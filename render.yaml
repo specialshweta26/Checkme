@@ -6,15 +6,16 @@ services:
   - type: web
     name: checkme-web
     runtime: docker
-    plan: starter
+    plan: standard
     branch: main
     dockerfilePath: ./apps/web/Dockerfile
     dockerContext: .
-    dockerCommand: sh -c "npx next start -H 0.0.0.0 -p ${PORT:-3000}"
-    healthCheckPath: /
+    healthCheckPath: /up
     envVars:
       - key: NODE_ENV
         value: production
+      - key: HOSTNAME
+        value: 0.0.0.0
       - key: API_HOSTPORT
         fromService:
           name: checkme-api

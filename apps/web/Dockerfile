@@ -1,15 +1,11 @@
-FROM node:22-alpine AS base
+FROM node:22-alpine
 WORKDIR /app
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV HOSTNAME=0.0.0.0
 COPY apps/web/package.json /app/package.json
 COPY apps/web/package-lock.json /app/package-lock.json
-RUN npm install
+RUN npm ci
 COPY apps/web /app
-EXPOSE 3000
-
-FROM base AS development
-ENV API_INTERNAL_URL=http://api:8000
-CMD ["npm", "run", "dev"]
-
-FROM base AS production
 RUN npm run build
+EXPOSE 3000
 CMD ["sh", "-c", "npx next start -H 0.0.0.0 -p ${PORT:-3000}"]

@@ -73,8 +73,7 @@ services:
   web:
     build:
       context: .
-      dockerfile: apps/web/Dockerfile
-      target: development
+      dockerfile: apps/web/Dockerfile.dev
     environment:
       API_INTERNAL_URL: http://api:8000
     ports:
