@@ -1,0 +1,14 @@
+.env
+.env.*
+!.env.example
+.cursor/
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+node_modules/
+.next/
+out/
+*.egg-info/
+.DS_Store

@@ -1,0 +1,146 @@
+# Render Blueprint for the main branch.
+# In the Render dashboard: New → Blueprint → this repo, branch main.
+# Local development uses the `local` branch and docker compose (see README).
+
+services:
+  - type: web
+    name: checkme-web
+    runtime: docker
+    plan: starter
+    branch: main
+    dockerfilePath: ./apps/web/Dockerfile
+    dockerContext: .
+    dockerCommand: sh -c "npx next start -H 0.0.0.0 -p ${PORT:-3000}"
+    healthCheckPath: /
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: API_HOSTPORT
+        fromService:
+          name: checkme-api
+          type: pserv
+          property: hostport
+      - fromGroup: checkme-secrets
+
+  - type: pserv
+    name: checkme-api
+    runtime: docker
+    plan: starter
+    branch: main
+    dockerfilePath: ./apps/api/Dockerfile
+    dockerContext: .
+    envVars:
+      - key: DATABASE_HOSTPORT
+        fromService:
+          name: checkme-postgres
+          type: pserv
+          property: hostport
+      - key: POSTGRES_USER
+        value: assistant
+      - key: POSTGRES_DB
+        value: assistant
+      - key: POSTGRES_PASSWORD
+        fromService:
+          name: checkme-postgres
+          type: pserv
+          envVarKey: POSTGRES_PASSWORD
+      - key: REDIS_URL
+        fromService:
+          name: checkme-redis
+          type: keyvalue
+          property: connectionString
+      - key: S3_ENDPOINT_URL
+        fromService:
+          name: checkme-minio
+          type: pserv
+          property: hostport
+      - key: S3_ACCESS_KEY
+        fromService:
+          name: checkme-minio
+          type: pserv
+          envVarKey: MINIO_ROOT_USER
+      - key: S3_SECRET_KEY
+        fromService:
+          name: checkme-minio
+          type: pserv
+          envVarKey: MINIO_ROOT_PASSWORD
+      - key: S3_BUCKET
+        value: attachments
+      - key: PUBLIC_WEB_URL
+        fromService:
+          name: checkme-web
+          type: web
+          envVarKey: RENDER_EXTERNAL_URL
+      - fromGroup: checkme-secrets
+
+  - type: pserv
+    name: checkme-postgres
+    runtime: docker
+    plan: starter
+    branch: main
+    dockerfilePath: ./deploy/postgres/Dockerfile
+    dockerContext: ./deploy/postgres
+    envVars:
+      - key: POSTGRES_USER
+        value: assistant
+      - key: POSTGRES_DB
+        value: assistant
+      - key: POSTGRES_PASSWORD
+        generateValue: true
+      - key: PGDATA
+        value: /var/lib/postgresql/data/pgdata
+      - key: PORT
+        value: "5432"
+    disk:
+      name: checkme-pgdata
+      mountPath: /var/lib/postgresql/data
+      sizeGB: 10
+
+  - type: pserv
+    name: checkme-minio
+    runtime: docker
+    plan: starter
+    branch: main
+    dockerfilePath: ./deploy/minio/Dockerfile
+    dockerContext: ./deploy/minio
+    envVars:
+      - key: MINIO_ROOT_USER
+        value: checkme
+      - key: MINIO_ROOT_PASSWORD
+        generateValue: true
+      - key: PORT
+        value: "9000"
+    disk:
+      name: checkme-objects
+      mountPath: /data
+      sizeGB: 10
+
+  - type: keyvalue
+    name: checkme-redis
+    plan: starter
+    ipAllowList: []
+    maxmemoryPolicy: allkeys-lru
+
+envVarGroups:
+  - name: checkme-secrets
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        value: gpt-5.6-luna
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: TOKEN_ENCRYPTION_KEY
+        generateValue: true
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: MICROSOFT_CLIENT_ID
+        sync: false
+      - key: MICROSOFT_CLIENT_SECRET
+        sync: false
+      - key: MICROSOFT_TENANT
+        value: common
+      - key: ALLOW_PRIVATE_MCP_URLS
+        value: "false"

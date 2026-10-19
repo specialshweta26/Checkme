@@ -1,0 +1,90 @@
+from types import SimpleNamespace
+
+from app.inbox.service import _badge_payload, apply_triage, newest_first, normalize_class, parse_json_object, received_sort_key, serialize
+
+
+def test_normalize_class_aliases():
+    assert normalize_class("REPLY") == "reply"
+    assert normalize_class("needs reply") == "reply"
+    assert normalize_class("follow-up") == "respond"
+    assert normalize_class("normal") == "discard"
+    assert normalize_class("spam") == ""
+
+
+def test_parse_json_object_tolerates_prose():
+    data = parse_json_object('Here you go\n{"classification":"discard","draft":"No reply needed.","summary":"FYI"}')
+    assert data["classification"] == "discard"
+    assert data["draft"].startswith("No reply")
+
+
+def test_apply_triage_fills_discard_draft():
+    item = SimpleNamespace(classification="", summary="", key_points=[], draft="")
+    apply_triage(
+        item,
+        {
+            "classification": "ignore",
+            "summary": "Quarantine notice",
+            "key_points": ["Open the portal", "Release only if expected"],
+            "draft": "",
+        },
+    )
+    assert item.classification == "discard"
+    assert item.draft == "No reply is needed to this message."
+    assert len(item.key_points) == 2
+
+
+def test_serialize_shape():
+    item = SimpleNamespace(
+        id="abc",
+        message_id="m1",
+        thread_id="t1",
+        subject="Hello",
+        sender="Ada <ada@example.com>",
+        received_at="20/10/2026, 03:00:00",
+        snippet="Hi",
+        classification="reply",
+        summary="Ada asked for the deck.",
+        key_points=["Send the deck"],
+        draft="Hi Ada, attaching the deck.",
+        status="pending",
+        unread=True,
+        seen=False,
+    )
+    out = serialize(item, "Gmail")
+    assert out["from"] == "Ada <ada@example.com>"
+    assert out["classification"] == "reply"
+    assert out["connector"] == "Gmail"
+
+
+def test_received_sort_key_newest_first():
+    older = received_sort_key("30 Jun 2026, 12:29 PM IST")
+    newer = received_sort_key("19 Oct 2026, 3:11 PM IST")
+    assert newer > older
+    rows = newest_first(
+        [
+            SimpleNamespace(received_at="30 Jun 2026, 12:29 PM IST", created_at=None, subject="old"),
+            SimpleNamespace(received_at="19 Oct 2026, 3:11 PM IST", created_at=None, subject="new"),
+        ]
+    )
+    assert [r.subject for r in rows] == ["new", "old"]
+
+
+def test_badge_counts_only_unseen():
+    items = [
+        SimpleNamespace(id="1", subject="New", sender="Ada", received_at="", classification="reply", unread=True, seen=False),
+        SimpleNamespace(id="2", subject="Seen", sender="Ada", received_at="", classification="respond", unread=True, seen=True),
+    ]
+    out = _badge_payload(items)
+    assert out["count"] == 1
+    assert out["pending"] == 2
+    assert [row["subject"] for row in out["items"]] == ["New"]
+    marked = _badge_payload(
+        [
+            SimpleNamespace(id="1", subject="New", sender="Ada", received_at="", classification="reply", unread=True, seen=True),
+            SimpleNamespace(id="2", subject="Seen", sender="Ada", received_at="", classification="respond", unread=True, seen=True),
+        ],
+        alerts=items[:1],
+    )
+    assert marked["count"] == 0
+    assert marked["pending"] == 2
+    assert [row["subject"] for row in marked["items"]] == ["New"]
