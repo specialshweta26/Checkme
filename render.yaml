@@ -98,16 +98,18 @@ services:
 
   - type: pserv
     name: checkme-minio
-    runtime: docker
+    runtime: image
     plan: starter
-    branch: main
-    dockerfilePath: ./deploy/minio/Dockerfile
-    dockerContext: ./deploy/minio
+    image:
+      url: cgr.dev/chainguard/minio:latest
+    dockerCommand: /bin/sh -c "mkdir -p /data && exec minio server --address 0.0.0.0:$PORT /data"
     envVars:
       - key: MINIO_ROOT_USER
         value: checkme
       - key: MINIO_ROOT_PASSWORD
         generateValue: true
+      - key: MINIO_BROWSER
+        value: "off"
       - key: PORT
         value: "9000"
     disk:
