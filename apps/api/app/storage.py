@@ -2,12 +2,26 @@ from __future__ import annotations
 
 import io
 from functools import lru_cache
+from pathlib import Path
 
 import boto3
 from botocore.client import Config
 from botocore.exceptions import ClientError
 
 from app.config import get_settings
+
+
+def _disk_root() -> Path:
+    root = Path(get_settings().storage_disk_path)
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _disk_file(key: str) -> Path:
+    dest = (_disk_root() / key).resolve()
+    if not str(dest).startswith(str(_disk_root().resolve())):
+        raise ValueError("invalid storage key")
+    return dest
 
 
 def guess_media_type(filename: str, content_type: str | None = None) -> str:
@@ -80,6 +94,9 @@ def _client():
 
 
 def ensure_bucket() -> None:
+    if get_settings().use_disk_storage:
+        _disk_root()
+        return
     s = get_settings()
     client = _client()
     try:
@@ -89,10 +106,22 @@ def ensure_bucket() -> None:
 
 
 def put_bytes(key: str, data: bytes, content_type: str) -> None:
+    if get_settings().use_disk_storage:
+        dest = _disk_file(key)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+        dest.with_name(dest.name + ".ctype").write_text(content_type or "", encoding="utf-8")
+        return
     _client().put_object(Bucket=get_settings().s3_bucket, Key=key, Body=data, ContentType=content_type)
 
 
 def get_bytes(key: str) -> tuple[bytes, str]:
+    if get_settings().use_disk_storage:
+        dest = _disk_file(key)
+        data = dest.read_bytes()
+        meta = dest.with_name(dest.name + ".ctype")
+        stored = meta.read_text(encoding="utf-8").strip() if meta.exists() else ""
+        return data, stored or guess_media_type(dest.name)
     obj = _client().get_object(Bucket=get_settings().s3_bucket, Key=key)
     data = obj["Body"].read()
     return data, obj.get("ContentType") or "application/octet-stream"

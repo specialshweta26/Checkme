@@ -21,9 +21,11 @@ OAUTH_COOKIE = "pa_oauth"
 def _fernet() -> Fernet:
     key = get_settings().token_encryption_key
     if not key:
-        # Dev fallback derived from the session secret; set TOKEN_ENCRYPTION_KEY in any real deployment.
         key = base64.urlsafe_b64encode(hashlib.sha256(get_settings().session_secret.encode()).digest()).decode()
-    return Fernet(key.encode())
+    try:
+        return Fernet(key.encode())
+    except ValueError:
+        return Fernet(base64.urlsafe_b64encode(hashlib.sha256(key.encode()).digest()))
 
 
 def encrypt(value: str | dict) -> str:

@@ -42,12 +42,18 @@ class Settings(BaseSettings):
     letta_agent_model: str = ""
     letta_embedding: str = "openai/text-embedding-3-small"
 
+    file_storage: str = "s3"
+    storage_disk_path: str = "/var/data/attachments"
     s3_endpoint_url: str = "http://localhost:9000"
     s3_public_endpoint_url: str = "http://localhost:9000"
     s3_bucket: str = "attachments"
     s3_access_key: str = "minioadmin"
     s3_secret_key: str = "minioadmin"
     attachment_max_bytes: int = 25 * 1024 * 1024
+
+    @property
+    def use_disk_storage(self) -> bool:
+        return (self.file_storage or "").strip().lower() in {"disk", "local", "fs", "filesystem"}
 
     allow_private_mcp_urls: bool = False
 
