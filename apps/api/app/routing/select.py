@@ -265,7 +265,7 @@ async def core_tools(db: AsyncSession, connectors: list[Connector]) -> list[Tool
         if not conn.server_key:
             continue
         card = await db.get(ServerCard, conn.server_key)
-        names = (card.core_tools if card else [])[:8]
+        names = card.core_tools if card else []
         loaded = await load_named(db, [conn], {(conn.slug, n) for n in names})
         hits.extend(loaded)
     return hits

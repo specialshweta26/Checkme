@@ -105,6 +105,10 @@ def dumps(value: Any, limit: int = MAX_TOOL_CHARS) -> str:
     return json.dumps(compact_payload(value, limit), default=str)
 
 
+def dumps_full(value: Any) -> str:
+    return json.dumps(value, default=str)
+
+
 def _path_parts(path: str) -> list[str]:
     return [part for part in path.replace("/", ".").split(".") if part]
 
@@ -323,7 +327,7 @@ async def list_user_connectors(ctx: RunContext) -> list[dict]:
         card = cards.get(conn.server_key or "")
         core = list(card.core_tools or []) if card else []
         if conn.provider in {"gmail", "outlook"}:
-            core = list(MAIL_CORE_TOOLS)
+            core = list(dict.fromkeys([*MAIL_CORE_TOOLS, *core]))
         out.append(
             {
                 "slug": conn.slug,
@@ -346,7 +350,7 @@ async def search_user_tools(ctx: RunContext, query: str, connector_slug: str | N
         if conn is None:
             return [{"error": f"connector '{connector_slug}' is not connected for this user"}]
         conns = [conn]
-    hits = await search_tools(ctx.db, conns, query, 12)
+    hits = await search_tools(ctx.db, conns, query, 40)
     q = (query or "").lower()
     wanted: set[tuple[str, str]] = set()
     mail_conns = [c for c in conns if c.provider in {"gmail", "outlook"}]
@@ -624,15 +628,15 @@ class InspectInput(BaseModel):
 def harness_tools(ctx: RunContext) -> list[StructuredTool]:
     async def list_connectors() -> str:
         """List this user's enabled connectors. Start here when you are unsure which source to use. Other users have different connectors."""
-        return dumps(await list_user_connectors(ctx), 8000)
+        return dumps_full(await list_user_connectors(ctx))
 
     async def search_tools_fn(query: str, connector_slug: str | None = None) -> str:
         """Search this user's tool catalog by meaning. Returns names and descriptions, not data."""
-        return dumps(await search_user_tools(ctx, query, connector_slug), 6000)
+        return dumps_full(await search_user_tools(ctx, query, connector_slug))
 
     async def get_tool_schema(connector_slug: str, tool_name: str) -> str:
         """Return the description and JSON schema for one tool so you can fill arguments correctly."""
-        return dumps(await get_user_tool_schema(ctx, connector_slug, tool_name), 6000)
+        return dumps_full(await get_user_tool_schema(ctx, connector_slug, tool_name))
 
     async def call_tool(connector_slug: str, tool_name: str, args: dict[str, Any] | None = None) -> str:
         """Run a tool on one of this user's connectors now. Do not use this to send or fetch if the user named a future time — call schedule_task instead. Catalog/search/resolve/list tools are not answers. Large results are stored; use inspect_result for the slice the user asked for."""

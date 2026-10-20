@@ -6,6 +6,8 @@ from app.agent.deep import (
     RunContext,
     call_user_tool,
     compact_payload,
+    dumps,
+    dumps_full,
     harness_tools,
     inspect_user_result,
     last_text,
@@ -41,6 +43,22 @@ async def test_list_connectors_is_this_user_only():
     listed = await list_user_connectors(ctx)
     assert [item["slug"] for item in listed] == ["digital"]
     assert "gmail" not in json.dumps(listed)
+
+
+def test_catalog_dumps_are_not_truncated():
+    listed = [
+        {"slug": "gmail", "core_tools": [f"mail_tool_{i}" for i in range(80)]},
+        {"slug": "outlook", "core_tools": [f"outlook_tool_{i}" for i in range(80)]},
+        {"slug": "digital", "core_tools": [f"kpi_{i}" for i in range(80)], "kind": "mcp"},
+    ]
+    raw = dumps_full(listed)
+    data = json.loads(raw)
+    assert isinstance(data, list)
+    assert [row["slug"] for row in data] == ["gmail", "outlook", "digital"]
+    assert "too_large" not in raw
+    assert len(data[2]["core_tools"]) == 80
+    compact = json.loads(dumps(listed, 2000))
+    assert isinstance(compact, dict) and compact.get("too_large") is True
 
 
 async def test_unknown_slug_is_rejected():
