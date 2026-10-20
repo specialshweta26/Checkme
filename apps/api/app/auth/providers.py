@@ -124,6 +124,7 @@ def get_provider(name: str) -> OAuthProvider:
                 "Contacts.Read",
                 "People.Read",
                 "Calendars.ReadWrite",
+                "OnlineMeetings.ReadWrite",
             ),
             client_id=s.microsoft_client_id,
             client_secret=s.microsoft_client_secret,

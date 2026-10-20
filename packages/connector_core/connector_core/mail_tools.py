@@ -179,8 +179,9 @@ MAIL_CALENDAR_TOOLS: list[ToolSpec] = [
     ),
     ToolSpec(
         "create_event",
-        "Create a calendar event and send meeting invites to attendees. Requires user confirmation. "
-        "Interpret local times as IST (Asia/Kolkata) unless another timezone is given. Always include start, end, title, and attendees.",
+        "Create a calendar event and send meeting invites to attendees. Gmail and Outlook both have calendar. Requires confirmation. "
+        "Interpret local times as IST (Asia/Kolkata) unless another timezone is given. Always include start, title, and attendees. "
+        "Set conference to google_meet or teams to attach a join link.",
         _obj(
             {
                 "title": _STR,
@@ -192,6 +193,12 @@ MAIL_CALENDAR_TOOLS: list[ToolSpec] = [
                 "location": _STR,
                 "timezone": {**_STR, "description": "IANA zone; default Asia/Kolkata (IST)", "default": "Asia/Kolkata"},
                 "send_invites": {"type": "boolean", "default": True},
+                "conference": {
+                    "type": "string",
+                    "enum": ["none", "google_meet", "teams"],
+                    "description": "none, google_meet (Gmail Meet link), or teams (Outlook Teams link)",
+                    "default": "none",
+                },
             },
             ["title", "start"],
         ),
@@ -217,6 +224,48 @@ MAIL_CALENDAR_TOOLS: list[ToolSpec] = [
         ),
         group="calendar",
         tags=("calendar",),
+    ),
+    ToolSpec(
+        "create_google_meet",
+        "Create a calendar event with a Google Meet join link and email invites. Use Gmail for a real Meet URL. Requires confirmation.",
+        _obj(
+            {
+                "title": _STR,
+                "start": _ISO,
+                "end": _ISO,
+                "duration_minutes": {"type": "integer", "default": 30, "minimum": 15, "maximum": 480},
+                "attendees": _EMAILS,
+                "description": _STR,
+                "timezone": {**_STR, "default": "Asia/Kolkata"},
+            },
+            ["title", "start", "attendees"],
+        ),
+        group="calendar",
+        read_only=False,
+        destructive=True,
+        produces=("event_id",),
+        tags=("calendar", "meet"),
+    ),
+    ToolSpec(
+        "create_teams_meeting",
+        "Create a calendar event with a Microsoft Teams join link and email invites. Use Outlook for a real Teams URL. Requires confirmation.",
+        _obj(
+            {
+                "title": _STR,
+                "start": _ISO,
+                "end": _ISO,
+                "duration_minutes": {"type": "integer", "default": 30, "minimum": 15, "maximum": 480},
+                "attendees": _EMAILS,
+                "description": _STR,
+                "timezone": {**_STR, "default": "Asia/Kolkata"},
+            },
+            ["title", "start", "attendees"],
+        ),
+        group="calendar",
+        read_only=False,
+        destructive=True,
+        produces=("event_id",),
+        tags=("calendar", "teams"),
     ),
     ToolSpec(
         "delete_message",

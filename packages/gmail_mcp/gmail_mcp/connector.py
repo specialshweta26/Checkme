@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import re
+import uuid
 from datetime import timedelta
 from email.message import EmailMessage
 from email.utils import getaddresses
@@ -99,7 +100,11 @@ def _event(e: dict) -> dict:
         "location": e.get("location"),
         "organizer": (e.get("organizer") or {}).get("email"),
         "attendee_count": len(e.get("attendees", []) or []),
-        "meeting_link": e.get("hangoutLink"),
+        "meeting_link": e.get("hangoutLink")
+        or next(
+            (p.get("uri") for p in (e.get("conferenceData") or {}).get("entryPoints") or [] if p.get("uri")),
+            None,
+        ),
         "status": e.get("status"),
     }
 
@@ -679,22 +684,63 @@ class GmailConnector(BaseConnector):
         location: str = "",
         timezone: str = DEFAULT_TZ,
         send_invites: bool = True,
+        conference: str = "none",
     ):
         zone = timezone or DEFAULT_TZ
         start_dt = as_local(start, zone)
         end_dt = as_local(end, zone) if end else start_dt + timedelta(minutes=duration_minutes or 30)
-        body = {
+        kind = (conference or "none").lower()
+        loc = location or ""
+        note = description or ""
+        body: dict[str, Any] = {
             "summary": title,
-            "description": description or "",
-            "location": location or "",
+            "description": note,
+            "location": loc,
             "start": {"dateTime": local_wall(start_dt, zone), "timeZone": iana_tz(zone)},
             "end": {"dateTime": local_wall(end_dt, zone), "timeZone": iana_tz(zone)},
             "attendees": [{"email": a} for a in (attendees or []) if a],
         }
-        e = await self.api.json(
-            "POST",
-            f"{CAL}/calendars/primary/events",
-            params={"sendUpdates": "all" if send_invites else "none"},
-            json=body,
+        params: dict[str, Any] = {"sendUpdates": "all" if send_invites else "none"}
+        if kind in {"google_meet", "meet", "hangouts"}:
+            body["conferenceData"] = {
+                "createRequest": {
+                    "requestId": uuid.uuid4().hex,
+                    "conferenceSolutionKey": {"type": "hangoutsMeet"},
+                }
+            }
+            params["conferenceDataVersion"] = 1
+        elif kind == "teams":
+            body["location"] = loc or "Microsoft Teams"
+            body["description"] = (
+                (note + "\n\n" if note else "")
+                + "Teams join links are created from Outlook. This Gmail event has no Teams URL."
+            )
+        e = await self.api.json("POST", f"{CAL}/calendars/primary/events", params=params, json=body)
+        out = {**_event(e), "invites_sent": bool(send_invites and attendees), "timezone": tz_label(zone), "conference": kind}
+        if kind == "teams":
+            out["hint"] = "Use Outlook create_teams_meeting for a Teams join URL."
+        return out
+
+    async def tool_create_google_meet(self, title: str, start: str, attendees: list[str], end: str | None = None, duration_minutes: int = 30, description: str = "", timezone: str = DEFAULT_TZ):
+        return await self.tool_create_event(
+            title=title,
+            start=start,
+            end=end,
+            duration_minutes=duration_minutes,
+            attendees=attendees,
+            description=description,
+            timezone=timezone,
+            conference="google_meet",
         )
-        return {**_event(e), "invites_sent": bool(send_invites and attendees), "timezone": tz_label(zone)}
+
+    async def tool_create_teams_meeting(self, title: str, start: str, attendees: list[str], end: str | None = None, duration_minutes: int = 30, description: str = "", timezone: str = DEFAULT_TZ):
+        return await self.tool_create_event(
+            title=title,
+            start=start,
+            end=end,
+            duration_minutes=duration_minutes,
+            attendees=attendees,
+            description=description,
+            timezone=timezone,
+            conference="teams",
+        )

@@ -30,7 +30,7 @@ async def preview(user, conn, tool: str, args: dict) -> dict:
             "sample": preview_result.get("sample"),
             "permanent": args.get("permanent", False),
         }
-    if tool == "create_event":
+    if tool in {"create_event", "create_google_meet", "create_teams_meeting"}:
         tz = args.get("timezone") or getattr(user, "timezone", None) or DEFAULT_TZ
         start = args.get("start")
         end = args.get("end")
@@ -55,7 +55,7 @@ async def invoke_named(db, user, conn, tool_name: str, args: dict, attachments: 
     runtime = RuntimeConnector(conn)
     if tool_name in STAFF_TOOLS:
         return await staff_dispatch(db, user, runtime, tool_name, args)
-    if tool_name == "create_event":
+    if tool_name in {"create_event", "create_google_meet", "create_teams_meeting"}:
         args = {**args, "timezone": args.get("timezone") or user.timezone or DEFAULT_TZ}
     if tool_name == "summarize_thread":
         thread = await runtime.call("get_thread", {"thread_id": args["thread_id"]})

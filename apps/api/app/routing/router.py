@@ -62,7 +62,7 @@ async def _assemble(db, connectors: list[Connector], query: str, extra_hits: lis
             }
     if any(k in qlow for k in ("invite", "schedule", "meeting", "calendar", "event", "book")):
         for c in connectors:
-            extra_names |= {(c.slug, n) for n in ("create_event", "list_events", "find_free_slots")}
+            extra_names |= {(c.slug, n) for n in ("create_event", "create_google_meet", "create_teams_meeting", "list_events", "find_free_slots")}
     if any(
         k in qlow
         for k in (

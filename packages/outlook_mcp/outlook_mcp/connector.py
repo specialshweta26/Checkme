@@ -716,18 +716,65 @@ class OutlookConnector(BaseConnector):
         location: str = "",
         timezone: str = DEFAULT_TZ,
         send_invites: bool = True,
+        conference: str = "none",
     ):
         zone = timezone or DEFAULT_TZ
         start_dt = as_local(start, zone)
         end_dt = as_local(end, zone) if end else start_dt + timedelta(minutes=duration_minutes or 30)
+        kind = (conference or "none").lower()
+        note = description or ""
         payload: dict[str, Any] = {
             "subject": title,
-            "body": {"contentType": "text", "content": description or ""},
+            "body": {"contentType": "text", "content": note},
             "start": {"dateTime": graph_datetime(start_dt, zone), "timeZone": graph_timezone(zone)},
             "end": {"dateTime": graph_datetime(end_dt, zone), "timeZone": graph_timezone(zone)},
             "attendees": [{"emailAddress": {"address": a}, "type": "required"} for a in (attendees or []) if a],
         }
         if location:
             payload["location"] = {"displayName": location}
+        if kind in {"teams", "team"}:
+            payload["isOnlineMeeting"] = True
+            payload["onlineMeetingProvider"] = "teamsForBusiness"
+        elif kind in {"google_meet", "meet", "hangouts"}:
+            payload["location"] = {"displayName": location or "Google Meet"}
+            payload["body"] = {
+                "contentType": "text",
+                "content": (note + "\n\n" if note else "")
+                + "Google Meet links are created from Gmail. This Outlook event has no Meet URL.",
+            }
         e = await self.api.json("POST", f"{ME}/events", json=payload)
-        return {**_event(e), "invites_sent": bool(send_invites and attendees), "timezone": tz_label(zone)}
+        if kind in {"teams", "team"} and not (e.get("onlineMeeting") or {}).get("joinUrl"):
+            e = await self.api.json(
+                "GET",
+                f"{ME}/events/{_q(e.get('id') or '')}",
+                params={"$select": "id,subject,start,end,location,organizer,attendees,onlineMeeting,isAllDay,showAs"},
+                headers=_LOCAL_TZ,
+            )
+        out = {**_event(e), "invites_sent": bool(send_invites and attendees), "timezone": tz_label(zone), "conference": kind}
+        if kind in {"google_meet", "meet", "hangouts"}:
+            out["hint"] = "Use Gmail create_google_meet for a Google Meet join URL."
+        return out
+
+    async def tool_create_google_meet(self, title: str, start: str, attendees: list[str], end: str | None = None, duration_minutes: int = 30, description: str = "", timezone: str = DEFAULT_TZ):
+        return await self.tool_create_event(
+            title=title,
+            start=start,
+            end=end,
+            duration_minutes=duration_minutes,
+            attendees=attendees,
+            description=description,
+            timezone=timezone,
+            conference="google_meet",
+        )
+
+    async def tool_create_teams_meeting(self, title: str, start: str, attendees: list[str], end: str | None = None, duration_minutes: int = 30, description: str = "", timezone: str = DEFAULT_TZ):
+        return await self.tool_create_event(
+            title=title,
+            start=start,
+            end=end,
+            duration_minutes=duration_minutes,
+            attendees=attendees,
+            description=description,
+            timezone=timezone,
+            conference="teams",
+        )

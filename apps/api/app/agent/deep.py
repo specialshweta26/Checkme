@@ -332,7 +332,7 @@ async def list_user_connectors(ctx: RunContext) -> list[dict]:
             {
                 "slug": conn.slug,
                 "name": conn.alias or conn.name,
-                "kind": "mail" if conn.kind == "builtin" else "mcp",
+                "kind": "mail+calendar" if conn.kind == "builtin" else "mcp",
                 "description": getattr(conn, "description", "") or "",
                 "core_tools": core,
                 "tool_count": card.tool_count if card else None,
@@ -354,7 +354,11 @@ async def search_user_tools(ctx: RunContext, query: str, connector_slug: str | N
     q = (query or "").lower()
     wanted: set[tuple[str, str]] = set()
     mail_conns = [c for c in conns if c.provider in {"gmail", "outlook"}]
-    if any(k in q for k in ("send", "email", "compose", "mail to", "write", "draft")):
+    calendary = any(k in q for k in ("invite", "meeting", "calendar", "event", "google meet", "teams", "free slot"))
+    if calendary:
+        for c in mail_conns:
+            wanted.update((c.slug, n) for n in ("create_event", "create_google_meet", "create_teams_meeting", "find_free_slots", "list_events"))
+    if any(k in q for k in ("send", "email", "compose", "mail to", "write", "draft")) and not calendary:
         for c in mail_conns:
             wanted.update((c.slug, n) for n in ("send_message", "create_draft", "reply", "forward"))
     if any(k in q for k in ("reply", "respond")):
@@ -713,18 +717,19 @@ def system_prompt(user, connectors: list, memory: str) -> str:
         "Read get_tool_schema before filling arguments. Argument names come from that schema and description.\n"
         "Search, resolve, and list tools return catalogs, not answers. After you pick a tool, call_tool it.\n"
         "Call tools as many times as the task needs — different connectors, different argument sets, different windows. Combine results yourself.\n"
-        "Gmail and Outlook can search, open (get_message), send a new email (send_message), reply, forward, list attachments, extract text, and summarize attachments. "
-        "To send a new email now, call_tool send_message with to, subject, and body. Reply uses reply; forwarding uses forward. "
-        "After search_messages or list_messages, if the user asked to open, show, read, or summarize a mail or attachment, call get_message then summarize_attachments. "
-        "Never say a mail connector is search-only or cannot compose, send, open, or attach.\n"
+        "Gmail and Outlook are mail AND calendar. Never say there is no calendar connector when gmail or outlook is listed. "
+        "Send mail with send_message. Create a calendar invite with create_event (attendees, start in IST). "
+        "Google Meet: create_google_meet on gmail. Teams: create_teams_meeting on outlook. "
+        "After search_messages, if the user asked to open or summarize, call get_message then summarize_attachments. "
+        "Never say a mail connector cannot compose, send, invite, or attach.\n"
         "Answer every part of the ask. If a result is too large, inspect_result the stored result_id using a path or search from the user's words, and keep paging until the requested slice is complete. Or call_tool again with narrower schema arguments. Never say data was truncated and stop.\n"
         "Cite source_tool (connector slug and tool name, plus the downstream name if a gateway executed one).\n"
         "If asked how a number was produced, cite tool evidence from this thread or fetch again. Do not invent figures.\n"
         "If you cannot tell which connector fits, ask the user.\n"
         "Destructive actions still need call_tool; the app asks the user to confirm.\n"
-        "If the user names a future time (in N minutes, later, tonight, tomorrow, a clock, every day/week), "
-        "your only action this turn is schedule_task with their full request. Do not fetch reports or send mail now. "
-        "Tell them the scheduled time. The worker runs the work at that time.\n"
+        "If the user wants work done later (email a report in N minutes, tonight, every day), schedule_task and do not fetch now. "
+        "If they want a calendar invite or meeting at a clock time, that time is the event start: call create_event now. "
+        "Tell them the scheduled time only when you actually called schedule_task.\n"
         "Never invent emails, events, ids, or numbers that did not come from a tool result. Keep answers short.\n\n"
         f"This user's connectors:\n{catalog}\n\nUser memory:\n{memory or '(none)'}"
     )

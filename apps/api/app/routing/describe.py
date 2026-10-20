@@ -75,9 +75,12 @@ def catalog_lines(connectors: list) -> str:
     for connector in connectors:
         label = connector.alias or connector.name
         desc = (getattr(connector, "description", "") or "").strip()
-        kind = "mail" if connector.kind == "builtin" else "mcp"
+        kind = "mail+calendar" if connector.kind == "builtin" else "mcp"
         extra = f" — {desc}" if desc else ""
-        if kind == "mail":
-            extra += " — search, get_message, send_message, reply, forward, list_attachments, summarize_attachments"
+        if connector.kind == "builtin":
+            extra += (
+                " — mail and calendar: send_message, get_message, create_event, "
+                "create_google_meet, create_teams_meeting"
+            )
         lines.append(f"- @{connector.slug} ({label}, {kind}){extra}")
     return "\n".join(lines) if lines else "(none)"
