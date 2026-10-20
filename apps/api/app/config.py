@@ -1,14 +1,29 @@
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from urllib.parse import quote_plus
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def _env(*names: str) -> str:
+    for name in names:
+        value = (os.environ.get(name) or "").strip().strip('"').strip("'")
+        if value:
+            return value
+    return ""
+
+
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=(".env", "../../.env"), extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=(".env", "../../.env"),
+        extra="ignore",
+        case_sensitive=False,
+        populate_by_name=True,
+        env_ignore_empty=True,
+    )
 
     public_web_url: str = "http://localhost:3000"
 
@@ -18,11 +33,16 @@ class Settings(BaseSettings):
     openai_reasoning_effort: str = "none"
     embedding_dims: int = 1536
 
-    google_client_id: str = ""
-    google_client_secret: str = ""
-    microsoft_client_id: str = Field(default="", validation_alias=AliasChoices("MICROSOFT_CLIENT_ID", "OUTLOOK_CLIENT_ID"))
+    google_client_id: str = Field(default="", validation_alias=AliasChoices("GOOGLE_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_ID"))
+    google_client_secret: str = Field(
+        default="", validation_alias=AliasChoices("GOOGLE_CLIENT_SECRET", "GOOGLE_OAUTH_CLIENT_SECRET")
+    )
+    microsoft_client_id: str = Field(
+        default="", validation_alias=AliasChoices("MICROSOFT_CLIENT_ID", "OUTLOOK_CLIENT_ID", "AZURE_CLIENT_ID")
+    )
     microsoft_client_secret: str = Field(
-        default="", validation_alias=AliasChoices("MICROSOFT_CLIENT_SECRET", "OUTLOOK_CLIENT_SECRET")
+        default="",
+        validation_alias=AliasChoices("MICROSOFT_CLIENT_SECRET", "OUTLOOK_CLIENT_SECRET", "AZURE_CLIENT_SECRET"),
     )
     microsoft_tenant: str = "common"
 
@@ -63,6 +83,22 @@ class Settings(BaseSettings):
     chat_rate_limit_per_minute: int = 30
     history_messages: int = 8
     max_agent_steps: int = 12
+
+    @model_validator(mode="after")
+    def fill_oauth_from_environ(self):
+        if not self.google_client_id:
+            self.google_client_id = _env("GOOGLE_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_ID")
+        if not self.google_client_secret:
+            self.google_client_secret = _env("GOOGLE_CLIENT_SECRET", "GOOGLE_OAUTH_CLIENT_SECRET")
+        if not self.microsoft_client_id:
+            self.microsoft_client_id = _env("MICROSOFT_CLIENT_ID", "OUTLOOK_CLIENT_ID", "AZURE_CLIENT_ID")
+        if not self.microsoft_client_secret:
+            self.microsoft_client_secret = _env(
+                "MICROSOFT_CLIENT_SECRET", "OUTLOOK_CLIENT_SECRET", "AZURE_CLIENT_SECRET"
+            )
+        if self.public_web_url:
+            self.public_web_url = self.public_web_url.rstrip("/")
+        return self
 
     @property
     def secure_cookies(self) -> bool:

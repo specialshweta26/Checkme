@@ -37,6 +37,16 @@ def _web(path: str) -> str:
     return f"{get_settings().public_web_url}{path}"
 
 
+@router.get("/status")
+async def oauth_status():
+    s = get_settings()
+    return {
+        "google": bool(s.google_client_id),
+        "microsoft": bool(s.microsoft_client_id),
+        "public_web_url": s.public_web_url,
+    }
+
+
 @router.get("/{provider}/login")
 async def login(provider: str, request: Request, mode: str = "signin", user: User | None = Depends(optional_user)):
     try:
@@ -44,7 +54,11 @@ async def login(provider: str, request: Request, mode: str = "signin", user: Use
     except KeyError:
         raise HTTPException(404, "Unknown provider")
     if not p.client_id:
-        raise HTTPException(500, f"{provider} OAuth is not configured on the server")
+        needed = "GOOGLE_CLIENT_ID" if provider == "google" else "MICROSOFT_CLIENT_ID"
+        raise HTTPException(
+            500,
+            f"{provider} OAuth is not configured on the server. Set {needed} on the checkme-api service (not only the env group), then redeploy checkme-api.",
+        )
     if mode == "link" and user is None:
         return RedirectResponse(_web("/?error=signin_required"))
     state = secrets.token_urlsafe(24)

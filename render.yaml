@@ -63,6 +63,16 @@ services:
           name: checkme-web
           type: web
           envVarKey: RENDER_EXTERNAL_URL
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: MICROSOFT_CLIENT_ID
+        sync: false
+      - key: MICROSOFT_CLIENT_SECRET
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
       - fromGroup: checkme-secrets
 
   - type: pserv

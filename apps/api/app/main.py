@@ -47,6 +47,13 @@ async def lifespan(_app: FastAPI):
     from app.tasks.scheduler import start_scheduler
 
     worker = await start_scheduler()
+    cfg = get_settings()
+    log.info(
+        "oauth google=%s microsoft=%s public_web_url=%s",
+        bool(cfg.google_client_id),
+        bool(cfg.microsoft_client_id),
+        cfg.public_web_url,
+    )
     try:
         yield
     finally:
