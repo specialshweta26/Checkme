@@ -323,7 +323,7 @@ async def list_user_connectors(ctx: RunContext) -> list[dict]:
         card = cards.get(conn.server_key or "")
         core = list(card.core_tools or []) if card else []
         if conn.provider in {"gmail", "outlook"}:
-            core = list(dict.fromkeys([*MAIL_CORE_TOOLS, *core]))
+            core = list(MAIL_CORE_TOOLS)
         out.append(
             {
                 "slug": conn.slug,
@@ -624,7 +624,7 @@ class InspectInput(BaseModel):
 def harness_tools(ctx: RunContext) -> list[StructuredTool]:
     async def list_connectors() -> str:
         """List this user's enabled connectors. Start here when you are unsure which source to use. Other users have different connectors."""
-        return dumps(await list_user_connectors(ctx), 4000)
+        return dumps(await list_user_connectors(ctx), 8000)
 
     async def search_tools_fn(query: str, connector_slug: str | None = None) -> str:
         """Search this user's tool catalog by meaning. Returns names and descriptions, not data."""
@@ -705,7 +705,7 @@ def system_prompt(user, connectors: list, memory: str) -> str:
         "You are this user's personal chief of staff. You have mail, calendar, and connected MCP servers.\n"
         f"Current date and time: {now.strftime('%Y-%m-%d %H:%M')} ({tz}). Interpret and display times in that timezone.\n"
         "Only use connectors listed below. Other users have different connectors.\n"
-        "Discover first: list_connectors — Gmail and Outlook core_tools is the full mail catalog, including send_message. Then search_tools if needed.\n"
+        "Discover first: list_connectors, then search_tools with the user's own words. Mail and analytics are different connectors — do not treat a missing mail tool as a missing MCP connector.\n"
         "Read get_tool_schema before filling arguments. Argument names come from that schema and description.\n"
         "Search, resolve, and list tools return catalogs, not answers. After you pick a tool, call_tool it.\n"
         "Call tools as many times as the task needs — different connectors, different argument sets, different windows. Combine results yourself.\n"

@@ -78,9 +78,6 @@ def catalog_lines(connectors: list) -> str:
         kind = "mail" if connector.kind == "builtin" else "mcp"
         extra = f" — {desc}" if desc else ""
         if kind == "mail":
-            extra += (
-                " — full mail catalog in core_tools: search_messages, get_message, send_message, "
-                "reply, forward, create_draft, list_attachments, summarize_attachments, and the rest"
-            )
+            extra += " — search, get_message, send_message, reply, forward, list_attachments, summarize_attachments"
         lines.append(f"- @{connector.slug} ({label}, {kind}){extra}")
     return "\n".join(lines) if lines else "(none)"

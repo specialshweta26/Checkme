@@ -120,7 +120,28 @@ async def search_tools(db: AsyncSession, connectors: list[Connector], query: str
                 )
             )
     hits.sort(key=lambda h: h.score, reverse=True)
-    return hits[:limit]
+    per_conn = max(3, limit // max(1, len(connectors)))
+    picked: list[ToolHit] = []
+    used: set[tuple[str, str]] = set()
+    counts: dict[str, int] = defaultdict(int)
+    for hit in hits:
+        key = (hit.slug, hit.tool_name)
+        if key in used or counts[hit.slug] >= per_conn:
+            continue
+        used.add(key)
+        counts[hit.slug] += 1
+        picked.append(hit)
+        if len(picked) >= limit:
+            return picked
+    for hit in hits:
+        key = (hit.slug, hit.tool_name)
+        if key in used:
+            continue
+        used.add(key)
+        picked.append(hit)
+        if len(picked) >= limit:
+            break
+    return picked
 
 
 async def usage_bonus(db: AsyncSession, user_id, connector_id) -> float:
@@ -244,7 +265,7 @@ async def core_tools(db: AsyncSession, connectors: list[Connector]) -> list[Tool
         if not conn.server_key:
             continue
         card = await db.get(ServerCard, conn.server_key)
-        names = card.core_tools if card else []
+        names = (card.core_tools if card else [])[:8]
         loaded = await load_named(db, [conn], {(conn.slug, n) for n in names})
         hits.extend(loaded)
     return hits
