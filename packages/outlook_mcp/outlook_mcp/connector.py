@@ -275,6 +275,349 @@ class OutlookConnector(BaseConnector):
         )
         return {"sent": True}
 
+    async def _thread_ids(self, thread_id: str) -> list[str]:
+        cid = thread_id.replace("'", "''")
+        params = {"$filter": f"conversationId eq '{cid}'", "$select": "id", "$top": 200}
+        rows, nxt = await self._page(f"{ME}/messages", params, None)
+        ids = [r["id"] for r in rows]
+        while nxt:
+            rows, nxt = await self._page("", None, nxt)
+            ids.extend(r["id"] for r in rows)
+        return ids
+
+    async def tool_delete_message(self, message_id: str, permanent: bool = False):
+        if permanent:
+            await self.api.json("POST", f"{ME}/messages/{_q(message_id)}/permanentDelete")
+        else:
+            await self.api.json(
+                "POST", f"{ME}/messages/{_q(message_id)}/move", json={"destinationId": "deleteditems"}
+            )
+        return {"deleted": True, "message_id": message_id, "permanent": permanent}
+
+    async def tool_list_threads(self, query: str | None = None, limit: int = 15, page_token: str | None = None):
+        params: dict[str, Any] = {
+            "$top": min(max(limit * 3, 15), 50),
+            "$select": _LIST_SELECT,
+            "$orderby": "receivedDateTime desc",
+        }
+        if query:
+            params = {"$search": f'"{to_kql(query)}"', "$top": min(max(limit * 3, 15), 50), "$select": _LIST_SELECT}
+        rows, nxt = await self._page(f"{ME}/messages", params, page_token)
+        seen: dict[str, dict] = {}
+        for m in rows:
+            cid = m.get("conversationId") or m["id"]
+            if cid not in seen:
+                seen[cid] = {
+                    "thread_id": cid,
+                    "subject": m.get("subject") or "",
+                    "snippet": clip(m.get("bodyPreview") or "", 200),
+                    "date": format_local(m.get("receivedDateTime"), DEFAULT_TZ),
+                    "from": _addr(m.get("from")),
+                }
+            if len(seen) >= limit:
+                break
+        return {"threads": list(seen.values()), "next_page_token": nxt}
+
+    async def tool_trash_thread(self, thread_id: str):
+        ids = await self._thread_ids(thread_id)
+        ok, failed = await self._batch(
+            [{"method": "POST", "url": f"/me/messages/{_q(i)}/move", "body": {"destinationId": "deleteditems"}} for i in ids]
+        )
+        return {"trashed": True, "thread_id": thread_id, "updated": ok, "failed": failed}
+
+    async def tool_delete_thread(self, thread_id: str):
+        ids = await self._thread_ids(thread_id)
+        ok, failed = await self._batch(
+            [{"method": "POST", "url": f"/me/messages/{_q(i)}/permanentDelete", "body": {}} for i in ids]
+        )
+        return {"deleted": True, "thread_id": thread_id, "permanent": True, "updated": ok, "failed": failed}
+
+    def _is_folder(self, label_id: str) -> bool:
+        return label_id.lower() in _WELL_KNOWN or len(label_id) > 20
+
+    async def _apply_labels(self, message_id: str, add_label_ids: list[str] | None, remove_label_ids: list[str] | None):
+        add = list(add_label_ids or [])
+        remove = list(remove_label_ids or [])
+        folders = [x for x in add if self._is_folder(x)]
+        cats_add = [x for x in add if not self._is_folder(x)]
+        cats_remove = [x for x in remove if not self._is_folder(x)]
+        if any(x.lower() == "inbox" for x in remove) or any(x.lower() == "archive" for x in add):
+            await self.api.json("POST", f"{ME}/messages/{_q(message_id)}/move", json={"destinationId": "archive"})
+        elif folders:
+            await self.api.json("POST", f"{ME}/messages/{_q(message_id)}/move", json={"destinationId": folders[0]})
+        if cats_add or cats_remove:
+            msg = await self.api.json("GET", f"{ME}/messages/{_q(message_id)}", params={"$select": "categories"})
+            cats = [c for c in (msg.get("categories") or []) if c not in cats_remove]
+            for c in cats_add:
+                if c not in cats:
+                    cats.append(c)
+            await self.api.json("PATCH", f"{ME}/messages/{_q(message_id)}", json={"categories": cats})
+        if "UNREAD" in [x.upper() for x in remove]:
+            await self.api.json("PATCH", f"{ME}/messages/{_q(message_id)}", json={"isRead": True})
+        if "UNREAD" in [x.upper() for x in add]:
+            await self.api.json("PATCH", f"{ME}/messages/{_q(message_id)}", json={"isRead": False})
+
+    async def tool_modify_thread_labels(
+        self, thread_id: str, add_label_ids: list[str] | None = None, remove_label_ids: list[str] | None = None
+    ):
+        ids = await self._thread_ids(thread_id)
+        for mid in ids:
+            await self._apply_labels(mid, add_label_ids, remove_label_ids)
+        return {"updated": True, "thread_id": thread_id, "messages": len(ids)}
+
+    async def tool_list_drafts(self, limit: int = 15, page_token: str | None = None):
+        params = {"$top": min(limit, 50), "$select": _LIST_SELECT + ",toRecipients", "$orderby": "receivedDateTime desc"}
+        rows, nxt = await self._page(f"{ME}/mailFolders/drafts/messages", params, page_token)
+        drafts = []
+        for m in rows:
+            drafts.append(
+                {
+                    "draft_id": m["id"],
+                    "message_id": m["id"],
+                    "subject": m.get("subject") or "",
+                    "to": ", ".join(_addr(r) for r in m.get("toRecipients") or []),
+                    "snippet": clip(m.get("bodyPreview") or "", 200),
+                    "date": format_local(m.get("receivedDateTime"), DEFAULT_TZ),
+                }
+            )
+        return {"drafts": drafts, "next_page_token": nxt}
+
+    async def tool_get_draft(self, draft_id: str):
+        data = await self.tool_get_message(draft_id)
+        return {"draft_id": draft_id, **data}
+
+    async def tool_send_draft(self, draft_id: str):
+        await self.api.json("POST", f"{ME}/messages/{_q(draft_id)}/send")
+        return {"sent": True, "draft_id": draft_id}
+
+    async def tool_delete_draft(self, draft_id: str):
+        await self.api.json("DELETE", f"{ME}/messages/{_q(draft_id)}")
+        return {"deleted": True, "draft_id": draft_id}
+
+    async def tool_modify_labels(
+        self, message_id: str, add_label_ids: list[str] | None = None, remove_label_ids: list[str] | None = None
+    ):
+        await self._apply_labels(message_id, add_label_ids, remove_label_ids)
+        return {"updated": True, "message_id": message_id}
+
+    async def tool_batch_modify_messages(
+        self, message_ids: list[str], add_label_ids: list[str] | None = None, remove_label_ids: list[str] | None = None
+    ):
+        for mid in message_ids:
+            await self._apply_labels(mid, add_label_ids, remove_label_ids)
+        return {"updated": len(message_ids)}
+
+    async def tool_create_label(self, name: str):
+        data = await self.api.json("POST", f"{ME}/mailFolders", json={"displayName": name})
+        return {"label_id": data.get("id"), "name": data.get("displayName")}
+
+    async def tool_get_label(self, label_id: str):
+        fid = label_id.lower() if label_id.lower() in _WELL_KNOWN else _q(label_id)
+        data = await self.api.json(
+            "GET", f"{ME}/mailFolders/{fid}", params={"$select": "id,displayName,unreadItemCount,totalItemCount"}
+        )
+        return {
+            "label_id": data.get("id"),
+            "name": data.get("displayName"),
+            "type": "system" if label_id.lower() in _WELL_KNOWN else "user",
+            "messages_total": data.get("totalItemCount"),
+            "messages_unread": data.get("unreadItemCount"),
+        }
+
+    async def tool_patch_label(self, label_id: str, name: str):
+        data = await self.api.json("PATCH", f"{ME}/mailFolders/{_q(label_id)}", json={"displayName": name})
+        return {"label_id": data.get("id"), "name": data.get("displayName")}
+
+    async def tool_delete_label(self, label_id: str):
+        await self.api.json("DELETE", f"{ME}/mailFolders/{_q(label_id)}")
+        return {"deleted": True, "label_id": label_id}
+
+    def _rule(self, row: dict) -> dict:
+        return {
+            "filter_id": row.get("id"),
+            "name": row.get("displayName"),
+            "enabled": row.get("isEnabled"),
+            "conditions": row.get("conditions") or {},
+            "actions": row.get("actions") or {},
+        }
+
+    async def tool_list_filters(self):
+        data = await self.api.json("GET", f"{ME}/mailFolders/inbox/messageRules")
+        return {"filters": [self._rule(r) for r in data.get("value") or []]}
+
+    async def tool_get_filter(self, filter_id: str):
+        data = await self.api.json("GET", f"{ME}/mailFolders/inbox/messageRules/{_q(filter_id)}")
+        return self._rule(data)
+
+    async def tool_create_filter(
+        self,
+        name: str | None = None,
+        from_email: str | None = None,
+        subject: str | None = None,
+        query: str | None = None,
+        add_label_ids: list[str] | None = None,
+        skip_inbox: bool = False,
+        trash: bool = False,
+    ):
+        conditions: dict[str, Any] = {}
+        if from_email:
+            conditions["fromAddresses"] = [{"emailAddress": {"address": from_email}}]
+        if subject:
+            conditions["subjectContains"] = [subject]
+        if query:
+            conditions["bodyOrSubjectContains"] = [query]
+        if not conditions:
+            raise ToolError("Provide from_email, subject, or query")
+        actions: dict[str, Any] = {}
+        dest = None
+        if trash:
+            dest = "deleteditems"
+        elif add_label_ids:
+            dest = add_label_ids[0]
+        elif skip_inbox:
+            dest = "archive"
+        if dest:
+            actions["moveToFolder"] = dest
+        if skip_inbox and not dest:
+            actions["moveToFolder"] = "archive"
+        raw = await self.api.json("GET", f"{ME}/mailFolders/inbox/messageRules")
+        sequence = max((int(r.get("sequence") or 0) for r in raw.get("value") or []), default=0) + 1
+        data = await self.api.json(
+            "POST",
+            f"{ME}/mailFolders/inbox/messageRules",
+            json={
+                "displayName": name or "Assistant filter",
+                "sequence": sequence,
+                "isEnabled": True,
+                "conditions": conditions,
+                "actions": actions or {"markAsRead": False},
+            },
+        )
+        return self._rule(data)
+
+    async def tool_delete_filter(self, filter_id: str):
+        await self.api.json("DELETE", f"{ME}/mailFolders/inbox/messageRules/{_q(filter_id)}")
+        return {"deleted": True, "filter_id": filter_id}
+
+    async def tool_get_profile(self):
+        me = await self.api.json("GET", f"{ME}?$select=mail,userPrincipalName,displayName")
+        return {
+            "email": me.get("mail") or me.get("userPrincipalName"),
+            "name": me.get("displayName"),
+        }
+
+    async def tool_get_vacation_settings(self):
+        data = await self.api.json("GET", f"{ME}/mailboxSettings/automaticRepliesSetting")
+        return {
+            "enabled": data.get("status") not in (None, "disabled"),
+            "status": data.get("status"),
+            "body": (data.get("internalReplyMessage") or data.get("externalReplyMessage") or ""),
+            "start": (data.get("scheduledStartDateTime") or {}).get("dateTime"),
+            "end": (data.get("scheduledEndDateTime") or {}).get("dateTime"),
+        }
+
+    async def tool_get_auto_forwarding(self):
+        rules = (await self.tool_list_filters()).get("filters") or []
+        for rule in rules:
+            actions = rule.get("actions") or {}
+            dest = (actions.get("forwardTo") or actions.get("redirectTo") or [None])[0]
+            if dest or actions.get("forwardTo") or actions.get("redirectTo"):
+                addrs = actions.get("forwardTo") or actions.get("redirectTo") or []
+                email = ""
+                if addrs and isinstance(addrs[0], dict):
+                    email = ((addrs[0].get("emailAddress") or {}).get("address")) or ""
+                return {"enabled": bool(rule.get("enabled")), "email": email, "disposition": "rule", "filter_id": rule.get("filter_id")}
+        return {"enabled": False}
+
+    async def tool_list_forwarding_addresses(self):
+        rules = (await self.tool_list_filters()).get("filters") or []
+        addresses = []
+        for rule in rules:
+            actions = rule.get("actions") or {}
+            for key in ("forwardTo", "redirectTo"):
+                for item in actions.get(key) or []:
+                    email = ((item or {}).get("emailAddress") or {}).get("address")
+                    if email:
+                        addresses.append({"email": email, "status": "rule"})
+        return {"addresses": addresses}
+
+    async def tool_list_send_as(self):
+        me = await self.api.json("GET", f"{ME}?$select=mail,userPrincipalName,otherMails")
+        primary = me.get("mail") or me.get("userPrincipalName")
+        aliases = [{"email": primary, "name": "", "primary": True, "default": True}]
+        for extra in me.get("otherMails") or []:
+            if extra and extra != primary:
+                aliases.append({"email": extra, "name": "", "primary": False, "default": False})
+        return {"aliases": aliases}
+
+    async def tool_get_language_settings(self):
+        data = await self.api.json("GET", f"{ME}/mailboxSettings")
+        lang = data.get("language") or {}
+        return {"language": lang.get("locale") or lang.get("displayName")}
+
+    async def tool_get_imap_settings(self):
+        return {"supported": False, "provider": "outlook", "note": "Outlook on Microsoft 365 does not expose IMAP settings via Graph."}
+
+    async def tool_get_pop_settings(self):
+        return {"supported": False, "provider": "outlook", "note": "Outlook on Microsoft 365 does not expose POP settings via Graph."}
+
+    def _outlook_contact(self, row: dict) -> dict:
+        emails = [e.get("address") for e in (row.get("emailAddresses") or []) if e.get("address")]
+        phones = [p for p in [row.get("mobilePhone"), *((row.get("businessPhones") or []))] if p]
+        return {
+            "contact_id": row.get("id"),
+            "name": row.get("displayName") or "",
+            "emails": emails,
+            "phones": phones,
+            "organization": row.get("companyName") or "",
+        }
+
+    async def tool_get_contacts(self, limit: int = 15, page_token: str | None = None):
+        params = {"$top": min(limit, 50), "$select": "id,displayName,emailAddresses,mobilePhone,businessPhones,companyName"}
+        rows, nxt = await self._page(f"{ME}/contacts", params, page_token)
+        return {"contacts": [self._outlook_contact(r) for r in rows], "next_page_token": nxt}
+
+    async def tool_search_people(self, query: str, limit: int = 15):
+        params = {"$search": f'"{query}"', "$top": min(limit, 30)}
+        try:
+            rows, _ = await self._page(f"{ME}/people", params, None)
+            contacts = []
+            for row in rows:
+                emails = [((s.get("emailAddress") or {}).get("address")) for s in (row.get("scoredEmailAddresses") or [])]
+                contacts.append(
+                    {
+                        "contact_id": row.get("id"),
+                        "name": row.get("displayName") or "",
+                        "emails": [e for e in emails if e],
+                        "phones": [],
+                        "organization": (row.get("companyName") or ""),
+                    }
+                )
+            if contacts:
+                return {"contacts": contacts}
+        except Exception:  # noqa: BLE001
+            pass
+        params = {
+            "$filter": f"contains(displayName,'{query.replace(chr(39), '')}')",
+            "$top": min(limit, 30),
+            "$select": "id,displayName,emailAddresses,mobilePhone,businessPhones,companyName",
+        }
+        rows, _ = await self._page(f"{ME}/contacts", params, None)
+        return {"contacts": [self._outlook_contact(r) for r in rows]}
+
+    async def tool_get_people(self, contact_id: str | None = None, other_contacts: bool = False):
+        if other_contacts:
+            rows, _ = await self._page(
+                f"{ME}/contacts",
+                {"$top": 20, "$select": "id,displayName,emailAddresses,mobilePhone,businessPhones,companyName"},
+                None,
+            )
+            return {"contacts": [self._outlook_contact(r) for r in rows]}
+        if not contact_id:
+            raise ToolError("Provide contact_id or set other_contacts=true")
+        row = await self.api.json("GET", f"{ME}/contacts/{_q(contact_id)}")
+        return self._outlook_contact(row)
+
     # ---- attachments -----------------------------------------------------
 
     async def tool_list_attachments(self, message_id: str):

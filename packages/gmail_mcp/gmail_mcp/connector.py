@@ -16,6 +16,7 @@ from connector_core.text import clean_body, clip
 
 GMAIL = "https://gmail.googleapis.com/gmail/v1/users/me"
 CAL = "https://www.googleapis.com/calendar/v3"
+PEOPLE = "https://people.googleapis.com/v1"
 _SYSTEM_LABELS = {"inbox", "sent", "draft", "spam", "trash", "starred", "important", "unread"}
 _META_HEADERS = ["From", "To", "Cc", "Subject", "Date", "Message-ID", "References", "Reply-To"]
 
@@ -293,6 +294,281 @@ class GmailConnector(BaseConnector):
             "POST", f"{GMAIL}/messages/send", json={"raw": self._raw(msg), "threadId": orig.get("threadId")}
         )
         return {"sent": True, "message_id": data.get("id"), "to": to, "cc": cc}
+
+    async def tool_delete_message(self, message_id: str, permanent: bool = False):
+        if permanent:
+            await self.api.json("DELETE", f"{GMAIL}/messages/{message_id}")
+        else:
+            await self.api.json("POST", f"{GMAIL}/messages/{message_id}/trash")
+        return {"deleted": True, "message_id": message_id, "permanent": permanent}
+
+    async def tool_list_threads(self, query: str | None = None, limit: int = 15, page_token: str | None = None):
+        params: dict[str, Any] = {"maxResults": min(limit, 50)}
+        if query:
+            params["q"] = to_gmail_query(query)
+        if page_token:
+            params["pageToken"] = page_token
+        data = await self.api.json("GET", f"{GMAIL}/threads", params=params)
+        threads = []
+        for row in data.get("threads") or []:
+            threads.append({"thread_id": row.get("id"), "snippet": clip(row.get("snippet") or "", 200)})
+        return {"threads": threads, "next_page_token": data.get("nextPageToken")}
+
+    async def tool_trash_thread(self, thread_id: str):
+        await self.api.json("POST", f"{GMAIL}/threads/{thread_id}/trash")
+        return {"trashed": True, "thread_id": thread_id}
+
+    async def tool_delete_thread(self, thread_id: str):
+        await self.api.json("DELETE", f"{GMAIL}/threads/{thread_id}")
+        return {"deleted": True, "thread_id": thread_id, "permanent": True}
+
+    async def tool_modify_thread_labels(self, thread_id: str, add_label_ids: list[str] | None = None, remove_label_ids: list[str] | None = None):
+        await self.api.json(
+            "POST",
+            f"{GMAIL}/threads/{thread_id}/modify",
+            json={"addLabelIds": add_label_ids or [], "removeLabelIds": remove_label_ids or []},
+        )
+        return {"updated": True, "thread_id": thread_id}
+
+    async def tool_list_drafts(self, limit: int = 15, page_token: str | None = None):
+        params: dict[str, Any] = {"maxResults": min(limit, 50)}
+        if page_token:
+            params["pageToken"] = page_token
+        data = await self.api.json("GET", f"{GMAIL}/drafts", params=params)
+        ids = [d.get("id") for d in data.get("drafts") or [] if d.get("id")]
+        drafts = []
+        for draft_id in ids:
+            try:
+                drafts.append(await self.tool_get_draft(draft_id))
+            except Exception:  # noqa: BLE001
+                drafts.append({"draft_id": draft_id})
+        return {"drafts": drafts, "next_page_token": data.get("nextPageToken")}
+
+    async def tool_get_draft(self, draft_id: str):
+        data = await self.api.json("GET", f"{GMAIL}/drafts/{draft_id}", params={"format": "full"})
+        msg = data.get("message") or {}
+        h = _headers(msg)
+        body, is_html = _bodies(msg.get("payload") or {})
+        return {
+            "draft_id": data.get("id") or draft_id,
+            "message_id": msg.get("id"),
+            "thread_id": msg.get("threadId"),
+            "subject": h.get("subject", ""),
+            "to": h.get("to", ""),
+            "cc": h.get("cc", ""),
+            "body": clean_body(body, is_html, self.body_limit),
+        }
+
+    async def tool_send_draft(self, draft_id: str):
+        data = await self.api.json("POST", f"{GMAIL}/drafts/send", json={"id": draft_id})
+        return {"sent": True, "draft_id": draft_id, "message_id": data.get("id"), "thread_id": data.get("threadId")}
+
+    async def tool_delete_draft(self, draft_id: str):
+        await self.api.json("DELETE", f"{GMAIL}/drafts/{draft_id}")
+        return {"deleted": True, "draft_id": draft_id}
+
+    async def tool_modify_labels(self, message_id: str, add_label_ids: list[str] | None = None, remove_label_ids: list[str] | None = None):
+        await self.api.json(
+            "POST",
+            f"{GMAIL}/messages/{message_id}/modify",
+            json={"addLabelIds": add_label_ids or [], "removeLabelIds": remove_label_ids or []},
+        )
+        return {"updated": True, "message_id": message_id}
+
+    async def tool_batch_modify_messages(
+        self, message_ids: list[str], add_label_ids: list[str] | None = None, remove_label_ids: list[str] | None = None
+    ):
+        await self._batch_modify(message_ids, add=add_label_ids, remove=remove_label_ids)
+        return {"updated": len(message_ids)}
+
+    async def tool_create_label(self, name: str):
+        data = await self.api.json(
+            "POST",
+            f"{GMAIL}/labels",
+            json={"name": name, "labelListVisibility": "labelShow", "messageListVisibility": "show"},
+        )
+        return {"label_id": data.get("id"), "name": data.get("name")}
+
+    async def tool_get_label(self, label_id: str):
+        data = await self.api.json("GET", f"{GMAIL}/labels/{label_id}")
+        return {
+            "label_id": data.get("id"),
+            "name": data.get("name"),
+            "type": data.get("type"),
+            "messages_total": data.get("messagesTotal"),
+            "messages_unread": data.get("messagesUnread"),
+            "threads_total": data.get("threadsTotal"),
+        }
+
+    async def tool_patch_label(self, label_id: str, name: str):
+        data = await self.api.json("PATCH", f"{GMAIL}/labels/{label_id}", json={"name": name})
+        return {"label_id": data.get("id"), "name": data.get("name")}
+
+    async def tool_delete_label(self, label_id: str):
+        await self.api.json("DELETE", f"{GMAIL}/labels/{label_id}")
+        return {"deleted": True, "label_id": label_id}
+
+    async def tool_list_filters(self):
+        data = await self.api.json("GET", f"{GMAIL}/settings/filters")
+        return {"filters": data.get("filter") or []}
+
+    async def tool_get_filter(self, filter_id: str):
+        return await self.api.json("GET", f"{GMAIL}/settings/filters/{filter_id}")
+
+    async def tool_create_filter(
+        self,
+        name: str | None = None,
+        from_email: str | None = None,
+        subject: str | None = None,
+        query: str | None = None,
+        add_label_ids: list[str] | None = None,
+        skip_inbox: bool = False,
+        trash: bool = False,
+    ):
+        del name
+        criteria: dict[str, Any] = {}
+        if from_email:
+            criteria["from"] = from_email
+        if subject:
+            criteria["subject"] = subject
+        if query:
+            criteria["query"] = query
+        if not criteria:
+            raise ToolError("Provide from_email, subject, or query")
+        action: dict[str, Any] = {}
+        add = list(add_label_ids or [])
+        if trash:
+            add.append("TRASH")
+        if add:
+            action["addLabelIds"] = add
+        remove = []
+        if skip_inbox:
+            remove.append("INBOX")
+        if remove:
+            action["removeLabelIds"] = remove
+        data = await self.api.json("POST", f"{GMAIL}/settings/filters", json={"criteria": criteria, "action": action})
+        return {"filter_id": data.get("id"), "criteria": data.get("criteria"), "action": data.get("action")}
+
+    async def tool_delete_filter(self, filter_id: str):
+        await self.api.json("DELETE", f"{GMAIL}/settings/filters/{filter_id}")
+        return {"deleted": True, "filter_id": filter_id}
+
+    async def tool_get_profile(self):
+        data = await self.api.json("GET", f"{GMAIL}/profile")
+        return {
+            "email": data.get("emailAddress"),
+            "messages_total": data.get("messagesTotal"),
+            "threads_total": data.get("threadsTotal"),
+            "history_id": data.get("historyId"),
+        }
+
+    async def tool_get_vacation_settings(self):
+        data = await self.api.json("GET", f"{GMAIL}/settings/vacation")
+        return {
+            "enabled": data.get("enableAutoReply"),
+            "subject": data.get("responseSubject"),
+            "body": data.get("responseBodyPlainText") or data.get("responseBodyHtml"),
+            "start": data.get("startTime"),
+            "end": data.get("endTime"),
+        }
+
+    async def tool_get_auto_forwarding(self):
+        data = await self.api.json("GET", f"{GMAIL}/settings/autoForwarding")
+        return {
+            "enabled": data.get("enabled"),
+            "email": data.get("emailAddress"),
+            "disposition": data.get("disposition"),
+        }
+
+    async def tool_list_forwarding_addresses(self):
+        data = await self.api.json("GET", f"{GMAIL}/settings/forwardingAddresses")
+        return {
+            "addresses": [
+                {"email": row.get("forwardingEmail"), "status": row.get("verificationStatus")}
+                for row in data.get("forwardingAddresses") or []
+            ]
+        }
+
+    async def tool_list_send_as(self):
+        data = await self.api.json("GET", f"{GMAIL}/settings/sendAs")
+        return {
+            "aliases": [
+                {
+                    "email": row.get("sendAsEmail"),
+                    "name": row.get("displayName"),
+                    "primary": row.get("isPrimary"),
+                    "default": row.get("isDefault"),
+                }
+                for row in data.get("sendAs") or []
+            ]
+        }
+
+    async def tool_get_language_settings(self):
+        data = await self.api.json("GET", f"{GMAIL}/settings/language")
+        return {"language": data.get("displayLanguage")}
+
+    async def tool_get_imap_settings(self):
+        return await self.api.json("GET", f"{GMAIL}/settings/imap")
+
+    async def tool_get_pop_settings(self):
+        return await self.api.json("GET", f"{GMAIL}/settings/pop")
+
+    def _contact(self, person: dict) -> dict:
+        names = person.get("names") or []
+        emails = person.get("emailAddresses") or []
+        phones = person.get("phoneNumbers") or []
+        orgs = person.get("organizations") or []
+        return {
+            "contact_id": person.get("resourceName"),
+            "name": (names[0] or {}).get("displayName") if names else "",
+            "emails": [e.get("value") for e in emails if e.get("value")],
+            "phones": [p.get("value") for p in phones if p.get("value")],
+            "organization": (orgs[0] or {}).get("name") if orgs else "",
+        }
+
+    async def tool_get_contacts(self, limit: int = 15, page_token: str | None = None):
+        params: dict[str, Any] = {
+            "pageSize": min(limit, 50),
+            "personFields": "names,emailAddresses,phoneNumbers,organizations",
+        }
+        if page_token:
+            params["pageToken"] = page_token
+        data = await self.api.json("GET", f"{PEOPLE}/people/me/connections", params=params)
+        return {
+            "contacts": [self._contact(p) for p in data.get("connections") or []],
+            "next_page_token": data.get("nextPageToken"),
+        }
+
+    async def tool_search_people(self, query: str, limit: int = 15):
+        data = await self.api.json(
+            "GET",
+            f"{PEOPLE}/people:searchContacts",
+            params={
+                "query": query,
+                "pageSize": min(limit, 30),
+                "readMask": "names,emailAddresses,phoneNumbers,organizations",
+            },
+        )
+        people = [self._contact(row.get("person") or {}) for row in data.get("results") or []]
+        return {"contacts": [p for p in people if p.get("contact_id")]}
+
+    async def tool_get_people(self, contact_id: str | None = None, other_contacts: bool = False):
+        if other_contacts:
+            data = await self.api.json(
+                "GET",
+                f"{PEOPLE}/otherContacts",
+                params={"pageSize": 20, "readMask": "names,emailAddresses,phoneNumbers"},
+            )
+            return {"contacts": [self._contact(p) for p in data.get("otherContacts") or []]}
+        if not contact_id:
+            raise ToolError("Provide contact_id or set other_contacts=true")
+        rid = contact_id if contact_id.startswith("people/") or contact_id.startswith("otherContacts/") else f"people/{contact_id}"
+        person = await self.api.json(
+            "GET",
+            f"{PEOPLE}/{rid}",
+            params={"personFields": "names,emailAddresses,phoneNumbers,organizations"},
+        )
+        return self._contact(person)
 
     async def tool_forward(self, message_id: str, to: list[str], comment: str = ""):
         orig = await self._full(message_id)
