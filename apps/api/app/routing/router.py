@@ -51,6 +51,9 @@ async def _assemble(db, connectors: list[Connector], query: str, extra_hits: lis
     hits.extend(await core_tools(db, connectors))
     qlow = query.lower()
     extra_names: set[tuple[str, str]] = set()
+    if any(k in qlow for k in ("send", "email", "compose", "draft", "reply", "forward", "mail")):
+        for c in connectors:
+            extra_names |= {(c.slug, n) for n in ("send_message", "reply", "forward", "create_draft", "send_draft")}
     if any(k in qlow for k in ("attach", "pdf", "download", "preview", "open")):
         for c in connectors:
             extra_names |= {

@@ -10,20 +10,16 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.connectors.sanitize import clean_description, destructive_name, infer_group, infer_ids
+from app.connectors.virtual import VIRTUAL_MAIL_TOOLS
 from app.llm import chat_complete, embed_texts
 from app.models import ServerCard, ToolIndex
-from connector_core import ToolSpec
+from connector_core import MAIL_CALENDAR_TOOLS, ToolSpec
 
 log = logging.getLogger(__name__)
 
 CORE_HINTS = ("search", "list", "get", "find", "whoami", "status")
-MAIL_CORE_TOOLS = (
-    "search_messages",
-    "get_message",
-    "list_attachments",
-    "summarize_attachments",
-    "list_messages",
-    "search_events",
+MAIL_CORE_TOOLS = tuple(
+    dict.fromkeys([s.name for s in MAIL_CALENDAR_TOOLS] + [s.name for s in VIRTUAL_MAIL_TOOLS])
 )
 
 
@@ -70,8 +66,8 @@ def _cluster(specs: list[ToolSpec]) -> dict:
 
 def _core(specs: list[ToolSpec]) -> list[str]:
     names = {s.name for s in specs}
-    if {"search_messages", "get_message"} <= names:
-        return [n for n in MAIL_CORE_TOOLS if n in names]
+    if "search_messages" in names and "get_message" in names:
+        return [s.name for s in specs]
     ranked = []
     for s in specs:
         score = sum(1 for h in CORE_HINTS if h in s.name.lower())

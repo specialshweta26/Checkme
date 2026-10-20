@@ -25,7 +25,7 @@ from app.connectors.runtime import RuntimeConnector
 from app.models import Connector, ServerCard
 from app.routing.describe import catalog_lines
 from app.routing.select import load_named, search_tools, user_connectors
-from connector_core import ConnectorAuthError, ToolError
+from connector_core import ConnectorAuthError, MAIL_CALENDAR_TOOLS, ToolError
 from connector_core.text import clip
 
 log = logging.getLogger(__name__)
@@ -347,6 +347,26 @@ async def search_user_tools(ctx: RunContext, query: str, connector_slug: str | N
             return [{"error": f"connector '{connector_slug}' is not connected for this user"}]
         conns = [conn]
     hits = await search_tools(ctx.db, conns, query, 12)
+    q = (query or "").lower()
+    wanted: set[tuple[str, str]] = set()
+    mail_conns = [c for c in conns if c.provider in {"gmail", "outlook"}]
+    if any(k in q for k in ("send", "email", "compose", "mail to", "write", "draft")):
+        for c in mail_conns:
+            wanted.update((c.slug, n) for n in ("send_message", "create_draft", "reply", "forward"))
+    if any(k in q for k in ("reply", "respond")):
+        for c in mail_conns:
+            wanted.add((c.slug, "reply"))
+    if "forward" in q:
+        for c in mail_conns:
+            wanted.add((c.slug, "forward"))
+    if any(k in q for k in ("open", "attach", "pdf", "summarize")):
+        for c in mail_conns:
+            wanted.update((c.slug, n) for n in ("get_message", "list_attachments", "summarize_attachments"))
+    if wanted:
+        extra = await load_named(ctx.db, mail_conns, wanted)
+        seen = {(h.slug, h.tool_name) for h in hits}
+        hits = extra + [h for h in hits if (h.slug, h.tool_name) not in {(e.slug, e.tool_name) for e in extra}]
+        del seen
     # #region agent log
     from app.debug_ndjson import dbg
 
@@ -359,6 +379,7 @@ async def search_user_tools(ctx: RunContext, query: str, connector_slug: str | N
             "slug": connector_slug or "",
             "tools": [f"{h.slug}.{h.tool_name}" for h in hits],
             "has_get_message": any(h.tool_name == "get_message" for h in hits),
+            "has_send_message": any(h.tool_name == "send_message" for h in hits),
             "has_summarize_attachments": any(h.tool_name == "summarize_attachments" for h in hits),
             "has_list_attachments": any(h.tool_name == "list_attachments" for h in hits),
         },
@@ -377,6 +398,22 @@ async def search_user_tools(ctx: RunContext, query: str, connector_slug: str | N
     ]
 
 
+def _builtin_mail_spec(conn, tool_name: str) -> dict | None:
+    if conn.provider not in {"gmail", "outlook"}:
+        return None
+    spec = next((s for s in MAIL_CALENDAR_TOOLS if s.name == tool_name), None)
+    if spec is None:
+        return None
+    return {
+        "connector_slug": conn.slug,
+        "tool_name": spec.name,
+        "description": spec.description,
+        "parameters": spec.input_schema or {"type": "object", "properties": {}},
+        "read_only": spec.read_only,
+        "destructive": spec.destructive,
+    }
+
+
 async def get_user_tool_schema(ctx: RunContext, connector_slug: str, tool_name: str) -> dict:
     conn = ctx.connectors.get(connector_slug)
     if conn is None:
@@ -385,6 +422,7 @@ async def get_user_tool_schema(ctx: RunContext, connector_slug: str, tool_name: 
         return {"error": "tool catalog is unavailable"}
     hits = await load_named(ctx.db, [conn], {(connector_slug, tool_name)})
     if not hits:
+        fallback = _builtin_mail_spec(conn, tool_name)
         # #region agent log
         from app.debug_ndjson import dbg
 
@@ -392,9 +430,11 @@ async def get_user_tool_schema(ctx: RunContext, connector_slug: str, tool_name: 
             "A",
             "deep.py:get_user_tool_schema",
             "tool missing from index",
-            {"slug": connector_slug, "tool": tool_name, "server_key": bool(conn.server_key)},
+            {"slug": connector_slug, "tool": tool_name, "server_key": bool(conn.server_key), "fallback": bool(fallback)},
         )
         # #endregion
+        if fallback:
+            return fallback
         return {"error": f"unknown tool {tool_name} on {connector_slug}. search_tools first."}
     hit = hits[0]
     return {
@@ -418,12 +458,14 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
     if ctx.db is not None:
         recovered = await load_named(ctx.db, [conn], {(connector_slug, tool_name)})
         hit = recovered[0] if recovered else None
-    if hit and hit.destructive and not ctx.auto_confirm and not confirmed(ctx.confirmations, connector_slug, tool_name):
+    spec = next((s for s in MAIL_CALENDAR_TOOLS if s.name == tool_name), None)
+    destructive = bool(hit.destructive if hit is not None else (spec.destructive if spec else False))
+    if destructive and not ctx.auto_confirm and not confirmed(ctx.confirmations, connector_slug, tool_name):
         token = sign_confirm("tool", {"slug": connector_slug, "tool": tool_name, "args": args})
         pending = {
             "needs_confirm": True,
             "token": token,
-            "title": f"{hit.connector_name}: {tool_name}",
+            "title": f"{(hit.connector_name if hit else conn.alias or conn.name)}: {tool_name}",
             "preview": await preview(ctx.user, conn, tool_name, args),
         }
         ctx.pending.append(pending)
@@ -663,13 +705,14 @@ def system_prompt(user, connectors: list, memory: str) -> str:
         "You are this user's personal chief of staff. You have mail, calendar, and connected MCP servers.\n"
         f"Current date and time: {now.strftime('%Y-%m-%d %H:%M')} ({tz}). Interpret and display times in that timezone.\n"
         "Only use connectors listed below. Other users have different connectors.\n"
-        "Discover first: list_connectors, then search_tools with the user's own words.\n"
+        "Discover first: list_connectors — Gmail and Outlook core_tools is the full mail catalog, including send_message. Then search_tools if needed.\n"
         "Read get_tool_schema before filling arguments. Argument names come from that schema and description.\n"
         "Search, resolve, and list tools return catalogs, not answers. After you pick a tool, call_tool it.\n"
         "Call tools as many times as the task needs — different connectors, different argument sets, different windows. Combine results yourself.\n"
-        "Gmail and Outlook can search, open a message (get_message), list attachments, extract text, and summarize attachments. "
+        "Gmail and Outlook can search, open (get_message), send a new email (send_message), reply, forward, list attachments, extract text, and summarize attachments. "
+        "To send a new email now, call_tool send_message with to, subject, and body. Reply uses reply; forwarding uses forward. "
         "After search_messages or list_messages, if the user asked to open, show, read, or summarize a mail or attachment, call get_message then summarize_attachments. "
-        "Never say a mail connector is search-only or cannot open messages or attachments.\n"
+        "Never say a mail connector is search-only or cannot compose, send, open, or attach.\n"
         "Answer every part of the ask. If a result is too large, inspect_result the stored result_id using a path or search from the user's words, and keep paging until the requested slice is complete. Or call_tool again with narrower schema arguments. Never say data was truncated and stop.\n"
         "Cite source_tool (connector slug and tool name, plus the downstream name if a gateway executed one).\n"
         "If asked how a number was produced, cite tool evidence from this thread or fetch again. Do not invent figures.\n"
