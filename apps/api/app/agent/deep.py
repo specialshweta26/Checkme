@@ -752,6 +752,14 @@ def _message_text(content: Any) -> str:
     return str(content or "").strip()
 
 
+def _is_recursion_limit(exc: BaseException) -> bool:
+    name = type(exc).__name__.lower()
+    if "recursion" in name:
+        return True
+    msg = str(exc).lower()
+    return "recursion limit" in msg or "recursed" in msg
+
+
 def last_text(messages: list) -> str:
     for msg in reversed(messages or []):
         role = getattr(msg, "type", None) or getattr(msg, "role", None)
@@ -817,16 +825,28 @@ async def run_deep_agent(
             )
         )
     agent = build_agent(ctx, system_prompt(user, conns, memory))
-    limit = max(24, get_settings().max_agent_steps * 4)
-    try:
-        result = await agent.ainvoke(
-            {"messages": _lc_messages(history, query, extra)},
-            config={"recursion_limit": limit, "configurable": {"thread_id": str(session_id)}},
-        )
-        text = last_text(result.get("messages") if isinstance(result, dict) else [])
-    except Exception as exc:  # noqa: BLE001
-        log.exception("deep agent failed")
-        text = f"I could not finish that request: {str(exc)[:240]}"
+    payload = {"messages": _lc_messages(history, query, extra)}
+    limit = max(80, get_settings().max_agent_steps * 8)
+    text = ""
+    for attempt in range(3):
+        try:
+            result = await agent.ainvoke(
+                payload,
+                config={
+                    "recursion_limit": limit,
+                    "configurable": {"thread_id": f"{session_id}:r{attempt}"},
+                },
+            )
+            text = last_text(result.get("messages") if isinstance(result, dict) else [])
+            break
+        except Exception as exc:  # noqa: BLE001
+            if _is_recursion_limit(exc) and attempt < 2:
+                limit = min(limit + 40, 200)
+                log.warning("recursion limit reached; retry %s/2 with limit=%s", attempt + 1, limit)
+                continue
+            log.exception("deep agent failed")
+            text = f"I could not finish that request: {str(exc)[:240]}"
+            break
     source = ctx.sources[-1] if ctx.sources else None
     # #region agent log
     from app.debug_ndjson import dbg

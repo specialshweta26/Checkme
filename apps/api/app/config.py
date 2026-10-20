@@ -82,7 +82,7 @@ class Settings(BaseSettings):
     max_tool_schemas: int = 12
     chat_rate_limit_per_minute: int = 30
     history_messages: int = 8
-    max_agent_steps: int = 12
+    max_agent_steps: int = 20
 
     @model_validator(mode="after")
     def fill_oauth_from_environ(self):
