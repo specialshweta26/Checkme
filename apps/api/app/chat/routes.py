@@ -125,10 +125,18 @@ async def chat(body: ChatIn, user: User = Depends(current_user), db: AsyncSessio
     if confirms:
         working["confirm_tools"] = confirms
 
+    # #region agent log
+    from app.debug_ndjson import dbg
+
+    dbg("B", "chat/routes.py:chat", "chat request", {"query": text[:80], "has_session": bool(body.session_id)})
+    # #endregion
     try:
         result = await run_deep_agent(db, user, sess.id, request_id, history, text, confirms)
     except Exception as exc:  # noqa: BLE001
         log.exception("chat agent failed")
+        # #region agent log
+        dbg("C", "chat/routes.py:chat", "agent exception", {"error": str(exc)[:200]})
+        # #endregion
         raise HTTPException(502, str(exc)[:400]) from exc
     try:
         if result.get("source"):

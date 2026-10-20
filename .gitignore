@@ -12,3 +12,4 @@ node_modules/
 out/
 *.egg-info/
 .DS_Store
+.cursor-debug-daee2b.log

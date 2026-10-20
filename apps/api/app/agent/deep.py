@@ -20,6 +20,7 @@ from app.agent.memory import load_memory, remember
 from app.agent.staff import STAFF_TOOLS, dispatch as staff_dispatch
 from app.auth.tokens import ReauthRequired
 from app.config import get_settings
+from app.connectors.registry import MAIL_CORE_TOOLS
 from app.connectors.runtime import RuntimeConnector
 from app.models import Connector, ServerCard
 from app.routing.describe import catalog_lines
@@ -253,6 +254,64 @@ def _source_tool(slug: str, tool_name: str, args: dict) -> str:
     return f"{slug}__{tool_name}"
 
 
+_MAIL_OPEN_HINTS = ("open", "summarize", "summary", "attachment", "pdf", "display", "show", "preview")
+
+
+def _wants_mail_open(query: str) -> bool:
+    q = (query or "").lower()
+    return any(hint in q for hint in _MAIL_OPEN_HINTS)
+
+
+def _first_message_id(result: Any) -> str | None:
+    if not isinstance(result, dict):
+        return None
+    if result.get("message_id"):
+        return str(result["message_id"])
+    msgs = result.get("messages") or []
+    if msgs and isinstance(msgs[0], dict):
+        return str(msgs[0].get("message_id") or msgs[0].get("id") or "") or None
+    return None
+
+
+async def _invoke_follow(ctx: RunContext, slug: str, tool: str, args: dict) -> Any:
+    conn = ctx.connectors[slug]
+    if ctx.call_impl is not None:
+        return await ctx.call_impl(slug, tool, args)
+    return await invoke_named(ctx.db, ctx.user, conn, tool, args, ctx.attachments)
+
+
+async def _hydrate_opened_mail(ctx: RunContext, slug: str, tool_name: str, result: Any) -> Any:
+    if tool_name not in {"search_messages", "list_messages"}:
+        return result
+    if not isinstance(result, dict) or result.get("error"):
+        return result
+    if not _wants_mail_open(ctx.query):
+        return result
+    mid = _first_message_id(result)
+    if not mid:
+        return result
+    opened = await _invoke_follow(ctx, slug, "get_message", {"message_id": mid})
+    opened_name = f"{slug}__get_message"
+    if opened_name not in ctx.used_tools:
+        ctx.used_tools.append(opened_name)
+    out = dict(result)
+    out["opened_message"] = opened if isinstance(opened, dict) else {"result": opened}
+    has_atts = False
+    if isinstance(opened, dict):
+        has_atts = bool(opened.get("attachments")) or bool(opened.get("has_attachments"))
+    if has_atts:
+        summarized = await _invoke_follow(ctx, slug, "summarize_attachments", {"message_id": mid})
+        sum_name = f"{slug}__summarize_attachments"
+        if sum_name not in ctx.used_tools:
+            ctx.used_tools.append(sum_name)
+        out["attachment_open"] = summarized
+    out["hint"] = (
+        "Opened the first matching message with get_message. "
+        "If attachments exist they were summarized. Do not say this connector is search-only."
+    )
+    return out
+
+
 async def list_user_connectors(ctx: RunContext) -> list[dict]:
     cards: dict[str, ServerCard] = {}
     keys = [c.server_key for c in ctx.connectors.values() if getattr(c, "server_key", None)]
@@ -262,13 +321,16 @@ async def list_user_connectors(ctx: RunContext) -> list[dict]:
     out = []
     for conn in ctx.connectors.values():
         card = cards.get(conn.server_key or "")
+        core = list(card.core_tools or []) if card else []
+        if conn.provider in {"gmail", "outlook"}:
+            core = list(dict.fromkeys([*MAIL_CORE_TOOLS, *core]))
         out.append(
             {
                 "slug": conn.slug,
                 "name": conn.alias or conn.name,
                 "kind": "mail" if conn.kind == "builtin" else "mcp",
                 "description": getattr(conn, "description", "") or "",
-                "core_tools": list(card.core_tools or []) if card else [],
+                "core_tools": core,
                 "tool_count": card.tool_count if card else None,
             }
         )
@@ -285,6 +347,23 @@ async def search_user_tools(ctx: RunContext, query: str, connector_slug: str | N
             return [{"error": f"connector '{connector_slug}' is not connected for this user"}]
         conns = [conn]
     hits = await search_tools(ctx.db, conns, query, 12)
+    # #region agent log
+    from app.debug_ndjson import dbg
+
+    dbg(
+        "D",
+        "deep.py:search_user_tools",
+        "catalog search results",
+        {
+            "query": (query or "")[:80],
+            "slug": connector_slug or "",
+            "tools": [f"{h.slug}.{h.tool_name}" for h in hits],
+            "has_get_message": any(h.tool_name == "get_message" for h in hits),
+            "has_summarize_attachments": any(h.tool_name == "summarize_attachments" for h in hits),
+            "has_list_attachments": any(h.tool_name == "list_attachments" for h in hits),
+        },
+    )
+    # #endregion
     return [
         {
             "connector_slug": hit.slug,
@@ -306,6 +385,16 @@ async def get_user_tool_schema(ctx: RunContext, connector_slug: str, tool_name: 
         return {"error": "tool catalog is unavailable"}
     hits = await load_named(ctx.db, [conn], {(connector_slug, tool_name)})
     if not hits:
+        # #region agent log
+        from app.debug_ndjson import dbg
+
+        dbg(
+            "A",
+            "deep.py:get_user_tool_schema",
+            "tool missing from index",
+            {"slug": connector_slug, "tool": tool_name, "server_key": bool(conn.server_key)},
+        )
+        # #endregion
         return {"error": f"unknown tool {tool_name} on {connector_slug}. search_tools first."}
     hit = hits[0]
     return {
@@ -344,6 +433,42 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
             result = await ctx.call_impl(connector_slug, tool_name, args)
         else:
             result = await invoke_named(ctx.db, ctx.user, conn, tool_name, args, ctx.attachments)
+        # #region agent log
+        from app.debug_ndjson import dbg
+
+        payload_preview = result if isinstance(result, dict) else {"type": type(result).__name__}
+        dbg(
+            "C",
+            "deep.py:call_user_tool",
+            "tool invoked",
+            {
+                "slug": connector_slug,
+                "tool": tool_name,
+                "has_error": bool(isinstance(result, dict) and result.get("error")),
+                "error": (result.get("error")[:160] if isinstance(result, dict) and result.get("error") else ""),
+                "has_message_id": bool(isinstance(result, dict) and (result.get("message_id") or (result.get("messages") or [{}])[0].get("message_id"))),
+                "attachment_count": len(result.get("attachments") or []) if isinstance(result, dict) else 0,
+                "keys": list(payload_preview.keys())[:12] if isinstance(payload_preview, dict) else [],
+            },
+        )
+        # #endregion
+        result = await _hydrate_opened_mail(ctx, connector_slug, tool_name, result)
+        # #region agent log
+        if tool_name in {"search_messages", "list_messages"}:
+            from app.debug_ndjson import dbg
+
+            dbg(
+                "B",
+                "deep.py:_hydrate_opened_mail",
+                "mail follow-up",
+                {
+                    "slug": connector_slug,
+                    "wants_open": _wants_mail_open(ctx.query),
+                    "did_open": bool(isinstance(result, dict) and result.get("opened_message")),
+                    "did_summarize": bool(isinstance(result, dict) and result.get("attachment_open")),
+                },
+            )
+        # #endregion
         if ctx.db is not None:
             await bump_usage(ctx.db, ctx.user.id, conn.id, tool_name, True)
         source_name = _source_tool(connector_slug, tool_name, args)
@@ -542,6 +667,9 @@ def system_prompt(user, connectors: list, memory: str) -> str:
         "Read get_tool_schema before filling arguments. Argument names come from that schema and description.\n"
         "Search, resolve, and list tools return catalogs, not answers. After you pick a tool, call_tool it.\n"
         "Call tools as many times as the task needs — different connectors, different argument sets, different windows. Combine results yourself.\n"
+        "Gmail and Outlook can search, open a message (get_message), list attachments, extract text, and summarize attachments. "
+        "After search_messages or list_messages, if the user asked to open, show, read, or summarize a mail or attachment, call get_message then summarize_attachments. "
+        "Never say a mail connector is search-only or cannot open messages or attachments.\n"
         "Answer every part of the ask. If a result is too large, inspect_result the stored result_id using a path or search from the user's words, and keep paging until the requested slice is complete. Or call_tool again with narrower schema arguments. Never say data was truncated and stop.\n"
         "Cite source_tool (connector slug and tool name, plus the downstream name if a gateway executed one).\n"
         "If asked how a number was produced, cite tool evidence from this thread or fetch again. Do not invent figures.\n"
@@ -700,6 +828,22 @@ async def run_deep_agent(
         log.exception("deep agent failed")
         text = f"I could not finish that request: {str(exc)[:240]}"
     source = ctx.sources[-1] if ctx.sources else None
+    # #region agent log
+    from app.debug_ndjson import dbg
+
+    dbg(
+        "B",
+        "deep.py:run_deep_agent",
+        "agent finished",
+        {
+            "query": (query or "")[:80],
+            "used_tools": ctx.used_tools,
+            "attachment_cards": len(ctx.attachments),
+            "claimed_search_only": "only provides" in (text or "").lower() or "searching" in (text or "").lower(),
+            "text_head": (text or "")[:160],
+        },
+    )
+    # #endregion
     await remember(db, user.id, "episodic", clip(f"Q: {query}\nA: {text}", 400))
     return {
         "text": text or "Done.",

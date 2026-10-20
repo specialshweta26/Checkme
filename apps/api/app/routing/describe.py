@@ -77,5 +77,7 @@ def catalog_lines(connectors: list) -> str:
         desc = (getattr(connector, "description", "") or "").strip()
         kind = "mail" if connector.kind == "builtin" else "mcp"
         extra = f" — {desc}" if desc else ""
+        if kind == "mail":
+            extra += " — search, get_message, list_attachments, summarize_attachments"
         lines.append(f"- @{connector.slug} ({label}, {kind}){extra}")
     return "\n".join(lines) if lines else "(none)"
