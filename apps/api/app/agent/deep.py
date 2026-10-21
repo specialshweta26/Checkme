@@ -843,6 +843,8 @@ def system_prompt(user, connectors: list, memory: str) -> str:
         "After search_messages or list_messages, if the user asked to open, read, or summarize mail, call get_thread "
         "with thread_id AND message_id from the hit. Never call get_thread with an empty thread_id — pass message_id instead. "
         "Use every message in the thread, not only the latest reply. Then summarize_attachments if files exist. "
+        "list_messages includes mail where the user is on To or Cc (recipient_role). Cover CC'd mail in briefings. "
+        "When sending or replying, pass cc and bcc if the user named other people to include. "
         "Never say a mail connector cannot compose, send, invite, attach, or batch-delete. "
         "Empty spam, junk, trash, or drafts with empty_folder (folder=spam|trash|drafts) in one call_tool — do not loop delete_draft.\n"
         "Answer every part of the ask. If a result is too large, inspect_result the stored result_id using a path or search from the user's words, and keep paging until the requested slice is complete. Or call_tool again with narrower schema arguments. Never say data was truncated and stop.\n"

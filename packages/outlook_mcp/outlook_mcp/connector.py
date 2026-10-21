@@ -9,7 +9,7 @@ from urllib.parse import quote
 import httpx
 
 from connector_core import MAIL_CALENDAR_TOOLS, BaseConnector, BinaryResult, ToolError, TokenProvider
-from connector_core.mail_tools import canonical_mail_folder, folder_from_query
+from connector_core.mail_tools import canonical_mail_folder, folder_from_query, merge_message_lists, recipient_role
 from connector_core.calendar import (
     DEFAULT_TZ,
     as_local,
@@ -27,7 +27,7 @@ from connector_core.text import clean_body, clip
 
 GRAPH = "https://graph.microsoft.com/v1.0"
 ME = f"{GRAPH}/me"
-_LIST_SELECT = "id,conversationId,subject,from,receivedDateTime,bodyPreview,isRead,hasAttachments"
+_LIST_SELECT = "id,conversationId,subject,from,receivedDateTime,bodyPreview,isRead,hasAttachments,toRecipients,ccRecipients"
 _TEXT = {"Prefer": 'outlook.body-content-type="text"'}
 _LOCAL_TZ = {"Prefer": f'outlook.timezone="{graph_timezone(DEFAULT_TZ)}"'}
 _WELL_KNOWN = {"inbox", "sentitems", "drafts", "deleteditems", "junkemail", "archive"}
@@ -54,13 +54,18 @@ def _recips(addresses: list[str] | None) -> list[dict]:
     return [{"emailAddress": {"address": a}} for a in addresses or []]
 
 
-def _summary(m: dict) -> dict:
+def _summary(m: dict, my_email: str = "") -> dict:
     cid = (m.get("conversationId") or "").strip()
+    to = ", ".join(_addr(r) for r in m.get("toRecipients", []) or [])
+    cc = ", ".join(_addr(r) for r in m.get("ccRecipients", []) or [])
     return {
         "message_id": m["id"],
         "thread_id": cid or m["id"],
         "subject": m.get("subject") or "",
         "from": _addr(m.get("from")),
+        "to": to,
+        "cc": cc,
+        "recipient_role": recipient_role(my_email, to, cc),
         "date": format_local(m.get("receivedDateTime"), DEFAULT_TZ),
         "snippet": clip(m.get("bodyPreview") or "", 200),
         "unread": not m.get("isRead", True),
@@ -128,6 +133,21 @@ class OutlookConnector(BaseConnector):
         super().__init__(token_provider)
         self.api = ApiClient("Outlook", token_provider, http)
         self.body_limit = body_limit
+        self._me: str | None = None
+
+    async def _my_email(self) -> str:
+        if self._me is None:
+            data = await self.api.json("GET", f"{ME}", params={"$select": "mail,userPrincipalName"})
+            self._me = data.get("mail") or data.get("userPrincipalName") or ""
+        return self._me
+
+    async def _summaries(self, rows: list[dict]) -> list[dict]:
+        me = ""
+        try:
+            me = await self._my_email()
+        except Exception:  # noqa: BLE001
+            me = ""
+        return [_summary(m, me) for m in rows]
 
     async def _page(self, url: str, params: dict | None, page_token: str | None, headers: dict | None = None):
         if page_token:
@@ -333,20 +353,40 @@ class OutlookConnector(BaseConnector):
             params["$filter"] = "isRead eq false"
         rows, nxt = await self._page(f"{ME}/mailFolders/{fid}/messages", params, page_token)
         await self._ensure_conversation_ids(rows)
-        return {"messages": [_summary(m) for m in rows], "next_page_token": nxt}
+        messages = await self._summaries(rows)
+        if (folder or "inbox").lower() == "inbox" and not page_token:
+            try:
+                me = await self._my_email()
+            except Exception:  # noqa: BLE001
+                me = ""
+            if me:
+                try:
+                    found = await self.tool_search_messages(f"cc:{me}", limit=min(limit, 20))
+                    extra = found.get("messages") or []
+                    if unread_only:
+                        extra = [m for m in extra if m.get("unread")]
+                    messages = merge_message_lists(messages, extra)
+                except Exception:  # noqa: BLE001
+                    pass
+        return {"messages": messages, "next_page_token": nxt}
 
     async def tool_search_messages(self, query: str, limit: int = 15, page_token: str | None = None):
         params = {"$search": f'"{to_kql(query)}"', "$top": min(limit, 50), "$select": _LIST_SELECT}
         rows, nxt = await self._page(f"{ME}/messages", params, page_token)
         await self._ensure_conversation_ids(rows)
-        return {"messages": [_summary(m) for m in rows], "next_page_token": nxt}
+        return {"messages": await self._summaries(rows), "next_page_token": nxt}
 
     async def tool_get_message(self, message_id: str):
         m = await self._get_message_raw(message_id)
         atts = (await self.tool_list_attachments(message_id))["attachments"] if m.get("hasAttachments") else []
         raw, is_html = _body_text(m)
+        me = ""
+        try:
+            me = await self._my_email()
+        except Exception:  # noqa: BLE001
+            me = ""
         return {
-            **_summary(m),
+            **_summary(m, me),
             "to": ", ".join(_addr(r) for r in m.get("toRecipients", [])),
             "cc": ", ".join(_addr(r) for r in m.get("ccRecipients", [])),
             "body": clean_body(raw, is_html, self.body_limit),
@@ -506,20 +546,37 @@ class OutlookConnector(BaseConnector):
         await self.api.json("POST", f"{ME}/sendMail", json={"message": payload, "saveToSentItems": True})
         return {"sent": True}
 
-    async def tool_reply(self, message_id: str, body: str, reply_all: bool = False, files: list | None = None):
+    async def tool_reply(
+        self,
+        message_id: str,
+        body: str,
+        reply_all: bool = False,
+        files: list | None = None,
+        cc: list[str] | None = None,
+        bcc: list[str] | None = None,
+    ):
+        extra_cc = [a.strip() for a in (cc or []) if a and a.strip()]
+        extra_bcc = [a.strip() for a in (bcc or []) if a and a.strip()]
         atts = self._file_attachments(files)
-        if not atts:
+        if not atts and not extra_cc and not extra_bcc:
             action = "replyAll" if reply_all else "reply"
             await self.api.json("POST", f"{ME}/messages/{_q(message_id)}/{action}", json={"comment": body})
             return {"sent": True, "reply_all": reply_all}
         path = "createReplyAll" if reply_all else "createReply"
         draft = await self.api.json("POST", f"{ME}/messages/{_q(message_id)}/{path}")
         did = draft.get("id")
-        await self.api.json("PATCH", f"{ME}/messages/{_q(did)}", json={"body": {"contentType": "Text", "content": body}})
+        patch: dict[str, Any] = {"body": {"contentType": "Text", "content": body}}
+        if extra_cc:
+            existing = [_addr(r) for r in draft.get("ccRecipients") or []]
+            merged = list(dict.fromkeys([a for a in existing if a] + extra_cc))
+            patch["ccRecipients"] = _recips(merged)
+        if extra_bcc:
+            patch["bccRecipients"] = _recips(extra_bcc)
+        await self.api.json("PATCH", f"{ME}/messages/{_q(did)}", json=patch)
         for att in atts:
             await self.api.json("POST", f"{ME}/messages/{_q(did)}/attachments", json=att)
         await self.api.json("POST", f"{ME}/messages/{_q(did)}/send")
-        return {"sent": True, "reply_all": reply_all, "attachments": len(atts)}
+        return {"sent": True, "reply_all": reply_all, "cc": extra_cc, "bcc": extra_bcc, "attachments": len(atts)}
 
     async def tool_forward(self, message_id: str, to: list[str], comment: str = ""):
         await self.api.json(

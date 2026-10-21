@@ -11,7 +11,7 @@ from typing import Any
 import httpx
 
 from connector_core import MAIL_CALENDAR_TOOLS, BaseConnector, BinaryResult, ToolError, TokenProvider
-from connector_core.mail_tools import canonical_mail_folder, folder_from_query
+from connector_core.mail_tools import canonical_mail_folder, folder_from_query, merge_message_lists, recipient_role
 from connector_core.calendar import DEFAULT_TZ, as_local, format_local, free_slots, iana_tz, local_wall, now_local, parse_iso, tz_label
 from connector_core.http import ApiClient, gather_limited
 from connector_core.text import clean_body, clip
@@ -75,14 +75,19 @@ def _attachments(payload: dict) -> list[dict]:
     return out
 
 
-def _summary(msg: dict) -> dict:
+def _summary(msg: dict, my_email: str = "") -> dict:
     h = _headers(msg)
     labels = msg.get("labelIds", [])
+    to = h.get("to", "")
+    cc = h.get("cc", "")
     return {
         "message_id": msg["id"],
         "thread_id": msg.get("threadId") or msg.get("id") or "",
         "subject": h.get("subject", ""),
         "from": h.get("from", ""),
+        "to": to,
+        "cc": cc,
+        "recipient_role": recipient_role(my_email, to, cc),
         "date": format_local(h.get("date", ""), DEFAULT_TZ),
         "snippet": clip(msg.get("snippet", ""), 200),
         "unread": "UNREAD" in labels,
@@ -166,7 +171,12 @@ class GmailConnector(BaseConnector):
     async def _meta(self, ids: list[str]) -> list[dict]:
         params = {"format": "metadata", "metadataHeaders": _META_HEADERS}
         msgs = await gather_limited([self.api.json("GET", f"{GMAIL}/messages/{i}", params=params) for i in ids], 10)
-        return [_summary(m) for m in msgs]
+        me = ""
+        try:
+            me = await self._my_email()
+        except Exception:  # noqa: BLE001
+            me = ""
+        return [_summary(m, me) for m in msgs]
 
     async def _full(self, message_id: str) -> dict:
         return await self.api.json("GET", f"{GMAIL}/messages/{message_id}", params={"format": "full"})
@@ -176,7 +186,17 @@ class GmailConnector(BaseConnector):
     async def tool_list_messages(self, folder: str = "INBOX", unread_only: bool = False, limit: int = 15, page_token: str | None = None):
         label = folder.upper() if folder.lower() in _SYSTEM_LABELS else folder
         ids, nxt = await self._list_ids("is:unread" if unread_only else None, [label], limit, page_token)
-        return {"messages": await self._meta(ids), "next_page_token": nxt}
+        messages = await self._meta(ids)
+        if label == "INBOX" and not page_token:
+            cc_q = "cc:me is:unread" if unread_only else "cc:me"
+            try:
+                cc_ids, _ = await self._list_ids(cc_q, None, min(limit, 20), None)
+            except Exception:  # noqa: BLE001
+                cc_ids = []
+            extra = [i for i in cc_ids if i not in ids]
+            if extra:
+                messages = merge_message_lists(messages, await self._meta(extra), limit=max(limit, len(messages) + len(extra)))
+        return {"messages": messages, "next_page_token": nxt}
 
     async def tool_search_messages(self, query: str, limit: int = 15, page_token: str | None = None):
         ids, nxt = await self._list_ids(to_gmail_query(query), None, limit, page_token)
@@ -186,10 +206,13 @@ class GmailConnector(BaseConnector):
         msg = await self._full(message_id)
         h = _headers(msg)
         body, is_html = _bodies(msg.get("payload", {}))
+        me = ""
+        try:
+            me = await self._my_email()
+        except Exception:  # noqa: BLE001
+            me = ""
         return {
-            **_summary(msg),
-            "to": h.get("to", ""),
-            "cc": h.get("cc", ""),
+            **_summary(msg, me),
             "body": clean_body(body, is_html, self.body_limit),
             "attachments": _attachments(msg.get("payload", {})),
         }
@@ -390,27 +413,39 @@ class GmailConnector(BaseConnector):
         data = await self.api.json("POST", f"{GMAIL}/messages/send", json={"raw": self._raw(msg)})
         return {"sent": True, "message_id": data.get("id"), "thread_id": data.get("threadId")}
 
-    async def tool_reply(self, message_id: str, body: str, reply_all: bool = False, files: list | None = None):
+    async def tool_reply(
+        self,
+        message_id: str,
+        body: str,
+        reply_all: bool = False,
+        files: list | None = None,
+        cc: list[str] | None = None,
+        bcc: list[str] | None = None,
+    ):
         params = {"format": "metadata", "metadataHeaders": _META_HEADERS}
         orig = await self.api.json("GET", f"{GMAIL}/messages/{message_id}", params=params)
         h = _headers(orig)
         me = (await self._my_email()).lower()
         to = [a for _, a in getaddresses([h.get("reply-to") or h.get("from", "")]) if a]
-        cc: list[str] = []
+        copied: list[str] = []
         if reply_all:
             others = [a for _, a in getaddresses([h.get("to", ""), h.get("cc", "")]) if a and a.lower() != me]
-            cc = [a for a in dict.fromkeys(others) if a not in to]
+            copied = [a for a in dict.fromkeys(others) if a not in to]
+        extra = [a.strip() for a in (cc or []) if a and a.strip()]
+        copied = list(dict.fromkeys(copied + extra))
+        copied = [a for a in copied if a not in to]
+        blind = [a.strip() for a in (bcc or []) if a and a.strip() and a not in to and a not in copied]
         subject = h.get("subject", "")
         if not subject.lower().startswith("re:"):
             subject = f"Re: {subject}"
         mid = h.get("message-id", "")
         refs = (h.get("references", "") + " " + mid).strip()
-        msg = self._compose(to, subject, body, cc, headers={"In-Reply-To": mid, "References": refs})
+        msg = self._compose(to, subject, body, copied, blind, headers={"In-Reply-To": mid, "References": refs})
         self._attach_files(msg, files)
         data = await self.api.json(
             "POST", f"{GMAIL}/messages/send", json={"raw": self._raw(msg), "threadId": orig.get("threadId")}
         )
-        return {"sent": True, "message_id": data.get("id"), "to": to, "cc": cc}
+        return {"sent": True, "message_id": data.get("id"), "to": to, "cc": copied, "bcc": blind}
 
     async def tool_delete_message(self, message_id: str, permanent: bool = False):
         if permanent:

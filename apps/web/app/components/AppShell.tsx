@@ -91,7 +91,12 @@ function NotifyBell({
                   <span className={`triage-tag ${mail.classification || "pending"}`}>
                     {mail.classification || "reviewing"}
                   </span>
-                  <strong>{mail.subject || "(no subject)"}</strong>
+                  <strong>
+                    {mail.recipient_role === "cc" || mail.recipient_role === "bcc" ? (
+                      <span className="role-tag">{mail.recipient_role === "bcc" ? "Bcc" : "Cc"} </span>
+                    ) : null}
+                    {mail.subject || "(no subject)"}
+                  </strong>
                   <small>{mail.from || "Unknown sender"}{mail.date ? ` · ${mail.date}` : ""}</small>
                 </a>
               ))}

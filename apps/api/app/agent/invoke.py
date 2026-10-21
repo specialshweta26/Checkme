@@ -49,7 +49,7 @@ async def preview(user, conn, tool: str, args: dict) -> dict:
             if args.get(key) not in (None, "", []):
                 out[key] = args.get(key)
         return {k: v for k, v in out.items() if v not in (None, "", [])}
-    return {k: args.get(k) for k in ("to", "subject", "body", "message_id", "query") if args.get(k)}
+    return {k: args.get(k) for k in ("to", "cc", "bcc", "subject", "body", "message_id", "query", "reply_all") if args.get(k)}
 
 
 def _load_mail_files(args: dict) -> dict:

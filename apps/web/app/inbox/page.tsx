@@ -26,7 +26,19 @@ type InboxMail = {
   connector: string;
   connector_slug?: string;
   sort_at?: string;
+  to?: string;
+  cc?: string;
+  recipient_role?: string;
 };
+
+type CopyFields = { cc: string; bcc: string; replyAll: boolean };
+
+function parseEmails(raw: string): string[] {
+  return raw
+    .split(/[\s,;]+/)
+    .map((part) => part.trim())
+    .filter((part) => part.includes("@"));
+}
 
 const TONES = ["Professional", "Concise", "Friendly", "Warmer"] as const;
 
@@ -49,6 +61,7 @@ export default function InboxPage() {
   const [focusId, setFocusId] = useState("");
   const [confirm, setConfirm] = useState<{ action: string; title: string; count: number; sample: string; itemIds: string[] } | null>(null);
   const [filesById, setFilesById] = useState<Record<string, UploadedFile[]>>({});
+  const [copyById, setCopyById] = useState<Record<string, CopyFields>>({});
 
   useEffect(() => {
     getMe().then((u) => {
@@ -130,7 +143,7 @@ export default function InboxPage() {
     setItems((rows) => rows.map((r) => (r.id === id ? { ...r, ...patch } : r)));
   }
 
-  async function act(id: string, path: string, body?: Record<string, string>) {
+  async function act(id: string, path: string, body?: Record<string, unknown>) {
     setBusy(`${id}:${path}`);
     setError("");
     const item = items.find((m) => m.id === id);
@@ -332,8 +345,13 @@ export default function InboxPage() {
                     <span className={`triage-tag ${mail.classification || "pending"}`}>
                       {mail.classification || "reviewing"}
                     </span>
-                    <span className={`status-dot ${mail.status === "pending" ? "active" : "ok"}`}>
-                      {mail.status === "pending" ? "Pending" : "Completed"}
+                    <span className="inbox-card-flags">
+                      {mail.recipient_role === "cc" || mail.recipient_role === "bcc" ? (
+                        <span className="role-tag">{mail.recipient_role === "bcc" ? "Bcc’d to you" : "Cc’d to you"}</span>
+                      ) : null}
+                      <span className={`status-dot ${mail.status === "pending" ? "active" : "ok"}`}>
+                        {mail.status === "pending" ? "Pending" : "Completed"}
+                      </span>
                     </span>
                   </header>
                   <h2>{mail.subject || "(no subject)"}</h2>
@@ -341,6 +359,7 @@ export default function InboxPage() {
                     {mail.from || "Unknown sender"}
                     {mail.date ? ` · ${mail.date}` : ""}
                     {mail.connector ? ` · ${mail.connector}` : ""}
+                    {mail.cc ? ` · Cc ${mail.cc}` : ""}
                   </p>
                   {mail.summary ? <p className="inbox-summary">{mail.summary}</p> : <p className="muted">{mail.snippet || "Reading this thread…"}</p>}
                   {mail.key_points?.length ? (
@@ -406,6 +425,50 @@ export default function InboxPage() {
                       ))}
                     </div>
                   ) : null}
+                  <div className="inbox-copy">
+                    <label>
+                      Cc
+                      <input
+                        value={(copyById[mail.id] || { cc: "", bcc: "", replyAll: false }).cc}
+                        onChange={(e) =>
+                          setCopyById((cur) => ({
+                            ...cur,
+                            [mail.id]: { ...(cur[mail.id] || { cc: "", bcc: "", replyAll: false }), cc: e.target.value },
+                          }))
+                        }
+                        placeholder="other@company.com"
+                        disabled={working}
+                      />
+                    </label>
+                    <label>
+                      Bcc
+                      <input
+                        value={(copyById[mail.id] || { cc: "", bcc: "", replyAll: false }).bcc}
+                        onChange={(e) =>
+                          setCopyById((cur) => ({
+                            ...cur,
+                            [mail.id]: { ...(cur[mail.id] || { cc: "", bcc: "", replyAll: false }), bcc: e.target.value },
+                          }))
+                        }
+                        placeholder="hidden@company.com"
+                        disabled={working}
+                      />
+                    </label>
+                    <label className="inbox-reply-all">
+                      <input
+                        type="checkbox"
+                        checked={(copyById[mail.id] || { cc: "", bcc: "", replyAll: false }).replyAll}
+                        onChange={(e) =>
+                          setCopyById((cur) => ({
+                            ...cur,
+                            [mail.id]: { ...(cur[mail.id] || { cc: "", bcc: "", replyAll: false }), replyAll: e.target.checked },
+                          }))
+                        }
+                        disabled={working}
+                      />
+                      Reply all
+                    </label>
+                  </div>
                   <footer className="inbox-actions">
                     <label className="rephrase-btn attach-btn">
                       Attach
@@ -434,7 +497,14 @@ export default function InboxPage() {
                       className="send-btn"
                       type="button"
                       disabled={working || !mail.draft.trim()}
-                      onClick={() => act(mail.id, "/send")}
+                      onClick={() => {
+                        const copy = copyById[mail.id] || { cc: "", bcc: "", replyAll: false };
+                        act(mail.id, "/send", {
+                          cc: parseEmails(copy.cc),
+                          bcc: parseEmails(copy.bcc),
+                          reply_all: copy.replyAll,
+                        });
+                      }}
                     >
                       Send
                     </button>

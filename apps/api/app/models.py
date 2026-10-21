@@ -301,6 +301,9 @@ class InboxItem(Base):
     thread_id: Mapped[str] = mapped_column(String(300), default="")
     subject: Mapped[str] = mapped_column(String(500), default="")
     sender: Mapped[str] = mapped_column(String(400), default="")
+    to_header: Mapped[str] = mapped_column(String(1000), default="")
+    cc_header: Mapped[str] = mapped_column(String(1000), default="")
+    recipient_role: Mapped[str] = mapped_column(String(12), default="to")
     received_at: Mapped[str] = mapped_column(String(80), default="")
     snippet: Mapped[str] = mapped_column(Text, default="")
     classification: Mapped[str] = mapped_column(String(20), default="")  # reply | respond | discard
