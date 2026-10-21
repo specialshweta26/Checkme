@@ -44,9 +44,10 @@ async def lifespan(_app: FastAPI):
                     log.warning("builtin sync skipped for %s: %s", row.slug, exc)
     except Exception as exc:  # noqa: BLE001
         log.warning("startup connector sync skipped: %s", exc)
+    from app.inbox.worker import start_inbox_worker
     from app.tasks.scheduler import start_scheduler
 
-    worker = await start_scheduler()
+    workers = [await start_scheduler(), await start_inbox_worker()]
     cfg = get_settings()
     log.info(
         "oauth google=%s microsoft=%s public_web_url=%s",
@@ -57,11 +58,13 @@ async def lifespan(_app: FastAPI):
     try:
         yield
     finally:
-        worker.cancel()
-        try:
-            await worker
-        except asyncio.CancelledError:
-            pass
+        for worker in workers:
+            worker.cancel()
+        for worker in workers:
+            try:
+                await worker
+            except asyncio.CancelledError:
+                pass
 
 
 app = FastAPI(title="Personal Assistant", lifespan=lifespan)
