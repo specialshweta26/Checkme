@@ -22,6 +22,7 @@ log = logging.getLogger(__name__)
 CLASSIFICATIONS = ("reply", "respond", "discard")
 ACTIVE = ("pending",)
 HIDDEN = ("sent", "discarded")
+KEEP_PENDING = 40
 MAX_CLASSIFY = 6
 _INGEST_LOCKS: dict[uuid.UUID, asyncio.Lock] = {}
 BATCH_FOLDERS = {"empty_spam": "spam", "empty_drafts": "drafts", "empty_trash": "trash"}
@@ -163,11 +164,26 @@ def _alert(item: InboxItem) -> dict[str, Any]:
 async def _pending_items(db: AsyncSession, user: User) -> list[InboxItem]:
     return newest_first(
         (
-            await db.execute(
-                select(InboxItem).where(InboxItem.user_id == user.id, InboxItem.status == "pending").limit(60)
-            )
+            await db.execute(select(InboxItem).where(InboxItem.user_id == user.id, InboxItem.status == "pending"))
         ).scalars().all()
     )
+
+
+def split_kept(items: list, limit: int = KEEP_PENDING) -> tuple[list, list]:
+    ranked = newest_first(items)
+    return ranked[:limit], ranked[limit:]
+
+
+async def _trim_pending(db: AsyncSession, user: User) -> list[InboxItem]:
+    """Keep only the newest KEEP_PENDING cards. Older pending mail leaves the inbox view."""
+    keep, drop = split_kept(await _pending_items(db, user))
+    for item in drop:
+        item.status = "discarded"
+        item.unread = False
+        item.seen = True
+    if drop:
+        await db.commit()
+    return keep
 
 
 async def _mark_unseen(db: AsyncSession, user: User) -> list[InboxItem]:
@@ -199,13 +215,23 @@ async def refresh_mailboxes(db: AsyncSession, user: User, *, unread_only: bool =
     return await _ingest(db, user, runtimes, unread_only=unread_only, classify=classify)
 
 
+async def _cards_payload(db: AsyncSession, user: User, items: list[InboxItem], **badge_kw) -> dict[str, Any]:
+    runtimes = await mail_connectors(db, user)
+    names = {r.id: r.name for r in runtimes}
+    payload = _badge_payload(items, **badge_kw)
+    payload["inbox"] = [serialize(i, names.get(i.connector_id, "")) for i in items]
+    payload["connected"] = bool(runtimes)
+    return payload
+
+
 async def badge(db: AsyncSession, user: User) -> dict[str, Any]:
-    return _badge_payload(await _pending_items(db, user))
+    return await _cards_payload(db, user, await _trim_pending(db, user))
 
 
 async def mark_alerts_seen(db: AsyncSession, user: User) -> dict[str, Any]:
     snapshot = newest_first(await _mark_unseen(db, user))
-    return _badge_payload(await _pending_items(db, user), alerts=snapshot)
+    items = await _trim_pending(db, user)
+    return await _cards_payload(db, user, items, alerts=snapshot)
 
 
 async def list_inbox(db: AsyncSession, user: User, *, live: bool = False, mark_seen: bool = False, classify: bool = False) -> dict[str, Any]:
@@ -217,13 +243,7 @@ async def list_inbox(db: AsyncSession, user: User, *, live: bool = False, mark_s
     if mark_seen:
         await _mark_unseen(db, user)
     names = {r.id: r.name for r in runtimes}
-    items = newest_first(
-        (
-            await db.execute(
-                select(InboxItem).where(InboxItem.user_id == user.id, InboxItem.status.in_(ACTIVE)).limit(60)
-            )
-        ).scalars().all()
-    )[:40]
+    items = await _trim_pending(db, user)
     unseen = sum(1 for i in items if not i.seen)
     return {
         "items": [serialize(i, names.get(i.connector_id, "")) for i in items],
@@ -514,6 +534,9 @@ async def _ingest_locked(
             if classify and row.status == "pending" and not row.classification:
                 pending.append(row)
     await db.commit()
+    kept = await _trim_pending(db, user)
+    kept_ids = {item.id for item in kept}
+    pending = [item for item in pending if item.id in kept_ids]
     if classify and pending:
         await _classify_many(db, user, runtimes, pending[:MAX_CLASSIFY])
     return arrived

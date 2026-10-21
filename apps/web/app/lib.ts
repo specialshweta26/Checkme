@@ -115,6 +115,8 @@ function readBadge(data: Partial<InboxBadge> | null | undefined): InboxBadge {
     count,
     pending: Number(data?.pending ?? count),
     items: data?.items || [],
+    inbox: data?.inbox,
+    connected: data?.connected,
   };
 }
 

@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from app.inbox.service import _badge_payload, apply_triage, newest_first, normalize_class, parse_json_object, received_sort_key, serialize
+from app.inbox.service import KEEP_PENDING, _badge_payload, apply_triage, newest_first, normalize_class, parse_json_object, received_sort_key, serialize, split_kept
 
 
 def test_normalize_class_aliases():
@@ -67,6 +67,19 @@ def test_received_sort_key_newest_first():
         ]
     )
     assert [r.subject for r in rows] == ["new", "old"]
+
+
+def test_split_kept_drops_oldest_past_limit():
+    rows = [
+        SimpleNamespace(received_at="01 Oct 2026, 9:00 AM IST", created_at=None, subject=f"m{i}")
+        for i in range(KEEP_PENDING + 5)
+    ]
+    rows.append(SimpleNamespace(received_at="21 Oct 2026, 12:00 PM IST", created_at=None, subject="newest"))
+    keep, drop = split_kept(rows)
+    assert len(keep) == KEEP_PENDING
+    assert len(drop) == 6
+    assert keep[0].subject == "newest"
+    assert "newest" not in {r.subject for r in drop}
 
 
 def test_badge_counts_only_unseen():
