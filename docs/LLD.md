@@ -1,6 +1,6 @@
 # Low-level design
 
-Module-level design of Checkme: request paths, data model, agent loop, connectors, inbox, and files. Pair with [HLD](HLD.md).
+Module-level design of Checkme: request paths, data model, agent loop, connectors, inbox, and files. Pair with [HLD](HLD.md) and [diagrams](diagrams.md).
 
 ## 1. Process and package map
 
