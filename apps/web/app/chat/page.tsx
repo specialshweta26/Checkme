@@ -5,7 +5,7 @@ import { AttachmentWidget } from "../AttachmentWidget";
 import { AppShell } from "../components/AppShell";
 import { Markdown } from "../components/Markdown";
 import { Thinking } from "../components/Thinking";
-import { deleteSession, getMe, listSessions, loadSession, type ChatSessionRow, type Me } from "../lib";
+import { deleteSession, getMe, listSessions, loadSession, uploadFiles, type ChatSessionRow, type Me, type UploadedFile } from "../lib";
 
 const STORE = "assistant.session";
 
@@ -23,6 +23,9 @@ export default function ChatPage() {
   const [notice, setNotice] = useState("");
   const end = useRef<HTMLDivElement>(null);
   const box = useRef<HTMLTextAreaElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [uploads, setUploads] = useState<UploadedFile[]>([]);
+  const [uploadError, setUploadError] = useState("");
 
   async function refreshSessions() {
     setSessions(await listSessions());
@@ -46,6 +49,7 @@ export default function ChatPage() {
     setMessages([]);
     setPending([]);
     setNotice("");
+    setUploads([]);
     window.localStorage.removeItem(STORE);
     box.current?.focus();
   }
@@ -81,16 +85,19 @@ export default function ChatPage() {
   }, [messages, pending, busy]);
 
   async function send(message: string, confirmations: any[] = []) {
-    if (!message.trim() || busy) return;
+    if ((!message.trim() && !uploads.length) || busy) return;
+    const pendingFiles = uploads;
     setBusy(true);
-    setMessages((m) => [...m, { role: "user", content: message }]);
+    setMessages((m) => [...m, { role: "user", content: message || "Attached files", meta: pendingFiles.length ? { uploads: pendingFiles } : undefined }]);
     setText("");
+    setUploads([]);
+    setUploadError("");
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message, session_id: sessionId, confirmations }),
+        body: JSON.stringify({ message, session_id: sessionId, confirmations, attachments: pendingFiles }),
       });
       const raw = await res.text();
       let data: any = {};
@@ -169,6 +176,7 @@ export default function ChatPage() {
               m.role === "user" ? (
                 <div key={i} className="turn user">
                   <div className="bubble">{m.content}</div>
+                  {m.meta?.uploads?.length ? <AttachmentWidget items={m.meta.uploads} /> : null}
                 </div>
               ) : (
                 <div key={i} className="turn assistant">
@@ -220,7 +228,42 @@ export default function ChatPage() {
           </div>
         ) : null}
         <div className="composer-wrap">
+          {uploadError ? <p className="err">{uploadError}</p> : null}
+          {uploads.length ? (
+            <div className="attach-chips composer-chips">
+              {uploads.map((file) => (
+                <span key={file.key} className="attach-chip">
+                  {file.filename}
+                  <button type="button" aria-label="Remove file" onClick={() => setUploads((rows) => rows.filter((f) => f.key !== file.key))}>
+                    ×
+                  </button>
+                </span>
+              ))}
+            </div>
+          ) : null}
           <form className="composer" onSubmit={onSubmit}>
+            <input
+              ref={fileRef}
+              type="file"
+              multiple
+              hidden
+              onChange={async (e) => {
+                const picked = Array.from(e.target.files || []);
+                e.target.value = "";
+                if (!picked.length) return;
+                try {
+                  setUploadError("");
+                  setUploads((rows) => [...rows, ...(await uploadFiles(picked))]);
+                } catch (err: any) {
+                  setUploadError(err.message || "Upload failed");
+                }
+              }}
+            />
+            <button className="attach-icon" type="button" aria-label="Attach files" disabled={busy} onClick={() => fileRef.current?.click()}>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden>
+                <path d="M16 7v8.5a4 4 0 0 1-8 0V7.8A2.8 2.8 0 0 1 13.6 7v7.2" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+              </svg>
+            </button>
             <textarea
               ref={box}
               value={text}
@@ -234,7 +277,7 @@ export default function ChatPage() {
                 }
               }}
             />
-            <button className="send" type="submit" disabled={busy || !text.trim()} aria-label="Send">
+            <button className="send" type="submit" disabled={busy || (!text.trim() && !uploads.length)} aria-label="Send">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
                 <path d="M12 19V5M12 5 6 11M12 5l6 6" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
               </svg>

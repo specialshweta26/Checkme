@@ -647,7 +647,7 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
 
     async def call_tool(connector_slug: str, tool_name: str, args: dict[str, Any] | None = None) -> str:
         """Run a tool on one of this user's connectors now. Do not use this to send or fetch if the user named a future time — call schedule_task instead. Catalog/search/resolve/list tools are not answers. Large results are stored; use inspect_result for the slice the user asked for."""
-        return dumps(await call_user_tool(ctx, connector_slug, tool_name, args), 28000)
+        return dumps(await call_user_tool(ctx, connector_slug, tool_name, args), 60000)
 
     async def schedule_task(prompt: str) -> str:
         """Queue work for a future time. Required when the user says in N minutes, later, tonight, tomorrow, every day, or any clock. Pass their full request. Do not fetch data or send mail in this turn."""
@@ -734,7 +734,9 @@ def system_prompt(user, connectors: list, memory: str) -> str:
         "If the user wants work done later (email a report in N minutes, tonight, every day), schedule_task and do not fetch now. "
         "If they want a calendar invite or meeting at a clock time, that time is the event start: call create_event now. "
         "Tell them the scheduled time only when you actually called schedule_task.\n"
-        "Never invent emails, events, ids, or numbers that did not come from a tool result. Keep answers short.\n\n"
+        "Never invent emails, events, ids, or numbers that did not come from a tool result. "
+        "When connector data comes back, write a detailed analyst briefing — never a short brief. "
+        "Cover what the numbers mean, drivers, comparisons, risks, outliers, and recommended actions, with headings and specifics from the tool result.\n\n"
         f"This user's connectors:\n{catalog}\n\nUser memory:\n{memory or '(none)'}"
     )
 

@@ -453,10 +453,10 @@ textarea.field { min-height: 110px; resize: vertical; }
   width: min(760px, 100%);
   margin: 0 auto;
   display: grid;
-  grid-template-columns: 1fr 44px;
+  grid-template-columns: 40px 1fr 44px;
   gap: 10px;
   align-items: end;
-  padding: 10px 10px 10px 16px;
+  padding: 10px 10px 10px 10px;
   border-radius: var(--radius);
   border: 1px solid var(--line);
   background: #fff;
@@ -487,6 +487,39 @@ textarea.field { min-height: 110px; resize: vertical; }
   place-items: center;
 }
 .send:disabled { opacity: 0.35; }
+.attach-icon {
+  width: 40px;
+  height: 40px;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+}
+.attach-icon:hover { color: var(--text); background: var(--lift); }
+.attach-icon:disabled { opacity: 0.35; }
+.composer-chips { width: min(760px, 100%); margin: 0 auto 8px; }
+.attach-chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 12px; }
+.attach-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px 4px 10px;
+  border-radius: 999px;
+  background: var(--lift);
+  border: 1px solid var(--line);
+  font-size: 12.5px;
+  max-width: 100%;
+}
+.attach-chip button {
+  border: 0;
+  background: none;
+  color: var(--muted);
+  padding: 0 2px;
+  line-height: 1;
+}
+.attach-btn { cursor: pointer; }
 
 .think { display: flex; align-items: center; gap: 10px; color: var(--muted); }
 .think-orb {
@@ -710,8 +743,12 @@ textarea.field { min-height: 110px; resize: vertical; }
   border-radius: 12px;
   background: #fff;
   overflow: auto;
+  overflow-x: auto;
+  overflow-y: auto;
   max-height: min(80vh, 900px);
   min-height: 420px;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
 }
 .att-preview-status { margin: 16px; }
 .att-preview-frame {
@@ -724,15 +761,21 @@ textarea.field { min-height: 110px; resize: vertical; }
 }
 .att-preview-scroll {
   overflow: auto;
+  overflow-x: auto;
+  overflow-y: auto;
   max-height: min(80vh, 900px);
   min-height: 320px;
   background: #f8fafc;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  touch-action: pan-x pan-y;
 }
 .att-preview-scroll img {
   display: block;
-  width: 100%;
+  width: auto;
+  max-width: none;
+  min-width: max(100%, 720px);
   height: auto;
-  max-width: 100%;
 }
 
 .scrim { display: none; }

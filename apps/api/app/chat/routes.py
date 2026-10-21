@@ -31,6 +31,7 @@ class ChatIn(BaseModel):
     message: str
     session_id: uuid.UUID | None = None
     confirmations: list[dict] = []
+    attachments: list[dict] = []
 
 
 @router.get("/sessions")
@@ -77,8 +78,26 @@ async def chat(body: ChatIn, user: User = Depends(current_user), db: AsyncSessio
     if await rate_limited(f"chat:{user.id}", get_settings().chat_rate_limit_per_minute):
         raise HTTPException(429, "Too many messages. Wait a minute.")
     text = (body.message or "").strip()
-    if not text:
+    uploads = [item for item in (body.attachments or []) if isinstance(item, dict) and item.get("key")]
+    if not text and not uploads:
         raise HTTPException(400, "Empty message")
+    if not text:
+        text = "Please review the attached files."
+    agent_text = text
+    if uploads:
+        bits = []
+        keys = []
+        for item in uploads[:8]:
+            keys.append(item.get("key"))
+            name = item.get("filename") or "file"
+            extracted = (item.get("extracted_text") or "").strip()
+            bits.append(f"- {name} (attachment_key={item.get('key')})" + (f"\n{extracted[:3000]}" if extracted else ""))
+        agent_text = (
+            text
+            + "\n\nThe user uploaded these files. Use attachment_keys when sending or replying to mail. "
+            "Analyze them in detail; do not give a brief summary.\n"
+            + "\n".join(bits)
+        )
 
     if body.session_id:
         sess = await db.get(ChatSession, body.session_id)
@@ -131,7 +150,7 @@ async def chat(body: ChatIn, user: User = Depends(current_user), db: AsyncSessio
     dbg("B", "chat/routes.py:chat", "chat request", {"query": text[:80], "has_session": bool(body.session_id)})
     # #endregion
     try:
-        result = await run_deep_agent(db, user, sess.id, request_id, history, text, confirms)
+        result = await run_deep_agent(db, user, sess.id, request_id, history, agent_text, confirms)
     except Exception as exc:  # noqa: BLE001
         log.exception("chat agent failed")
         # #region agent log
@@ -153,8 +172,12 @@ async def chat(body: ChatIn, user: User = Depends(current_user), db: AsyncSessio
             "attachments": result.get("attachments"),
             "source": result.get("source"),
         }
-        await _store(db, sess, user.id, request_id, text, result["text"], meta)
-        return {"session_id": str(sess.id), **result, "request_id": request_id}
+        public_uploads = [
+            {k: item.get(k) for k in ("key", "filename", "content_type", "kind", "download_url", "preview_url", "previewable", "size") if item.get(k) is not None}
+            for item in uploads
+        ]
+        await _store(db, sess, user.id, request_id, text, result["text"], meta, user_meta={"uploads": public_uploads} if public_uploads else None)
+        return {"session_id": str(sess.id), **result, "request_id": request_id, "uploads": public_uploads}
     except Exception as exc:  # noqa: BLE001
         log.exception("chat store failed")
         raise HTTPException(500, str(exc)[:400]) from exc
@@ -184,8 +207,8 @@ async def summarize_attachment(body: SummarizeIn, user: User = Depends(current_u
     return result
 
 
-async def _store(db, sess, user_id, request_id, user_text, assistant_text, meta) -> None:
-    db.add(ChatMessage(session_id=sess.id, user_id=user_id, role="user", content=user_text, request_id=request_id))
+async def _store(db, sess, user_id, request_id, user_text, assistant_text, meta, user_meta=None) -> None:
+    db.add(ChatMessage(session_id=sess.id, user_id=user_id, role="user", content=user_text, meta=user_meta or {}, request_id=request_id))
     db.add(ChatMessage(session_id=sess.id, user_id=user_id, role="assistant", content=assistant_text, meta=meta, request_id=request_id))
     if not sess.title or sess.title == "New chat":
         sess.title = user_text[:80]

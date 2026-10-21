@@ -268,7 +268,36 @@ async def rephrase(db: AsyncSession, user: User, item_id, *, tone: str = "", ins
     return serialize(item)
 
 
-async def send_reply(db: AsyncSession, user: User, item_id, draft: str | None = None) -> dict[str, Any]:
+async def classify_pending(db: AsyncSession, user: User) -> int:
+    runtimes = await mail_connectors(db, user)
+    if not runtimes:
+        return 0
+    items = (
+        (
+            await db.execute(
+                select(InboxItem).where(
+                    InboxItem.user_id == user.id,
+                    InboxItem.status == "pending",
+                    InboxItem.classification == "",
+                ).limit(MAX_CLASSIFY)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not items:
+        return 0
+    await _classify_many(db, user, runtimes, list(items))
+    return len(items)
+
+
+async def send_reply(
+    db: AsyncSession,
+    user: User,
+    item_id,
+    draft: str | None = None,
+    attachment_keys: list[str] | None = None,
+) -> dict[str, Any]:
     item = await get_item(db, user, item_id)
     body = clip((draft if draft is not None else item.draft) or "", 4000).strip()
     if not body:
@@ -277,7 +306,10 @@ async def send_reply(db: AsyncSession, user: User, item_id, draft: str | None = 
     if runtime is None:
         raise LookupError("Mail connector is not available")
     item.draft = body
-    result = await runtime.call("reply", {"message_id": item.message_id, "body": body})
+    from app.agent.invoke import _load_mail_files
+
+    args = _load_mail_files({"message_id": item.message_id, "body": body, "attachment_keys": attachment_keys or []})
+    result = await runtime.call("reply", args)
     if isinstance(result, dict) and result.get("error"):
         raise RuntimeError(str(result.get("error")))
     try:
@@ -442,7 +474,7 @@ async def _ingest_locked(
     pending: list[InboxItem] = []
     for runtime in runtimes:
         try:
-            listed = (await runtime.call("list_messages", {"unread_only": unread_only, "limit": 20})).get("messages") or []
+            listed = (await runtime.call("list_messages", {"unread_only": unread_only, "limit": 30})).get("messages") or []
         except Exception as exc:  # noqa: BLE001
             log.warning("inbox list failed for %s: %s", runtime.slug, exc)
             continue

@@ -111,12 +111,13 @@ async def summarize_texts(items: list[dict], focus: str | None = None) -> str:
         names = ", ".join(i["filename"] for i in items)
         return f"No extractable text in: {names}. Use the preview or download links."
     prompt = (
-        "Summarize these email attachments for the user. Cover what each file is, key numbers, "
-        "dates, and any action needed. Be concise. "
-        f"Focus: {focus or 'overall'}\n\n" + clip("\n\n".join(parts), 12000)
+        "You are a senior analyst. Write a detailed briefing of these files, not a short summary. "
+        "For each file cover: what it is, the important numbers and dates, trends or exceptions, "
+        "risks or decisions, and what the user should do next. Quote figures exactly. "
+        f"Focus: {focus or 'overall'}\n\n" + clip("\n\n".join(parts), 16000)
     )
     try:
-        resp = await chat_complete([{"role": "user", "content": prompt}], max_tokens=500)
+        resp = await chat_complete([{"role": "user", "content": prompt}], max_tokens=1800)
         return (resp.choices[0].message.content or "").strip()
     except Exception as exc:  # noqa: BLE001
         log.warning("attachment summary failed: %s", exc)

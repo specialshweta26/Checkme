@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { AppShell } from "../components/AppShell";
-import { getMe, type Me } from "../lib";
+import { getMe, uploadFiles, type Me, type UploadedFile } from "../lib";
 
 type Classification = "reply" | "respond" | "discard" | "";
 type Filter = "all" | Classification;
@@ -46,6 +46,7 @@ export default function InboxPage() {
   const [instruction, setInstruction] = useState("");
   const [focusId, setFocusId] = useState("");
   const [confirm, setConfirm] = useState<{ action: string; title: string; count: number; sample: string; itemIds: string[] } | null>(null);
+  const [filesById, setFilesById] = useState<Record<string, UploadedFile[]>>({});
 
   useEffect(() => {
     getMe().then((u) => {
@@ -76,7 +77,6 @@ export default function InboxPage() {
       setConnected(data.connected !== false);
       setError("");
       setLoading(false);
-      window.dispatchEvent(new Event("inbox-seen"));
     } catch {
       if (!opts.quiet) setError("Could not load inbox");
       setLoading(false);
@@ -86,8 +86,16 @@ export default function InboxPage() {
   useEffect(() => {
     if (!me) return;
     refresh({ live: true });
-    const id = window.setInterval(() => refresh({ quiet: true }), 12000);
-    return () => window.clearInterval(id);
+    function onLive(ev: Event) {
+      const detail = (ev as CustomEvent).detail || {};
+      if (Array.isArray(detail.inbox)) {
+        setItems(detail.inbox);
+        setConnected(detail.connected !== false);
+        setLoading(false);
+      }
+    }
+    window.addEventListener("inbox-live", onLive);
+    return () => window.removeEventListener("inbox-live", onLive);
   }, [me]);
 
   useEffect(() => {
@@ -128,7 +136,11 @@ export default function InboxPage() {
       method: "POST",
       credentials: "include",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ draft: item?.draft || "", ...body }),
+      body: JSON.stringify({
+        draft: item?.draft || "",
+        attachment_keys: (filesById[id] || []).map((f) => f.key),
+        ...body,
+      }),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
@@ -138,6 +150,11 @@ export default function InboxPage() {
     }
     if (path === "/send" || path === "/delete") {
       setItems((rows) => rows.filter((r) => r.id !== id));
+      setFilesById((cur) => {
+        const next = { ...cur };
+        delete next[id];
+        return next;
+      });
     } else if (data.draft || data.classification) {
       update(id, data);
     } else if (data.item) {
@@ -364,7 +381,39 @@ export default function InboxPage() {
                       />
                     </div>
                   ) : null}
+                  {(filesById[mail.id] || []).length ? (
+                    <div className="attach-chips">
+                      {(filesById[mail.id] || []).map((file) => (
+                        <span key={file.key} className="attach-chip">
+                          {file.filename}
+                          <button type="button" aria-label="Remove file" onClick={() => setFilesById((cur) => ({ ...cur, [mail.id]: (cur[mail.id] || []).filter((f) => f.key !== file.key) }))}>
+                            ×
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  ) : null}
                   <footer className="inbox-actions">
+                    <label className="rephrase-btn attach-btn">
+                      Attach
+                      <input
+                        type="file"
+                        multiple
+                        hidden
+                        disabled={working}
+                        onChange={async (e) => {
+                          const picked = Array.from(e.target.files || []);
+                          e.target.value = "";
+                          if (!picked.length) return;
+                          try {
+                            const uploaded = await uploadFiles(picked);
+                            setFilesById((cur) => ({ ...cur, [mail.id]: [...(cur[mail.id] || []), ...uploaded] }));
+                          } catch (err: any) {
+                            setError(err.message || "Upload failed");
+                          }
+                        }}
+                      />
+                    </label>
                     <button className="rephrase-btn" type="button" disabled={working} onClick={() => setOpenRephrase(openRephrase === mail.id ? "" : mail.id)}>
                       ✦ Rephrase
                     </button>

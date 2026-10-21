@@ -303,20 +303,60 @@ class OutlookConnector(BaseConnector):
             msg["bccRecipients"] = _recips(bcc)
         return msg
 
-    async def tool_create_draft(self, to: list[str], subject: str, body: str, cc: list[str] | None = None):
-        data = await self.api.json("POST", f"{ME}/messages", json=self._message(to, subject, body, cc))
+    def _file_attachments(self, files: list[dict] | None) -> list[dict]:
+        out = []
+        for item in files or []:
+            data = item.get("data") or b""
+            if not data:
+                continue
+            out.append(
+                {
+                    "@odata.type": "#microsoft.graph.fileAttachment",
+                    "name": item.get("filename") or "file",
+                    "contentType": item.get("content_type") or "application/octet-stream",
+                    "contentBytes": base64.b64encode(data).decode(),
+                }
+            )
+        return out
+
+    async def tool_create_draft(self, to: list[str], subject: str, body: str, cc: list[str] | None = None, files: list | None = None):
+        payload = self._message(to, subject, body, cc)
+        atts = self._file_attachments(files)
+        if atts:
+            payload["attachments"] = atts
+        data = await self.api.json("POST", f"{ME}/messages", json=payload)
         return {"draft_id": data.get("id"), "message_id": data.get("id")}
 
-    async def tool_send_message(self, to: list[str], subject: str, body: str, cc: list[str] | None = None, bcc: list[str] | None = None):
-        await self.api.json(
-            "POST", f"{ME}/sendMail", json={"message": self._message(to, subject, body, cc, bcc), "saveToSentItems": True}
-        )
+    async def tool_send_message(
+        self,
+        to: list[str],
+        subject: str,
+        body: str,
+        cc: list[str] | None = None,
+        bcc: list[str] | None = None,
+        files: list | None = None,
+    ):
+        payload = self._message(to, subject, body, cc, bcc)
+        atts = self._file_attachments(files)
+        if atts:
+            payload["attachments"] = atts
+        await self.api.json("POST", f"{ME}/sendMail", json={"message": payload, "saveToSentItems": True})
         return {"sent": True}
 
-    async def tool_reply(self, message_id: str, body: str, reply_all: bool = False):
-        action = "replyAll" if reply_all else "reply"
-        await self.api.json("POST", f"{ME}/messages/{_q(message_id)}/{action}", json={"comment": body})
-        return {"sent": True, "reply_all": reply_all}
+    async def tool_reply(self, message_id: str, body: str, reply_all: bool = False, files: list | None = None):
+        atts = self._file_attachments(files)
+        if not atts:
+            action = "replyAll" if reply_all else "reply"
+            await self.api.json("POST", f"{ME}/messages/{_q(message_id)}/{action}", json={"comment": body})
+            return {"sent": True, "reply_all": reply_all}
+        path = "createReplyAll" if reply_all else "createReply"
+        draft = await self.api.json("POST", f"{ME}/messages/{_q(message_id)}/{path}")
+        did = draft.get("id")
+        await self.api.json("PATCH", f"{ME}/messages/{_q(did)}", json={"body": {"contentType": "Text", "content": body}})
+        for att in atts:
+            await self.api.json("POST", f"{ME}/messages/{_q(did)}/attachments", json=att)
+        await self.api.json("POST", f"{ME}/messages/{_q(did)}/send")
+        return {"sent": True, "reply_all": reply_all, "attachments": len(atts)}
 
     async def tool_forward(self, message_id: str, to: list[str], comment: str = ""):
         await self.api.json(

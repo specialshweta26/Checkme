@@ -6,18 +6,17 @@ import logging
 from sqlalchemy import select
 
 from app.db import SessionLocal
-from app.inbox.service import refresh_mailboxes
+from app.inbox.service import classify_pending, refresh_mailboxes
 from app.models import Connector, User
 
 log = logging.getLogger(__name__)
-INTERVAL_SEC = 20
+INTERVAL_SEC = 8
+_classify_task: asyncio.Task | None = None
 
 
-async def sync_all_inboxes() -> int:
-    """Pull new mail for every connected Gmail/Outlook account. Does not need a browser session."""
-    arrived = 0
+async def _mail_user_ids() -> list:
     async with SessionLocal() as db:
-        user_ids = list(
+        return list(
             (
                 await db.execute(
                     select(Connector.user_id)
@@ -31,30 +30,50 @@ async def sync_all_inboxes() -> int:
             .scalars()
             .all()
         )
-    for user_id in user_ids:
+
+
+async def ingest_all_inboxes() -> int:
+    """Store new mail for every connected account. Does not need a browser session."""
+    arrived = 0
+    for user_id in await _mail_user_ids():
         try:
             async with SessionLocal() as db:
                 user = await db.get(User, user_id)
                 if user is None:
                     continue
                 arrived += await asyncio.wait_for(
-                    refresh_mailboxes(db, user, unread_only=True, classify=True),
-                    timeout=90,
+                    refresh_mailboxes(db, user, unread_only=False, classify=False),
+                    timeout=45,
                 )
         except Exception:  # noqa: BLE001
-            log.exception("inbox sync failed for user %s", user_id)
+            log.exception("inbox ingest failed for user %s", user_id)
     return arrived
 
 
+async def classify_all_inboxes() -> None:
+    for user_id in await _mail_user_ids():
+        try:
+            async with SessionLocal() as db:
+                user = await db.get(User, user_id)
+                if user is None:
+                    continue
+                await asyncio.wait_for(classify_pending(db, user), timeout=90)
+        except Exception:  # noqa: BLE001
+            log.exception("inbox classify failed for user %s", user_id)
+
+
 async def inbox_loop() -> None:
-    await asyncio.sleep(6)
+    global _classify_task
+    await asyncio.sleep(2)
     while True:
         try:
-            count = await sync_all_inboxes()
+            count = await ingest_all_inboxes()
             if count:
                 log.info("inbox worker stored %s new messages", count)
         except Exception:  # noqa: BLE001
             log.exception("inbox worker tick failed")
+        if _classify_task is None or _classify_task.done():
+            _classify_task = asyncio.create_task(classify_all_inboxes(), name="inbox-classify")
         await asyncio.sleep(INTERVAL_SEC)
 
 
