@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { deleteSession, inboxBadge, initials, listSessions, markInboxSeen, relativeTime, type ChatSessionRow, type InboxAlert, type Me } from "../lib";
+import { deleteSession, initials, listSessions, markInboxSeen, relativeTime, subscribeInbox, type ChatSessionRow, type InboxAlert, type Me } from "../lib";
 import { BrandMark } from "./BrandMark";
 
 type Nav = "chat" | "inbox" | "tasks" | "connectors";
@@ -140,10 +140,10 @@ export function AppShell({
 
   useEffect(() => {
     let on = true;
-    async function poll() {
+    const stop = subscribeInbox((next) => {
+      if (!on) return;
       const gen = seenGen.current;
-      const next = await inboxBadge();
-      if (!on || gen !== seenGen.current) return;
+      if (gen !== seenGen.current) return;
       if (next.count > last.current && last.current >= 0 && next.count > 0) {
         setToast(next.count === 1 ? "New email arrived" : `${next.count} new emails arrived`);
         window.setTimeout(() => {
@@ -154,12 +154,11 @@ export function AppShell({
       setBadge(next.count);
       setPending(next.pending);
       if (next.items.length || !alertsOpenRef.current) setAlerts(next.items);
-    }
-    poll();
-    const id = window.setInterval(poll, 8000);
+      window.dispatchEvent(new CustomEvent("inbox-live", { detail: next }));
+    });
     return () => {
       on = false;
-      window.clearInterval(id);
+      stop();
     };
   }, []);
 

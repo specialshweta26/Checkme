@@ -53,7 +53,61 @@ export type InboxBadge = {
   count: number;
   pending: number;
   items: InboxAlert[];
+  inbox?: any[];
+  connected?: boolean;
 };
+
+export type UploadedFile = {
+  key: string;
+  filename: string;
+  content_type?: string;
+  kind?: string;
+  size?: number;
+  download_url?: string;
+  preview_url?: string;
+  previewable?: boolean;
+  extracted_text?: string;
+};
+
+export async function uploadFiles(files: File[]): Promise<UploadedFile[]> {
+  if (!files.length) return [];
+  const body = new FormData();
+  for (const file of files) body.append("files", file);
+  const res = await fetch("/api/files/upload", { method: "POST", credentials: "include", body });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : "Upload failed");
+  return data.files || [];
+}
+
+export function subscribeInbox(onData: (data: InboxBadge) => void): () => void {
+  const es = new EventSource("/api/inbox/events");
+  let fallback: number | null = null;
+  const apply = (data: InboxBadge) => onData(data);
+  const handler = (ev: MessageEvent) => {
+    try {
+      apply(JSON.parse(ev.data));
+    } catch {
+      /* ignore malformed frames */
+    }
+  };
+  es.addEventListener("inbox", handler);
+  es.onmessage = handler;
+  es.onerror = () => {
+    if (fallback != null) return;
+    fallback = window.setInterval(() => {
+      inboxBadge().then(apply);
+    }, 3000);
+  };
+  es.onopen = () => {
+    if (fallback == null) return;
+    window.clearInterval(fallback);
+    fallback = null;
+  };
+  return () => {
+    es.close();
+    if (fallback != null) window.clearInterval(fallback);
+  };
+}
 
 function readBadge(data: Partial<InboxBadge> | null | undefined): InboxBadge {
   const count = Number(data?.count || 0);

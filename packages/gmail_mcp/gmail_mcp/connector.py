@@ -328,17 +328,38 @@ class GmailConnector(BaseConnector):
         msg.set_content(body)
         return msg
 
-    async def tool_create_draft(self, to: list[str], subject: str, body: str, cc: list[str] | None = None):
+    @staticmethod
+    def _attach_files(msg: EmailMessage, files: list[dict] | None) -> None:
+        for item in files or []:
+            data = item.get("data") or b""
+            if not data:
+                continue
+            filename = item.get("filename") or "file"
+            ctype = item.get("content_type") or "application/octet-stream"
+            maintype, _, subtype = ctype.partition("/")
+            msg.add_attachment(data, maintype=maintype or "application", subtype=subtype or "octet-stream", filename=filename)
+
+    async def tool_create_draft(self, to: list[str], subject: str, body: str, cc: list[str] | None = None, files: list | None = None):
         msg = self._compose(to, subject, body, cc)
+        self._attach_files(msg, files)
         data = await self.api.json("POST", f"{GMAIL}/drafts", json={"message": {"raw": self._raw(msg)}})
         return {"draft_id": data.get("id"), "message_id": data.get("message", {}).get("id")}
 
-    async def tool_send_message(self, to: list[str], subject: str, body: str, cc: list[str] | None = None, bcc: list[str] | None = None):
+    async def tool_send_message(
+        self,
+        to: list[str],
+        subject: str,
+        body: str,
+        cc: list[str] | None = None,
+        bcc: list[str] | None = None,
+        files: list | None = None,
+    ):
         msg = self._compose(to, subject, body, cc, bcc)
+        self._attach_files(msg, files)
         data = await self.api.json("POST", f"{GMAIL}/messages/send", json={"raw": self._raw(msg)})
         return {"sent": True, "message_id": data.get("id"), "thread_id": data.get("threadId")}
 
-    async def tool_reply(self, message_id: str, body: str, reply_all: bool = False):
+    async def tool_reply(self, message_id: str, body: str, reply_all: bool = False, files: list | None = None):
         params = {"format": "metadata", "metadataHeaders": _META_HEADERS}
         orig = await self.api.json("GET", f"{GMAIL}/messages/{message_id}", params=params)
         h = _headers(orig)
@@ -354,6 +375,7 @@ class GmailConnector(BaseConnector):
         mid = h.get("message-id", "")
         refs = (h.get("references", "") + " " + mid).strip()
         msg = self._compose(to, subject, body, cc, headers={"In-Reply-To": mid, "References": refs})
+        self._attach_files(msg, files)
         data = await self.api.json(
             "POST", f"{GMAIL}/messages/send", json={"raw": self._raw(msg), "threadId": orig.get("threadId")}
         )

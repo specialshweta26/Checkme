@@ -52,8 +52,40 @@ async def preview(user, conn, tool: str, args: dict) -> dict:
     return {k: args.get(k) for k in ("to", "subject", "body", "message_id", "query") if args.get(k)}
 
 
+def _load_mail_files(args: dict) -> dict:
+    keys = list(args.pop("attachment_keys", None) or args.pop("files", None) or [])
+    args.pop("files", None)
+    if not keys:
+        return args
+    from app.storage import get_bytes, guess_media_type
+
+    loaded = []
+    for raw in keys[:8]:
+        key = raw.get("key") if isinstance(raw, dict) else str(raw)
+        if not key:
+            continue
+        try:
+            data, stored = get_bytes(key)
+        except Exception:  # noqa: BLE001
+            continue
+        filename = raw.get("filename") if isinstance(raw, dict) else key.split("/")[-1]
+        ctype = (raw.get("content_type") if isinstance(raw, dict) else None) or stored
+        loaded.append(
+            {
+                "filename": filename or "file",
+                "content_type": guess_media_type(filename or "file", ctype),
+                "data": data,
+            }
+        )
+    if loaded:
+        args = {**args, "files": loaded}
+    return args
+
+
 async def invoke_named(db, user, conn, tool_name: str, args: dict, attachments: list) -> Any:
     runtime = RuntimeConnector(conn)
+    if tool_name in {"send_message", "reply", "forward", "create_draft"}:
+        args = _load_mail_files(args)
     if tool_name in STAFF_TOOLS:
         return await staff_dispatch(db, user, runtime, tool_name, args)
     if tool_name in {"create_event", "create_google_meet", "create_teams_meeting"}:

@@ -119,12 +119,13 @@ async def today_briefing(db, user, runtime) -> dict:
         ],
     }
     prompt = (
-        "You are the user's chief of staff. Write a tight daily briefing from this JSON. "
+        "You are the user's chief of staff and analyst. Write a detailed daily briefing from this JSON, not a short recap. "
         "Sections: What matters today; Calendar risk; People waiting on a reply (cite subject + message_id); "
-        "Open commitments; Admin/bills; Next 3 actions. Show every time in IST (Asia/Kolkata). Do not invent items.\n\n"
+        "Open commitments; Admin/bills; Insights and risks; Next actions with why they matter. "
+        "Show every time in IST (Asia/Kolkata). Do not invent items.\n\n"
         + clip(json.dumps(payload, default=str), 10000)
     )
-    text = await _llm(prompt, 700)
+    text = await _llm(prompt, 1400)
     return {"briefing": text, **payload}
 
 

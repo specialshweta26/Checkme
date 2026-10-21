@@ -14,6 +14,11 @@ def _obj(properties: dict, required: list[str] | None = None) -> dict:
 _STR = {"type": "string"}
 _IDS = {"type": "array", "items": {"type": "string"}}
 _EMAILS = {"type": "array", "items": {"type": "string"}, "description": "Email addresses"}
+_ATTACH_KEYS = {
+    "type": "array",
+    "items": {"type": "string"},
+    "description": "Storage keys of files the user uploaded in chat or inbox (from the attach control)",
+}
 _LIMIT = {"type": "integer", "minimum": 1, "maximum": 50, "default": 15}
 _ISO = {"type": "string", "description": "ISO 8601 datetime, e.g. 2026-10-19T09:00:00+05:30"}
 _FOLDER_CANON = {
@@ -125,16 +130,16 @@ MAIL_CALENDAR_TOOLS: list[ToolSpec] = [
     ),
     ToolSpec(
         "create_draft",
-        "Create a draft email (not sent).",
-        _obj({"to": _EMAILS, "cc": _EMAILS, "subject": _STR, "body": _STR}, ["to", "subject", "body"]),
+        "Create a draft email (not sent). Pass attachment_keys for files the user uploaded.",
+        _obj({"to": _EMAILS, "cc": _EMAILS, "subject": _STR, "body": _STR, "attachment_keys": _ATTACH_KEYS}, ["to", "subject", "body"]),
         group="messages.write",
         read_only=False,
         tags=("mail",),
     ),
     ToolSpec(
         "send_message",
-        "Send a new email. Requires user confirmation in the app.",
-        _obj({"to": _EMAILS, "cc": _EMAILS, "bcc": _EMAILS, "subject": _STR, "body": _STR}, ["to", "subject", "body"]),
+        "Send a new email. Requires user confirmation in the app. Pass attachment_keys for uploaded files.",
+        _obj({"to": _EMAILS, "cc": _EMAILS, "bcc": _EMAILS, "subject": _STR, "body": _STR, "attachment_keys": _ATTACH_KEYS}, ["to", "subject", "body"]),
         group="messages.write",
         read_only=False,
         destructive=True,
@@ -142,8 +147,8 @@ MAIL_CALENDAR_TOOLS: list[ToolSpec] = [
     ),
     ToolSpec(
         "reply",
-        "Reply to a message (optionally reply-all). Requires user confirmation in the app.",
-        _obj({"message_id": _STR, "body": _STR, "reply_all": {"type": "boolean", "default": False}}, ["message_id", "body"]),
+        "Reply to a message (optionally reply-all). Requires user confirmation in the app. Pass attachment_keys for uploaded files.",
+        _obj({"message_id": _STR, "body": _STR, "reply_all": {"type": "boolean", "default": False}, "attachment_keys": _ATTACH_KEYS}, ["message_id", "body"]),
         group="messages.write",
         read_only=False,
         destructive=True,
