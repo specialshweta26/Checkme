@@ -2,7 +2,7 @@
 
 End-to-end architecture of Checkme (Assistant Workspace): a signed-in PWA that acts as chief of staff over Gmail, Outlook, calendar, files, and user-added MCP servers.
 
-Related: [README](../README.md) · [LLD](LLD.md)
+Related: [README](../README.md) · [LLD](LLD.md) · [Diagrams](diagrams.md)
 
 ## 1. Purpose
 
@@ -107,6 +107,21 @@ flowchart TB
 
 ### 6.1 Sign-in and connector attach
 
+```mermaid
+sequenceDiagram
+  participant B as Browser
+  participant A as FastAPI
+  participant IdP as Google or Microsoft
+  B->>A: GET /api/auth/{provider}/login
+  A-->>B: 302 + PKCE state cookie
+  B->>IdP: authorize
+  IdP-->>B: callback?code
+  B->>A: GET /api/auth/{provider}/callback
+  A->>IdP: exchange code
+  A->>A: User, Account, builtin connector
+  A-->>B: session cookie, 302 /chat
+```
+
 1. User hits `/api/auth/{google|microsoft}/login`.
 2. API starts PKCE, stores state in an HttpOnly cookie, redirects to the IdP.
 3. Callback exchanges the code, upserts `users` + `accounts`, encrypts the refresh token, issues a session JWT cookie.
@@ -116,6 +131,16 @@ flowchart TB
 One **User** can have two **Accounts** (Google + Microsoft). Each account owns one builtin **Connector**.
 
 ### 6.2 Chat (deep agent)
+
+```mermaid
+flowchart LR
+  Q[Query] --> L[list_connectors]
+  L --> S[search_tools]
+  S --> G[get_tool_schema]
+  G --> C[call_tool]
+  C --> T[get_thread if mail]
+  T --> A[answer + See full email]
+```
 
 Chat always runs `run_deep_agent`. The model does not receive hundreds of MCP tools. It only has a harness:
 
@@ -178,6 +203,14 @@ Both call `open_full_thread`: resolve conversation id, page all messages, `full=
 ## 7. Deployment
 
 ### Local (`local` branch)
+
+```mermaid
+flowchart LR
+  Web["web :3000"] --> API["api :8001"]
+  API --> PG[(postgres)]
+  API --> Redis[(redis)]
+  API --> MinIO[(MinIO)]
+```
 
 Docker Compose: Next (3000), API (8001→8000), Postgres+pgvector, Redis, MinIO. Optional Letta profile. API `--reload` mounts `apps/api/app`.
 

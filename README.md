@@ -6,6 +6,7 @@ Design docs:
 
 - [High-level design (HLD)](docs/HLD.md) — system context, components, end-to-end flows
 - [Low-level design (LLD)](docs/LLD.md) — modules, APIs, data model, sequences
+- [Architecture diagrams](docs/diagrams.md) — Mermaid context, containers, sequences, ERD
 
 ## What you can do
 
