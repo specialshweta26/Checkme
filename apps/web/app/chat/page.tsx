@@ -280,7 +280,7 @@ function sourceLabel(meta?: any): string | null {
 function formatPreview(preview: any): string {
   if (!preview) return "No preview.";
   if (typeof preview === "string") return preview;
-  const order = ["to", "recipient", "subject", "when", "schedule", "body", "preview", "text"];
+  const order = ["folder", "count", "to", "recipient", "subject", "when", "schedule", "body", "preview", "text", "sample"];
   const lines = order
     .filter((k) => preview[k] != null && preview[k] !== "")
     .map((k) => {

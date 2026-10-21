@@ -28,6 +28,12 @@ type InboxMail = {
 
 const TONES = ["Professional", "Concise", "Friendly", "Warmer"] as const;
 
+const BATCH = [
+  { id: "empty_spam", label: "Empty spam" },
+  { id: "empty_drafts", label: "Clear drafts" },
+  { id: "empty_trash", label: "Empty trash" },
+] as const;
+
 export default function InboxPage() {
   const [me, setMe] = useState<Me | null>(null);
   const [items, setItems] = useState<InboxMail[]>([]);
@@ -39,6 +45,7 @@ export default function InboxPage() {
   const [openRephrase, setOpenRephrase] = useState("");
   const [instruction, setInstruction] = useState("");
   const [focusId, setFocusId] = useState("");
+  const [confirm, setConfirm] = useState<{ action: string; title: string; count: number; sample: string; itemIds: string[] } | null>(null);
 
   useEffect(() => {
     getMe().then((u) => {
@@ -51,30 +58,35 @@ export default function InboxPage() {
     setFocusId(new URLSearchParams(window.location.search).get("mail") || "");
   }, []);
 
-  async function refresh() {
-    const res = await fetch("/api/inbox", { credentials: "include" });
-    if (res.status === 401) {
-      window.location.replace("/");
-      return;
-    }
-    if (!res.ok) {
-      const text = await res.text();
-      setError(text || "Could not load inbox");
+  async function refresh(opts: { live?: boolean; quiet?: boolean } = {}) {
+    try {
+      const res = await fetch(`/api/inbox${opts.live ? "?live=1" : ""}`, { credentials: "include" });
+      if (res.status === 401) {
+        window.location.replace("/");
+        return;
+      }
+      if (!res.ok) {
+        const text = await res.text();
+        if (!opts.quiet) setError(text || "Could not load inbox");
+        setLoading(false);
+        return;
+      }
+      const data = await res.json();
+      setItems(data.items || []);
+      setConnected(data.connected !== false);
+      setError("");
       setLoading(false);
-      return;
+      window.dispatchEvent(new Event("inbox-seen"));
+    } catch {
+      if (!opts.quiet) setError("Could not load inbox");
+      setLoading(false);
     }
-    const data = await res.json();
-    setItems(data.items || []);
-    setConnected(data.connected !== false);
-    setError("");
-    setLoading(false);
-    window.dispatchEvent(new Event("inbox-seen"));
   }
 
   useEffect(() => {
     if (!me) return;
-    refresh();
-    const id = window.setInterval(refresh, 12000);
+    refresh({ live: true });
+    const id = window.setInterval(() => refresh({ quiet: true }), 12000);
     return () => window.clearInterval(id);
   }, [me]);
 
@@ -135,6 +147,70 @@ export default function InboxPage() {
     setOpenRephrase("");
   }
 
+  function sampleText(sample: unknown): string {
+    if (!Array.isArray(sample) || sample.length === 0) return "";
+    return sample
+      .map((row) => {
+        if (!row || typeof row !== "object") return String(row);
+        const item = row as { subject?: string; from?: string };
+        return [item.subject || "(no subject)", item.from].filter(Boolean).join(" — ");
+      })
+      .join("\n");
+  }
+
+  async function askBatch(action: string, title: string, itemIds: string[] = []) {
+    setBusy(action);
+    setError("");
+    try {
+      const res = await fetch("/api/inbox/batch", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, confirm: false, item_ids: itemIds }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setError(typeof data.detail === "string" ? data.detail : "That batch action failed");
+        setBusy("");
+        return;
+      }
+      const count = Number(data.count || 0);
+      if (!count) {
+        setError("Nothing to clear.");
+        setBusy("");
+        return;
+      }
+      setConfirm({ action, title, count, sample: sampleText(data.sample), itemIds });
+    } catch (err: any) {
+      setError(err.message || "That batch action failed");
+    }
+    setBusy("");
+  }
+
+  async function runBatch() {
+    if (!confirm) return;
+    setBusy(confirm.action);
+    try {
+      const res = await fetch("/api/inbox/batch", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: confirm.action, confirm: true, item_ids: confirm.itemIds }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setError(typeof data.detail === "string" ? data.detail : "That batch action failed");
+        setBusy("");
+        return;
+      }
+      setConfirm(null);
+      await refresh({ live: true });
+    } catch (err: any) {
+      setError(err.message || "That batch action failed");
+    }
+    setBusy("");
+  }
+
   async function saveDraft(id: string, draft: string) {
     update(id, { draft });
     await fetch(`/api/inbox/${id}`, {
@@ -155,7 +231,7 @@ export default function InboxPage() {
             <h1>Inbox</h1>
             <p className="muted">Triage arriving mail, review the thread, and send a drafted reply.</p>
           </div>
-          <button className="btn secondary" type="button" onClick={() => { setLoading(true); refresh(); }} disabled={loading}>
+          <button className="btn secondary" type="button" onClick={() => { setLoading(true); refresh({ live: true }); }} disabled={loading || Boolean(busy)}>
             Refresh
           </button>
         </div>
@@ -168,6 +244,49 @@ export default function InboxPage() {
             </button>
           ))}
         </div>
+
+        {connected ? (
+          <div className="inbox-batch">
+            {BATCH.map((row) => (
+              <button key={row.id} className="chip" type="button" disabled={Boolean(busy)} onClick={() => askBatch(row.id, row.label)}>
+                {row.label}
+              </button>
+            ))}
+            {items.some((m) => m.classification === "discard") ? (
+              <button className="chip" type="button" disabled={Boolean(busy)} onClick={() => askBatch("clear_discard", "Clear discard cards")}>
+                Clear discard cards
+              </button>
+            ) : null}
+            {visible.length > 1 ? (
+              <button
+                className="chip"
+                type="button"
+                disabled={Boolean(busy)}
+                onClick={() => askBatch("delete_items", "Delete messages in this view", visible.map((m) => m.id))}
+              >
+                Delete all in view
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+
+        {confirm ? (
+          <div className="inbox-confirm">
+            <strong>{confirm.title}</strong>
+            <p className="muted">
+              {confirm.count} item{confirm.count === 1 ? "" : "s"} will be removed. This cannot be undone from the app.
+            </p>
+            {confirm.sample ? <pre className="approval-preview">{confirm.sample}</pre> : null}
+            <div className="inbox-actions">
+              <button className="send-btn" type="button" disabled={Boolean(busy)} onClick={runBatch}>
+                Confirm
+              </button>
+              <button className="btn secondary" type="button" disabled={Boolean(busy)} onClick={() => setConfirm(null)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        ) : null}
 
         {error ? <p className="err">{error}</p> : null}
 

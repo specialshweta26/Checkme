@@ -24,7 +24,7 @@ async def get_file(t: str = Query(..., min_length=8), render: bool = False):
     content_type = guess_media_type(filename, data.get("content_type") or stored_type)
     if render and content_type == "application/pdf":
         try:
-            png = render_pdf_preview(body)
+            png = render_pdf_preview(body, max_pages=12)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(422, "Could not render this PDF") from exc
         return Response(

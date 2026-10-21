@@ -370,6 +370,9 @@ async def search_user_tools(ctx: RunContext, query: str, connector_slug: str | N
     if any(k in q for k in ("open", "attach", "pdf", "summarize")):
         for c in mail_conns:
             wanted.update((c.slug, n) for n in ("get_message", "list_attachments", "summarize_attachments"))
+    if any(k in q for k in ("spam", "junk", "trash", "drafts", "drafted", "delete all", "empty", "clear all", "bulk")):
+        for c in mail_conns:
+            wanted.update((c.slug, n) for n in ("empty_folder", "bulk_delete", "list_drafts", "delete_draft"))
     if wanted:
         extra = await load_named(ctx.db, mail_conns, wanted)
         seen = {(h.slug, h.tool_name) for h in hits}
@@ -721,7 +724,8 @@ def system_prompt(user, connectors: list, memory: str) -> str:
         "Send mail with send_message. Create a calendar invite with create_event (attendees, start in IST). "
         "Google Meet: create_google_meet on gmail. Teams: create_teams_meeting on outlook. "
         "After search_messages, if the user asked to open or summarize, call get_message then summarize_attachments. "
-        "Never say a mail connector cannot compose, send, invite, or attach.\n"
+        "Never say a mail connector cannot compose, send, invite, attach, or batch-delete. "
+        "Empty spam, junk, trash, or drafts with empty_folder (folder=spam|trash|drafts) in one call_tool — do not loop delete_draft.\n"
         "Answer every part of the ask. If a result is too large, inspect_result the stored result_id using a path or search from the user's words, and keep paging until the requested slice is complete. Or call_tool again with narrower schema arguments. Never say data was truncated and stop.\n"
         "Cite source_tool (connector slug and tool name, plus the downstream name if a gateway executed one).\n"
         "If asked how a number was produced, cite tool evidence from this thread or fetch again. Do not invent figures.\n"

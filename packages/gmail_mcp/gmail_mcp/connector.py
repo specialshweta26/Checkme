@@ -11,6 +11,7 @@ from typing import Any
 import httpx
 
 from connector_core import MAIL_CALENDAR_TOOLS, BaseConnector, BinaryResult, ToolError, TokenProvider
+from connector_core.mail_tools import canonical_mail_folder, folder_from_query
 from connector_core.calendar import DEFAULT_TZ, as_local, format_local, free_slots, iana_tz, local_wall, now_local, parse_iso, tz_label
 from connector_core.http import ApiClient, gather_limited
 from connector_core.text import clean_body, clip
@@ -133,17 +134,34 @@ class GmailConnector(BaseConnector):
         if page_token:
             params["pageToken"] = page_token
         data = await self.api.json("GET", f"{GMAIL}/messages", params=params)
-        return [m["id"] for m in data.get("messages", [])], data.get("nextPageToken")
+        return [m["id"] for m in data.get("messages") or []], data.get("nextPageToken")
 
-    async def _collect_ids(self, q: str | None, limit: int) -> list[str]:
+    async def _collect_ids(self, q: str | None, limit: int, label_ids: list[str] | None = None) -> list[str]:
         ids: list[str] = []
         token = None
         while len(ids) < limit:
-            batch, token = await self._list_ids(q, None, limit - len(ids), token)
+            batch, token = await self._list_ids(q, label_ids, limit - len(ids), token)
             ids.extend(batch)
             if not token or not batch:
                 break
         return ids[:limit]
+
+    async def _collect_draft_ids(self, limit: int) -> list[tuple[str, str | None]]:
+        rows: list[tuple[str, str | None]] = []
+        token = None
+        while len(rows) < limit:
+            params: dict[str, Any] = {"maxResults": min(100, limit - len(rows))}
+            if token:
+                params["pageToken"] = token
+            data = await self.api.json("GET", f"{GMAIL}/drafts", params=params)
+            for row in data.get("drafts") or []:
+                draft_id = row.get("id")
+                if draft_id:
+                    rows.append((draft_id, (row.get("message") or {}).get("id")))
+            token = data.get("nextPageToken")
+            if not token or not data.get("drafts"):
+                break
+        return rows[:limit]
 
     async def _meta(self, ids: list[str]) -> list[dict]:
         params = {"format": "metadata", "metadataHeaders": _META_HEADERS}
@@ -236,7 +254,15 @@ class GmailConnector(BaseConnector):
         if message_ids:
             ids = list(dict.fromkeys(message_ids))[:limit]
         elif query:
-            ids = await self._collect_ids(to_gmail_query(query), limit)
+            folder = folder_from_query(query)
+            if folder == "drafts":
+                ids = [mid or did for did, mid in await self._collect_draft_ids(limit) if (mid or did)]
+            elif folder == "spam":
+                ids = await self._collect_ids(None, limit, ["SPAM"])
+            elif folder == "trash":
+                ids = await self._collect_ids(None, limit, ["TRASH"])
+            else:
+                ids = await self._collect_ids(to_gmail_query(query), limit)
         else:
             raise ToolError("Provide message_ids or query")
         if dry_run:
@@ -247,7 +273,40 @@ class GmailConnector(BaseConnector):
                 await self.api.json("POST", f"{GMAIL}/messages/batchDelete", json={"ids": ids[i : i + 1000]})
         else:
             await self._batch_modify(ids, add=["TRASH"], remove=["INBOX"])
-        return {"deleted": len(ids), "permanent": permanent}
+        return {"deleted": len(ids), "permanent": permanent, "message_ids": ids}
+
+    async def tool_empty_folder(self, folder: str, dry_run: bool = True, limit: int = 1000):
+        key = canonical_mail_folder(folder)
+        limit = max(1, min(limit, 1000))
+        if key == "drafts":
+            drafts = await self._collect_draft_ids(limit)
+            ids = [did for did, _ in drafts]
+            if dry_run:
+                sample = []
+                for draft_id in ids[:5]:
+                    try:
+                        sample.append(await self.tool_get_draft(draft_id))
+                    except Exception:  # noqa: BLE001
+                        sample.append({"draft_id": draft_id})
+                return {"folder": key, "count": len(ids), "sample": sample, "draft_ids": ids}
+            deleted = 0
+            for draft_id in ids:
+                try:
+                    await self.api.json("DELETE", f"{GMAIL}/drafts/{draft_id}")
+                    deleted += 1
+                except Exception:  # noqa: BLE001
+                    continue
+            return {"folder": key, "deleted": deleted, "permanent": True}
+        label = "SPAM" if key == "spam" else "TRASH"
+        ids = await self._collect_ids(None, limit, [label])
+        if dry_run:
+            sample = await self._meta(ids[:5]) if ids else []
+            return {"folder": key, "count": len(ids), "sample": sample, "message_ids": ids}
+        for i in range(0, len(ids), 1000):
+            chunk = ids[i : i + 1000]
+            if chunk:
+                await self.api.json("POST", f"{GMAIL}/messages/batchDelete", json={"ids": chunk})
+        return {"folder": key, "deleted": len(ids), "permanent": True, "message_ids": ids}
 
     # ---- mail write ------------------------------------------------------
 

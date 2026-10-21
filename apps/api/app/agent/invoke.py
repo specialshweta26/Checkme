@@ -23,12 +23,13 @@ def confirmed(confirmations: list[dict], slug: str, tool: str) -> bool:
 
 
 async def preview(user, conn, tool: str, args: dict) -> dict:
-    if tool == "bulk_delete":
-        preview_result = await RuntimeConnector(conn).call("bulk_delete", {**args, "dry_run": True})
+    if tool in {"bulk_delete", "empty_folder"}:
+        preview_result = await RuntimeConnector(conn).call(tool, {**args, "dry_run": True})
         return {
+            "folder": preview_result.get("folder") or args.get("folder"),
             "count": preview_result.get("count"),
             "sample": preview_result.get("sample"),
-            "permanent": args.get("permanent", False),
+            "permanent": args.get("permanent", tool == "empty_folder"),
         }
     if tool in {"create_event", "create_google_meet", "create_teams_meeting"}:
         tz = args.get("timezone") or getattr(user, "timezone", None) or DEFAULT_TZ
@@ -91,7 +92,7 @@ async def invoke_named(db, user, conn, tool_name: str, args: dict, attachments: 
         card = await store_blob(user.id, blob)
         attachments.append(card)
         return {k: card[k] for k in ("filename", "download_url", "preview_url", "size", "kind") if k in card}
-    if tool_name == "bulk_delete":
+    if tool_name in {"bulk_delete", "empty_folder"}:
         args = {**args, "dry_run": False}
     result = await runtime.call(tool_name, args)
     if tool_name in {"get_message", "list_attachments"}:
