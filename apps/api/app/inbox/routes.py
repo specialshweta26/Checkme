@@ -23,6 +23,9 @@ router = APIRouter(prefix="/inbox", tags=["inbox"])
 class DraftIn(BaseModel):
     draft: str = ""
     attachment_keys: list[str] = []
+    cc: list[str] | str = ""
+    bcc: list[str] | str = ""
+    reply_all: bool = False
 
 
 class RephraseIn(BaseModel):
@@ -183,7 +186,16 @@ async def send_draft(
     db: AsyncSession = Depends(get_db),
 ):
     try:
-        return await service.send_reply(db, user, item_id, body.draft or None, body.attachment_keys)
+        return await service.send_reply(
+            db,
+            user,
+            item_id,
+            body.draft or None,
+            body.attachment_keys,
+            cc=body.cc,
+            bcc=body.bcc,
+            reply_all=body.reply_all,
+        )
     except LookupError as exc:
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:

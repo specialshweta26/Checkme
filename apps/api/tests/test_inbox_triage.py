@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
-from app.inbox.service import KEEP_PENDING, _badge_payload, apply_triage, newest_first, normalize_class, parse_json_object, received_sort_key, serialize, split_kept
+from app.inbox.service import KEEP_PENDING, _address_list, _badge_payload, apply_triage, newest_first, normalize_class, parse_json_object, received_sort_key, serialize, split_kept
+from connector_core.mail_tools import merge_message_lists, recipient_role
 
 
 def test_normalize_class_aliases():
@@ -55,6 +56,9 @@ def test_serialize_shape():
     assert out["classification"] == "reply"
     assert out["connector"] == "Gmail"
     assert out["connector_slug"] == "gmail"
+    assert out["recipient_role"] == "to"
+    assert out["to"] == ""
+    assert out["cc"] == ""
 
 
 def test_received_sort_key_newest_first():
@@ -102,3 +106,30 @@ def test_badge_counts_only_unseen():
     assert marked["count"] == 0
     assert marked["pending"] == 2
     assert [row["subject"] for row in marked["items"]] == ["New"]
+    assert out["items"][0]["recipient_role"] == "to"
+
+
+def test_recipient_role_to_cc_bcc():
+    me = "shweta@agilitas.com"
+    assert recipient_role(me, "Shweta <shweta@agilitas.com>", "Ada <ada@example.com>") == "to"
+    assert recipient_role(me, "Ada <ada@example.com>", "Shweta <shweta@agilitas.com>") == "cc"
+    assert recipient_role(me, "Ada <ada@example.com>", "Pat <pat@example.com>") == "bcc"
+    assert recipient_role("", "Ada <ada@example.com>", "Pat <pat@example.com>") == "to"
+
+
+def test_merge_message_lists_keeps_cc_hits():
+    inbox = [{"message_id": f"to-{i}", "subject": f"to {i}"} for i in range(3)]
+    copied = [{"message_id": "cc-1", "subject": "cc me", "recipient_role": "cc"}]
+    merged = merge_message_lists(inbox, copied)
+    assert [row["message_id"] for row in merged] == ["to-0", "to-1", "to-2", "cc-1"]
+    again = merge_message_lists(inbox + copied, copied)
+    assert [row["message_id"] for row in again] == ["to-0", "to-1", "to-2", "cc-1"]
+
+
+def test_address_list_parses_cc_bcc():
+    assert _address_list("ada@example.com, pat@example.com;  Sam <sam@example.com>") == [
+        "ada@example.com",
+        "pat@example.com",
+        "sam@example.com",
+    ]
+    assert _address_list(["ada@example.com", "ada@example.com", ""]) == ["ada@example.com"]

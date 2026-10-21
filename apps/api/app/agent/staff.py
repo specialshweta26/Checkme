@@ -77,7 +77,7 @@ async def today_briefing(db, user, runtime) -> dict:
     except Exception as exc:  # noqa: BLE001
         log.warning("briefing events failed: %s", exc)
     try:
-        unread = (await runtime.call("list_messages", {"unread_only": True, "limit": 12})).get("messages") or []
+        unread = (await runtime.call("list_messages", {"unread_only": True, "limit": 20})).get("messages") or []
     except Exception as exc:  # noqa: BLE001
         log.warning("briefing unread failed: %s", exc)
     commits = (
@@ -102,7 +102,15 @@ async def today_briefing(db, user, runtime) -> dict:
         "now": now.isoformat(),
         "calendar": events,
         "needs_response": [
-            {"message_id": m.get("message_id"), "subject": m.get("subject"), "from": m.get("from"), "date": m.get("date")}
+            {
+                "message_id": m.get("message_id"),
+                "subject": m.get("subject"),
+                "from": m.get("from"),
+                "to": m.get("to"),
+                "cc": m.get("cc"),
+                "recipient_role": m.get("recipient_role") or "to",
+                "date": m.get("date"),
+            }
             for m in unread
         ],
         "commitments": [_commit(c) for c in commits],
@@ -121,7 +129,9 @@ async def today_briefing(db, user, runtime) -> dict:
     prompt = (
         "You are the user's chief of staff and analyst. Write a detailed daily briefing from this JSON, not a short recap. "
         "Sections: What matters today; Calendar risk; People waiting on a reply (cite subject + message_id); "
+        "CC'd to you (recipient_role is cc or bcc — still include these, do not skip them); "
         "Open commitments; Admin/bills; Insights and risks; Next actions with why they matter. "
+        "Mail where the user is on Cc or Bcc is part of their inbox. Cover it. "
         "Show every time in IST (Asia/Kolkata). Do not invent items.\n\n"
         + clip(json.dumps(payload, default=str), 10000)
     )
@@ -148,13 +158,17 @@ async def ask_inbox(runtime, question: str) -> dict:
                 "thread_id": full.get("thread_id") or m.get("thread_id"),
                 "subject": full.get("subject") or m.get("subject"),
                 "from": full.get("from") or m.get("from"),
+                "to": full.get("to") or m.get("to"),
+                "cc": full.get("cc") or m.get("cc"),
+                "recipient_role": full.get("recipient_role") or m.get("recipient_role") or "to",
                 "date": full.get("date") or m.get("date"),
                 "body": clip(full.get("body") or m.get("snippet") or "", 1200),
             }
         )
     prompt = (
-        f"Answer this question from the user's email. Cite message_id and subject for every claim. "
-        f"If unknown, say so.\nQuestion: {question}\n\nEmails:\n{clip(json.dumps(bodies, default=str), 9000)}"
+        f"Answer this question from the user's email, including messages they were CC'd or BCC'd on. "
+        f"Cite message_id, subject, and recipient_role for every claim. If unknown, say so.\n"
+        f"Question: {question}\n\nEmails:\n{clip(json.dumps(bodies, default=str), 9000)}"
     )
     return {"answer": await _llm(prompt, 600), "sources": bodies}
 

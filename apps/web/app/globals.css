@@ -1000,6 +1000,41 @@ textarea.field { min-height: 110px; resize: vertical; }
   gap: 12px;
   margin-bottom: 10px;
 }
+.inbox-card-flags { display: inline-flex; align-items: center; gap: 8px; }
+.role-tag {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.inbox-copy {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 10px;
+  align-items: end;
+  margin: 0 0 14px;
+}
+.inbox-copy label { display: grid; gap: 4px; font-size: 12px; color: var(--faint); min-width: 0; }
+.inbox-copy input {
+  min-width: 0;
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: #fff;
+}
+.inbox-reply-all {
+  display: inline-flex !important;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  padding-bottom: 8px;
+  color: var(--text);
+  font-weight: 600;
+}
+.inbox-reply-all input { width: auto; }
 .inbox-card h2 {
   margin: 0 0 6px;
   font-family: var(--font-ui);
@@ -1216,6 +1251,8 @@ textarea.field { min-height: 110px; resize: vertical; }
   }
   .inbox-card h2 { font-size: 17px; }
   .inbox-card-top { flex-wrap: wrap; gap: 8px; }
+  .inbox-copy { grid-template-columns: 1fr; }
+  .inbox-reply-all { padding-bottom: 0; }
   .inbox-toolbar {
     flex-wrap: wrap;
   }

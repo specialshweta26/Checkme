@@ -45,6 +45,35 @@ def canonical_mail_folder(name: str) -> str:
     return key
 
 
+def recipient_role(my_email: str, to: str = "", cc: str = "") -> str:
+    """Where this mailbox sits on the message: to, cc, or bcc (inbox but not listed)."""
+    me = (my_email or "").strip().lower()
+    if not me:
+        return "to"
+    if me in (to or "").lower():
+        return "to"
+    if me in (cc or "").lower():
+        return "cc"
+    return "bcc"
+
+
+def merge_message_lists(*groups: list, limit: int | None = None) -> list[dict]:
+    out: dict[str, dict] = {}
+    order: list[str] = []
+    for group in groups:
+        for row in group or []:
+            if not isinstance(row, dict):
+                continue
+            mid = str(row.get("message_id") or row.get("id") or "")
+            if not mid:
+                continue
+            if mid not in out:
+                order.append(mid)
+            out[mid] = {**out.get(mid, {}), **row}
+    rows = [out[key] for key in order]
+    return rows[:limit] if limit else rows
+
+
 def folder_from_query(query: str) -> str | None:
     text = (query or "").strip()
     if not text:
@@ -64,7 +93,8 @@ def folder_from_query(query: str) -> str | None:
 MAIL_CALENDAR_TOOLS: list[ToolSpec] = [
     ToolSpec(
         "list_messages",
-        "List recent messages in a folder/label (default inbox), newest first. Returns ids, subject, sender, date, snippet.",
+        "List recent messages in a folder/label (default inbox), newest first, including mail where the user is on To or Cc. "
+        "Each row has to, cc, and recipient_role (to|cc|bcc).",
         _obj(
             {
                 "folder": {**_STR, "description": "Folder or label id; default inbox"},
@@ -155,8 +185,19 @@ MAIL_CALENDAR_TOOLS: list[ToolSpec] = [
     ),
     ToolSpec(
         "reply",
-        "Reply to a message (optionally reply-all). Requires user confirmation in the app. Pass attachment_keys for uploaded files.",
-        _obj({"message_id": _STR, "body": _STR, "reply_all": {"type": "boolean", "default": False}, "attachment_keys": _ATTACH_KEYS}, ["message_id", "body"]),
+        "Reply to a message (optionally reply-all). Extra people can be added with cc and bcc. "
+        "Requires user confirmation in the app. Pass attachment_keys for uploaded files.",
+        _obj(
+            {
+                "message_id": _STR,
+                "body": _STR,
+                "reply_all": {"type": "boolean", "default": False},
+                "cc": _EMAILS,
+                "bcc": _EMAILS,
+                "attachment_keys": _ATTACH_KEYS,
+            },
+            ["message_id", "body"],
+        ),
         group="messages.write",
         read_only=False,
         destructive=True,

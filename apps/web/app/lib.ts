@@ -47,6 +47,7 @@ export type InboxAlert = {
   classification: string;
   unread?: boolean;
   seen?: boolean;
+  recipient_role?: string;
 };
 
 export type InboxBadge = {

@@ -113,6 +113,9 @@ def serialize(item: InboxItem, connector_name: str = "", connector_slug: str = "
         "thread_id": item.thread_id,
         "subject": item.subject,
         "from": item.sender,
+        "to": getattr(item, "to_header", "") or "",
+        "cc": getattr(item, "cc_header", "") or "",
+        "recipient_role": getattr(item, "recipient_role", "") or "to",
         "date": item.received_at,
         "snippet": item.snippet,
         "classification": item.classification or "",
@@ -157,6 +160,7 @@ def _alert(item: InboxItem) -> dict[str, Any]:
         "from": item.sender,
         "date": item.received_at,
         "classification": item.classification or "",
+        "recipient_role": getattr(item, "recipient_role", "") or "to",
         "unread": item.unread,
         "seen": item.seen,
     }
@@ -318,12 +322,28 @@ async def classify_pending(db: AsyncSession, user: User) -> int:
     return len(items)
 
 
+def _address_list(values: list[str] | str | None) -> list[str]:
+    if isinstance(values, str):
+        parts = re.split(r"[\s,;]+", values)
+    else:
+        parts = list(values or [])
+    out: list[str] = []
+    for raw in parts:
+        addr = (raw or "").strip().strip("<>")
+        if "@" in addr and addr not in out:
+            out.append(addr)
+    return out
+
+
 async def send_reply(
     db: AsyncSession,
     user: User,
     item_id,
     draft: str | None = None,
     attachment_keys: list[str] | None = None,
+    cc: list[str] | str | None = None,
+    bcc: list[str] | str | None = None,
+    reply_all: bool = False,
 ) -> dict[str, Any]:
     item = await get_item(db, user, item_id)
     body = clip((draft if draft is not None else item.draft) or "", 4000).strip()
@@ -335,7 +355,16 @@ async def send_reply(
     item.draft = body
     from app.agent.invoke import _load_mail_files
 
-    args = _load_mail_files({"message_id": item.message_id, "body": body, "attachment_keys": attachment_keys or []})
+    args = _load_mail_files(
+        {
+            "message_id": item.message_id,
+            "body": body,
+            "attachment_keys": attachment_keys or [],
+            "reply_all": bool(reply_all),
+            "cc": _address_list(cc),
+            "bcc": _address_list(bcc),
+        }
+    )
     result = await runtime.call("reply", args)
     if isinstance(result, dict) and result.get("error"):
         raise RuntimeError(str(result.get("error")))
@@ -501,7 +530,7 @@ async def _ingest_locked(
     pending: list[InboxItem] = []
     for runtime in runtimes:
         try:
-            listed = (await runtime.call("list_messages", {"unread_only": unread_only, "limit": 30})).get("messages") or []
+            listed = (await runtime.call("list_messages", {"unread_only": unread_only, "limit": 40})).get("messages") or []
         except Exception as exc:  # noqa: BLE001
             log.warning("inbox list failed for %s: %s", runtime.slug, exc)
             continue
@@ -522,6 +551,9 @@ async def _ingest_locked(
                     thread_id=msg.get("thread_id") or "",
                     subject=(msg.get("subject") or "")[:500],
                     sender=(msg.get("from") or "")[:400],
+                    to_header=(msg.get("to") or "")[:1000],
+                    cc_header=(msg.get("cc") or "")[:1000],
+                    recipient_role=(msg.get("recipient_role") or "to")[:12],
                     received_at=(msg.get("date") or "")[:80],
                     snippet=clip(msg.get("snippet") or "", 400),
                     unread=bool(msg.get("unread", True)),
@@ -534,6 +566,12 @@ async def _ingest_locked(
                 row.unread = bool(msg.get("unread", row.unread))
                 row.subject = (msg.get("subject") or row.subject)[:500]
                 row.sender = (msg.get("from") or row.sender)[:400]
+                if msg.get("to"):
+                    row.to_header = str(msg.get("to") or "")[:1000]
+                if msg.get("cc"):
+                    row.cc_header = str(msg.get("cc") or "")[:1000]
+                if msg.get("recipient_role"):
+                    row.recipient_role = str(msg.get("recipient_role") or "to")[:12]
                 row.received_at = (msg.get("date") or row.received_at)[:80]
                 row.snippet = clip(msg.get("snippet") or row.snippet, 400)
                 if not row.thread_id:
@@ -598,9 +636,22 @@ async def _classify_one(item: InboxItem, runtime: RuntimeConnector, voice: str) 
         item.subject = (thread.get("subject") or item.subject)[:500]
     if not item.thread_id:
         item.thread_id = thread.get("thread_id") or ""
+    if thread.get("to") and not getattr(item, "to_header", ""):
+        item.to_header = str(thread.get("to") or "")[:1000]
+    if thread.get("cc") and not getattr(item, "cc_header", ""):
+        item.cc_header = str(thread.get("cc") or "")[:1000]
+    latest_msg = (thread.get("messages") or [None])[-1] if isinstance(thread.get("messages"), list) else None
+    if isinstance(latest_msg, dict):
+        if latest_msg.get("to"):
+            item.to_header = str(latest_msg.get("to") or item.to_header)[:1000]
+        if latest_msg.get("cc"):
+            item.cc_header = str(latest_msg.get("cc") or item.cc_header)[:1000]
     payload = {
         "subject": item.subject or thread.get("subject"),
         "from": item.sender,
+        "to": getattr(item, "to_header", "") or thread.get("to") or "",
+        "cc": getattr(item, "cc_header", "") or thread.get("cc") or "",
+        "recipient_role": getattr(item, "recipient_role", "") or "to",
         "date": item.received_at,
         "latest": clip(thread.get("body") or item.snippet, 2500),
         "thread": [
@@ -619,6 +670,9 @@ async def _classify_one(item: InboxItem, runtime: RuntimeConnector, voice: str) 
         "- reply: a person asked a question or expects a written answer.\n"
         "- respond: needs confirmation, a decision, a booking, or a short acknowledgement.\n"
         "- discard: automated, marketing, quarantine, newsletter, no-reply, or no action needed.\n"
+        "recipient_role is to, cc, or bcc. Mail CC'd or BCC'd to the user still belongs in their inbox. "
+        "Do not discard it only because they are not the primary To recipient. "
+        "If they were asked to act or stay informed, classify reply or respond and say they were CC'd.\n"
         "summary: 2-4 sentences covering the latest message and prior thread context.\n"
         "key_points: 2-5 short bullets the user should see.\n"
         "draft: a ready-to-send reply in the user's voice that answers open questions from the whole thread. "
