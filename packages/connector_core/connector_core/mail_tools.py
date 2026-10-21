@@ -96,11 +96,19 @@ MAIL_CALENDAR_TOOLS: list[ToolSpec] = [
     ),
     ToolSpec(
         "get_thread",
-        "Read a whole conversation oldest-first with quoted replies and signatures removed.",
-        _obj({"thread_id": _STR, "max_messages": {"type": "integer", "default": 50, "maximum": 200}}, ["thread_id"]),
+        "Read every message in a conversation oldest-first. Pass Gmail threadId or Outlook conversationId as thread_id. "
+        "If thread_id is unknown or empty, pass message_id (any message in the thread) and the connector resolves it. "
+        "Never call this with both fields empty.",
+        _obj(
+            {
+                "thread_id": {**_STR, "description": "Gmail threadId or Outlook conversationId. Do not leave empty when known."},
+                "message_id": {**_STR, "description": "Any message in the thread; required when thread_id is missing."},
+                "max_messages": {"type": "integer", "default": 50, "maximum": 200},
+            },
+            [],
+        ),
         group="threads",
-        requires=("thread_id",),
-        produces=("message_id",),
+        produces=("message_id", "thread_id"),
         tags=("mail",),
     ),
     ToolSpec(

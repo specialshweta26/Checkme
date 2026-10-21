@@ -32,6 +32,7 @@ log = logging.getLogger(__name__)
 
 MAX_TOOL_CHARS = 24000
 INSPECT_CHARS = 32000
+MAIL_DETAIL_TOOLS = {"get_thread", "get_message"}
 CATALOG_TOOLS = {
     "gateway__tool_search",
     "gateway__resolve",
@@ -258,7 +259,23 @@ def _source_tool(slug: str, tool_name: str, args: dict) -> str:
     return f"{slug}__{tool_name}"
 
 
-_MAIL_OPEN_HINTS = ("open", "summarize", "summary", "attachment", "pdf", "display", "show", "preview")
+_MAIL_OPEN_HINTS = (
+    "open",
+    "summarize",
+    "summary",
+    "attachment",
+    "pdf",
+    "display",
+    "show",
+    "preview",
+    "thread",
+    "conversation",
+    "email",
+    "mail",
+    "inbox",
+    "briefing",
+    "read",
+)
 
 
 def _wants_mail_open(query: str) -> bool:
@@ -266,15 +283,88 @@ def _wants_mail_open(query: str) -> bool:
     return any(hint in q for hint in _MAIL_OPEN_HINTS)
 
 
-def _first_message_id(result: Any) -> str | None:
+def _first_mail_ref(result: Any) -> tuple[str, str]:
     if not isinstance(result, dict):
-        return None
-    if result.get("message_id"):
-        return str(result["message_id"])
-    msgs = result.get("messages") or []
-    if msgs and isinstance(msgs[0], dict):
-        return str(msgs[0].get("message_id") or msgs[0].get("id") or "") or None
-    return None
+        return "", ""
+    msgs = result.get("messages") or result.get("threads") or []
+    hit = msgs[0] if msgs and isinstance(msgs[0], dict) else result
+    if not isinstance(hit, dict):
+        return "", ""
+    tid = str(hit.get("thread_id") or result.get("thread_id") or "").strip()
+    mid = str(hit.get("message_id") or hit.get("last_message_id") or hit.get("id") or result.get("message_id") or "").strip()
+    return tid, mid
+
+
+def _complete_thread_args(ctx: RunContext, args: dict) -> dict:
+    out = dict(args)
+    tid = str(out.get("thread_id") or "").strip()
+    mid = str(out.get("message_id") or "").strip()
+    if tid and mid:
+        return out
+    for row in reversed(ctx.results):
+        data = row.get("data")
+        if not isinstance(data, dict):
+            continue
+        opened = data.get("opened_thread") if isinstance(data.get("opened_thread"), dict) else None
+        msg = data.get("opened_message") if isinstance(data.get("opened_message"), dict) else None
+        hit = opened or msg
+        if hit is None:
+            msgs = data.get("messages") or data.get("threads") or []
+            hit = msgs[0] if msgs and isinstance(msgs[0], dict) else data
+        if not isinstance(hit, dict):
+            continue
+        if not tid:
+            tid = str(hit.get("thread_id") or "").strip()
+        if not mid:
+            mid = str(hit.get("message_id") or hit.get("last_message_id") or "").strip()
+        if tid or mid:
+            break
+    if tid:
+        out["thread_id"] = tid
+    if mid:
+        out["message_id"] = mid
+    return out
+
+
+def _mail_threads(ctx: RunContext) -> list[dict]:
+    out: list[dict] = []
+    seen: set[tuple[str, str, str]] = set()
+    for row in ctx.results:
+        tool = str(row.get("source_tool") or "")
+        args = row.get("args") if isinstance(row.get("args"), dict) else {}
+        data = row.get("data")
+        if not isinstance(data, dict):
+            continue
+        slug = str(row.get("connector_slug") or "")
+        if not slug and "__" in tool:
+            slug = tool.split("__", 1)[0]
+        opened = data.get("opened_thread") if isinstance(data.get("opened_thread"), dict) else None
+        msg = data.get("opened_message") if isinstance(data.get("opened_message"), dict) else None
+        hit = opened or msg or data
+        if not isinstance(hit, dict):
+            continue
+        mailish = any(name in tool for name in ("get_thread", "get_message", "search_messages", "list_messages", "list_threads", "summarize_attachments"))
+        mailish = mailish or bool(hit.get("thread_id") or hit.get("messages") or hit.get("last_message_id"))
+        if not mailish:
+            continue
+        tid = str(hit.get("thread_id") or args.get("thread_id") or "").strip()
+        mid = str(hit.get("message_id") or hit.get("last_message_id") or args.get("message_id") or "").strip()
+        msgs = hit.get("messages") if isinstance(hit.get("messages"), list) else []
+        if not mid and msgs and isinstance(msgs[-1], dict):
+            mid = str(msgs[-1].get("message_id") or "").strip()
+        key = (slug, tid, mid)
+        if (not tid and not mid) or key in seen:
+            continue
+        seen.add(key)
+        out.append(
+            {
+                "connector_slug": slug,
+                "thread_id": tid,
+                "message_id": mid,
+                "subject": hit.get("subject") or "",
+            }
+        )
+    return out
 
 
 async def _invoke_follow(ctx: RunContext, slug: str, tool: str, args: dict) -> Any:
@@ -285,33 +375,48 @@ async def _invoke_follow(ctx: RunContext, slug: str, tool: str, args: dict) -> A
 
 
 async def _hydrate_opened_mail(ctx: RunContext, slug: str, tool_name: str, result: Any) -> Any:
-    if tool_name not in {"search_messages", "list_messages"}:
+    if tool_name in {"get_thread", "summarize_attachments"}:
+        return result
+    if tool_name not in {"search_messages", "list_messages", "list_threads", "get_message"}:
         return result
     if not isinstance(result, dict) or result.get("error"):
         return result
-    if not _wants_mail_open(ctx.query):
+    if tool_name != "get_message" and not _wants_mail_open(ctx.query):
         return result
-    mid = _first_message_id(result)
-    if not mid:
+    tid, mid = _first_mail_ref(result)
+    if not tid and not mid:
         return result
-    opened = await _invoke_follow(ctx, slug, "get_message", {"message_id": mid})
-    opened_name = f"{slug}__get_message"
-    if opened_name not in ctx.used_tools:
-        ctx.used_tools.append(opened_name)
+    thread_args = {"thread_id": tid, "message_id": mid, "max_messages": 50}
+    thread = await _invoke_follow(ctx, slug, "get_thread", thread_args)
+    thread_name = f"{slug}__get_thread"
+    if thread_name not in ctx.used_tools:
+        ctx.used_tools.append(thread_name)
     out = dict(result)
-    out["opened_message"] = opened if isinstance(opened, dict) else {"result": opened}
-    has_atts = False
-    if isinstance(opened, dict):
-        has_atts = bool(opened.get("attachments")) or bool(opened.get("has_attachments"))
-    if has_atts:
+    out["opened_thread"] = thread if isinstance(thread, dict) else {"result": thread}
+    if isinstance(thread, dict):
+        tid = str(thread.get("thread_id") or tid).strip()
+        mid = str(thread.get("last_message_id") or mid).strip()
+        out["thread_id"] = tid
+        if mid:
+            out["message_id"] = mid
+    latest = None
+    if isinstance(thread, dict):
+        msgs = thread.get("messages") or []
+        if msgs and isinstance(msgs[-1], dict):
+            latest = msgs[-1]
+    has_atts = bool(latest and (latest.get("attachments") or latest.get("has_attachments")))
+    if not has_atts and isinstance(result, dict):
+        has_atts = bool(result.get("attachments") or result.get("has_attachments"))
+    if has_atts and mid:
         summarized = await _invoke_follow(ctx, slug, "summarize_attachments", {"message_id": mid})
         sum_name = f"{slug}__summarize_attachments"
         if sum_name not in ctx.used_tools:
             ctx.used_tools.append(sum_name)
         out["attachment_open"] = summarized
     out["hint"] = (
-        "Opened the first matching message with get_message. "
-        "If attachments exist they were summarized. Do not say this connector is search-only."
+        "Opened the full conversation with get_thread (every message, oldest-first). "
+        "Cite thread_id from this result. If attachments exist they were summarized. "
+        "Do not say this connector is search-only."
     )
     return out
 
@@ -367,9 +472,9 @@ async def search_user_tools(ctx: RunContext, query: str, connector_slug: str | N
     if "forward" in q:
         for c in mail_conns:
             wanted.add((c.slug, "forward"))
-    if any(k in q for k in ("open", "attach", "pdf", "summarize")):
+    if any(k in q for k in ("open", "attach", "pdf", "summarize", "thread", "inbox", "email", "mail", "briefing")):
         for c in mail_conns:
-            wanted.update((c.slug, n) for n in ("get_message", "list_attachments", "summarize_attachments"))
+            wanted.update((c.slug, n) for n in ("get_thread", "get_message", "list_attachments", "summarize_attachments"))
     if any(k in q for k in ("spam", "junk", "trash", "drafts", "drafted", "delete all", "empty", "clear all", "bulk")):
         for c in mail_conns:
             wanted.update((c.slug, n) for n in ("empty_folder", "bulk_delete", "list_drafts", "delete_draft"))
@@ -389,6 +494,7 @@ async def search_user_tools(ctx: RunContext, query: str, connector_slug: str | N
             "query": (query or "")[:80],
             "slug": connector_slug or "",
             "tools": [f"{h.slug}.{h.tool_name}" for h in hits],
+            "has_get_thread": any(h.tool_name == "get_thread" for h in hits),
             "has_get_message": any(h.tool_name == "get_message" for h in hits),
             "has_send_message": any(h.tool_name == "send_message" for h in hits),
             "has_summarize_attachments": any(h.tool_name == "summarize_attachments" for h in hits),
@@ -481,6 +587,8 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
         }
         ctx.pending.append(pending)
         return {"status": "awaiting_user_confirmation", "preview": pending["preview"]}
+    if tool_name == "get_thread":
+        args = _complete_thread_args(ctx, args)
     try:
         if ctx.call_impl is not None:
             result = await ctx.call_impl(connector_slug, tool_name, args)
@@ -526,8 +634,17 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
             await bump_usage(ctx.db, ctx.user.id, conn.id, tool_name, True)
         source_name = _source_tool(connector_slug, tool_name, args)
         rid = f"r{len(ctx.results) + 1}"
-        ctx.results.append({"result_id": rid, "source_tool": source_name, "args": args, "data": result})
-        payload = compact_payload(result)
+        ctx.results.append(
+            {
+                "result_id": rid,
+                "source_tool": source_name,
+                "connector_slug": connector_slug,
+                "tool_name": tool_name,
+                "args": args,
+                "data": result,
+            }
+        )
+        payload = compact_payload(result, 60000 if tool_name in MAIL_DETAIL_TOOLS else MAX_TOOL_CHARS)
         if isinstance(payload, dict) and payload.get("too_large"):
             payload["result_id"] = rid
         if tool_name not in CATALOG_TOOLS:
@@ -723,7 +840,9 @@ def system_prompt(user, connectors: list, memory: str) -> str:
         "Gmail and Outlook are mail AND calendar. Never say there is no calendar connector when gmail or outlook is listed. "
         "Send mail with send_message. Create a calendar invite with create_event (attendees, start in IST). "
         "Google Meet: create_google_meet on gmail. Teams: create_teams_meeting on outlook. "
-        "After search_messages, if the user asked to open or summarize, call get_message then summarize_attachments. "
+        "After search_messages or list_messages, if the user asked to open, read, or summarize mail, call get_thread "
+        "with thread_id AND message_id from the hit. Never call get_thread with an empty thread_id — pass message_id instead. "
+        "Use every message in the thread, not only the latest reply. Then summarize_attachments if files exist. "
         "Never say a mail connector cannot compose, send, invite, attach, or batch-delete. "
         "Empty spam, junk, trash, or drafts with empty_folder (folder=spam|trash|drafts) in one call_tool — do not loop delete_draft.\n"
         "Answer every part of the ask. If a result is too large, inspect_result the stored result_id using a path or search from the user's words, and keep paging until the requested slice is complete. Or call_tool again with narrower schema arguments. Never say data was truncated and stop.\n"
@@ -930,4 +1049,5 @@ async def run_deep_agent(
         "used_tools": ctx.used_tools,
         "route": "deep",
         "source": source,
+        "mail_threads": _mail_threads(ctx),
     }

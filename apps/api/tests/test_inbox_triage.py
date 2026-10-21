@@ -50,10 +50,11 @@ def test_serialize_shape():
         unread=True,
         seen=False,
     )
-    out = serialize(item, "Gmail")
+    out = serialize(item, "Gmail", "gmail")
     assert out["from"] == "Ada <ada@example.com>"
     assert out["classification"] == "reply"
     assert out["connector"] == "Gmail"
+    assert out["connector_slug"] == "gmail"
 
 
 def test_received_sort_key_newest_first():

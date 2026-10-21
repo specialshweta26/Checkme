@@ -106,7 +106,7 @@ def apply_triage(item: InboxItem, data: dict[str, Any]) -> None:
         item.draft = "No reply is needed to this message."
 
 
-def serialize(item: InboxItem, connector_name: str = "") -> dict[str, Any]:
+def serialize(item: InboxItem, connector_name: str = "", connector_slug: str = "") -> dict[str, Any]:
     return {
         "id": str(item.id),
         "message_id": item.message_id,
@@ -123,6 +123,7 @@ def serialize(item: InboxItem, connector_name: str = "") -> dict[str, Any]:
         "unread": item.unread,
         "seen": item.seen,
         "connector": connector_name,
+        "connector_slug": connector_slug,
         "sort_at": received_sort_key(item.received_at, getattr(item, "created_at", None)).isoformat(),
     }
 
@@ -215,11 +216,17 @@ async def refresh_mailboxes(db: AsyncSession, user: User, *, unread_only: bool =
     return await _ingest(db, user, runtimes, unread_only=unread_only, classify=classify)
 
 
+def _connector_labels(runtimes: list[RuntimeConnector]) -> tuple[dict, dict]:
+    names = {r.id: r.name for r in runtimes}
+    slugs = {r.id: r.slug for r in runtimes}
+    return names, slugs
+
+
 async def _cards_payload(db: AsyncSession, user: User, items: list[InboxItem], **badge_kw) -> dict[str, Any]:
     runtimes = await mail_connectors(db, user)
-    names = {r.id: r.name for r in runtimes}
+    names, slugs = _connector_labels(runtimes)
     payload = _badge_payload(items, **badge_kw)
-    payload["inbox"] = [serialize(i, names.get(i.connector_id, "")) for i in items]
+    payload["inbox"] = [serialize(i, names.get(i.connector_id, ""), slugs.get(i.connector_id, "")) for i in items]
     payload["connected"] = bool(runtimes)
     return payload
 
@@ -242,11 +249,11 @@ async def list_inbox(db: AsyncSession, user: User, *, live: bool = False, mark_s
         await _ingest(db, user, runtimes, unread_only=False, classify=classify)
     if mark_seen:
         await _mark_unseen(db, user)
-    names = {r.id: r.name for r in runtimes}
+    names, slugs = _connector_labels(runtimes)
     items = await _trim_pending(db, user)
     unseen = sum(1 for i in items if not i.seen)
     return {
-        "items": [serialize(i, names.get(i.connector_id, "")) for i in items],
+        "items": [serialize(i, names.get(i.connector_id, ""), slugs.get(i.connector_id, "")) for i in items],
         "count": unseen,
         "pending": len(items),
         "connected": True,
@@ -563,17 +570,30 @@ async def _classify_many(db: AsyncSession, user: User, runtimes: list[RuntimeCon
 
 async def _classify_one(item: InboxItem, runtime: RuntimeConnector, voice: str) -> None:
     thread: dict[str, Any] = {}
-    if item.thread_id:
-        try:
-            thread = await runtime.call("get_thread", {"thread_id": item.thread_id, "max_messages": 20})
-        except Exception as exc:  # noqa: BLE001
-            log.warning("get_thread failed: %s", exc)
-    if not thread:
+    try:
+        thread = await runtime.call(
+            "get_thread",
+            {"thread_id": item.thread_id or "", "message_id": item.message_id, "max_messages": 50},
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("get_thread failed: %s", exc)
+    if not isinstance(thread, dict) or not (thread.get("messages") or thread.get("body")):
         try:
             thread = await runtime.call("get_message", {"message_id": item.message_id})
         except Exception as exc:  # noqa: BLE001
             log.warning("get_message failed: %s", exc)
             thread = {"subject": item.subject, "from": item.sender, "body": item.snippet}
+        tid = (thread.get("thread_id") or "").strip() if isinstance(thread, dict) else ""
+        if tid and tid != item.thread_id:
+            try:
+                richer = await runtime.call(
+                    "get_thread",
+                    {"thread_id": tid, "message_id": item.message_id, "max_messages": 50},
+                )
+                if isinstance(richer, dict) and richer.get("messages"):
+                    thread = richer
+            except Exception as exc:  # noqa: BLE001
+                log.warning("get_thread retry failed: %s", exc)
     if not item.subject:
         item.subject = (thread.get("subject") or item.subject)[:500]
     if not item.thread_id:
@@ -582,14 +602,14 @@ async def _classify_one(item: InboxItem, runtime: RuntimeConnector, voice: str) 
         "subject": item.subject or thread.get("subject"),
         "from": item.sender,
         "date": item.received_at,
-        "latest": clip(thread.get("body") or item.snippet, 1800),
+        "latest": clip(thread.get("body") or item.snippet, 2500),
         "thread": [
             {
                 "from": m.get("from"),
                 "date": m.get("date"),
-                "body": clip(m.get("body") or "", 900),
+                "body": clip(m.get("body") or "", 2000),
             }
-            for m in (thread.get("messages") or [])[-12:]
+            for m in (thread.get("messages") or [])[-40:]
         ],
     }
     prompt = (
@@ -605,7 +625,7 @@ async def _classify_one(item: InboxItem, runtime: RuntimeConnector, voice: str) 
         "If classification is discard, draft a one-line note that no reply is needed — do not invent a fake email.\n"
         "Never invent facts, dates, or commitments. Do not include a subject line.\n"
         f"User writing voice: {clip(voice or 'plain, concise, professional', 800)}\n"
-        f"Email JSON: {clip(json.dumps(payload, default=str), 9000)}\n"
+        f"Email JSON: {clip(json.dumps(payload, default=str), 30000)}\n"
     )
     apply_triage(item, parse_json_object(await _llm(prompt, 900, json_mode=True)))
 
@@ -615,6 +635,100 @@ async def _voice(db: AsyncSession, user: User) -> str:
         await db.execute(select(MemoryBlock).where(MemoryBlock.user_id == user.id, MemoryBlock.label == "voice"))
     ).scalar_one_or_none()
     return (row.value if row else "") or ""
+
+
+def _thread_as_messages(data: dict[str, Any]) -> dict[str, Any]:
+    msgs = data.get("messages") if isinstance(data, dict) else None
+    if msgs:
+        return {
+            "thread_id": data.get("thread_id") or "",
+            "subject": data.get("subject") or "",
+            "message_count": data.get("message_count") or len(msgs),
+            "last_message_id": data.get("last_message_id"),
+            "messages": [
+                {
+                    "message_id": m.get("message_id"),
+                    "from": m.get("from"),
+                    "to": m.get("to"),
+                    "cc": m.get("cc"),
+                    "date": m.get("date"),
+                    "subject": m.get("subject") or data.get("subject"),
+                    "body": m.get("body") or "",
+                    "has_attachments": bool(m.get("has_attachments") or m.get("attachments")),
+                }
+                for m in msgs
+                if isinstance(m, dict)
+            ],
+        }
+    return {
+        "thread_id": data.get("thread_id") or "",
+        "subject": data.get("subject") or "",
+        "message_count": 1 if data.get("body") else 0,
+        "last_message_id": data.get("message_id"),
+        "messages": [
+            {
+                "message_id": data.get("message_id"),
+                "from": data.get("from"),
+                "to": data.get("to"),
+                "cc": data.get("cc"),
+                "date": data.get("date"),
+                "subject": data.get("subject"),
+                "body": data.get("body") or data.get("snippet") or "",
+                "has_attachments": bool(data.get("has_attachments") or data.get("attachments")),
+            }
+        ]
+        if data.get("body") or data.get("snippet")
+        else [],
+    }
+
+
+async def open_full_thread(
+    db: AsyncSession,
+    user: User,
+    *,
+    slug: str = "",
+    thread_id: str = "",
+    message_id: str = "",
+    item_id=None,
+) -> dict[str, Any]:
+    runtimes = await mail_connectors(db, user)
+    runtime = None
+    if item_id is not None:
+        item = await get_item(db, user, item_id)
+        runtime = next((r for r in runtimes if r.id == item.connector_id), None)
+        thread_id = thread_id or item.thread_id or ""
+        message_id = message_id or item.message_id or ""
+        slug = slug or (runtime.slug if runtime else "")
+    if runtime is None and slug:
+        runtime = next((r for r in runtimes if r.slug == slug or r.provider == slug), None)
+    if runtime is None and len(runtimes) == 1:
+        runtime = runtimes[0]
+    if runtime is None:
+        raise LookupError("Mail connector not found")
+    if not thread_id and not message_id:
+        raise ValueError("thread_id or message_id is required")
+    try:
+        data = await runtime.call(
+            "get_thread",
+            {"thread_id": thread_id or "", "message_id": message_id or "", "max_messages": 100, "full": True},
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("open_full_thread get_thread failed: %s", exc)
+        data = {}
+    packed = _thread_as_messages(data if isinstance(data, dict) else {})
+    if packed["messages"]:
+        packed["connector_slug"] = runtime.slug
+        return packed
+    if message_id:
+        try:
+            msg = await runtime.call("get_message", {"message_id": message_id})
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(str(exc)[:300]) from exc
+        packed = _thread_as_messages(msg if isinstance(msg, dict) else {})
+    packed["connector_slug"] = runtime.slug
+    if not packed["messages"]:
+        raise LookupError("Could not load that email thread")
+    return packed
 
 
 async def _llm(prompt: str, max_tokens: int, json_mode: bool = False) -> str:

@@ -55,9 +55,10 @@ def _recips(addresses: list[str] | None) -> list[dict]:
 
 
 def _summary(m: dict) -> dict:
+    cid = (m.get("conversationId") or "").strip()
     return {
         "message_id": m["id"],
-        "thread_id": m.get("conversationId"),
+        "thread_id": cid or m["id"],
         "subject": m.get("subject") or "",
         "from": _addr(m.get("from")),
         "date": format_local(m.get("receivedDateTime"), DEFAULT_TZ),
@@ -65,6 +66,42 @@ def _summary(m: dict) -> dict:
         "unread": not m.get("isRead", True),
         "has_attachments": m.get("hasAttachments", False),
     }
+
+
+def _merge_msgs(*groups: list[dict]) -> list[dict]:
+    out: dict[str, dict] = {}
+    for group in groups:
+        for row in group:
+            mid = row.get("id")
+            if mid:
+                out[mid] = row
+    rows = list(out.values())
+    rows.sort(key=lambda m: m.get("receivedDateTime") or "")
+    return rows
+
+
+def _subject_core(subject: str) -> str:
+    return re.sub(r"^(re|fw|fwd)\s*:\s*", "", (subject or "").strip(), flags=re.I).strip()
+
+
+def _looks_like_subject(value: str) -> bool:
+    text = (value or "").strip()
+    if not text:
+        return False
+    if " " in text or "<>" in text:
+        return True
+    return bool(re.match(r"^(re|fw|fwd)\b", text, re.I))
+
+
+def _looks_like_graph_message_id(value: str) -> bool:
+    text = (value or "").strip()
+    return text.startswith("AAMk") or (text.startswith("AA") and not text.startswith("AAQk") and " " not in text and len(text) > 20)
+
+
+def _body_text(m: dict) -> tuple[str, bool]:
+    body = m.get("body") or {}
+    raw = body.get("content") or ""
+    return raw, (body.get("contentType") or "").lower() == "html"
 
 
 def _event(e: dict) -> dict:
@@ -100,6 +137,144 @@ class OutlookConnector(BaseConnector):
         else:
             data = await self.api.json("GET", url, params=params, headers=headers)
         return data.get("value", []), data.get("@odata.nextLink")
+
+    async def _paged(self, url: str, params: dict | None, headers: dict | None, limit: int) -> list[dict]:
+        rows, nxt = await self._page(url, params, None, headers=headers)
+        out = list(rows)
+        while nxt and len(out) < limit:
+            rows, nxt = await self._page("", None, nxt, headers=headers)
+            out.extend(rows)
+        return out[:limit]
+
+    async def _ensure_conversation_ids(self, rows: list[dict]) -> None:
+        missing = [m for m in rows if m.get("id") and not m.get("conversationId")]
+        if not missing:
+            return
+
+        async def fill(m: dict) -> None:
+            try:
+                data = await self.api.json("GET", f"{ME}/messages/{_q(m['id'])}", params={"$select": "id,conversationId"})
+                if data.get("conversationId"):
+                    m["conversationId"] = data["conversationId"]
+            except Exception:  # noqa: BLE001
+                return
+
+        await gather_limited([fill(m) for m in missing], 8)
+
+    async def _get_message_raw(self, message_id: str) -> dict:
+        params = {"$select": _LIST_SELECT + ",toRecipients,ccRecipients,body"}
+        return await self.api.json("GET", f"{ME}/messages/{_q(message_id)}", params=params, headers=_TEXT)
+
+    async def _resolve_conversation(self, thread_id: str = "", message_id: str = "") -> tuple[str, dict | None]:
+        tid = (thread_id or "").strip()
+        mid = (message_id or "").strip()
+        seed = None
+        if mid:
+            try:
+                seed = await self._get_message_raw(mid)
+                cid = (seed.get("conversationId") or "").strip()
+                if cid:
+                    return cid, seed
+            except Exception:  # noqa: BLE001
+                pass
+        if tid and _looks_like_subject(tid):
+            found = await self.tool_search_messages(tid, limit=8)
+            hit = (found.get("messages") or [None])[0]
+            if isinstance(hit, dict) and hit.get("message_id"):
+                try:
+                    seed = await self._get_message_raw(hit["message_id"])
+                    cid = (seed.get("conversationId") or hit.get("thread_id") or "").strip()
+                    if cid:
+                        return cid, seed
+                except Exception:  # noqa: BLE001
+                    cid = (hit.get("thread_id") or "").strip()
+                    if cid:
+                        return cid, seed
+        if tid and (not mid) and (_looks_like_graph_message_id(tid) or not tid.startswith("AAQk")):
+            try:
+                seed = await self._get_message_raw(tid)
+                cid = (seed.get("conversationId") or "").strip()
+                if cid:
+                    return cid, seed
+            except Exception:  # noqa: BLE001
+                pass
+        if tid:
+            return tid, seed
+        if seed and seed.get("id"):
+            return (seed.get("conversationId") or seed["id"]).strip(), seed
+        raise ToolError("thread_id or message_id is required")
+
+    async def _messages_by_conversation(self, cid: str, max_messages: int, seed: dict | None = None) -> list[dict]:
+        escaped = cid.replace("'", "''")
+        headers = {**_TEXT, "ConsistencyLevel": "eventual"}
+        select = _LIST_SELECT + ",toRecipients,ccRecipients,body"
+        filt = f"conversationId eq '{escaped}'"
+        rows = await self._paged(
+            f"{ME}/messages",
+            {"$filter": filt, "$count": "true", "$top": min(max(max_messages, 50), 100), "$select": select},
+            headers,
+            max_messages,
+        )
+        if len(rows) <= 1:
+            try:
+                searched = await self._paged(
+                    f"{ME}/messages",
+                    {"$search": f'"conversationid:{cid}"', "$top": min(max_messages, 50), "$select": select},
+                    _TEXT,
+                    max_messages,
+                )
+                rows = _merge_msgs(rows, searched)
+            except Exception:  # noqa: BLE001
+                pass
+        if len(rows) <= 1:
+            for fid in ("inbox", "sentitems", "deleteditems", "archive", "junkemail", "drafts"):
+                try:
+                    extra = await self._paged(
+                        f"{ME}/mailFolders/{fid}/messages",
+                        {"$filter": filt, "$top": min(max_messages, 50), "$select": select},
+                        headers,
+                        max_messages,
+                    )
+                    rows = _merge_msgs(rows, extra)
+                except Exception:  # noqa: BLE001
+                    continue
+                if len({m.get("id") for m in rows}) >= 2:
+                    break
+        if len(rows) <= 1 and seed:
+            core = _subject_core(seed.get("subject") or "")
+            if core:
+                try:
+                    found = await self._paged(
+                        f"{ME}/messages",
+                        {"$search": f'"{core}"', "$top": min(max_messages, 50), "$select": select},
+                        _TEXT,
+                        max_messages,
+                    )
+                    matched = [
+                        m
+                        for m in found
+                        if (m.get("conversationId") or "") == cid or _subject_core(m.get("subject") or "") == core
+                    ]
+                    rows = _merge_msgs(rows, matched)
+                except Exception:  # noqa: BLE001
+                    pass
+        if seed:
+            rows = _merge_msgs(rows, [seed])
+        return rows[-max_messages:]
+
+    def _thread_message(self, m: dict, *, body_limit: int, keep_quoted: bool) -> dict:
+        raw, is_html = _body_text(m)
+        return {
+            "message_id": m["id"],
+            "thread_id": (m.get("conversationId") or "").strip(),
+            "from": _addr(m.get("from")),
+            "to": ", ".join(_addr(r) for r in m.get("toRecipients", [])),
+            "cc": ", ".join(_addr(r) for r in m.get("ccRecipients", [])),
+            "date": format_local(m.get("receivedDateTime"), DEFAULT_TZ),
+            "subject": m.get("subject") or "",
+            "body": clean_body(raw, is_html, body_limit, keep_quoted=keep_quoted),
+            "has_attachments": m.get("hasAttachments", False),
+        }
 
     async def _batch(self, requests: list[dict]) -> tuple[int, int]:
         """Graph $batch, 20 requests per call. Returns (ok, failed)."""
@@ -157,51 +332,39 @@ class OutlookConnector(BaseConnector):
         if unread_only:
             params["$filter"] = "isRead eq false"
         rows, nxt = await self._page(f"{ME}/mailFolders/{fid}/messages", params, page_token)
+        await self._ensure_conversation_ids(rows)
         return {"messages": [_summary(m) for m in rows], "next_page_token": nxt}
 
     async def tool_search_messages(self, query: str, limit: int = 15, page_token: str | None = None):
         params = {"$search": f'"{to_kql(query)}"', "$top": min(limit, 50), "$select": _LIST_SELECT}
         rows, nxt = await self._page(f"{ME}/messages", params, page_token)
+        await self._ensure_conversation_ids(rows)
         return {"messages": [_summary(m) for m in rows], "next_page_token": nxt}
 
     async def tool_get_message(self, message_id: str):
-        params = {"$select": _LIST_SELECT + ",toRecipients,ccRecipients,body"}
-        m = await self.api.json("GET", f"{ME}/messages/{_q(message_id)}", params=params, headers=_TEXT)
+        m = await self._get_message_raw(message_id)
         atts = (await self.tool_list_attachments(message_id))["attachments"] if m.get("hasAttachments") else []
+        raw, is_html = _body_text(m)
         return {
             **_summary(m),
             "to": ", ".join(_addr(r) for r in m.get("toRecipients", [])),
             "cc": ", ".join(_addr(r) for r in m.get("ccRecipients", [])),
-            "body": clean_body((m.get("body") or {}).get("content", ""), False, self.body_limit),
+            "body": clean_body(raw, is_html, self.body_limit),
             "attachments": atts,
         }
 
-    async def tool_get_thread(self, thread_id: str, max_messages: int = 50):
-        cid = thread_id.replace("'", "''")
-        params = {
-            "$filter": f"conversationId eq '{cid}'",
-            "$top": min(max_messages, 200),
-            "$select": _LIST_SELECT + ",toRecipients,body",
-        }
-        rows, _ = await self._page(f"{ME}/messages", params, None, headers=_TEXT)
-        rows.sort(key=lambda m: m.get("receivedDateTime", ""))
-        rows = rows[-max_messages:]
+    async def tool_get_thread(self, thread_id: str = "", max_messages: int = 50, message_id: str = "", full: bool = False):
+        cid, seed = await self._resolve_conversation(thread_id, message_id)
+        rows = await self._messages_by_conversation(cid, max(1, min(max_messages, 200)), seed)
+        keep_quoted = full or len(rows) <= 1
+        body_limit = 20000 if full else max(self.body_limit, 2500)
+        messages = [self._thread_message(m, body_limit=body_limit, keep_quoted=keep_quoted) for m in rows]
         return {
-            "thread_id": thread_id,
+            "thread_id": cid,
             "subject": rows[0].get("subject", "") if rows else "",
-            "message_count": len(rows),
+            "message_count": len(messages),
             "last_message_id": rows[-1]["id"] if rows else None,
-            "messages": [
-                {
-                    "message_id": m["id"],
-                    "from": _addr(m.get("from")),
-                    "to": ", ".join(_addr(r) for r in m.get("toRecipients", [])),
-                    "date": format_local(m.get("receivedDateTime"), DEFAULT_TZ),
-                    "body": clean_body((m.get("body") or {}).get("content", ""), False, 1500),
-                    "has_attachments": m.get("hasAttachments", False),
-                }
-                for m in rows
-            ],
+            "messages": messages,
         }
 
     async def tool_list_folders(self):
@@ -365,14 +528,9 @@ class OutlookConnector(BaseConnector):
         return {"sent": True}
 
     async def _thread_ids(self, thread_id: str) -> list[str]:
-        cid = thread_id.replace("'", "''")
-        params = {"$filter": f"conversationId eq '{cid}'", "$select": "id", "$top": 200}
-        rows, nxt = await self._page(f"{ME}/messages", params, None)
-        ids = [r["id"] for r in rows]
-        while nxt:
-            rows, nxt = await self._page("", None, nxt)
-            ids.extend(r["id"] for r in rows)
-        return ids
+        cid, seed = await self._resolve_conversation(thread_id, "")
+        rows = await self._messages_by_conversation(cid, 200, seed)
+        return [r["id"] for r in rows if r.get("id")]
 
     async def tool_delete_message(self, message_id: str, permanent: bool = False):
         if permanent:
@@ -392,6 +550,7 @@ class OutlookConnector(BaseConnector):
         if query:
             params = {"$search": f'"{to_kql(query)}"', "$top": min(max(limit * 3, 15), 50), "$select": _LIST_SELECT}
         rows, nxt = await self._page(f"{ME}/messages", params, page_token)
+        await self._ensure_conversation_ids(rows)
         seen: dict[str, dict] = {}
         for m in rows:
             cid = m.get("conversationId") or m["id"]
