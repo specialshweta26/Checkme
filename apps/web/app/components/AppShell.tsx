@@ -156,7 +156,7 @@ export function AppShell({
       if (next.items.length || !alertsOpenRef.current) setAlerts(next.items);
     }
     poll();
-    const id = window.setInterval(poll, 25000);
+    const id = window.setInterval(poll, 8000);
     return () => {
       on = false;
       window.clearInterval(id);

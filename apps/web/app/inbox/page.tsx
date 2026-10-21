@@ -74,7 +74,7 @@ export default function InboxPage() {
   useEffect(() => {
     if (!me) return;
     refresh();
-    const id = window.setInterval(refresh, 45000);
+    const id = window.setInterval(refresh, 12000);
     return () => window.clearInterval(id);
   }, [me]);
 

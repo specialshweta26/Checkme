@@ -188,6 +188,13 @@ def _badge_payload(items: list[InboxItem], *, arrived: int = 0, alerts: list[Inb
     }
 
 
+async def refresh_mailboxes(db: AsyncSession, user: User, *, unread_only: bool = True, classify: bool = True) -> int:
+    runtimes = await mail_connectors(db, user)
+    if not runtimes:
+        return 0
+    return await _ingest(db, user, runtimes, unread_only=unread_only, classify=classify)
+
+
 async def badge(db: AsyncSession, user: User) -> dict[str, Any]:
     runtimes = await mail_connectors(db, user)
     arrived = 0
