@@ -151,6 +151,7 @@ def test_system_prompt_has_no_product_recipes():
     assert "create_event" in lowered
     assert "create_google_meet" in lowered
     assert "create_teams_meeting" in lowered
+    assert "empty_folder" in lowered
     assert "schedule_task and do not fetch now" in lowered
     assert "one8" not in lowered
     assert "lotto" not in lowered

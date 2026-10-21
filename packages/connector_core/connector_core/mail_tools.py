@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from connector_core.spec import ToolSpec
+import re
+
+from connector_core.spec import ToolError, ToolSpec
 
 
 def _obj(properties: dict, required: list[str] | None = None) -> dict:
@@ -14,6 +16,45 @@ _IDS = {"type": "array", "items": {"type": "string"}}
 _EMAILS = {"type": "array", "items": {"type": "string"}, "description": "Email addresses"}
 _LIMIT = {"type": "integer", "minimum": 1, "maximum": 50, "default": 15}
 _ISO = {"type": "string", "description": "ISO 8601 datetime, e.g. 2026-10-19T09:00:00+05:30"}
+_FOLDER_CANON = {
+    "spam": "spam",
+    "junk": "spam",
+    "junkemail": "spam",
+    "junk-email": "spam",
+    "trash": "trash",
+    "bin": "trash",
+    "deleted": "trash",
+    "deleteditems": "trash",
+    "deleted-items": "trash",
+    "drafts": "drafts",
+    "draft": "drafts",
+}
+
+
+def canonical_mail_folder(name: str) -> str:
+    raw = re.sub(r"^(in:|label:|folder:)", "", (name or "").strip().lower())
+    raw = raw.replace(" ", "")
+    key = _FOLDER_CANON.get(raw)
+    if key is None:
+        raise ToolError("empty_folder supports spam, trash, or drafts")
+    return key
+
+
+def folder_from_query(query: str) -> str | None:
+    text = (query or "").strip()
+    if not text:
+        return None
+    try:
+        return canonical_mail_folder(text)
+    except ToolError:
+        pass
+    match = re.search(r"\b(?:in|label|folder):(spam|junk|junkemail|trash|bin|drafts?|deleteditems)\b", text, re.I)
+    if match:
+        try:
+            return canonical_mail_folder(match.group(1))
+        except ToolError:
+            return None
+    return None
 
 MAIL_CALENDAR_TOOLS: list[ToolSpec] = [
     ToolSpec(
@@ -130,6 +171,26 @@ MAIL_CALENDAR_TOOLS: list[ToolSpec] = [
                 "permanent": {"type": "boolean", "default": False},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 500},
             }
+        ),
+        group="messages.manage",
+        read_only=False,
+        destructive=True,
+        tags=("mail",),
+    ),
+    ToolSpec(
+        "empty_folder",
+        "Empty a whole mailbox folder in one confirmed action: spam/junk, trash, or drafts. "
+        "Deletes every message currently in that folder (spam and trash are purged; drafts are discarded). "
+        "Use this for 'delete all spam' or 'clear all drafts' — do not loop delete_draft. Max 1000 per run.",
+        _obj(
+            {
+                "folder": {
+                    "type": "string",
+                    "description": "spam, trash, or drafts (junk and bin are accepted aliases)",
+                },
+                "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 1000},
+            },
+            ["folder"],
         ),
         group="messages.manage",
         read_only=False,

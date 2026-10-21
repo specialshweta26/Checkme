@@ -9,6 +9,7 @@ from urllib.parse import quote
 import httpx
 
 from connector_core import MAIL_CALENDAR_TOOLS, BaseConnector, BinaryResult, ToolError, TokenProvider
+from connector_core.mail_tools import canonical_mail_folder, folder_from_query
 from connector_core.calendar import (
     DEFAULT_TZ,
     as_local,
@@ -118,9 +119,30 @@ class OutlookConnector(BaseConnector):
         return sum(r[0] for r in results), sum(r[1] for r in results)
 
     async def _collect_ids(self, query: str, limit: int) -> list[str]:
+        folder = folder_from_query(query)
+        if folder:
+            return await self._collect_folder_ids(folder, limit)
         ids: list[str] = []
         params = {"$search": f'"{to_kql(query)}"', "$top": min(100, limit), "$select": "id"}
         rows, nxt = await self._page(f"{ME}/messages", params, None)
+        ids.extend(r["id"] for r in rows)
+        while nxt and len(ids) < limit:
+            rows, nxt = await self._page("", None, nxt)
+            ids.extend(r["id"] for r in rows)
+        return ids[:limit]
+
+    def _well_known_folder(self, folder: str) -> str:
+        key = canonical_mail_folder(folder)
+        return {"spam": "junkemail", "trash": "deleteditems", "drafts": "drafts"}[key]
+
+    async def _collect_folder_ids(self, folder: str, limit: int) -> list[str]:
+        try:
+            fid = self._well_known_folder(folder)
+        except ToolError:
+            fid = folder.lower() if folder.lower() in _WELL_KNOWN else _q(folder)
+        ids: list[str] = []
+        params = {"$select": "id", "$top": min(100, max(limit, 1))}
+        rows, nxt = await self._page(f"{ME}/mailFolders/{fid}/messages", params, None)
         ids.extend(r["id"] for r in rows)
         while nxt and len(ids) < limit:
             rows, nxt = await self._page("", None, nxt)
@@ -237,7 +259,34 @@ class OutlookConnector(BaseConnector):
                 for i in ids
             ]
         ok, failed = await self._batch(reqs)
-        return {"deleted": ok, "failed": failed, "permanent": permanent}
+        return {"deleted": ok, "failed": failed, "permanent": permanent, "message_ids": ids}
+
+    async def tool_empty_folder(self, folder: str, dry_run: bool = True, limit: int = 1000):
+        key = canonical_mail_folder(folder)
+        limit = max(1, min(limit, 1000))
+        ids = await self._collect_folder_ids(key, limit)
+        if dry_run:
+            sample = await gather_limited(
+                [self.api.json("GET", f"{ME}/messages/{_q(i)}", params={"$select": _LIST_SELECT}) for i in ids[:5]]
+            )
+            return {"folder": key, "count": len(ids), "sample": [_summary(m) for m in sample], "message_ids": ids}
+        if key == "drafts":
+            reqs = [{"method": "DELETE", "url": f"/me/messages/{_q(i)}"} for i in ids]
+        else:
+            reqs = [{"method": "POST", "url": f"/me/messages/{_q(i)}/permanentDelete", "body": {}} for i in ids]
+        ok, failed = await self._batch(reqs)
+        if failed and key != "drafts":
+            moved, move_failed = await self._batch(
+                [{"method": "POST", "url": f"/me/messages/{_q(i)}/move", "body": {"destinationId": "deleteditems"}} for i in ids]
+            )
+            return {
+                "folder": key,
+                "deleted": max(ok, moved),
+                "failed": min(failed, move_failed),
+                "permanent": bool(ok and not failed),
+                "message_ids": ids,
+            }
+        return {"folder": key, "deleted": ok, "failed": failed, "permanent": True, "message_ids": ids}
 
     # ---- mail write ------------------------------------------------------
 

@@ -108,9 +108,14 @@ function AttachmentRow({ item }: { item: Attachment }) {
   const download = item.download_url || item.url;
   const preview = item.preview_url || download;
   const kind = kindOf(item);
-  const { url: previewSrc, mime, loadError, loading } = useObjectUrl(preview, open && (kind === "image" || kind === "pdf"));
-  const showPdf = kind === "pdf" || mime.includes("pdf");
-  const showImage = !showPdf && (kind === "image" || mime.startsWith("image/"));
+  const pdfRender = preview && (kind === "pdf" || (preview || "").toLowerCase().includes(".pdf"))
+    ? `${preview}${preview.includes("?") ? "&" : "?"}render=1`
+    : "";
+  const { url: previewSrc, mime, loadError, loading } = useObjectUrl(
+    kind === "pdf" ? pdfRender || preview : preview,
+    open && (kind === "image" || kind === "pdf"),
+  );
+  const showImage = !pdfRender && (kind === "image" || mime.startsWith("image/"));
 
   async function summarize() {
     if (!item.message_id || !item.attachment_id || !item.connector_slug) {
@@ -156,19 +161,23 @@ function AttachmentRow({ item }: { item: Attachment }) {
         </button>
       </div>
       {open && preview ? (
-        <div className={`att-preview${showPdf ? " pdf" : ""}`}>
+        <div className={`att-preview${pdfRender ? " pdf" : ""}`}>
           {loading ? <p className="muted att-preview-status">Loading preview…</p> : null}
-          {loadError ? <p className="err att-preview-status">{loadError}</p> : null}
-          {previewSrc && showPdf ? (
-            <iframe className="att-preview-frame" title={item.filename || "PDF preview"} src={`${previewSrc}#toolbar=1&navpanes=0&view=FitH`} />
+          {loadError ? (
+            <p className="err att-preview-status">
+              {loadError}.{" "}
+              <a href={preview} target="_blank" rel="noreferrer">
+                Open file
+              </a>
+            </p>
           ) : null}
-          {previewSrc && showImage ? (
+          {previewSrc && (pdfRender || showImage) ? (
             <div className="att-preview-scroll">
               <img src={previewSrc} alt={item.filename || "Attachment preview"} />
             </div>
           ) : null}
-          {!showPdf && !showImage ? (
-            <a className="muted" href={preview} target="_blank" rel="noreferrer">
+          {!pdfRender && !showImage && !loading ? (
+            <a className="muted att-preview-status" href={preview} target="_blank" rel="noreferrer">
               Open preview
             </a>
           ) : null}

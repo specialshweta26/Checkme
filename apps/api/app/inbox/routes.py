@@ -24,6 +24,12 @@ class RephraseIn(BaseModel):
     draft: str = ""
 
 
+class BatchIn(BaseModel):
+    action: str
+    confirm: bool = False
+    item_ids: list[str] = []
+
+
 @router.get("/badge")
 async def inbox_badge(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     try:
@@ -41,9 +47,21 @@ async def mark_inbox_seen(user: User = Depends(current_user), db: AsyncSession =
 
 
 @router.get("")
-async def list_inbox(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+async def list_inbox(live: bool = False, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     try:
-        return await service.list_inbox(db, user, classify=True, mark_seen=True)
+        return await service.list_inbox(db, user, live=live, mark_seen=True)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, str(exc)[:300]) from exc
+
+
+@router.post("/batch")
+async def inbox_batch(body: BatchIn, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    try:
+        return await service.batch_mailbox(db, user, body.action, confirm=body.confirm, item_ids=body.item_ids)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(502, str(exc)[:300]) from exc
 

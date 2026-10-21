@@ -893,7 +893,15 @@ textarea.field { min-height: 110px; resize: vertical; }
 .notify-item small { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .notify-item .triage-tag { justify-self: start; }
 .inbox-page { max-width: 860px; min-width: 0; width: 100%; }
-.inbox-toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 18px; }
+.inbox-toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.inbox-batch { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 16px; }
+.inbox-confirm {
+  margin: 0 0 16px;
+  padding: 16px 18px;
+  border-radius: 14px;
+  border: 1px solid rgba(220, 77, 93, 0.28);
+  background: #fff;
+}
 .inbox-toolbar .pill { display: inline-flex; align-items: center; gap: 8px; }
 .inbox-stack { display: grid; gap: 16px; min-width: 0; }
 .inbox-card {

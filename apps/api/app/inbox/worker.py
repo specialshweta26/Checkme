@@ -37,7 +37,10 @@ async def sync_all_inboxes() -> int:
                 user = await db.get(User, user_id)
                 if user is None:
                     continue
-                arrived += await refresh_mailboxes(db, user, unread_only=True, classify=True)
+                arrived += await asyncio.wait_for(
+                    refresh_mailboxes(db, user, unread_only=True, classify=True),
+                    timeout=90,
+                )
         except Exception:  # noqa: BLE001
             log.exception("inbox sync failed for user %s", user_id)
     return arrived

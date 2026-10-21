@@ -4,6 +4,8 @@ import asyncio
 import json
 import logging
 import re
+import uuid
+from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any
 
@@ -21,6 +23,8 @@ CLASSIFICATIONS = ("reply", "respond", "discard")
 ACTIVE = ("pending",)
 HIDDEN = ("sent", "discarded")
 MAX_CLASSIFY = 6
+_INGEST_LOCKS: dict[uuid.UUID, asyncio.Lock] = {}
+BATCH_FOLDERS = {"empty_spam": "spam", "empty_drafts": "drafts", "empty_trash": "trash"}
 _MONTHS = {name: i for i, name in enumerate(("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"), 1)}
 _DATE_NAMED = re.compile(r"(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4}),\s+(\d{1,2}):(\d{2})\s*(AM|PM)", re.I)
 _DATE_NUMERIC = re.compile(r"(\d{1,2})/(\d{1,2})/(\d{4})(?:[,\s]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?")
@@ -196,27 +200,20 @@ async def refresh_mailboxes(db: AsyncSession, user: User, *, unread_only: bool =
 
 
 async def badge(db: AsyncSession, user: User) -> dict[str, Any]:
-    runtimes = await mail_connectors(db, user)
-    arrived = 0
-    if runtimes:
-        arrived = await _ingest(db, user, runtimes, unread_only=True, classify=False)
-    return _badge_payload(await _pending_items(db, user), arrived=arrived)
+    return _badge_payload(await _pending_items(db, user))
 
 
 async def mark_alerts_seen(db: AsyncSession, user: User) -> dict[str, Any]:
-    runtimes = await mail_connectors(db, user)
-    arrived = 0
-    if runtimes:
-        arrived = await _ingest(db, user, runtimes, unread_only=True, classify=False)
     snapshot = newest_first(await _mark_unseen(db, user))
-    return _badge_payload(await _pending_items(db, user), arrived=arrived, alerts=snapshot)
+    return _badge_payload(await _pending_items(db, user), alerts=snapshot)
 
 
-async def list_inbox(db: AsyncSession, user: User, *, classify: bool = True, mark_seen: bool = False) -> dict[str, Any]:
+async def list_inbox(db: AsyncSession, user: User, *, live: bool = False, mark_seen: bool = False, classify: bool = False) -> dict[str, Any]:
     runtimes = await mail_connectors(db, user)
     if not runtimes:
         return {"items": [], "count": 0, "pending": 0, "connected": False}
-    await _ingest(db, user, runtimes, unread_only=False, classify=classify)
+    if live:
+        await _ingest(db, user, runtimes, unread_only=False, classify=classify)
     if mark_seen:
         await _mark_unseen(db, user)
     names = {r.id: r.name for r in runtimes}
@@ -307,7 +304,133 @@ async def delete_item(db: AsyncSession, user: User, item_id) -> dict[str, Any]:
     return {"ok": True, "item": serialize(item), "result": result}
 
 
+async def batch_mailbox(
+    db: AsyncSession,
+    user: User,
+    action: str,
+    *,
+    confirm: bool = False,
+    item_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    key = (action or "").strip().lower()
+    if key in BATCH_FOLDERS:
+        return await _empty_all(db, user, BATCH_FOLDERS[key], confirm)
+    if key in {"clear_discard", "delete_items"}:
+        return await _delete_cards(db, user, key, confirm, item_ids or [])
+    raise ValueError("Unknown batch action. Use empty_spam, empty_drafts, empty_trash, clear_discard, or delete_items.")
+
+
+async def _empty_all(db: AsyncSession, user: User, folder: str, confirm: bool) -> dict[str, Any]:
+    runtimes = await mail_connectors(db, user)
+    if not runtimes:
+        raise ValueError("Connect Gmail or Outlook first")
+    connectors: list[dict[str, Any]] = []
+    samples: list[Any] = []
+    ids: list[str] = []
+    total = 0
+    for runtime in runtimes:
+        try:
+            result = await runtime.call("empty_folder", {"folder": folder, "dry_run": not confirm})
+        except Exception as exc:  # noqa: BLE001
+            log.warning("empty_folder failed for %s: %s", runtime.slug, exc)
+            connectors.append({"connector": runtime.name, "folder": folder, "count": 0, "deleted": 0, "failed": 1, "error": str(exc)[:200]})
+            continue
+        if not isinstance(result, dict):
+            result = {"count": 0}
+        count = int(result.get("count") or result.get("deleted") or 0)
+        total += count
+        connectors.append(
+            {
+                "connector": runtime.name,
+                "folder": result.get("folder") or folder,
+                "count": count,
+                "deleted": result.get("deleted") or 0,
+                "failed": result.get("failed") or 0,
+            }
+        )
+        samples.extend(result.get("sample") or [])
+        ids.extend(str(x) for x in (result.get("message_ids") or result.get("draft_ids") or []) if x)
+    if confirm and ids:
+        rows = (
+            await db.execute(select(InboxItem).where(InboxItem.user_id == user.id, InboxItem.message_id.in_(ids)))
+        ).scalars().all()
+        for row in rows:
+            row.status = "discarded"
+            row.unread = False
+            row.seen = True
+        await db.commit()
+    return {
+        "action": f"empty_{folder}",
+        "folder": folder,
+        "count": total,
+        "deleted": total if confirm else 0,
+        "confirm": confirm,
+        "connectors": connectors,
+        "sample": samples[:8],
+    }
+
+
+async def _delete_cards(
+    db: AsyncSession,
+    user: User,
+    action: str,
+    confirm: bool,
+    item_ids: list[str],
+) -> dict[str, Any]:
+    query = select(InboxItem).where(InboxItem.user_id == user.id, InboxItem.status == "pending")
+    if action == "clear_discard":
+        query = query.where(InboxItem.classification == "discard")
+    else:
+        parsed = []
+        for raw in item_ids:
+            try:
+                parsed.append(uuid.UUID(str(raw)))
+            except ValueError:
+                continue
+        if not parsed:
+            raise ValueError("No messages selected")
+        query = query.where(InboxItem.id.in_(parsed))
+    rows = (await db.execute(query)).scalars().all()
+    sample = [{"subject": row.subject or "(no subject)", "from": row.sender} for row in rows[:8]]
+    if not confirm:
+        return {"action": action, "count": len(rows), "sample": sample, "confirm": False}
+    grouped: dict[Any, list[InboxItem]] = defaultdict(list)
+    for row in rows:
+        grouped[row.connector_id].append(row)
+    deleted = 0
+    for connector_id, items in grouped.items():
+        runtime = await connector_for(db, user, connector_id)
+        if runtime is None:
+            continue
+        await runtime.call(
+            "bulk_delete",
+            {"message_ids": [item.message_id for item in items], "permanent": False, "dry_run": False},
+        )
+        for item in items:
+            item.status = "discarded"
+            item.unread = False
+            item.seen = True
+            deleted += 1
+    await db.commit()
+    return {"action": action, "count": deleted, "deleted": deleted, "confirm": True, "sample": sample}
+
+
 async def _ingest(
+    db: AsyncSession,
+    user: User,
+    runtimes: list[RuntimeConnector],
+    *,
+    unread_only: bool,
+    classify: bool,
+) -> int:
+    lock = _INGEST_LOCKS.setdefault(user.id, asyncio.Lock())
+    if lock.locked():
+        return 0
+    async with lock:
+        return await _ingest_locked(db, user, runtimes, unread_only=unread_only, classify=classify)
+
+
+async def _ingest_locked(
     db: AsyncSession,
     user: User,
     runtimes: list[RuntimeConnector],
