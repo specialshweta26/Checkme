@@ -1,11 +1,56 @@
-# Personal assistant
+# Checkme — Assistant Workspace
 
-Mobile-friendly web app. Sign in with **Google** or **Microsoft** (OAuth). That sign-in attaches Gmail or Outlook mail + calendar tools. Users can add more MCP servers to the same account. An orchestrator routes each request to the right connector without loading every tool into the model.
+Personal chief-of-staff for **mail, calendar, files, and connected MCP systems**. Sign in with Google or Microsoft. That sign-in attaches Gmail or Outlook (mail + calendar). Add more MCP servers on the Connectors page. Chat never loads every tool into the model: it lists your connectors, searches the catalog, then calls one tool at a time.
+
+Design docs:
+
+- [High-level design (HLD)](docs/HLD.md) — system context, components, end-to-end flows
+- [Low-level design (LLD)](docs/LLD.md) — modules, APIs, data model, sequences
+
+## What you can do
+
+| Surface | What it does |
+| --- | --- |
+| **Chat** | Ask about mail, calendar, attachments, or any connected MCP. Open threads, summarize, send (with in-app confirm), schedule later work. **See full email** on mail answers. |
+| **Inbox** | Background ingest of Gmail/Outlook. Newest 40 pending cards. Classify reply / respond / discard, draft a thread-aware reply, rephrase, attach files, send, or delete. **See full email** on every summary. |
+| **Connectors** | Link the other mailbox, or add an MCP URL (OAuth, bearer, or none). |
+| **Tasks** | One-shot or recurring jobs the scheduler runs even when you are logged out. |
+
+Notifications use a red bell. New mail is ingested by an API worker (no browser session required). The inbox list stays at 40 cards: older pending cards are dropped in-app when newer mail arrives.
+
+## Architecture (snapshot)
+
+```mermaid
+flowchart LR
+  Browser["Next.js PWA<br/>apps/web"] -->|"cookie + /api/* proxy"| API["FastAPI<br/>apps/api"]
+  API --> PG["Postgres + pgvector"]
+  API --> Redis["Redis sessions"]
+  API --> Store["Disk or MinIO"]
+  API --> OpenAI["OpenAI chat + embeddings"]
+  API --> Gmail["Gmail + Calendar"]
+  API --> Graph["Microsoft Graph"]
+  API --> MCP["User MCP servers"]
+```
+
+- **`apps/web`** — Next.js 15 PWA. Browser talks only to same-origin `/api/*`; Next proxies to FastAPI and forwards the session cookie.
+- **`apps/api`** — Auth, chat agent, inbox worker, task scheduler, file storage, connector runtime.
+- **`packages/gmail_mcp`**, **`packages/outlook_mcp`**, **`packages/connector_core`** — Shared mail/calendar tool names; in-process connectors (and optional stdio MCP servers for Cursor).
 
 ## Branches
 
-- **`local`** — use this branch on your machine. Run the stack with Docker Compose below.
+- **`local`** — machine development. Run with Docker Compose below.
 - **`main`** — Render deploys from this branch. Blueprint: [`render.yaml`](render.yaml).
+
+## Repo layout
+
+```
+apps/web          Next.js PWA (chat, inbox, connectors, tasks)
+apps/api          FastAPI, agent, OAuth, workers
+packages/connector_core   Shared ToolSpec, mail/calendar catalog, text helpers
+packages/gmail_mcp        Gmail + Google Calendar connector
+packages/outlook_mcp      Microsoft Graph mail + calendar connector
+deploy/postgres           Render Postgres image with pgvector
+```
 
 ## Run locally
 
@@ -17,43 +62,47 @@ python3 -c "import secrets; print('SESSION_SECRET=' + secrets.token_urlsafe(48))
 python3 -c "from cryptography.fernet import Fernet; print('TOKEN_ENCRYPTION_KEY=' + Fernet.generate_key().decode())"
 ```
 
-3. Put your OpenAI key in `OPENAI_API_KEY`. Do not commit `.env`.
-4. Create a Google OAuth **Web** client. Redirect URI: `http://localhost:3000/api/auth/google/callback`.
-5. Create a Microsoft Entra app (accounts in any org + personal). Redirect URI: `http://localhost:3000/api/auth/microsoft/callback`. Enable `Mail.ReadWrite`, `Mail.Send`, `Calendars.Read`, `offline_access`.
-6. Start everything:
+3. Set `OPENAI_API_KEY`. Do not commit `.env`.
+4. Google OAuth **Web** client. Redirect URI: `http://localhost:3000/api/auth/google/callback`.
+5. Microsoft Entra app (any org + personal accounts). Redirect URI: `http://localhost:3000/api/auth/microsoft/callback`. Enable the Graph scopes listed in [HLD](docs/HLD.md#oauth-scopes).
+6. Start:
 
 ```bash
 docker compose up --build
 ```
 
-Open [http://localhost:3000](http://localhost:3000). Optional Letta memory: `docker compose --profile letta up`.
+Open [http://localhost:3000](http://localhost:3000). API is `localhost:8001` inside Compose (`8000` in the container). Optional Letta memory: `docker compose --profile letta up`.
+
+API tests (from `apps/api`):
+
+```bash
+.venv/bin/python -m pytest -q
+```
 
 ## Deploy on Render (`main`)
 
-1. Push `main` to GitHub (this repo).
-2. In [Render](https://dashboard.render.com): **New → Blueprint**, select the repo, branch `main`.
-3. Fill the prompted secrets: `OPENAI_API_KEY`, Google and Microsoft OAuth client values.
-4. After the first deploy, copy the `checkme-web` URL (for example `https://checkme-web.onrender.com`).
+1. Push `main` to GitHub.
+2. In Render: **New → Blueprint**, repo, branch `main`.
+3. Fill secrets: `OPENAI_API_KEY`, Google and Microsoft OAuth client values. Put OAuth and OpenAI on **checkme-api**, not only the env group.
+4. After first deploy, copy the `checkme-web` URL.
 5. Add that origin as an OAuth redirect:
    - Google: `{PUBLIC_WEB_URL}/api/auth/google/callback`
    - Microsoft: `{PUBLIC_WEB_URL}/api/auth/microsoft/callback`
 
-`TOKEN_ENCRYPTION_KEY` and `SESSION_SECRET` are generated by Render. Attachments on Render are stored on a disk on `checkme-api` (MinIO stays local-only). Do not commit `.env`.
+`TOKEN_ENCRYPTION_KEY` and `SESSION_SECRET` are generated by Render. Attachments on Render use a disk on `checkme-api` (`FILE_STORAGE=disk`). MinIO is local-only.
 
-## What sign-in does
+## Sign-in
 
-- **Continue with Google** → attaches the built-in `gmail` connector (Gmail + Calendar).
-- **Continue with Microsoft** → attaches the built-in `outlook` connector (Graph mail + Calendar).
-- **Connectors** page: link the other mailbox, or add an MCP URL (OAuth, bearer token, or no auth).
+- **Continue with Google** → built-in `gmail` connector (Gmail + Calendar + Meet).
+- **Continue with Microsoft** → built-in `outlook` connector (Graph mail + Calendar + Teams).
+- **Connectors** → link the other mailbox, or add an MCP URL.
 
-## Tools (same names on Gmail and Outlook)
+Refresh tokens are stored encrypted per account (`TOKEN_ENCRYPTION_KEY`). The web app does not put provider tokens in the browser.
 
-List/search/read mail, whole threads, thread summaries, drafts, send/reply/forward (confirm in the UI), bulk delete to trash (confirm + preview), attachments (download link, never sent to the model), calendar list/search/free slots.
+## Mail and calendar tools
 
-## Layout
+Gmail and Outlook expose the **same tool names** (`list_messages`, `get_thread`, `send_message`, `create_event`, `empty_folder`, …). Chat discovers them with `list_connectors` → `search_tools` → `get_tool_schema` → `call_tool`. Destructive sends, deletes, and meeting creates wait for an in-app Confirm button.
 
-- `apps/web` — Next.js PWA
-- `apps/api` — FastAPI, router, agent loop, OAuth
-- `packages/gmail_mcp` / `packages/outlook_mcp` — in-process connectors and optional stdio MCP servers (`gmail-mcp`, `outlook-mcp`)
+Opening or summarizing mail loads the **full thread** (Outlook `conversationId` / Gmail `threadId`), not only the latest reply. Inbox and chat both offer **See full email**.
 
-Standalone MCP (for Cursor) needs a refresh token in the environment. The web app stores tokens encrypted per user instead.
+Standalone MCP (`gmail-mcp`, `outlook-mcp`) for Cursor needs a refresh token in the environment. This web app stores tokens encrypted per user instead.
