@@ -12,12 +12,12 @@ Design docs:
 
 | Surface | What it does |
 | --- | --- |
-| **Chat** | Ask about mail, calendar, attachments, or any connected MCP. Open threads, summarize, send (with in-app confirm), schedule later work. **See full email** on mail answers. |
-| **Inbox** | Background ingest of Gmail/Outlook. Newest 40 pending cards. Classify reply / respond / discard, draft a thread-aware reply, rephrase, attach files, send, or delete. **See full email** on every summary. |
+| **Chat** | Ask about mail, calendar, attachments, or any connected MCP. Open threads, summarize, send (with in-app confirm, including **Cc/Bcc**), schedule later work. **See full email** on mail answers. |
+| **Inbox** | Background ingest of Gmail/Outlook **To and Cc** (Bcc when the mailbox exposes it). Newest 40 pending cards. Classify reply / respond / discard, draft a thread-aware reply, rephrase, attach files, add **Cc/Bcc/Reply all**, send, or delete. **See full email** on every summary. |
 | **Connectors** | Link the other mailbox, or add an MCP URL (OAuth, bearer, or none). |
 | **Tasks** | One-shot or recurring jobs the scheduler runs even when you are logged out. |
 
-Notifications use a red bell. New mail is ingested by an API worker (no browser session required). The inbox list stays at 40 cards: older pending cards are dropped in-app when newer mail arrives.
+Notifications use a red bell, including mail where you are on **Cc**. New mail is ingested by an API worker (no browser session required). The inbox list stays at 40 cards: older pending cards are dropped in-app when newer mail arrives. Chief-of-staff briefing covers CC’d mail in its own section.
 
 ## Architecture (snapshot)
 
@@ -102,8 +102,8 @@ Refresh tokens are stored encrypted per account (`TOKEN_ENCRYPTION_KEY`). The we
 
 ## Mail and calendar tools
 
-Gmail and Outlook expose the **same tool names** (`list_messages`, `get_thread`, `send_message`, `create_event`, `empty_folder`, …). Chat discovers them with `list_connectors` → `search_tools` → `get_tool_schema` → `call_tool`. Destructive sends, deletes, and meeting creates wait for an in-app Confirm button.
+Gmail and Outlook expose the **same tool names** (`list_messages`, `get_thread`, `send_message`, `reply`, `create_event`, `empty_folder`, …). Chat discovers them with `list_connectors` → `search_tools` → `get_tool_schema` → `call_tool`. Destructive sends, deletes, and meeting creates wait for an in-app Confirm button.
 
-Opening or summarizing mail loads the **full thread** (Outlook `conversationId` / Gmail `threadId`), not only the latest reply. Inbox and chat both offer **See full email**.
+`list_messages` returns inbox mail on **To or Cc**, each row tagged `recipient_role` (`to` | `cc` | `bcc`). `send_message` and `reply` accept extra `cc` / `bcc` (and `reply_all` on reply). Opening or summarizing mail loads the **full thread** (Outlook `conversationId` / Gmail `threadId`), not only the latest reply. Inbox and chat both offer **See full email**.
 
 Standalone MCP (`gmail-mcp`, `outlook-mcp`) for Cursor needs a refresh token in the environment. This web app stores tokens encrypted per user instead.

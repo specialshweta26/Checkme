@@ -193,8 +193,8 @@ flowchart TD
 ```mermaid
 flowchart LR
   subgraph Background
-    W[Worker 8s] --> List[list_messages]
-    List --> Upsert[upsert inbox_items]
+    W[Worker 8s] --> List[list_messages + cc:me]
+    List --> Upsert[upsert inbox_items + role]
     Upsert --> Trim[newest 40 pending]
     Trim --> LLM[get_thread + classify]
   end
@@ -276,4 +276,23 @@ flowchart TB
   API --> IdP
   API --> LLM
   API --> Store
+```
+
+## 13. To, Cc, and Bcc
+
+Mail on **Cc** (and **Bcc** when the mailbox still delivers it) is ingested, notified, triaged, and briefed. Send can add extra people.
+
+```mermaid
+flowchart TD
+  Inbox["list_messages folder=inbox"] --> Merge["merge_message_lists with cc:me"]
+  Merge --> Role["recipient_role to / cc / bcc"]
+  Role --> Card["inbox_items + bell badge"]
+  Role --> Staff["today_briefing: CC'd to you"]
+  Card --> UI["Inbox card: Cc'd to you"]
+  UI --> Send["POST /inbox/id/send"]
+  Chat["Chat send_message / reply"] --> Confirm["confirm preview to, cc, bcc, reply_all"]
+  Send --> Reply["reply cc, bcc, reply_all"]
+  Confirm --> Reply
+  Reply --> Gmail["Gmail compose Cc/Bcc"]
+  Reply --> Graph["Graph reply or createReply + PATCH"]
 ```

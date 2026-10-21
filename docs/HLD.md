@@ -9,7 +9,7 @@ Related: [README](../README.md) · [LLD](LLD.md) · [Diagrams](diagrams.md)
 Give one person a private workspace that can:
 
 1. Read and act on **mail and calendar** from Google and/or Microsoft.
-2. **Triage inbound mail** in the background and draft thread-aware replies.
+2. **Triage inbound mail** in the background — including messages where the user is on **Cc or Bcc** — and draft thread-aware replies (optional extra Cc/Bcc on send).
 3. Answer questions in **chat** using only that user’s connectors (builtin mail plus optional MCP).
 4. **Schedule work** for later without an open browser.
 5. Keep provider tokens and attachments **off the model** except as extracted text the user asked to use.
@@ -20,7 +20,7 @@ Non-goals (not in this codebase today): CSE / S/MIME, IMAP-POP import, Gmail his
 
 | Actor | Use cases |
 | --- | --- |
-| End user | Sign in, chat, triage inbox, send/rephrase, attach files, connect MCP, schedule tasks |
+| End user | Sign in, chat, triage inbox (To and Cc), send/rephrase with optional Cc/Bcc, attach files, connect MCP, schedule tasks |
 | Background workers | Ingest mail every ~8s, classify pending cards, run due scheduled tasks |
 | Identity providers | Google and Microsoft OAuth (sign-in + mail/calendar consent) |
 | LLM provider | OpenAI chat completions and embeddings |
@@ -30,7 +30,8 @@ Primary journeys:
 
 - Sign in → land on Chat.
 - “Open this mail thread …” → search → full `get_thread` → optional attachment summary → **See full email**.
-- New mail arrives while logged out → worker stores a card → bell + Inbox (max 40 pending).
+- New mail arrives while logged out (To or Cc) → worker stores a card → bell + Inbox (max 40 pending).
+- Send from Inbox → optional Cc, Bcc, Reply all on the drafted reply.
 - “Empty spam” / send / meeting invite → tool call → Confirm UI → execute.
 - “Email me this report in 20 minutes” → `schedule_task` → scheduler runs the agent later.
 
@@ -97,11 +98,11 @@ flowchart TB
 | --- | --- |
 | `/` | Google / Microsoft sign-in. Redirects to `/chat` if already signed in |
 | `/chat` | Transcript, composer, attach, confirm destructive tools, **See full email** |
-| `/inbox` | Triage cards, drafts, batch empty spam/drafts/trash, **See full email** |
+| `/inbox` | Triage cards (Cc’d-to-you badge), drafts, Cc/Bcc/Reply all on send, batch empty spam/drafts/trash, **See full email** |
 | `/connectors` | Builtin mail health + add MCP |
 | `/tasks` | List / edit scheduled work |
 
-`AppShell` owns the nav, conversation list, and notification bell. The bell subscribes to `/api/inbox/events` (SSE) and falls back to polling `/api/inbox/badge` every 3s if the stream dies (common on Render proxies).
+`AppShell` owns the nav, conversation list, and notification bell. The bell subscribes to `/api/inbox/events` (SSE) and falls back to polling `/api/inbox/badge` every 3s if the stream dies (common on Render proxies). Alert rows include `recipient_role` so CC’d mail is labeled in the panel.
 
 ## 6. End-to-end flows
 
@@ -150,7 +151,7 @@ Chat always runs `run_deep_agent`. The model does not receive hundreds of MCP to
 4. `call_tool` — execute on that slug; destructive tools return `awaiting_user_confirmation` until the UI posts the signed token.
 5. `inspect_result` — page a stored large payload (`result_id`).
 6. `schedule_task` — persist later work instead of fetching now.
-7. `staff` — briefing, commitments, voice, automations.
+7. `staff` — briefing (includes a **CC’d to you** section), commitments, voice, automations.
 
 After `search_messages` / `list_messages` / `get_message`, if the user asked to open, read, or summarize mail, the API **hydrates** `get_thread` (and attachment summary) so the model sees the whole conversation, not one reply.
 
@@ -166,8 +167,8 @@ sequenceDiagram
   participant G as Gmail/Graph
   participant UI as Web (if open)
   loop every 8s
-    W->>G: list_messages
-    W->>DB: upsert inbox_items
+    W->>G: list_messages (inbox + cc:me merge)
+    W->>DB: upsert inbox_items (to, cc, recipient_role)
     W->>DB: trim to newest 40 pending
     W->>API: classify_pending (LLM)
   end
@@ -177,7 +178,9 @@ sequenceDiagram
 ```
 
 - Ingest uses stored OAuth; it does not need the user to be in the app.
-- Classification uses `get_thread` (thread_id + message_id) so drafts follow the whole conversation.
+- `list_messages` merges the folder listing with a **Cc:me** search so CC’d mail is not dropped when the newest To mail fills the page. Each summary has `to`, `cc`, and `recipient_role` (`to` | `cc` | `bcc`).
+- Classification uses `get_thread` (thread_id + message_id) so drafts follow the whole conversation. Being on Cc is **not** a reason to discard.
+- Inbox send posts `cc`, `bcc`, and `reply_all` into connector `reply`. Chat confirm preview shows those fields.
 - `KEEP_PENDING = 40`. Overflow pending rows are marked discarded + seen (in-app only; mail is not deleted at the provider).
 - Live list and the bell share the same serialized card payload so a notification cannot show mail the Inbox cannot.
 
@@ -251,7 +254,7 @@ If a tool 401s, the connector is marked `auth_expired` and the user reconnects f
 | `connectors` | Builtin mail + MCP instances per user |
 | `server_cards`, `tool_index` | Shared catalog (embeddings reused across users of the same server) |
 | `chat_sessions`, `chat_messages` | Transcript + meta (attachments, mail_threads, confirms) |
-| `inbox_items` | Triage cards |
+| `inbox_items` | Triage cards (`to_header`, `cc_header`, `recipient_role`) |
 | `scheduled_tasks`, `automations` | Later work |
 | `memory_blocks`, `memory_passages` | Voice + episodic fallback if Letta is off |
 | `commitments`, `admin_items` | Staff extractions |
@@ -271,6 +274,7 @@ If a tool 401s, the connector is marked `auth_expired` and the user reconnects f
 ## 12. Risks and boundaries
 
 - Graph `$search` may omit `conversationId`; thread open must always pass `message_id` as backup (implemented).
+- Inbox folder pages can hide older CC mail; `list_messages` always merges a `cc:me` search so those still notify, classify, and brief (implemented).
 - Render EventSource often drops; badge fallback must include the `inbox` array (implemented).
 - Large MCP payloads are compacted; the model must `inspect_result` rather than assume truncation is final.
 - Confirmations are required in the interactive app; scheduled runs auto-confirm — keep prompts conservative.

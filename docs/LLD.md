@@ -107,14 +107,14 @@ erDiagram
 | `tool_index` | Unique `(server_key, tool_name)`. `search_tsv` generated, HNSW on `embedding` |
 | `chat_sessions` | `state` JSON (last source, confirm tools) |
 | `chat_messages` | `meta`: attachments, used_tools, pending_confirms, mail_threads, source |
-| `inbox_items` | Unique `(user_id, message_id)`. `classification` reply\|respond\|discard, `status` pending\|sent\|discarded |
+| `inbox_items` | Unique `(user_id, message_id)`. `to_header`, `cc_header`, `recipient_role` (`to`\|`cc`\|`bcc`). `classification` reply\|respond\|discard, `status` pending\|sent\|discarded |
 | `scheduled_tasks` | Index `(status, next_run_at)` |
 | `thread_summaries` | Cache for `summarize_thread` until `last_message_id` changes |
 | `memory_blocks` / `memory_passages` | Voice + episodic when Letta is unset |
 | `commitments` / `admin_items` / `automations` | Staff tools |
 | `tool_usage` / `tool_edges` | Routing feedback |
 
-`init_db` uses `create_all` plus a few `ALTER TABLE IF NOT EXISTS` patches. No separate migration tool.
+`init_db` uses `create_all` plus a few `ALTER TABLE IF NOT EXISTS` patches (`inbox_items.to_header`, `cc_header`, `recipient_role`). No separate migration tool.
 
 ## 5. HTTP API (FastAPI, prefix `/api`)
 
@@ -137,7 +137,7 @@ erDiagram
 - `GET /inbox?live=1` — optional ingest, no mark_seen
 - `GET /inbox/badge`, `POST /inbox/seen`
 - `GET /inbox/events` — SSE every 2s; live ingest every 5 ticks
-- `PATCH /inbox/{id}` draft, `POST .../rephrase|send|delete`
+- `PATCH /inbox/{id}` draft, `POST .../rephrase|send|delete` (`send` body: `draft`, `attachment_keys`, `cc`, `bcc`, `reply_all`)
 - `GET /inbox/{id}/thread`
 - `POST /inbox/batch` — `empty_spam` / `empty_drafts` / `empty_trash` / clear discard / delete ids (`confirm`)
 
@@ -169,7 +169,7 @@ System prompt rules that matter in production:
 
 - Discover, then `call_tool`. Catalog search is not an answer.
 - Gmail/Outlook **are** calendar. Meet = `create_google_meet`, Teams = `create_teams_meeting`.
-- After search, open/summarize mail with **`get_thread` + message_id**, never an empty `thread_id`.
+- After search, open/summarize mail with **`get_thread` + message_id**, never an empty `thread_id`. Cover CC’d mail (`recipient_role`). When sending, pass `cc` / `bcc` if the user named other people.
 - Large results → `inspect_result`, do not stop at “truncated”.
 - Future work → `schedule_task`. Clock-time meetings → `create_event` now.
 - Connector answers are a **detailed analyst briefing**, not a short brief.
@@ -195,7 +195,7 @@ flowchart TD
 
 `invoke_named` (`agent/invoke.py`):
 
-- `send_message` / `reply` / `forward` / `create_draft` load `attachment_keys` from storage into `files`.
+- `send_message` / `reply` / `forward` / `create_draft` load `attachment_keys` from storage into `files`. Confirm preview includes `to`, `cc`, `bcc`, `reply_all`.
 - Virtual tools: `summarize_thread`, `summarize_attachments`, `read_attachment_text`.
 - `get_message` / `get_thread`: hydrate attachment cards (preview URLs), do not dump bytes into the model.
 - `empty_folder` / `bulk_delete`: first call may be preview `dry_run` for the confirm card; execution sets `dry_run=False`.
@@ -247,14 +247,16 @@ Resolution (`packages/outlook_mcp/.../connector.py`):
 
 Gmail: `GET /threads/{id}` after resolving `threadId` from `messages/{id}` or from a subject search. Same `full` / quoted rules.
 
+`reply` extra recipients: Gmail composes To from Reply-To/From, merges Reply-all To/Cc plus extra `cc`, and sets `Bcc`. Outlook uses `reply` / `replyAll` when there are no extras or files; otherwise `createReply` / `createReplyAll`, PATCH merged `ccRecipients` / `bccRecipients`, attach, then send. `send_message` already takes `cc` and `bcc` on both providers.
+
 `GET /api/inbox/{id}/thread` and `GET /api/chat/thread` always pass `full=True`, `max_messages=100`.
 
 ## 8. Inbox pipeline
 
 ```mermaid
 flowchart TD
-  Worker["worker every 8s"] --> List["list_messages limit 30"]
-  List --> Upsert["upsert inbox_items by message_id"]
+  Worker["worker every 8s"] --> List["list_messages limit 40 + cc:me merge"]
+  List --> Upsert["upsert inbox_items by message_id (to, cc, role)"]
   Upsert --> Trim["_trim_pending newest 40"]
   Trim --> Drop["overflow: status=discarded, seen=true"]
   Trim --> Class["classify_pending max 6, sem 3"]
@@ -264,9 +266,13 @@ flowchart TD
 
 Constants (`inbox/service.py`): `KEEP_PENDING=40`, `MAX_CLASSIFY=6`, classes `reply | respond | discard`.
 
-`_classify_one` always prefers `get_thread`. If that fails, `get_message` then retry thread with the returned `thread_id`. Prompt includes up to 40 messages (bodies clipped, JSON clipped to 30k).
+`list_messages` (Gmail INBOX / Outlook inbox, no `page_token`) merges a second query (`cc:me` / Graph `cc:{mailbox}`) via `merge_message_lists` so CC hits are not truncated off the folder page. `_summary` sets `recipient_role` with `connector_core.mail_tools.recipient_role(my_email, to, cc)`: listed on To → `to`; listed on Cc only → `cc`; in inbox but listed on neither → `bcc`.
 
-Serialize includes `connector_slug` so the UI can fetch the full thread.
+`_classify_one` always prefers `get_thread`. If that fails, `get_message` then retry thread with the returned `thread_id`. Prompt includes to/cc/`recipient_role` and up to 40 messages (bodies clipped, JSON clipped to 30k). Do not discard only because the user is not primary To.
+
+Serialize and `_alert` include `to`, `cc`, `recipient_role`, and `connector_slug` (so the UI can fetch the full thread). `send_reply` parses address lists and calls connector `reply` with `cc`, `bcc`, `reply_all`.
+
+Staff `today_briefing` lists unread (limit 20) with role fields and a **CC’d to you** section. `ask_inbox` cites `recipient_role`.
 
 Batch mailbox actions call connector `empty_folder` per mail runtime (`spam|drafts|trash`).
 
@@ -302,6 +308,8 @@ Staff `learn_voice` updates the voice block from sent mail.
 | --- | --- |
 | Bell | `subscribeInbox` EventSource `/api/inbox/events`; `onerror` → `inboxBadge()` 3s; click `markInboxSeen` |
 | Inbox refresh | `GET /api/inbox?live=1`; listen `inbox-live` only if `detail.inbox` is an array |
+| Inbox send copy | Cc / Bcc inputs + Reply all; `POST /send` with parsed address lists |
+| Bell CC label | `recipient_role` `cc`/`bcc` → Cc / Bcc tag on the notify row |
 | See full email | `EmailThread.tsx` — inbox uses `item_id`; chat uses `mailRefsFromMeta(meta)` |
 | Confirm | `pending_confirms[]` with `token`; POST chat `{ confirmations: [{ token }] }` |
 | Attach | `uploadFiles` then state update (**await outside setState** — Next build requirement) |
@@ -325,7 +333,7 @@ Staff `learn_voice` updates the voice block from sent mail.
 | --- | --- |
 | `test_mail_thread.py` | Outlook resolves `message_id`, lists 2+ messages, keeps quotes when Graph returns 1, fills missing conversationId on search |
 | `test_deep_harness.py` | Catalog dumps not truncated, hydration calls `get_thread`, empty thread_id filled from prior search, prompt has get_thread / analyst rules |
-| `test_inbox_triage.py` | Classification aliases, serialize slug, newest-40 split |
+| `test_inbox_triage.py` | Classification aliases, serialize slug/role, newest-40 split, `recipient_role`, `merge_message_lists`, `_address_list` |
 | `test_attachments.py` | Previewable types |
 | `test_routing*.py` | Tool search / describe |
 
