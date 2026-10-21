@@ -152,6 +152,8 @@ def test_system_prompt_has_no_product_recipes():
     assert "create_google_meet" in lowered
     assert "create_teams_meeting" in lowered
     assert "empty_folder" in lowered
+    assert "get_thread" in lowered
+    assert "never call get_thread with an empty thread_id" in lowered
     assert "detailed analyst" in lowered
     assert "keep answers short" not in lowered
     assert "schedule_task and do not fetch now" in lowered
@@ -182,3 +184,54 @@ def test_last_text_skips_tool_calls():
     ai = SimpleNamespace(type="ai", tool_calls=[{"name": "call_tool"}], content="")
     final = SimpleNamespace(type="ai", tool_calls=[], content="Net sales were 12.")
     assert last_text([ai, final]) == "Net sales were 12."
+
+
+async def test_open_mail_hydrates_full_thread():
+    calls = []
+
+    async def fake_call(slug, tool, args):
+        calls.append((tool, dict(args)))
+        if tool == "search_messages":
+            return {"messages": [{"message_id": "AAMk1", "thread_id": "", "subject": "Re: Adidas"}]}
+        if tool == "get_thread":
+            return {
+                "thread_id": "AAQkConv",
+                "subject": "Adidas",
+                "message_count": 2,
+                "last_message_id": "AAMk1",
+                "messages": [
+                    {"message_id": "m0", "from": "Regina", "body": "Please find the profiles."},
+                    {"message_id": "AAMk1", "from": "Gourishanker", "body": "Please take this forward."},
+                ],
+            }
+        return {}
+
+    conn = _conn(slug="outlook", provider="outlook", name="Outlook", alias="outlook")
+    ctx = _ctx([conn], call_impl=fake_call, query="open this mail thread Adidas Data Engineer")
+    result = await call_user_tool(ctx, "outlook", "search_messages", {"query": "Adidas Data Engineer"})
+    assert result["opened_thread"]["message_count"] == 2
+    assert result["thread_id"] == "AAQkConv"
+    assert result["message_id"] == "AAMk1"
+    assert any(tool == "get_thread" and args.get("message_id") == "AAMk1" for tool, args in calls)
+    assert "outlook__get_thread" in ctx.used_tools
+
+
+async def test_get_thread_fills_empty_id_from_prior_search():
+    async def fake_call(slug, tool, args):
+        if tool == "search_messages":
+            return {"messages": [{"message_id": "m1", "thread_id": "t1", "subject": "Hi"}]}
+        if tool == "get_thread":
+            return {
+                "thread_id": args.get("thread_id") or "t1",
+                "message_count": 1,
+                "last_message_id": args.get("message_id") or "m1",
+                "messages": [{"message_id": "m1", "body": "hi"}],
+            }
+        return {}
+
+    conn = _conn(slug="outlook", provider="outlook", name="Outlook", alias="outlook")
+    ctx = _ctx([conn], call_impl=fake_call, query="find Adidas profiles")
+    await call_user_tool(ctx, "outlook", "search_messages", {"query": "Adidas profiles"})
+    out = await call_user_tool(ctx, "outlook", "get_thread", {"thread_id": ""})
+    assert out["thread_id"] == "t1"
+    assert out["last_message_id"] == "m1"

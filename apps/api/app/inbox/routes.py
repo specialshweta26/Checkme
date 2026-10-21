@@ -139,6 +139,22 @@ async def patch_draft(
         raise HTTPException(404, str(exc)) from exc
 
 
+@router.get("/{item_id}/thread")
+async def inbox_thread(
+    item_id: uuid.UUID,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        return await service.open_full_thread(db, user, item_id=item_id)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, str(exc)[:300]) from exc
+
+
 @router.post("/{item_id}/rephrase")
 async def rephrase_draft(
     item_id: uuid.UUID,

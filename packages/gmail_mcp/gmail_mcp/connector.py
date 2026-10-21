@@ -80,7 +80,7 @@ def _summary(msg: dict) -> dict:
     labels = msg.get("labelIds", [])
     return {
         "message_id": msg["id"],
-        "thread_id": msg.get("threadId"),
+        "thread_id": msg.get("threadId") or msg.get("id") or "",
         "subject": h.get("subject", ""),
         "from": h.get("from", ""),
         "date": format_local(h.get("date", ""), DEFAULT_TZ),
@@ -194,26 +194,57 @@ class GmailConnector(BaseConnector):
             "attachments": _attachments(msg.get("payload", {})),
         }
 
-    async def tool_get_thread(self, thread_id: str, max_messages: int = 50):
-        data = await self.api.json("GET", f"{GMAIL}/threads/{thread_id}", params={"format": "full"})
+    async def _resolve_thread_id(self, thread_id: str = "", message_id: str = "") -> str:
+        tid = (thread_id or "").strip()
+        mid = (message_id or "").strip()
+        if tid and (" " in tid or "<>" in tid or tid.lower().startswith(("re:", "fw:", "fwd:"))):
+            found = await self.tool_search_messages(tid, limit=5)
+            hit = (found.get("messages") or [None])[0]
+            if isinstance(hit, dict):
+                tid = (hit.get("thread_id") or "").strip() or tid
+                mid = mid or (hit.get("message_id") or "")
+        if not tid and mid:
+            msg = await self.api.json("GET", f"{GMAIL}/messages/{mid}", params={"format": "minimal"})
+            tid = (msg.get("threadId") or "").strip()
+        if tid:
+            return tid
+        if mid:
+            return mid
+        raise ToolError("thread_id or message_id is required")
+
+    async def tool_get_thread(self, thread_id: str = "", max_messages: int = 50, message_id: str = "", full: bool = False):
+        tid = await self._resolve_thread_id(thread_id, message_id)
+        try:
+            data = await self.api.json("GET", f"{GMAIL}/threads/{tid}", params={"format": "full"})
+        except Exception:
+            msg = await self.api.json("GET", f"{GMAIL}/messages/{tid}", params={"format": "minimal"})
+            tid = (msg.get("threadId") or tid).strip()
+            data = await self.api.json("GET", f"{GMAIL}/threads/{tid}", params={"format": "full"})
         msgs = data.get("messages", [])[-max_messages:]
+        keep_quoted = full or len(msgs) <= 1
+        body_limit = 20000 if full else 2500
         out = []
         for m in msgs:
             h = _headers(m)
             body, is_html = _bodies(m.get("payload", {}))
+            atts = _attachments(m.get("payload", {}))
             out.append(
                 {
                     "message_id": m["id"],
+                    "thread_id": m.get("threadId") or tid,
                     "from": h.get("from", ""),
                     "to": h.get("to", ""),
+                    "cc": h.get("cc", ""),
                     "date": format_local(h.get("date", ""), DEFAULT_TZ),
-                    "body": clean_body(body, is_html, 1500),
-                    "attachments": [a["filename"] for a in _attachments(m.get("payload", {}))],
+                    "subject": h.get("subject", ""),
+                    "body": clean_body(body, is_html, body_limit, keep_quoted=keep_quoted),
+                    "attachments": [a["filename"] for a in atts],
+                    "has_attachments": bool(atts),
                 }
             )
         first = _headers(msgs[0]) if msgs else {}
         return {
-            "thread_id": thread_id,
+            "thread_id": tid,
             "subject": first.get("subject", ""),
             "message_count": len(data.get("messages", [])),
             "last_message_id": msgs[-1]["id"] if msgs else None,

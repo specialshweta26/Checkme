@@ -3,6 +3,7 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { AttachmentWidget } from "../AttachmentWidget";
 import { AppShell } from "../components/AppShell";
+import { EmailThreadButton, mailRefsFromMeta } from "../components/EmailThread";
 import { Markdown } from "../components/Markdown";
 import { Thinking } from "../components/Thinking";
 import { deleteSession, getMe, listSessions, loadSession, uploadFiles, type ChatSessionRow, type Me, type UploadedFile } from "../lib";
@@ -182,6 +183,7 @@ export default function ChatPage() {
                 <div key={i} className="turn assistant">
                   <Markdown text={m.content} />
                   {sourceLabel(m.meta) ? <div className="source-chip">{sourceLabel(m.meta)}</div> : null}
+                  <EmailThreadButton refs={mailRefsFromMeta(m.meta)} />
                   {m.meta?.attachments?.length ? <AttachmentWidget items={m.meta.attachments} /> : null}
                   {m.meta?.clarify?.length ? (
                     <div className="chips" style={{ marginTop: 8 }}>

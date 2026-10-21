@@ -171,6 +171,7 @@ async def chat(body: ChatIn, user: User = Depends(current_user), db: AsyncSessio
             "pending_confirms": result.get("pending_confirms"),
             "attachments": result.get("attachments"),
             "source": result.get("source"),
+            "mail_threads": result.get("mail_threads") or [],
         }
         public_uploads = [
             {k: item.get(k) for k in ("key", "filename", "content_type", "kind", "download_url", "preview_url", "previewable", "size") if item.get(k) is not None}
@@ -187,6 +188,26 @@ class SummarizeIn(BaseModel):
     message_id: str
     attachment_id: str
     connector_slug: str
+
+
+@router.get("/thread")
+async def chat_thread(
+    slug: str = "",
+    thread_id: str = "",
+    message_id: str = "",
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    from app.inbox import service as inbox_service
+
+    try:
+        return await inbox_service.open_full_thread(db, user, slug=slug, thread_id=thread_id, message_id=message_id)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, str(exc)[:300]) from exc
 
 
 @router.post("/attachments/summarize")

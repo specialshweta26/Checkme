@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { AppShell } from "../components/AppShell";
+import { EmailThreadButton } from "../components/EmailThread";
 import { getMe, uploadFiles, type Me, type UploadedFile } from "../lib";
 
 type Classification = "reply" | "respond" | "discard" | "";
@@ -23,6 +24,7 @@ type InboxMail = {
   unread: boolean;
   seen: boolean;
   connector: string;
+  connector_slug?: string;
   sort_at?: string;
 };
 
@@ -348,6 +350,17 @@ export default function InboxPage() {
                       ))}
                     </ul>
                   ) : null}
+                  <EmailThreadButton
+                    refs={[
+                      {
+                        item_id: mail.id,
+                        connector_slug: mail.connector_slug,
+                        thread_id: mail.thread_id,
+                        message_id: mail.message_id,
+                        subject: mail.subject,
+                      },
+                    ]}
+                  />
                   <label className="inbox-draft-label">Drafted reply</label>
                   <textarea
                     className="inbox-draft"
