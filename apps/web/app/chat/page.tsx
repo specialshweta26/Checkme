@@ -253,7 +253,8 @@ export default function ChatPage() {
                 if (!picked.length) return;
                 try {
                   setUploadError("");
-                  setUploads((rows) => [...rows, ...(await uploadFiles(picked))]);
+                  const uploaded = await uploadFiles(picked);
+                  setUploads((rows) => [...rows, ...uploaded]);
                 } catch (err: any) {
                   setUploadError(err.message || "Upload failed");
                 }
