@@ -863,18 +863,26 @@ def system_prompt(user, connectors: list, memory: str) -> str:
 
 
 def _chat_model():
+    """gpt-6-luna function tools + reasoning only work on /v1/responses, not chat completions."""
+    from app.llm import reasoning_payload
+
     s = get_settings()
-    kwargs = {
-        "model": s.openai_model,
-        "api_key": s.openai_api_key,
-    }
-    effort = (s.openai_reasoning_effort or "").strip()
-    if effort:
-        kwargs["reasoning_effort"] = effort
-    try:
-        return ChatOpenAI(**kwargs, use_responses_api=False)
-    except TypeError:
-        return ChatOpenAI(**kwargs)
+    effort = (s.openai_reasoning_effort or "").strip() or "medium"
+    reasoning = reasoning_payload()
+    base = {"model": s.openai_model, "api_key": s.openai_api_key}
+    attempts = [
+        {"use_responses_api": True, "reasoning": reasoning, "verbosity": "medium", "service_tier": "default"},
+        {"use_responses_api": True, "reasoning": reasoning, "verbosity": "medium"},
+        {"use_responses_api": True, "reasoning": reasoning},
+        {"use_responses_api": True, "reasoning_effort": effort},
+        {"use_responses_api": True},
+    ]
+    for extra in attempts:
+        try:
+            return ChatOpenAI(**base, **extra)
+        except TypeError:
+            continue
+    return ChatOpenAI(**base)
 
 
 def _todo_middleware():
