@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from types import SimpleNamespace
 from typing import Any
 
 from openai import AsyncOpenAI
@@ -20,11 +21,68 @@ def openai_client() -> AsyncOpenAI:
     return _client
 
 
-def _chat_kwargs() -> dict[str, Any]:
-    effort = (get_settings().openai_reasoning_effort or "").strip()
-    if not effort:
-        return {}
-    return {"reasoning_effort": effort}
+def reasoning_payload() -> dict[str, str]:
+    effort = (get_settings().openai_reasoning_effort or "").strip() or "medium"
+    return {"effort": effort, "mode": "standard", "summary": "auto"}
+
+
+def _as_chat_completion(text: str) -> Any:
+    return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=text or ""))])
+
+
+def _output_text(resp: Any) -> str:
+    text = getattr(resp, "output_text", None)
+    if isinstance(text, str) and text.strip():
+        return text
+    chunks: list[str] = []
+    for item in getattr(resp, "output", None) or []:
+        for part in getattr(item, "content", None) or []:
+            value = getattr(part, "text", None)
+            if isinstance(value, str) and value:
+                chunks.append(value)
+    return "".join(chunks)
+
+
+def _split_messages(messages: list[dict[str, Any]]) -> tuple[str | None, list[dict[str, str]]]:
+    instructions: list[str] = []
+    items: list[dict[str, str]] = []
+    for raw in messages:
+        role = str(raw.get("role") or "user")
+        content = raw.get("content")
+        if not isinstance(content, str):
+            content = json.dumps(content, default=str) if content is not None else ""
+        if role == "system":
+            if content.strip():
+                instructions.append(content)
+            continue
+        items.append({"role": "assistant" if role == "assistant" else "user", "content": content})
+    return ("\n\n".join(instructions) if instructions else None), items
+
+
+def _responses_tools(tools: list[dict] | None) -> list[dict] | None:
+    if not tools:
+        return None
+    out: list[dict] = []
+    for tool in tools:
+        fn = tool.get("function") if isinstance(tool, dict) else None
+        if tool.get("type") == "function" and isinstance(fn, dict):
+            out.append(
+                {
+                    "type": "function",
+                    "name": fn.get("name"),
+                    "description": fn.get("description") or "",
+                    "parameters": fn.get("parameters") or {},
+                }
+            )
+        else:
+            out.append(tool)
+    return out
+
+
+def _text_format(response_format: dict | None) -> dict[str, Any]:
+    kind = (response_format or {}).get("type") if isinstance(response_format, dict) else None
+    fmt: dict[str, Any] = {"type": "json_object"} if kind == "json_object" else {"type": "text"}
+    return {"format": fmt, "verbosity": "medium"}
 
 
 async def chat_complete(
@@ -36,20 +94,27 @@ async def chat_complete(
     response_format: dict | None = None,
     max_tokens: int = 1200,
 ) -> Any:
+    """Call /v1/responses. gpt-6-luna cannot use function tools on chat completions with reasoning."""
+    instructions, items = _split_messages(messages)
     kwargs: dict[str, Any] = {
         "model": get_settings().openai_model,
-        "messages": messages,
-        "max_completion_tokens": max_tokens,
-        **_chat_kwargs(),
+        "service_tier": "default",
+        "input": items,
+        "text": _text_format(response_format),
+        "reasoning": reasoning_payload(),
+        "max_output_tokens": max_tokens,
     }
-    if tools:
-        kwargs["tools"] = tools
-        kwargs["tool_choice"] = tool_choice or "auto"
+    if instructions:
+        kwargs["instructions"] = instructions
+    converted = _responses_tools(tools)
+    if converted:
+        kwargs["tools"] = converted
+        if tool_choice:
+            kwargs["tool_choice"] = tool_choice
     if temperature is not None:
         kwargs["temperature"] = temperature
-    if response_format:
-        kwargs["response_format"] = response_format
-    return await openai_client().chat.completions.create(**kwargs)
+    resp = await openai_client().responses.create(**kwargs)
+    return _as_chat_completion(_output_text(resp))
 
 
 async def embed_texts(texts: list[str]) -> list[list[float]]:
