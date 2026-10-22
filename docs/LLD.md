@@ -346,7 +346,8 @@ See `.env.example`. Important knobs in `app/config.py`:
 | Key | Role |
 | --- | --- |
 | `PUBLIC_WEB_URL` | OAuth redirects + cookie Secure |
-| `OPENAI_API_KEY` / `OPENAI_MODEL` | Chat |
+| `OPENAI_API_KEY` / `OPENAI_MODEL` | Chat (default `gpt-6-luna`) |
+| `OPENAI_REASONING_EFFORT` | Chat reasoning (`medium`) |
 | `GOOGLE_*` / `MICROSOFT_*` | Must be on **checkme-api** in Render |
 | `SESSION_SECRET` / `TOKEN_ENCRYPTION_KEY` | Cookies + Fernet |
 | `FILE_STORAGE` | `s3` local, `disk` Render |

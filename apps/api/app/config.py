@@ -28,9 +28,9 @@ class Settings(BaseSettings):
     public_web_url: str = "http://localhost:3000"
 
     openai_api_key: str = ""
-    openai_model: str = "gpt-5.6-luna"
+    openai_model: str = "gpt-6-luna"
     openai_embedding_model: str = "text-embedding-3-small"
-    openai_reasoning_effort: str = "none"
+    openai_reasoning_effort: str = "medium"
     embedding_dims: int = 1536
 
     google_client_id: str = Field(default="", validation_alias=AliasChoices("GOOGLE_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_ID"))

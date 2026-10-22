@@ -20,11 +20,8 @@ def openai_client() -> AsyncOpenAI:
     return _client
 
 
-def _chat_kwargs(has_tools: bool) -> dict[str, Any]:
-    # gpt-5.6-luna rejects function tools unless reasoning_effort is none.
-    if has_tools:
-        return {"reasoning_effort": "none"}
-    effort = get_settings().openai_reasoning_effort
+def _chat_kwargs() -> dict[str, Any]:
+    effort = (get_settings().openai_reasoning_effort or "").strip()
     if not effort:
         return {}
     return {"reasoning_effort": effort}
@@ -43,7 +40,7 @@ async def chat_complete(
         "model": get_settings().openai_model,
         "messages": messages,
         "max_completion_tokens": max_tokens,
-        **_chat_kwargs(bool(tools)),
+        **_chat_kwargs(),
     }
     if tools:
         kwargs["tools"] = tools

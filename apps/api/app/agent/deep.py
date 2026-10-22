@@ -867,8 +867,10 @@ def _chat_model():
     kwargs = {
         "model": s.openai_model,
         "api_key": s.openai_api_key,
-        "reasoning_effort": "none",
     }
+    effort = (s.openai_reasoning_effort or "").strip()
+    if effort:
+        kwargs["reasoning_effort"] = effort
     try:
         return ChatOpenAI(**kwargs, use_responses_api=False)
     except TypeError:
