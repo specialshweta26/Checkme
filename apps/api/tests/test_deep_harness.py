@@ -145,6 +145,8 @@ def test_system_prompt_has_no_product_recipes():
     )
     lowered = prompt.lower()
     assert "list_connectors" in lowered
+    assert "capability phrase" in lowered
+    assert "gateway__tool_search return catalogs" in lowered
     assert "call_tool" in lowered
     assert "inspect_result" in lowered
     assert "schedule_task" in lowered

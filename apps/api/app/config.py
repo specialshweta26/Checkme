@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_model: str = "gpt-6-luna"
     openai_embedding_model: str = "text-embedding-3-small"
-    openai_reasoning_effort: str = "medium"
+    openai_reasoning_effort: str = "none"
     embedding_dims: int = 1536
 
     google_client_id: str = Field(default="", validation_alias=AliasChoices("GOOGLE_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_ID"))

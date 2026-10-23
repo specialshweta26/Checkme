@@ -76,7 +76,7 @@ services:
       - key: OPENAI_MODEL
         value: gpt-6-luna
       - key: OPENAI_REASONING_EFFORT
-        value: medium
+        value: none
       - fromGroup: checkme-secrets
 
   - type: pserv
@@ -116,7 +116,7 @@ envVarGroups:
       - key: OPENAI_MODEL
         value: gpt-6-luna
       - key: OPENAI_REASONING_EFFORT
-        value: medium
+        value: none
       - key: SESSION_SECRET
         generateValue: true
       - key: TOKEN_ENCRYPTION_KEY

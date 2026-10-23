@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.llm import embed_one
 from app.models import Connector, ServerCard, ToolEdge, ToolIndex, ToolUsage
+from app.routing.retrieve import capability_terms, embedding_query, lexical_tsquery, name_patterns, retrieve_score
 
 
 @dataclass
@@ -82,23 +83,39 @@ async def search_tools(db: AsyncSession, connectors: list[Connector], query: str
         if c.server_key:
             by_key[c.server_key].append(c)
 
-    vector = await embed_one(query)
+    terms = capability_terms(query)
+    tsq = lexical_tsquery(query)
+    likes = name_patterns(query) or ["%"]
+    vector = await embed_one(embedding_query(query))
     vec_lit = "[" + ",".join(f"{x:.7f}" for x in vector) + "]"
     sql = text(
         """
         SELECT tool_name, description, "group", input_schema, read_only, destructive,
                requires, produces, server_key,
                (1 - (embedding <=> CAST(:vec AS vector))) AS vscore,
-               ts_rank(search_tsv, plainto_tsquery('simple', :q)) AS tscore
+               CASE WHEN :tsq = '' THEN 0
+                    ELSE COALESCE(ts_rank(search_tsv, to_tsquery('simple', :tsq)), 0)
+               END AS tscore
         FROM tool_index
         WHERE server_key = ANY(:keys)
-          AND (embedding IS NOT NULL OR search_tsv @@ plainto_tsquery('simple', :q))
+          AND (
+                embedding IS NOT NULL
+                OR (:tsq <> '' AND search_tsv @@ to_tsquery('simple', :tsq))
+                OR replace(tool_name, '_', ' ') ILIKE ANY(:likes)
+              )
         ORDER BY (COALESCE(1 - (embedding <=> CAST(:vec AS vector)), 0) * 0.7
-                  + COALESCE(ts_rank(search_tsv, plainto_tsquery('simple', :q)), 0) * 0.3) DESC
+                  + CASE WHEN :tsq = '' THEN 0
+                         ELSE COALESCE(ts_rank(search_tsv, to_tsquery('simple', :tsq)), 0)
+                    END * 0.3) DESC
         LIMIT :limit
         """
     )
-    rows = (await db.execute(sql, {"vec": vec_lit, "q": query, "keys": keys, "limit": limit * 3})).all()
+    rows = (
+        await db.execute(
+            sql,
+            {"vec": vec_lit, "tsq": tsq, "likes": likes, "keys": keys, "limit": limit * 3},
+        )
+    ).all()
     hits: list[ToolHit] = []
     for row in rows:
         for conn in by_key.get(row.server_key, []):
@@ -116,7 +133,11 @@ async def search_tools(db: AsyncSession, connectors: list[Connector], query: str
                     destructive=row.destructive,
                     requires=list(row.requires or []),
                     produces=list(row.produces or []),
-                    score=float((row.vscore or 0) * 0.7 + (row.tscore or 0) * 0.3),
+                    score=retrieve_score(
+                        row.tool_name,
+                        float((row.vscore or 0) * 0.7 + (row.tscore or 0) * 0.3),
+                        terms,
+                    ),
                 )
             )
     hits.sort(key=lambda h: h.score, reverse=True)

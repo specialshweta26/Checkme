@@ -3,9 +3,12 @@ from app.llm import _as_chat_completion, _responses_tools, _split_messages, _tex
 
 def test_reasoning_payload_shape():
     payload = reasoning_payload()
-    assert payload["mode"] == "standard"
-    assert payload["summary"] == "auto"
     assert payload["effort"]
+    if payload["effort"] == "none":
+        assert "summary" not in payload
+    else:
+        assert payload["mode"] == "standard"
+        assert payload["summary"] == "auto"
 
 
 def test_split_messages_moves_system_to_instructions():
