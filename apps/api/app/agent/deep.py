@@ -24,6 +24,20 @@ from app.connectors.registry import MAIL_CORE_TOOLS
 from app.connectors.runtime import RuntimeConnector
 from app.models import Connector, ServerCard
 from app.routing.describe import catalog_lines
+from app.connectors.shape import slim_search
+from app.routing.retrieve import (
+    GATEWAY_EXECUTE_NAMES,
+    GATEWAY_RESOLVE_NAMES,
+    GATEWAY_SEARCH_NAMES,
+    capability_query,
+    capability_terms,
+    gateway_search_query,
+    is_catalog_tool,
+    nested_tool_rows,
+    resolve_call_args,
+    search_call_args,
+    wrap_through_execute,
+)
 from app.routing.select import load_named, search_tools, user_connectors
 from connector_core import ConnectorAuthError, MAIL_CALENDAR_TOOLS, ToolError
 from connector_core.text import clip
@@ -56,6 +70,7 @@ class RunContext:
     query: str = ""
     call_impl: Any = None
     results: list[dict] = field(default_factory=list)
+    gateway_surface: dict[str, dict] = field(default_factory=dict)
 
 
 def _json_size(value: Any) -> int:
@@ -259,6 +274,114 @@ def _source_tool(slug: str, tool_name: str, args: dict) -> str:
     return f"{slug}__{tool_name}"
 
 
+def _rewrite_catalog_search_args(tool_name: str, args: dict, fallback_query: str) -> dict:
+    if not is_catalog_tool(tool_name) or "search" not in tool_name.lower():
+        return args
+    key = next((k for k in ("query", "q", "search", "text") if k in args), "query")
+    raw = args.get(key) or fallback_query
+    return {**args, key: gateway_search_query(raw)}
+
+
+def _schema_from_resolve(slug: str, tool_name: str, result: Any) -> dict | None:
+    if not isinstance(result, dict):
+        return None
+    item = result.get("tool") or result.get("resolved") or result.get("candidate") or result
+    if not isinstance(item, dict):
+        return None
+    nested = item.get("tool") if isinstance(item.get("tool"), dict) else item
+    schema = (
+        nested.get("input_schema")
+        or nested.get("inputSchema")
+        or nested.get("parameters")
+        or nested.get("arguments")
+        or {}
+    )
+    if not isinstance(schema, dict):
+        schema = {"type": "object", "properties": {}}
+    if schema.get("properties") is None and any(k in nested for k in ("type", "properties")):
+        schema = {k: nested[k] for k in nested if k in {"type", "properties", "required", "additionalProperties"}}
+    name = nested.get("public_name") or nested.get("name") or nested.get("tool_name") or tool_name
+    desc = nested.get("description") or item.get("description") or ""
+    if not name:
+        return None
+    return {
+        "connector_slug": slug,
+        "tool_name": name,
+        "description": desc,
+        "parameters": schema if schema.get("type") or schema.get("properties") else {"type": "object", "additionalProperties": True},
+        "read_only": True,
+        "destructive": False,
+    }
+
+
+async def _silent_call(ctx: RunContext, conn, tool_name: str, args: dict) -> Any:
+    if ctx.call_impl is not None:
+        return await ctx.call_impl(conn.slug, tool_name, args)
+    return await invoke_named(ctx.db, ctx.user, conn, tool_name, args, ctx.attachments)
+
+
+async def _load_gateway_surface(ctx: RunContext, conn) -> dict:
+    cached = ctx.gateway_surface.get(conn.slug)
+    if cached:
+        return cached
+    surface = {"search": None, "search_schema": {}, "execute": None, "resolve": None, "resolve_schema": {}}
+    if ctx.db is None:
+        ctx.gateway_surface[conn.slug] = surface
+        return surface
+    wanted = {(conn.slug, name) for name in (*GATEWAY_SEARCH_NAMES, *GATEWAY_EXECUTE_NAMES, *GATEWAY_RESOLVE_NAMES)}
+    found = await load_named(ctx.db, [conn], wanted)
+    by_name = {hit.tool_name: hit for hit in found}
+    for name in GATEWAY_SEARCH_NAMES:
+        if name in by_name:
+            surface["search"] = name
+            surface["search_schema"] = by_name[name].schema or {}
+            break
+    for name in GATEWAY_EXECUTE_NAMES:
+        if name in by_name:
+            surface["execute"] = name
+            break
+    for name in GATEWAY_RESOLVE_NAMES:
+        if name in by_name:
+            surface["resolve"] = name
+            surface["resolve_schema"] = by_name[name].schema or {}
+            break
+    ctx.gateway_surface[conn.slug] = surface
+    return surface
+
+
+async def _expand_gateway_catalog(ctx: RunContext, conn, query: str) -> list[dict]:
+    if getattr(conn, "kind", None) == "builtin" or getattr(conn, "provider", None) in {"gmail", "outlook"}:
+        return []
+    surface = await _load_gateway_surface(ctx, conn)
+    search_name = surface.get("search")
+    execute_name = surface.get("execute")
+    if not search_name or not execute_name:
+        return []
+    queries: list[str] = []
+    for candidate in (gateway_search_query(query), capability_query(query)):
+        if candidate and candidate not in queries:
+            queries.append(candidate)
+    parsed: list[dict] = []
+    for q in queries:
+        try:
+            raw = await _silent_call(ctx, conn, search_name, search_call_args(surface.get("search_schema"), q))
+        except Exception:  # noqa: BLE001
+            log.warning("gateway catalog search failed on %s", conn.slug, exc_info=True)
+            continue
+        slim = slim_search(raw, q) if isinstance(raw, dict) else {"candidates": []}
+        parsed = [item for item in (slim.get("candidates") or []) if isinstance(item, dict)]
+        if parsed:
+            break
+    rows = nested_tool_rows(
+        conn.slug,
+        conn.alias or conn.name,
+        parsed,
+        execute_name,
+        capability_terms(query),
+    )
+    return rows
+
+
 _MAIL_OPEN_HINTS = (
     "open",
     "summarize",
@@ -447,15 +570,13 @@ async def list_user_connectors(ctx: RunContext) -> list[dict]:
 
 
 async def search_user_tools(ctx: RunContext, query: str, connector_slug: str | None = None) -> list[dict]:
-    if ctx.db is None:
-        return []
     conns = list(ctx.connectors.values())
     if connector_slug:
         conn = ctx.connectors.get(connector_slug)
         if conn is None:
             return [{"error": f"connector '{connector_slug}' is not connected for this user"}]
         conns = [conn]
-    hits = await search_tools(ctx.db, conns, query, 40)
+    hits = await search_tools(ctx.db, conns, query, 40) if ctx.db is not None else []
     q = (query or "").lower()
     wanted: set[tuple[str, str]] = set()
     mail_conns = [c for c in conns if c.provider in {"gmail", "outlook"}]
@@ -478,31 +599,10 @@ async def search_user_tools(ctx: RunContext, query: str, connector_slug: str | N
     if any(k in q for k in ("spam", "junk", "trash", "drafts", "drafted", "delete all", "empty", "clear all", "bulk")):
         for c in mail_conns:
             wanted.update((c.slug, n) for n in ("empty_folder", "bulk_delete", "list_drafts", "delete_draft"))
-    if wanted:
+    if wanted and ctx.db is not None:
         extra = await load_named(ctx.db, mail_conns, wanted)
-        seen = {(h.slug, h.tool_name) for h in hits}
         hits = extra + [h for h in hits if (h.slug, h.tool_name) not in {(e.slug, e.tool_name) for e in extra}]
-        del seen
-    # #region agent log
-    from app.debug_ndjson import dbg
-
-    dbg(
-        "D",
-        "deep.py:search_user_tools",
-        "catalog search results",
-        {
-            "query": (query or "")[:80],
-            "slug": connector_slug or "",
-            "tools": [f"{h.slug}.{h.tool_name}" for h in hits],
-            "has_get_thread": any(h.tool_name == "get_thread" for h in hits),
-            "has_get_message": any(h.tool_name == "get_message" for h in hits),
-            "has_send_message": any(h.tool_name == "send_message" for h in hits),
-            "has_summarize_attachments": any(h.tool_name == "summarize_attachments" for h in hits),
-            "has_list_attachments": any(h.tool_name == "list_attachments" for h in hits),
-        },
-    )
-    # #endregion
-    return [
+    local = [
         {
             "connector_slug": hit.slug,
             "connector_name": hit.connector_name,
@@ -515,6 +615,53 @@ async def search_user_tools(ctx: RunContext, query: str, connector_slug: str | N
         }
         for hit in hits
     ]
+    nested: list[dict] = []
+    for conn in conns:
+        already = [
+            row
+            for row in local
+            if row["connector_slug"] == conn.slug
+            and not is_catalog_tool(row["tool_name"])
+            and row["tool_name"] not in GATEWAY_EXECUTE_NAMES
+        ]
+        if already:
+            continue
+        nested.extend(await _expand_gateway_catalog(ctx, conn, query))
+    nested_keys = {(row["connector_slug"], row["tool_name"]) for row in nested}
+    data_local = [
+        row
+        for row in local
+        if not is_catalog_tool(row["tool_name"])
+        and row["tool_name"] not in GATEWAY_EXECUTE_NAMES
+        and (row["connector_slug"], row["tool_name"]) not in nested_keys
+    ]
+    catalog_local = [
+        row
+        for row in local
+        if is_catalog_tool(row["tool_name"]) or row["tool_name"] in GATEWAY_EXECUTE_NAMES
+    ]
+    merged = nested + data_local + (catalog_local if not nested else [])
+    # #region agent log
+    from app.debug_ndjson import dbg
+
+    dbg(
+        "D",
+        "deep.py:search_user_tools",
+        "catalog search results",
+        {
+            "query": (query or "")[:80],
+            "slug": connector_slug or "",
+            "tools": [f"{row['connector_slug']}.{row['tool_name']}" for row in merged],
+            "nested": len(nested),
+            "has_get_thread": any(row["tool_name"] == "get_thread" for row in merged),
+            "has_get_message": any(row["tool_name"] == "get_message" for row in merged),
+            "has_send_message": any(row["tool_name"] == "send_message" for row in merged),
+            "has_summarize_attachments": any(row["tool_name"] == "summarize_attachments" for row in merged),
+            "has_list_attachments": any(row["tool_name"] == "list_attachments" for row in merged),
+        },
+    )
+    # #endregion
+    return [{k: v for k, v in row.items() if k != "score"} for row in merged]
 
 
 def _builtin_mail_spec(conn, tool_name: str) -> dict | None:
@@ -537,9 +684,7 @@ async def get_user_tool_schema(ctx: RunContext, connector_slug: str, tool_name: 
     conn = ctx.connectors.get(connector_slug)
     if conn is None:
         return {"error": f"connector '{connector_slug}' is not connected for this user"}
-    if ctx.db is None:
-        return {"error": "tool catalog is unavailable"}
-    hits = await load_named(ctx.db, [conn], {(connector_slug, tool_name)})
+    hits = await load_named(ctx.db, [conn], {(connector_slug, tool_name)}) if ctx.db is not None else []
     if not hits:
         fallback = _builtin_mail_spec(conn, tool_name)
         # #region agent log
@@ -554,6 +699,33 @@ async def get_user_tool_schema(ctx: RunContext, connector_slug: str, tool_name: 
         # #endregion
         if fallback:
             return fallback
+        surface = await _load_gateway_surface(ctx, conn)
+        execute = surface.get("execute")
+        if execute and tool_name != execute and not is_catalog_tool(tool_name):
+            resolve = surface.get("resolve")
+            if resolve:
+                try:
+                    raw = await _silent_call(
+                        ctx, conn, resolve, resolve_call_args(surface.get("resolve_schema"), tool_name)
+                    )
+                    shaped = _schema_from_resolve(connector_slug, tool_name, raw)
+                    if shaped:
+                        shaped["execute_via"] = execute
+                        return shaped
+                except Exception:  # noqa: BLE001
+                    log.warning("gateway resolve failed on %s %s", connector_slug, tool_name, exc_info=True)
+            return {
+                "connector_slug": connector_slug,
+                "tool_name": tool_name,
+                "description": (
+                    f"Data tool on {conn.alias or conn.name}. Call call_tool with this tool_name; "
+                    f"it runs through {execute}."
+                ),
+                "parameters": {"type": "object", "additionalProperties": True},
+                "execute_via": execute,
+                "read_only": True,
+                "destructive": False,
+            }
         return {"error": f"unknown tool {tool_name} on {connector_slug}. search_tools first."}
     hit = hits[0]
     return {
@@ -578,6 +750,11 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
         recovered = await load_named(ctx.db, [conn], {(connector_slug, tool_name)})
         hit = recovered[0] if recovered else None
     spec = next((s for s in MAIL_CALENDAR_TOOLS if s.name == tool_name), None)
+    if hit is None and spec is None:
+        surface = await _load_gateway_surface(ctx, conn)
+        execute = surface.get("execute")
+        tool_name, args = wrap_through_execute(tool_name, args, execute)
+    args = _rewrite_catalog_search_args(tool_name, args, ctx.query)
     destructive = bool(hit.destructive if hit is not None else (spec.destructive if spec else False))
     if destructive and not ctx.auto_confirm and not confirmed(ctx.confirmations, connector_slug, tool_name):
         token = sign_confirm("tool", {"slug": connector_slug, "tool": tool_name, "args": args})
@@ -757,7 +934,7 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
         return dumps_full(await list_user_connectors(ctx))
 
     async def search_tools_fn(query: str, connector_slug: str | None = None) -> str:
-        """Search this user's tool catalog by capability (what the tool must return). Pass a short phrase, not the full user sentence. Omit brand names; pass connector_slug when known. Returns names and descriptions, not data."""
+        """Search this user's tool catalog by capability (what the tool must return). Pass a short phrase, not the full user sentence. Omit brand names; pass connector_slug when known. Gateway catalogs are expanded into data tools. Returns names and descriptions, not data."""
         return dumps_full(await search_user_tools(ctx, query, connector_slug))
 
     async def get_tool_schema(connector_slug: str, tool_name: str) -> str:
@@ -839,8 +1016,11 @@ def system_prompt(user, connectors: list, memory: str) -> str:
         "Omit brand names, people, and dates from the search query; pass those as tool arguments after get_tool_schema. "
         "Once you know the source, pass connector_slug so search is not split across mail and analytics. "
         "Mail and analytics are different connectors — do not treat a missing mail tool as a missing MCP connector.\n"
+        "search_tools already expands gateway catalogs into callable data tools. Prefer those names. "
+        "Do not call gateway catalog tools from core_tools unless search_tools returned no data tool.\n"
         "Read get_tool_schema before filling arguments. Argument names come from that schema and description.\n"
         "Search, resolve, list_mcps, and gateway__tool_search return catalogs, not answers. After you pick a data tool, call_tool it. "
+        "If a data tool returns a snapshot or as-of date, report those figures and the as-of date — that is still the answer. "
         "If the first search is weak, search once more with different capability words, then call_tool. Do not stop on a catalog search.\n"
         "Call tools as many times as the task needs — different connectors, different argument sets, different windows. Combine results yourself.\n"
         "Gmail and Outlook are mail AND calendar. Never say there is no calendar connector when gmail or outlook is listed. "

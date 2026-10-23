@@ -12,6 +12,7 @@ from app.agent.deep import (
     inspect_user_result,
     last_text,
     list_user_connectors,
+    search_user_tools,
     system_prompt,
 )
 
@@ -98,6 +99,71 @@ async def test_multi_call_records_each_execute_source():
     assert "get_sales_dashboard" in json.dumps(ctx.sources)
 
 
+def _gateway_surface(**kwargs):
+    surface = {
+        "search": "gateway__tool_search",
+        "search_schema": {"type": "object", "properties": {"query": {"type": "string"}}},
+        "execute": "gateway__execute",
+        "resolve": None,
+        "resolve_schema": {},
+    }
+    surface.update(kwargs)
+    return surface
+
+
+async def test_search_tools_expands_gateway_catalog():
+    calls = []
+
+    async def fake_call(slug, tool, args):
+        calls.append((tool, dict(args)))
+        return {
+            "candidates": [
+                {"public_name": "gateway__tool_search", "description": "catalog", "score": 0.99},
+                {"public_name": "get_sales_dashboard", "description": "KPIs and stock snapshot", "score": 0.4},
+            ]
+        }
+
+    ctx = _ctx([_conn()], call_impl=fake_call)
+    ctx.gateway_surface["digital"] = _gateway_surface()
+    rows = await search_user_tools(ctx, "inventory left")
+    names = [row["tool_name"] for row in rows]
+    assert names[0] == "get_sales_dashboard"
+    assert "gateway__tool_search" not in names
+    assert rows[0]["execute_via"] == "gateway__execute"
+    assert calls[0][0] == "gateway__tool_search"
+    assert "inventory" in calls[0][1]["query"]
+
+
+async def test_nested_tool_runs_through_execute():
+    calls = []
+
+    async def fake_call(slug, tool, args):
+        calls.append((tool, dict(args)))
+        return {"on_hand": 16}
+
+    ctx = _ctx([_conn()], call_impl=fake_call)
+    ctx.gateway_surface["digital"] = _gateway_surface()
+    out = await call_user_tool(ctx, "digital", "get_sales_dashboard", {"brand": "acme"})
+    assert out["on_hand"] == 16
+    assert calls[0][0] == "gateway__execute"
+    assert calls[0][1]["tool_name"] == "get_sales_dashboard"
+    assert calls[0][1]["arguments"]["brand"] == "acme"
+    assert ctx.sources[-1]["source_tool"] == "digital__get_sales_dashboard"
+
+
+async def test_catalog_search_query_is_rewritten():
+    calls = []
+
+    async def fake_call(slug, tool, args):
+        calls.append(dict(args))
+        return {"candidates": []}
+
+    ctx = _ctx([_conn()], call_impl=fake_call, query="inventory left")
+    await call_user_tool(ctx, "digital", "gateway__tool_search", {"query": "please show remaining inventory"})
+    assert "inventory" in calls[0]["query"]
+    assert "please" not in calls[0]["query"]
+
+
 async def test_catalog_search_is_not_stored_as_source():
     async def fake_call(slug, tool, args):
         return {"candidates": [{"public_name": "any_tool"}]}
@@ -147,6 +213,7 @@ def test_system_prompt_has_no_product_recipes():
     assert "list_connectors" in lowered
     assert "capability phrase" in lowered
     assert "gateway__tool_search return catalogs" in lowered
+    assert "expands gateway catalogs" in lowered
     assert "call_tool" in lowered
     assert "inspect_result" in lowered
     assert "schedule_task" in lowered

@@ -158,16 +158,16 @@ File: `apps/api/app/agent/deep.py`. This is the **only** chat execution path.
 | Tool | Behavior |
 | --- | --- |
 | `list_connectors` | Enabled connectors for **this user**; mail connectors advertise mail+calendar core tools (never truncated) |
-| `search_tools` | Capability query over `tool_index` (embed “Find a connector tool for: …”, OR prefix lexical). Catalog tools (`gateway__tool_search`, …) are scored down. Mail still injects `get_thread` / `empty_folder` / Meet/Teams. |
-| `get_tool_schema` | JSON schema from the index |
-| `call_tool` | `invoke_named` / MCP / builtin |
+| `search_tools` | Capability query over `tool_index` (embed “Find a connector tool for: …”, OR prefix lexical). If the connector is a gateway, `search_tools` also runs `gateway__tool_search` and returns nested data tools. Catalog tools are scored down. Mail still injects `get_thread` / `empty_folder` / Meet/Teams. |
+| `get_tool_schema` | JSON schema from the index, or `gateway__resolve` / a generic object schema for nested tools |
+| `call_tool` | `invoke_named` / MCP / builtin. Nested names run through `gateway__execute`. |
 | `inspect_result` | Slice stored `ctx.results` by path/search/offset |
 | `schedule_task` | Staff persist |
 | `staff` | Briefing, inbox Q&A, commitments, voice |
 
 System prompt rules that matter in production:
 
-- Discover, then `call_tool`. Search with a capability phrase, not the user sentence. Catalog search (`gateway__tool_search`) is not an answer.
+- Discover, then `call_tool`. Search with a capability phrase, not the user sentence. `search_tools` expands gateway catalogs; nested data tools are the answer, not `gateway__tool_search`. A dated snapshot is still an answer.
 - Gmail/Outlook **are** calendar. Meet = `create_google_meet`, Teams = `create_teams_meeting`.
 - After search, open/summarize mail with **`get_thread` + message_id**, never an empty `thread_id`.
 - Large results → `inspect_result`, do not stop at “truncated”.
