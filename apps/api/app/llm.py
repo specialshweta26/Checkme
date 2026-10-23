@@ -22,7 +22,9 @@ def openai_client() -> AsyncOpenAI:
 
 
 def reasoning_payload() -> dict[str, str]:
-    effort = (get_settings().openai_reasoning_effort or "").strip() or "medium"
+    effort = (get_settings().openai_reasoning_effort or "").strip() or "none"
+    if effort == "none":
+        return {"effort": "none"}
     return {"effort": effort, "mode": "standard", "summary": "auto"}
 
 

@@ -508,6 +508,8 @@ async def search_user_tools(ctx: RunContext, query: str, connector_slug: str | N
             "connector_name": hit.connector_name,
             "tool_name": hit.tool_name,
             "description": hit.description,
+            "group": hit.group,
+            "produces": hit.produces,
             "read_only": hit.read_only,
             "destructive": hit.destructive,
         }
@@ -755,7 +757,7 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
         return dumps_full(await list_user_connectors(ctx))
 
     async def search_tools_fn(query: str, connector_slug: str | None = None) -> str:
-        """Search this user's tool catalog by meaning. Returns names and descriptions, not data."""
+        """Search this user's tool catalog by capability (what the tool must return). Pass a short phrase, not the full user sentence. Omit brand names; pass connector_slug when known. Returns names and descriptions, not data."""
         return dumps_full(await search_user_tools(ctx, query, connector_slug))
 
     async def get_tool_schema(connector_slug: str, tool_name: str) -> str:
@@ -833,9 +835,13 @@ def system_prompt(user, connectors: list, memory: str) -> str:
         "You are this user's personal chief of staff. You have mail, calendar, and connected MCP servers.\n"
         f"Current date and time: {now.strftime('%Y-%m-%d %H:%M')} ({tz}). Interpret and display times in that timezone.\n"
         "Only use connectors listed below. Other users have different connectors.\n"
-        "Discover first: list_connectors, then search_tools with the user's own words. Mail and analytics are different connectors — do not treat a missing mail tool as a missing MCP connector.\n"
+        "Discover first: list_connectors, then search_tools with a short capability phrase (what the tool must return), not the full user sentence. "
+        "Omit brand names, people, and dates from the search query; pass those as tool arguments after get_tool_schema. "
+        "Once you know the source, pass connector_slug so search is not split across mail and analytics. "
+        "Mail and analytics are different connectors — do not treat a missing mail tool as a missing MCP connector.\n"
         "Read get_tool_schema before filling arguments. Argument names come from that schema and description.\n"
-        "Search, resolve, and list tools return catalogs, not answers. After you pick a tool, call_tool it.\n"
+        "Search, resolve, list_mcps, and gateway__tool_search return catalogs, not answers. After you pick a data tool, call_tool it. "
+        "If the first search is weak, search once more with different capability words, then call_tool. Do not stop on a catalog search.\n"
         "Call tools as many times as the task needs — different connectors, different argument sets, different windows. Combine results yourself.\n"
         "Gmail and Outlook are mail AND calendar. Never say there is no calendar connector when gmail or outlook is listed. "
         "Send mail with send_message. Create a calendar invite with create_event (attendees, start in IST). "
@@ -867,7 +873,7 @@ def _chat_model():
     from app.llm import reasoning_payload
 
     s = get_settings()
-    effort = (s.openai_reasoning_effort or "").strip() or "medium"
+    effort = (s.openai_reasoning_effort or "").strip() or "none"
     reasoning = reasoning_payload()
     base = {"model": s.openai_model, "api_key": s.openai_api_key}
     attempts = [

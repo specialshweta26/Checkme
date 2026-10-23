@@ -158,7 +158,7 @@ File: `apps/api/app/agent/deep.py`. This is the **only** chat execution path.
 | Tool | Behavior |
 | --- | --- |
 | `list_connectors` | Enabled connectors for **this user**; mail connectors advertise mail+calendar core tools (never truncated) |
-| `search_tools` | `search_tools()` over `tool_index` + keyword injection (`get_thread`, `empty_folder`, Meet/Teams, …) |
+| `search_tools` | Capability query over `tool_index` (embed “Find a connector tool for: …”, OR prefix lexical). Catalog tools (`gateway__tool_search`, …) are scored down. Mail still injects `get_thread` / `empty_folder` / Meet/Teams. |
 | `get_tool_schema` | JSON schema from the index |
 | `call_tool` | `invoke_named` / MCP / builtin |
 | `inspect_result` | Slice stored `ctx.results` by path/search/offset |
@@ -167,7 +167,7 @@ File: `apps/api/app/agent/deep.py`. This is the **only** chat execution path.
 
 System prompt rules that matter in production:
 
-- Discover, then `call_tool`. Catalog search is not an answer.
+- Discover, then `call_tool`. Search with a capability phrase, not the user sentence. Catalog search (`gateway__tool_search`) is not an answer.
 - Gmail/Outlook **are** calendar. Meet = `create_google_meet`, Teams = `create_teams_meeting`.
 - After search, open/summarize mail with **`get_thread` + message_id**, never an empty `thread_id`. Cover CC’d mail (`recipient_role`). When sending, pass `cc` / `bcc` if the user named other people.
 - Large results → `inspect_result`, do not stop at “truncated”.
@@ -347,7 +347,7 @@ See `.env.example`. Important knobs in `app/config.py`:
 | --- | --- |
 | `PUBLIC_WEB_URL` | OAuth redirects + cookie Secure |
 | `OPENAI_API_KEY` / `OPENAI_MODEL` | Chat (default `gpt-6-luna`) via `/v1/responses` |
-| `OPENAI_REASONING_EFFORT` | Responses `reasoning.effort` (`medium`; function tools are not valid on chat completions with reasoning) |
+| `OPENAI_REASONING_EFFORT` | Responses `reasoning.effort` (`none`). Tool search uses a capability query (not the raw user sentence); catalog tools like `gateway__tool_search` are not data answers. |
 | `GOOGLE_*` / `MICROSOFT_*` | Must be on **checkme-api** in Render |
 | `SESSION_SECRET` / `TOKEN_ENCRYPTION_KEY` | Cookies + Fernet |
 | `FILE_STORAGE` | `s3` local, `disk` Render |
