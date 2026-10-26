@@ -345,7 +345,7 @@ async def _maybe_start_job(db, user, sess, agent, group, confirms, text, agent_t
     context = "\n".join(f"{m['role']}: {str(m['content'])[:600]}" for m in history[-6:])
     prompt = agent_text + (f"\n\nRecent conversation for context:\n{context}" if context else "")
     try:
-        job = await jobs.create_job(db, user, agent=agent, prompt=prompt, title=text, role="coder", kind="chat", session_id=sess.id)
+        job = await jobs.create_job(db, user, agent=agent, prompt=prompt, title=text, role="planner", kind="chat", session_id=sess.id)
     except jobs.JobError:
         return None
     info = jobs.serialize_job(job)

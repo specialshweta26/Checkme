@@ -175,6 +175,8 @@ def apply_outcome(job: AgentJob, query: str, result: dict) -> list[JobEvent]:
     children = [str(c.get("id") if isinstance(c, dict) else c) for c in (result.get("jobs_started") or [])]
     events: list[JobEvent] = []
     job.heartbeat_at = _now()
+    if children:
+        meta["children"] = list(dict.fromkeys([*(meta.get("children") or []), *children]))
     if pending:
         meta["pending"] = pending
         job.status = "waiting_approval"
@@ -190,7 +192,6 @@ def apply_outcome(job: AgentJob, query: str, result: dict) -> list[JobEvent]:
             )
     elif children:
         meta["pending"] = []
-        meta["children"] = list(dict.fromkeys([*(meta.get("children") or []), *children]))
         job.status = "waiting_children"
         events.append(event(job, "message", text))
         events.append(event(job, "status", f"Waiting for {len(children)} delegated job(s)", {"status": "waiting_children"}))

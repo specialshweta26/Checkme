@@ -248,6 +248,14 @@ async def schedule_task(db, user, args: dict, agent=None) -> dict:
     prompt = (args.get("prompt") or "").strip()
     if not prompt:
         return {"error": "prompt is required"}
+    name = (args.get("agent_name") or "").strip()
+    if name:
+        from app.agents.service import find_agent_by_name
+
+        named = await find_agent_by_name(db, user, name)
+        if named is None:
+            return {"error": f"No agent named {name}. Leave agent_name empty to schedule it on yourself."}
+        agent = named
     try:
         task = await create_from_prompt(db, user, prompt, agent_id=getattr(agent, "id", None) if agent is not None else None)
     except ValueError as exc:
