@@ -7,8 +7,9 @@ import { chatAttachments, ComputerIcon, computerFromMeta, ScreenRail } from "../
 import { cardsFromMeta, ConnectCards } from "../components/ConnectCard";
 import { EmailThreadButton, mailRefsFromMeta } from "../components/EmailThread";
 import { Markdown } from "../components/Markdown";
+import { dismissFocusCard, focusCardDismissed, FocusOnboarding, type FocusOption } from "../components/FocusCard";
 import { Thinking } from "../components/Thinking";
-import { announceWorkspaceChanged, chatHref, deleteSession, getMe, listSessions, loadSession, rememberScope, uploadFiles, type ChatSessionRow, type Me, type UploadedFile, type WorkspaceRoster } from "../lib";
+import { announceWorkspaceChanged, chatHref, updateAgent, deleteSession, getMe, listSessions, loadSession, rememberScope, uploadFiles, type ChatSessionRow, type Me, type UploadedFile, type WorkspaceRoster } from "../lib";
 
 const STORE = "assistant.session";
 
@@ -93,6 +94,7 @@ export default function ChatPage() {
   const [groupId, setGroupId] = useState<string | null>(null);
   const [roster, setRoster] = useState<WorkspaceRoster>({ agents: [], groups: [] });
   const [hello, setHello] = useState("Hello");
+  const [focusHidden, setFocusHidden] = useState<Record<string, boolean>>({});
 
   async function refreshSessions() {
     setSessions(await listSessions());
@@ -314,6 +316,34 @@ export default function ChatPage() {
   const screenName = activeGroup?.name || activeAgent?.name || "Chief";
   const screenColor = activeGroup?.members[0]?.color || activeAgent?.color || "#f97316";
   const screenMeta = activeGroup ? activeGroup.members.map((m) => m.name).join(" · ") : activeAgent?.title || "";
+  const showFocusCard = Boolean(
+    !activeGroup &&
+      activeAgent &&
+      (activeAgent.kind || "custom") !== "default" &&
+      !activeAgent.focus &&
+      !focusHidden[activeAgent.id] &&
+      !focusCardDismissed(activeAgent.id),
+  );
+
+  function hideFocusCard(id: string) {
+    dismissFocusCard(id);
+    setFocusHidden((all) => ({ ...all, [id]: true }));
+  }
+
+  async function pickFocus(option: FocusOption) {
+    if (!activeAgent) return;
+    const id = activeAgent.id;
+    try {
+      await updateAgent(id, { focus: option.key });
+      setRoster((r) => ({ ...r, agents: r.agents.map((a) => (a.id === id ? { ...a, focus: option.key, focus_label: option.label } : a)) }));
+      announceWorkspaceChanged();
+    } catch {
+      // The agent can still set its own focus from the answer (set_my_focus).
+    }
+    hideFocusCard(id);
+    void send(option.answer);
+  }
+
   const scopedSessions = sessions.filter((s) => sessionInScopeRow(s, agentId, groupId));
   const computer = [...messages].reverse().map((m) => computerFromMeta(m.meta)).find(Boolean) || null;
 
@@ -483,10 +513,24 @@ export default function ChatPage() {
         <div className="transcript">
           <div className="thread">
             {notice ? <p className="notice">{notice}</p> : null}
+            {messages.length === 0 && !busyHere && showFocusCard && activeAgent ? (
+              <FocusOnboarding
+                userName={firstName(me)}
+                agentName={activeAgent.name}
+                agentColor={activeAgent.color}
+                disabled={busyHere}
+                onPick={(opt) => void pickFocus(opt)}
+                onDismiss={() => hideFocusCard(activeAgent.id)}
+              />
+            ) : null}
             {messages.length === 0 && !busyHere ? (
-              <div className="welcome">
-                <h1>{hello}</h1>
-                <p>Here&apos;s what&apos;s happening today — brief the inbox, ask a connected system, or schedule a send.</p>
+              <div className={showFocusCard ? "welcome welcome-after-onboard" : "welcome"}>
+                {showFocusCard ? null : (
+                  <>
+                    <h1>{hello}</h1>
+                    <p>Here&apos;s what&apos;s happening today — brief the inbox, ask a connected system, or schedule a send.</p>
+                  </>
+                )}
                 <div className="hero-cards">
                   <button className="hero-card" onClick={() => send("What matters today? Give me my chief of staff briefing.")}>
                     <span className="mark" />
@@ -672,9 +716,13 @@ export default function ChatPage() {
   );
 }
 
-function greeting(me: Me | null) {
+function firstName(me: Me | null) {
   const raw = (me?.name || me?.email || "there").trim().split(/[\s@]+/)[0];
-  const first = raw ? raw[0].toUpperCase() + raw.slice(1) : "there";
+  return raw ? raw[0].toUpperCase() + raw.slice(1) : "there";
+}
+
+function greeting(me: Me | null) {
+  const first = firstName(me);
   const hour = Number(
     new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Kolkata", hour: "numeric", hour12: false }).format(new Date()),
   );

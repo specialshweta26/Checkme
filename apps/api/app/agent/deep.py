@@ -1404,6 +1404,60 @@ class AskTeammateInput(BaseModel):
     prompt: str = Field(description="Focused task for that teammate. Include only what they need.")
 
 
+class SetFocusInput(BaseModel):
+    focus: str = Field(description="One of: email_calendar, coding, research, errands.")
+
+
+class SandboxShellInput(BaseModel):
+    command: str = Field(description="Shell command to run on the computer (bash). Chain steps with &&.")
+    cwd: str | None = Field(default=None, description="Working directory, e.g. ~/work/<repo>.")
+    timeout: int = Field(default=300, description="Seconds to wait (10-900). Use more for installs and test suites.")
+
+
+async def set_agent_focus(ctx: RunContext, focus: str) -> dict:
+    from app.agents import service as agents_service
+    from app.agents.focus import FOCUSES
+
+    if ctx.agent is None or ctx.db is None:
+        return {"error": "No agent to update"}
+    try:
+        row = await agents_service.update_agent(ctx.db, ctx.user, ctx.agent.id, {"focus": focus})
+    except agents_service.AgentError as exc:
+        return {"error": str(exc), "options": list(FOCUSES)}
+    ctx.agent = row
+    ctx.workspace_changed = True
+    return {"ok": True, "agent": row.name, "focus": row.focus, "label": FOCUSES[row.focus]["label"] if row.focus else ""}
+
+
+async def coding_workspace_status(ctx: RunContext) -> dict:
+    from app.agent import coding
+
+    probe: dict = {}
+    probe_error = ""
+    if coding.COMPUTER_SLUG in ctx.connectors:
+        result = await call_user_tool(ctx, coding.COMPUTER_SLUG, "exec", {"command": coding.PROBE_COMMAND, "timeout": 40})
+        data = as_dict(result)
+        inner = as_dict(data.get("data")) if isinstance(data.get("data"), dict) else data
+        if data.get("error"):
+            probe_error = str(data["error"])
+        else:
+            probe = coding.parse_probe(str(inner.get("stdout") or inner.get("result") or ""))
+    return coding.readiness(ctx.connectors, probe, probe_error)
+
+
+async def sandbox_shell(ctx: RunContext, command: str, cwd: str | None = None, timeout: int = 300) -> Any:
+    from app.agent import coding
+
+    if coding.COMPUTER_SLUG not in ctx.connectors:
+        return {"error": coding.readiness(ctx.connectors)["missing"][0]}
+    if not (command or "").strip():
+        return {"error": "command is required"}
+    args: dict[str, Any] = {"command": command, "timeout": coding.clamp_timeout(timeout)}
+    if cwd:
+        args["cwd"] = cwd
+    return await call_user_tool(ctx, coding.COMPUTER_SLUG, "exec", args)
+
+
 def harness_tools(ctx: RunContext) -> list[StructuredTool]:
     async def list_connectors() -> str:
         """List this user's enabled connectors. Start here when you are unsure which source to use. Other users have different connectors."""
@@ -1577,6 +1631,40 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
             args_schema=DeleteWorkspaceInput,
         ),
     ]
+    if ctx.agent is not None and (getattr(ctx.agent, "kind", "custom") or "custom") != "default":
+
+        async def set_my_focus(focus: str) -> str:
+            """Set your own focus area when the user says what they want a hand with: email_calendar, coding, research or errands."""
+            ctx.used_tools.append("set_my_focus")
+            return dumps(await set_agent_focus(ctx, focus))
+
+        tools.append(
+            StructuredTool.from_function(
+                coroutine=set_my_focus, name="set_my_focus", description=set_my_focus.__doc__, args_schema=SetFocusInput
+            )
+        )
+    from app.agent.coding import is_coding_agent
+
+    if is_coding_agent(ctx.agent):
+
+        async def coding_status() -> str:
+            """Check what you can do for coding work right now: computer (sandbox) and toolchain, git push credentials, GitHub and deploy connectors, and exactly what is missing. Call once per coding task, before building."""
+            ctx.used_tools.append("coding_workspace_status")
+            return dumps(await coding_workspace_status(ctx), 8000)
+
+        async def shell(command: str, cwd: str | None = None, timeout: int = 300) -> str:
+            """Run a bash command on the user's computer (Daytona sandbox): git clone/branch/commit/push, rg, sed, package installs, tests, builds. Returns exit_code and output."""
+            ctx.used_tools.append("sandbox_shell")
+            return dumps(await sandbox_shell(ctx, command, cwd, timeout), 40000)
+
+        tools.extend(
+            [
+                StructuredTool.from_function(coroutine=coding_status, name="coding_workspace_status", description=coding_status.__doc__),
+                StructuredTool.from_function(
+                    coroutine=shell, name="sandbox_shell", description=shell.__doc__, args_schema=SandboxShellInput
+                ),
+            ]
+        )
     if ctx.group is not None and ctx.teammate_depth == 0 and ctx.teammates:
         tools.append(
             StructuredTool.from_function(
@@ -1599,6 +1687,9 @@ def system_prompt(user, connectors: list, memory: str, agent=None, group=None, t
     identity = f"You are {name}, this user's {title}. You have mail, calendar, and connected MCP servers.\n"
     if extra:
         identity += extra + "\n"
+    from app.agents.focus import focus_prompt
+
+    identity += focus_prompt(agent)
     identity += "Your memory and scheduled routines belong only to you, not to other agents.\n"
     group_bit = ""
     peers = [p for p in (teammates or []) if str(getattr(p, "id", "")) != str(getattr(agent, "id", ""))]
@@ -1977,8 +2068,14 @@ async def run_deep_agent(
     )
     payload = {"messages": _lc_messages(history, query, extra)}
     limit = max(80, get_settings().max_agent_steps * 8)
+    from app.agent.coding import is_coding_agent
+
+    coding = is_coding_agent(workspace_agent)
+    if coding:
+        # Plan-and-build turns clone, edit, test and push: give them more steps.
+        limit = max(limit, 200)
     if teammate_depth:
-        limit = min(max(24, get_settings().max_agent_steps * 3), 48)
+        limit = min(max(24, get_settings().max_agent_steps * 3), 120 if coding else 48)
     text = ""
     peer = f":peer:{getattr(workspace_agent, 'id', 'x')}" if teammate_depth else ""
     for attempt in range(3):
@@ -1995,7 +2092,7 @@ async def run_deep_agent(
             break
         except Exception as exc:  # noqa: BLE001
             if _is_recursion_limit(exc) and attempt < 2:
-                limit = min(limit + 40, 200)
+                limit = min(limit + 40, 280 if coding else 200)
                 if progress is not None:
                     await progress.emit("That took many steps; giving it one more pass", kind="retry")
                 log.warning("recursion limit reached; retry %s/2 with limit=%s", attempt + 1, limit)

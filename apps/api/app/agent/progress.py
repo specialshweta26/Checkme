@@ -192,6 +192,15 @@ def describe_tool(name: str, args: dict | None, connector_names: dict[str, str] 
         return f"Renaming {_quote(a.get('group'))} to {_quote(a.get('name'))}"
     if n in {"delete_agent", "delete_agent_group"}:
         return f"Preparing a delete confirmation for {_quote(a.get('target'))}"
+    if n == "set_my_focus":
+        from app.agents.focus import FOCUSES
+
+        f = str(a.get("focus") or "")
+        return f"Setting my focus to {FOCUSES[f]['label'] if f in FOCUSES else f}"
+    if n == "coding_workspace_status":
+        return "Checking the computer, GitHub and deploy setup"
+    if n == "sandbox_shell":
+        return f"Running `{_clip(a.get('command'), 70)}` on the computer"
     # deepagents built-ins
     if n == "write_todos":
         todos = a.get("todos") or []

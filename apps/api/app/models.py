@@ -170,6 +170,8 @@ class WorkspaceAgent(Base):
     name: Mapped[str] = mapped_column(String(80))
     title: Mapped[str] = mapped_column(String(160), default="")
     instructions: Mapped[str] = mapped_column(Text, default="")
+    # Focus picked on the agent's first screen: email_calendar | coding | research | errands | "" (see agents/focus.py)
+    focus: Mapped[str] = mapped_column(String(40), default="")
     color: Mapped[str] = mapped_column(String(16), default="#f97316")
     kind: Mapped[str] = mapped_column(String(20), default="custom")  # default | custom
     pinned: Mapped[bool] = mapped_column(Boolean, default=False)

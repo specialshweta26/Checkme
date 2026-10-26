@@ -21,6 +21,8 @@ export type WorkspaceAgent = {
   name: string;
   title?: string;
   instructions?: string;
+  focus?: string;
+  focus_label?: string;
   color: string;
   kind?: string;
   pinned?: boolean;
@@ -109,6 +111,7 @@ export async function updateAgent(
     name?: string;
     title?: string;
     instructions?: string;
+    focus?: string;
     color?: string;
     pinned?: boolean;
     archived?: boolean;
