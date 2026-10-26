@@ -277,6 +277,9 @@ Files: `apps/api/app/agents/focus.py`, `apps/api/app/agent/coding.py`, `apps/web
 
 Gmail and Outlook share `MAIL_CALENDAR_TOOLS` in `connector_core/mail_tools.py` (identical names). API-side extras in `connectors/virtual.py`: `summarize_thread`, `summarize_attachments`, `read_attachment_text`.
 
+- **builtin** `github_app` (`connectors/github_app.py`, slug `github-app`): Checkme GitHub App. Each call mints an installation token through `POST /app/installations/{id}/access_tokens` with `repositories=[name]` and the minimum `permissions`, cached in memory until 5 min before expiry. The installation comes from `github_installations` by repo owner. Reads: `list_repos`, `get_file`, `list_prs`, `get_pull_request`, `list_issues`. Writes: `comment_pull_request`, plus the destructive `create_pull_request`, `push_files` (`agent/*` only, via the Git Data API) and `merge_pull_request`. Routes `/api/connectors/github/{status,install,callback,webhook}`. The callback only trusts `installation_id` once the OAuth `code` proves `GET /user/installations` contains it. The connector row is created by `ensure_platform_connectors` once the user has an installation. Setup: `docs/GITHUB_APP.md`.
+- **Git-write gate** (`deep.git_write_gate` → `github_app.is_git_write`): GitHub App write tools, and any GitHub/GitLab connector tool named like merge/push/create PR/commit/update file, need a confirm card even when `auto_confirm` is true.
+
 ### 7.1 Outlook `get_thread`
 
 Problem: Graph `$search` often omits `conversationId`, so the agent used to call `get_thread` with an empty id and return **one** message (the latest reply). Quoted history was also stripped (`clean_body` default).
@@ -426,5 +429,8 @@ See `.env.example`. Important knobs in `app/config.py`:
 | `chat_rate_limit_per_minute` | 30 |
 | `history_messages` | 8 prior turns into the agent |
 | `max_agent_steps` | 20 (recursion uses ×8) |
+| `GITHUB_APP_ID` / `GITHUB_APP_PRIVATE_KEY` / `GITHUB_APP_SLUG` | Turn on the Checkme GitHub App |
+| `GITHUB_APP_CLIENT_ID` / `GITHUB_APP_CLIENT_SECRET` | Verify installers on the callback |
+| `GITHUB_APP_WEBHOOK_SECRET` | `X-Hub-Signature-256` on `/api/connectors/github/webhook` |
 
 Do not commit `.env`.

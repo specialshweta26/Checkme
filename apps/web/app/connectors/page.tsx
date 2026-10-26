@@ -29,6 +29,23 @@ type Connector = {
   card?: string;
 };
 
+type GithubStatus = {
+  configured: boolean;
+  can_verify: boolean;
+  missing_env: string[];
+  installed: boolean;
+  install_url: string;
+  app_url: string;
+  installations: {
+    installation_id: number;
+    account: string;
+    account_type: string;
+    repository_selection: string;
+    suspended: boolean;
+    manage_url: string;
+  }[];
+};
+
 type MarketApp = {
   slug: string;
   name: string;
@@ -59,6 +76,18 @@ export default function ConnectorsPage() {
   const [agents, setAgents] = useState<WorkspaceAgent[]>([]);
   const [assignments, setAssignments] = useState<Record<string, string[]>>({});
   const [assigning, setAssigning] = useState("");
+  const [github, setGithub] = useState<GithubStatus | null>(null);
+
+  async function loadGithub() {
+    const res = await fetch("/api/connectors/github/status", { credentials: "include" });
+    if (res.ok) setGithub(await res.json());
+  }
+
+  async function forgetGithub(id: number) {
+    await fetch(`/api/connectors/github/installations/${id}`, { method: "DELETE", credentials: "include" });
+    await loadGithub();
+    await refresh();
+  }
 
   async function refresh() {
     const res = await fetch("/api/connectors", { credentials: "include" });
@@ -84,7 +113,10 @@ export default function ConnectorsPage() {
     setError(errorFromQuery(window.location.search));
     const q = new URLSearchParams(window.location.search);
     if (q.get("composio") === "connected") setNotice("Composio app connected. You can use it from chat.");
+    if (q.get("github") === "connected") setNotice("GitHub App installed. Your Coder can read repos and open PRs with your approval.");
+    if (q.get("github") === "requested") setNotice("Install request sent to the GitHub org owner. Come back once they approve it.");
     refresh();
+    loadGithub();
     loadMarket("");
   }, []);
 
@@ -223,6 +255,47 @@ export default function ConnectorsPage() {
         </div>
         {error ? <p className="err">{error}</p> : null}
         {notice ? <p className="ok">{notice}</p> : null}
+        <div className="card stack" style={{ marginBottom: 18 }}>
+          <header className="row" style={{ justifyContent: "space-between" }}>
+            <strong>GitHub</strong>
+            <span className={`badge ${github?.installed ? "ok" : "down"}`}>
+              {!github ? "checking" : !github.configured ? "not set up" : github.installed ? "installed" : "not installed"}
+            </span>
+          </header>
+          <p className="muted" style={{ margin: 0 }}>
+            Install the Checkme GitHub App on the repos your Coder should work on. It reads code, pushes only to agent/*
+            branches, and every push, PR, and merge waits for your approval.
+          </p>
+          {github && !github.configured ? (
+            <p className="muted" style={{ margin: 0 }}>
+              The GitHub App is not configured on this server yet ({github.missing_env.join(", ")}). Composio GitHub or a
+              GitHub MCP server still work below.
+            </p>
+          ) : null}
+          {github?.installations.map((inst) => (
+            <div key={inst.installation_id} className="row" style={{ justifyContent: "space-between" }}>
+              <span>
+                @{inst.account} · {inst.repository_selection === "all" ? "all repos" : "selected repos"}
+                {inst.suspended ? " · suspended" : ""}
+              </span>
+              <span className="row">
+                <a className="btn secondary" href={inst.manage_url} target="_blank" rel="noreferrer">
+                  Manage on GitHub
+                </a>
+                <button className="btn secondary" onClick={() => forgetGithub(inst.installation_id)}>
+                  Forget
+                </button>
+              </span>
+            </div>
+          ))}
+          {github?.configured ? (
+            <div>
+              <a className="btn" href={github.install_url}>
+                {github.installed ? "Add another account or repo" : "Install GitHub App"}
+              </a>
+            </div>
+          ) : null}
+        </div>
         {marketReady ? (
           <div className="card stack" style={{ marginBottom: 18 }}>
             <strong>Composio marketplace</strong>

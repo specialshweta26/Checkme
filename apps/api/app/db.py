@@ -73,7 +73,40 @@ async def _migrate() -> None:
         await conn.execute(text("ALTER TABLE workspace_agents ADD COLUMN IF NOT EXISTS archived BOOLEAN DEFAULT false"))
         await conn.execute(text("ALTER TABLE workspace_agents ADD COLUMN IF NOT EXISTS unread BOOLEAN DEFAULT false"))
         await conn.execute(text("ALTER TABLE workspace_agents ADD COLUMN IF NOT EXISTS focus VARCHAR(40) DEFAULT ''"))
+        await _migrate_github(conn)
         await _migrate_agent_scope(conn)
+
+
+async def _migrate_github(conn) -> None:
+    """GitHub App installations (create_all makes the table; these keep older databases in step)."""
+    await conn.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS github_installations (
+                id UUID PRIMARY KEY,
+                user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                installation_id BIGINT NOT NULL,
+                account_login VARCHAR(100) DEFAULT '',
+                account_type VARCHAR(20) DEFAULT '',
+                repository_selection VARCHAR(20) DEFAULT '',
+                permissions JSONB DEFAULT '{}'::jsonb,
+                suspended BOOLEAN DEFAULT false,
+                created_at TIMESTAMPTZ DEFAULT now(),
+                updated_at TIMESTAMPTZ DEFAULT now()
+            )
+            """
+        )
+    )
+    await conn.execute(text("ALTER TABLE github_installations ADD COLUMN IF NOT EXISTS suspended BOOLEAN DEFAULT false"))
+    await conn.execute(
+        text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_github_installations_user_inst "
+            "ON github_installations (user_id, installation_id)"
+        )
+    )
+    await conn.execute(
+        text("CREATE INDEX IF NOT EXISTS ix_github_installations_installation_id ON github_installations (installation_id)")
+    )
 
 
 async def _pk_columns(conn, table: str) -> list[str]:

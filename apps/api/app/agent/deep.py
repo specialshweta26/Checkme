@@ -1111,6 +1111,13 @@ async def get_user_tool_schema(ctx: RunContext, connector_slug: str, tool_name: 
     }
 
 
+def git_write_gate(conn, slug: str, tool: str, args: dict | None) -> bool:
+    from app.connectors.github_app import is_git_write
+
+    text = f"{getattr(conn, 'name', '') or ''} {getattr(conn, 'alias', '') or ''} {getattr(conn, 'server_url', '') or ''}"
+    return is_git_write(str(getattr(conn, "provider", "") or ""), slug, tool, args, text)
+
+
 async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, args: dict | None = None) -> Any:
     args = as_dict(args)
     orig_tool = tool_name
@@ -1161,7 +1168,11 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
         tool_name, args = wrap_through_execute(tool_name, args, execute)
     args = _rewrite_catalog_search_args(tool_name, args, ctx.query)
     destructive = bool(hit.destructive if hit is not None else (spec.destructive if spec else False))
-    if destructive and not ctx.auto_confirm and not confirmed(ctx.confirmations, connector_slug, tool_name):
+    # Git writes (push, open PR, merge, commit) always need a human, even in auto_confirm runs (schedules, jobs).
+    git_write = git_write_gate(conn, connector_slug, tool_name, args)
+    if (destructive or git_write) and (git_write or not ctx.auto_confirm) and not confirmed(
+        ctx.confirmations, connector_slug, tool_name
+    ):
         token = sign_confirm("tool", {"slug": connector_slug, "tool": tool_name, "args": args})
         pending = {
             "needs_confirm": True,
