@@ -111,16 +111,43 @@ class Settings(BaseSettings):
 
     @property
     def async_database_url(self) -> str:
-        if self.database_hostport and self.postgres_password:
-            user = quote_plus(self.postgres_user)
-            password = quote_plus(self.postgres_password)
-            return f"postgresql+asyncpg://{user}:{password}@{self.database_hostport}/{self.postgres_db}"
-        url = self.database_url
+        from urllib.parse import urlparse
+
+        hostport = (self.database_hostport or "").strip()
+        for prefix in ("http://", "https://", "postgresql://", "postgres://", "postgresql+asyncpg://"):
+            if hostport.lower().startswith(prefix):
+                hostport = hostport[len(prefix) :].lstrip("/")
+                break
+        if "@" in hostport:
+            hostport = hostport.rsplit("@", 1)[-1]
+        hostport = hostport.split("/")[0].strip()
+        if hostport:
+            user = quote_plus(self.postgres_user or "assistant")
+            password = quote_plus(self.postgres_password or "")
+            db = quote_plus(self.postgres_db or "assistant")
+            return f"postgresql+asyncpg://{user}:{password}@{hostport}/{db}"
+        url = (self.database_url or "").strip()
         if url.startswith("postgres://"):
             url = "postgresql://" + url[len("postgres://") :]
         if url.startswith("postgresql://") and "+asyncpg" not in url:
             url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        host = (urlparse(url.replace("postgresql+asyncpg://", "postgresql://", 1)).hostname or "").lower()
+        if os.environ.get("RENDER") and host in {"", "localhost", "127.0.0.1", "postgres", "postgresql"}:
+            raise RuntimeError(
+                "Render DATABASE_HOSTPORT is missing or still points at Docker. "
+                "On checkme-api, set DATABASE_HOSTPORT from checkme-postgres (hostport) and remove any DATABASE_URL that uses host 'postgres'."
+            )
         return url
+
+    @property
+    def database_host(self) -> str:
+        from urllib.parse import urlparse
+
+        raw = self.async_database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
+        parsed = urlparse(raw)
+        host = parsed.hostname or ""
+        port = parsed.port
+        return f"{host}:{port}" if port else host
 
 
 @lru_cache
