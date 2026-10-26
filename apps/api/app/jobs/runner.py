@@ -23,7 +23,9 @@ ROLE_BRIEF = {
         "round to the coder, then review again. Do not merge by default: the job ends by asking the user 'Merge it?'. Merge "
         "only after an explicit yes (or when the task says to merge): check_merge first, then github-app "
         "merge_pull_request, whose approval card the user must approve; never say it is merged until the result says so. "
-        "Finish with the PR link, what changed, the checks, the review verdict and any caveats."
+        "If the task asks to deploy, do it after the merge (or on the branch the user named): detect_deploy_targets, then "
+        "deploy (approval card), then deploy_status / deploy_logs; report the URL or the error. "
+        "Finish with the PR link, what changed, the checks, the review verdict, any deploy and any caveats."
     ),
     "coder": (
         "You are the coder for this background job. write_todos first. git_checkout the branch (agent/<short-name> unless "

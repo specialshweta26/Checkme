@@ -96,3 +96,8 @@ once they approve it.
   (`~/work/_patches/<repo>-<branch>/`) and the agent links the install page. Installing the App resumes the job.
 - The same git-write gate covers other GitHub connectors (MCP, Composio): any tool whose name looks like
   merge, push, create pull request, commit, or update file waits for approval.
+
+
+## Deploys
+
+The GitHub App doesn't deploy. Deploys use a platform connector or the platform CLI, with the user's own credentials saved on Connectors → Deploy platforms, and always go through an approval card. See [DEPLOY.md](DEPLOY.md).

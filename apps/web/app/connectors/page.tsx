@@ -1,5 +1,6 @@
 "use client";
 
+import { DeployPlatforms } from "../components/DeployPlatforms";
 import { FormEvent, useEffect, useState } from "react";
 import { AppShell } from "../components/AppShell";
 import {
@@ -296,6 +297,7 @@ export default function ConnectorsPage() {
             </div>
           ) : null}
         </div>
+        <DeployPlatforms />
         {marketReady ? (
           <div className="card stack" style={{ marginBottom: 18 }}>
             <strong>Composio marketplace</strong>
