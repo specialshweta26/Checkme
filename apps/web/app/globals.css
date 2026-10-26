@@ -733,6 +733,25 @@ textarea.field { min-height: 110px; resize: vertical; }
 
 .tasks-toolbar { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
 .tasks-tabs { display: flex; gap: 6px; }
+.tasks-filters { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+select.tasks-agent { width: auto; min-width: 9.5rem; max-width: 16rem; padding: 6px 10px; }
+input.tasks-search { width: min(260px, 100%); }
+.agent-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: 99px;
+  background: var(--lift);
+  color: var(--muted);
+  font-size: 12px;
+}
+.agent-chip i {
+  width: 8px;
+  height: 8px;
+  border-radius: 99px;
+  display: inline-block;
+}
 .pill {
   padding: 6px 12px;
   border-radius: 99px;
@@ -742,7 +761,6 @@ textarea.field { min-height: 110px; resize: vertical; }
   font-size: 13px;
 }
 .pill.on { background: var(--accent-soft); color: var(--text); border-color: transparent; }
-.tasks-search { width: min(260px, 100%); }
 
 .task-list { display: grid; gap: 10px; }
 .task-card {

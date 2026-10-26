@@ -10,9 +10,13 @@ from app.models import (
     AgentConnector,
     AgentGroup,
     AgentGroupMember,
+    Automation,
     ChatMessage,
     ChatSession,
     Connector,
+    MemoryBlock,
+    MemoryPassage,
+    ScheduledTask,
     User,
     WorkspaceAgent,
 )
@@ -309,9 +313,23 @@ async def update_agent(db: AsyncSession, user: User, agent_id: uuid.UUID, body: 
 
 
 async def delete_agent(db: AsyncSession, user: User, agent_id: uuid.UUID) -> None:
+    """Remove a custom agent and the memory and routines that belong to it.
+
+    Chat sessions stay, with their original ``agent_id``, so transcripts are not
+    copied onto Chief. The default agent cannot be deleted. The remote Letta
+    agent is deleted when it is not Chief's shared id; a Letta outage does not
+    block the local delete. Database foreign keys cascade the same rows.
+    """
     row = await get_agent(db, user, agent_id)
     if row.kind == "default":
         raise AgentError("The default agent cannot be deleted.")
+    from app.agent.memory import forget_letta_agent
+
+    await forget_letta_agent(row, user)
+    await db.execute(sql_delete(MemoryBlock).where(MemoryBlock.agent_id == row.id))
+    await db.execute(sql_delete(MemoryPassage).where(MemoryPassage.agent_id == row.id))
+    await db.execute(sql_delete(ScheduledTask).where(ScheduledTask.agent_id == row.id))
+    await db.execute(sql_delete(Automation).where(Automation.agent_id == row.id))
     await db.delete(row)
     await db.commit()
 

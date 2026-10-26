@@ -254,7 +254,9 @@ erDiagram
   User ||--o{ ChatSession : has
   User ||--o{ InboxItem : has
   User ||--o{ ScheduledTask : has
-  User ||--o{ MemoryBlock : has
+  User ||--o{ WorkspaceAgent : has
+  WorkspaceAgent ||--o{ ScheduledTask : owns
+  WorkspaceAgent ||--o{ MemoryBlock : owns
   Account ||--o| Connector : builtin
   Connector }o--o| ServerCard : server_key
   ServerCard ||--o{ ToolIndex : catalogs

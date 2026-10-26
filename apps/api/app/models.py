@@ -175,6 +175,7 @@ class WorkspaceAgent(Base):
     pinned: Mapped[bool] = mapped_column(Boolean, default=False)
     archived: Mapped[bool] = mapped_column(Boolean, default=False)
     unread: Mapped[bool] = mapped_column(Boolean, default=False)
+    letta_agent_id: Mapped[str | None] = mapped_column(String(100))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
@@ -256,10 +257,13 @@ class RouteLog(Base):
 
 
 class MemoryBlock(Base):
-    """Fallback core memory when Letta is not configured."""
+    """Fallback core memory when Letta is not configured. One row per agent and label."""
 
     __tablename__ = "memory_blocks"
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    agent_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workspace_agents.id", ondelete="CASCADE"), primary_key=True
+    )
     label: Mapped[str] = mapped_column(String(50), primary_key=True)
     value: Mapped[str] = mapped_column(Text, default="")
 
@@ -295,6 +299,9 @@ class Automation(Base):
     __tablename__ = "automations"
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
+    agent_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workspace_agents.id", ondelete="CASCADE"), index=True
+    )
     name: Mapped[str] = mapped_column(String(200))
     trigger: Mapped[str] = mapped_column(Text)
     condition: Mapped[str] = mapped_column(Text, default="")
@@ -309,6 +316,9 @@ class ScheduledTask(Base):
     __table_args__ = (Index("ix_scheduled_tasks_due", "status", "next_run_at"),)
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    agent_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workspace_agents.id", ondelete="CASCADE"), index=True
+    )
     title: Mapped[str] = mapped_column(String(200))
     instruction: Mapped[str] = mapped_column(Text)
     prompt: Mapped[str] = mapped_column(Text, default="")
@@ -331,6 +341,9 @@ class MemoryPassage(Base):
     __tablename__ = "memory_passages"
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
+    agent_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workspace_agents.id", ondelete="CASCADE"), index=True
+    )
     kind: Mapped[str] = mapped_column(String(20))  # archival | episodic
     text: Mapped[str] = mapped_column(Text)
     embedding = mapped_column(Vector(DIMS), nullable=True)
