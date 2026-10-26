@@ -23,6 +23,41 @@ function scopeStore(agentId?: string | null, groupId?: string | null) {
   return key ? `${STORE}.${key}` : STORE;
 }
 
+function newProgressId() {
+  const rand = Math.random().toString(36).slice(2, 12);
+  return `turn_${Date.now().toString(36)}${rand}`;
+}
+
+/** Poll the API for live status lines of one in-flight chat turn. Returns a stop function. */
+function pollProgress(progressId: string, onSteps: (steps: string[]) => void, everyMs = 1200) {
+  let stopped = false;
+  let last = 0;
+  let timer: number | undefined;
+  const tick = async () => {
+    if (stopped) return;
+    try {
+      const res = await fetch(`/api/chat/progress/${progressId}`, { credentials: "include", cache: "no-store" });
+      if (res.ok) {
+        const data = await res.json();
+        const steps: string[] = (data.steps || []).map((s: any) => String(s?.text || "")).filter(Boolean);
+        if (!stopped && steps.length !== last) {
+          last = steps.length;
+          onSteps(steps);
+        }
+        if (data.done) return;
+      }
+    } catch {
+      // Status is best effort; the chat reply still arrives on the POST.
+    }
+    if (!stopped) timer = window.setTimeout(tick, everyMs);
+  };
+  timer = window.setTimeout(tick, 600);
+  return () => {
+    stopped = true;
+    if (timer) window.clearTimeout(timer);
+  };
+}
+
 function sessionInScopeRow(row: ChatSessionRow | undefined, agentId?: string | null, groupId?: string | null) {
   if (!row) return false;
   if (groupId) return row.group_id === groupId;
@@ -41,6 +76,7 @@ export default function ChatPage() {
   const [sessions, setSessions] = useState<ChatSessionRow[]>([]);
   const [pending, setPending] = useState<Confirm[]>([]);
   const [busyScopes, setBusyScopes] = useState<string[]>([]);
+  const [progress, setProgress] = useState<Record<string, { steps: string[]; hint: string }>>({});
   const viewsRef = useRef<Record<string, AgentView>>({});
   const scopeRef = useRef("");
   const inflightRef = useRef<Set<string>>(new Set());
@@ -184,6 +220,11 @@ export default function ChatPage() {
     setText("");
     setUploads([]);
     setUploadError("");
+    const progressId = newProgressId();
+    setProgress((all) => ({ ...all, [key]: { steps: [], hint: message || "your files" } }));
+    const stopProgress = pollProgress(progressId, (steps) =>
+      setProgress((all) => (all[key] ? { ...all, [key]: { ...all[key], steps } } : all)),
+    );
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
@@ -196,6 +237,7 @@ export default function ChatPage() {
           attachments: pendingFiles,
           agent_id: sendGroup ? null : sendAgent,
           group_id: sendGroup,
+          progress_id: progressId,
         }),
       });
       const raw = await res.text();
@@ -240,6 +282,12 @@ export default function ChatPage() {
       viewsRef.current[key] = failView;
       if (scopeRef.current === key) showView(failView);
     } finally {
+      stopProgress();
+      setProgress((all) => {
+        const next = { ...all };
+        delete next[key];
+        return next;
+      });
       inflightRef.current.delete(key);
       setBusyScopes((keys) => keys.filter((k) => k !== key));
       if (scopeRef.current === key) setWatching(false);
@@ -491,7 +539,7 @@ export default function ChatPage() {
                 </div>
               ),
             )}
-            {busyHere ? <Thinking /> : null}
+            {busyHere ? <Thinking steps={progress[currentKey]?.steps} hint={progress[currentKey]?.hint} /> : null}
             <div ref={end} />
           </div>
         </div>

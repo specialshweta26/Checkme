@@ -87,6 +87,7 @@ class RunContext:
     session_id: uuid.UUID | None = None
     request_id: str = ""
     workspace_changed: bool = False
+    progress: Any = None
 
 
 def _json_size(value: Any) -> int:
@@ -1840,6 +1841,7 @@ async def _ask_teammate(ctx: RunContext, agent_id: str, prompt: str) -> dict:
         group=ctx.group,
         teammates=ctx.teammates,
         teammate_depth=ctx.teammate_depth + 1,
+        progress=ctx.progress.child(member.name) if ctx.progress is not None else None,
     )
     ctx.used_tools.append(f"ask_teammate:{member.name}")
     for item in nested.get("attachments") or []:
@@ -1885,6 +1887,16 @@ async def _ask_teammate(ctx: RunContext, agent_id: str, prompt: str) -> dict:
     return {"from": member.name, "agent_id": str(member.id), "reply": nested.get("text") or ""}
 
 
+def _progress_callbacks(ctx: RunContext, conns: list, query: str) -> list:
+    if ctx.progress is None:
+        return []
+    from app.agent.progress import ProgressCallback
+
+    names = {str(c.slug): str(getattr(c, "alias", "") or getattr(c, "name", "") or c.slug) for c in conns}
+    agents = {str(getattr(p, "id", "")): str(getattr(p, "name", "")) for p in ctx.teammates}
+    return [ProgressCallback(ctx.progress, query=query, connector_names=names, agent_names=agents)]
+
+
 async def run_deep_agent(
     db: AsyncSession,
     user,
@@ -1898,6 +1910,7 @@ async def run_deep_agent(
     group=None,
     teammates: list | None = None,
     teammate_depth: int = 0,
+    progress: Any = None,
 ) -> dict[str, Any]:
     from app.connectors.platform import ensure_platform_connectors
     from app.debug_ndjson import dbg as _dbg_start
@@ -1928,7 +1941,11 @@ async def run_deep_agent(
         teammate_depth=teammate_depth,
         session_id=session_id,
         request_id=request_id,
+        progress=progress,
     )
+    callbacks = _progress_callbacks(ctx, conns, query)
+    if progress is not None:
+        await progress.emit("Recalling what I know about this" if not teammate_depth else "Picking up the task", kind="memory")
     memory = await load_memory(db, user, query, workspace_agent)
     extra = []
     from langchain_core.messages import HumanMessage
@@ -1937,6 +1954,8 @@ async def run_deep_agent(
         slug, tool = payload.get("slug"), payload.get("tool")
         if not slug or not tool:
             continue
+        if progress is not None:
+            await progress.emit(f"Running what you confirmed: {tool.replace('_', ' ')}", kind="confirm", tool=tool)
         if slug == workspace_tools.WORKSPACE_SLUG:
             result = await workspace_tools.run_confirmed(ctx, tool, payload.get("args") or {})
             ctx.used_tools.append(tool)
@@ -1969,6 +1988,7 @@ async def run_deep_agent(
                 config={
                     "recursion_limit": limit,
                     "configurable": {"thread_id": f"{session_id}{peer}:r{attempt}"},
+                    **({"callbacks": callbacks} if callbacks else {}),
                 },
             )
             text = last_text(result.get("messages") if isinstance(result, dict) else [])
@@ -1976,6 +1996,8 @@ async def run_deep_agent(
         except Exception as exc:  # noqa: BLE001
             if _is_recursion_limit(exc) and attempt < 2:
                 limit = min(limit + 40, 200)
+                if progress is not None:
+                    await progress.emit("That took many steps; giving it one more pass", kind="retry")
                 log.warning("recursion limit reached; retry %s/2 with limit=%s", attempt + 1, limit)
                 continue
             log.exception("deep agent failed")

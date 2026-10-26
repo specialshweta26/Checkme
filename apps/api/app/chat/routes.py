@@ -17,6 +17,7 @@ from app.agent.attachments import summarize_one
 from app.agent.confirm import read_confirm
 from app.agent.deep import run_deep_agent
 from app.agent.memory import seed_letta
+from app.agent.progress import ProgressReporter, read_progress, valid_progress_id
 from app.agents import service as agents_service
 from app.cache import rate_limited
 from app.config import get_settings
@@ -36,6 +37,16 @@ class ChatIn(BaseModel):
     attachments: list[dict] = []
     agent_id: uuid.UUID | None = None
     group_id: uuid.UUID | None = None
+    progress_id: str | None = None
+
+
+@router.get("/progress/{progress_id}")
+async def chat_progress(progress_id: str, user: User = Depends(current_user)):
+    """Live status lines for an in-flight chat turn (polled by the web app)."""
+    if not valid_progress_id(progress_id):
+        raise HTTPException(400, "Bad progress id")
+    steps = await read_progress(user.id, progress_id)
+    return {"steps": steps, "done": bool(steps and steps[-1].get("kind") == "done")}
 
 
 @router.get("/sessions")
@@ -190,6 +201,7 @@ async def chat(
     dbg("B", "chat/routes.py:chat", "chat request", {"query": text[:80], "has_session": bool(body.session_id)})
     # #endregion
     t0 = time.time()
+    progress = ProgressReporter(user.id, body.progress_id) if valid_progress_id(body.progress_id) else None
     try:
         result = await run_deep_agent(
             db,
@@ -202,6 +214,7 @@ async def chat(
             workspace_agent=workspace_agent,
             group=group,
             teammates=teammates,
+            progress=progress,
         )
         # #region agent log
         dbg(
@@ -221,6 +234,9 @@ async def chat(
         dbg("C", "chat/routes.py:chat", "agent exception", {"error": str(exc)[:200], "ms": int((time.time() - t0) * 1000)})
         # #endregion
         raise HTTPException(502, str(exc)[:400]) from exc
+    finally:
+        if progress is not None:
+            await progress.finish()
     try:
         if result.get("source"):
             working["last_source"] = result["source"]
@@ -243,6 +259,7 @@ async def chat(
             "agent_id": (result.get("speaker") or {}).get("id") if result.get("speaker") else (str(workspace_agent.id) if workspace_agent else None),
             "agent_name": (result.get("speaker") or {}).get("name"),
             "group_id": result.get("group_id"),
+            "steps": [s.get("text") for s in (progress.steps if progress else []) if s.get("kind") != "done"][:40],
         }
         public_uploads = [
             {k: item.get(k) for k in ("key", "filename", "content_type", "kind", "download_url", "preview_url", "previewable", "size") if item.get(k) is not None}
