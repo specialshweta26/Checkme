@@ -342,3 +342,26 @@ def clip_output(text: str, limit: int = OUTPUT_MAX) -> str:
     if len(text) <= limit:
         return text
     return f"… {len(text) - limit} earlier chars clipped\n" + text[-limit:]
+
+
+# ---------------------------------------------------------------------------
+# Chat routing: which messages to a coding agent become background jobs.
+# Conservative on purpose: questions and chit-chat stay inline; the model can also
+# start a job itself with start_coding_job.
+
+_REPO_REF = _re.compile(r"(github\.com/[\w.-]+/[\w.-]+|\b[\w-]{2,39}/[\w.-]{2,100}\b|\b(repo|repository|codebase|pull request|pr|branch)\b)", _re.I)
+_DO_VERB = _re.compile(
+    r"\b(fix|implement|add|build|create|refactor|rename|bump|upgrade|migrate|write (?:a )?tests?|"
+    r"open (?:a )?(?:pr|pull request)|review (?:the )?(?:pr|pull request)|ship|deploy|port|remove|delete|update|change)\b",
+    _re.I,
+)
+_QUESTION = _re.compile(r"^\s*(what|why|how|which|who|when|where|can you explain|explain|is|are|does|do)\b.*\?\s*$", _re.I | _re.S)
+
+
+def looks_like_coding_task(text: str) -> bool:
+    t = (text or "").strip()
+    if len(t) < 12 or _QUESTION.match(t):
+        return False
+    if _re.search(r"\b(and/or|either/or|\d+/\d+)\b", t) and not _re.search(r"github\.com|\b(repo|repository|pr|branch)\b", t, _re.I):
+        return False
+    return bool(_REPO_REF.search(t) and _DO_VERB.search(t))

@@ -1850,3 +1850,50 @@ input.tasks-search { width: min(260px, 100%); }
 .focus-letter { display: inline-grid; place-items: center; width: 26px; height: 26px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--lift); color: var(--muted); font-size: 12.5px; }
 .focus-hint { margin: 10px 0 0 18px; color: var(--faint); font-size: 13px; }
 .welcome-after-onboard { padding-top: 20px; }
+
+/* Background job timeline (components/JobTimeline.tsx) */
+.job-timeline {
+  margin-top: 10px;
+  padding: 12px 14px;
+  border-radius: var(--radius);
+  border: 1px solid rgba(47, 107, 255, 0.18);
+  background: var(--panel);
+  display: grid;
+  gap: 8px;
+}
+.job-head { display: flex; align-items: center; gap: 10px; }
+.job-title { flex: 1; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.job-badge, .job-chip {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--lift);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.job-badge.running, .job-chip.running { background: rgba(47, 107, 255, 0.12); color: #2f6bff; }
+.job-badge.waiting_approval, .job-chip.waiting_approval { background: rgba(249, 115, 22, 0.14); color: #c2410c; }
+.job-badge.done, .job-chip.done { background: rgba(22, 163, 74, 0.12); color: #15803d; }
+.job-badge.failed, .job-chip.failed { background: rgba(220, 38, 38, 0.12); color: #b91c1c; }
+.job-tree { display: flex; flex-wrap: wrap; gap: 6px; }
+.job-events { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; max-height: 420px; overflow-y: auto; }
+.job-ev { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; line-height: 1.45; }
+.job-ev.status .job-text { color: var(--muted); }
+.job-ev.error .job-text { color: #b91c1c; }
+.job-ev.result .job-text { font-weight: 600; white-space: pre-wrap; }
+.job-ico { width: 16px; flex: none; text-align: center; color: var(--muted); }
+.job-body { display: grid; gap: 4px; min-width: 0; flex: 1; }
+.job-who { font-size: 11px; color: var(--muted); }
+.job-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.job-pre {
+  margin: 4px 0 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--lift);
+  font-size: 12px;
+  max-height: 280px;
+  overflow: auto;
+  white-space: pre;
+}
+.job-approval { display: grid; gap: 8px; }
+.btn.small { padding: 4px 10px; font-size: 12px; }

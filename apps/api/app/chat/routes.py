@@ -201,6 +201,9 @@ async def chat(
     dbg("B", "chat/routes.py:chat", "chat request", {"query": text[:80], "has_session": bool(body.session_id)})
     # #endregion
     t0 = time.time()
+    routed = await _maybe_start_job(db, user, sess, workspace_agent, group, confirms, text, agent_text, history, request_id)
+    if routed is not None:
+        return routed
     progress = ProgressReporter(user.id, body.progress_id) if valid_progress_id(body.progress_id) else None
     try:
         result = await run_deep_agent(
@@ -260,6 +263,8 @@ async def chat(
             "agent_name": (result.get("speaker") or {}).get("name"),
             "group_id": result.get("group_id"),
             "steps": [s.get("text") for s in (progress.steps if progress else []) if s.get("kind") != "done"][:40],
+            "jobs": result.get("jobs_started") or [],
+            "job": (result.get("jobs_started") or [None])[0],
         }
         public_uploads = [
             {k: item.get(k) for k in ("key", "filename", "content_type", "kind", "download_url", "preview_url", "previewable", "size") if item.get(k) is not None}
@@ -325,6 +330,45 @@ async def _resolve_roster(db, user, agent_id, group_id):
     if agent_id:
         return await agents_service.get_agent(db, user, agent_id), None, []
     return chief, None, []
+
+
+async def _maybe_start_job(db, user, sess, agent, group, confirms, text, agent_text, history, request_id):
+    """Coding agents: a code-change request becomes a background job with a live timeline.
+
+    That keeps long plan/build/test/push work off the chat request (and its ~5 minute proxy timeout)."""
+    from app.agent.coding import is_coding_agent, looks_like_coding_task
+    from app.jobs import service as jobs
+    from app.jobs.worker import wake
+
+    if group is not None or confirms or not is_coding_agent(agent) or not looks_like_coding_task(text):
+        return None
+    context = "\n".join(f"{m['role']}: {str(m['content'])[:600]}" for m in history[-6:])
+    prompt = agent_text + (f"\n\nRecent conversation for context:\n{context}" if context else "")
+    try:
+        job = await jobs.create_job(db, user, agent=agent, prompt=prompt, title=text, role="coder", kind="chat", session_id=sess.id)
+    except jobs.JobError:
+        return None
+    info = jobs.serialize_job(job)
+    reply = (
+        f"On it. I started a background job for this: {info['title']}. "
+        "Follow the live timeline below; anything that pushes code or merges waits for your approval there."
+    )
+    speaker = {"id": str(agent.id), "name": agent.name, "color": getattr(agent, "color", "") or "", "title": getattr(agent, "title", "") or ""}
+    meta = {"request_id": request_id, "route": "job", "job": info, "jobs": [info], "speaker": speaker, "agent_id": str(agent.id), "agent_name": agent.name}
+    await _store(db, sess, user.id, request_id, text, reply, meta)
+    wake()
+    return {
+        "session_id": str(sess.id),
+        "text": reply,
+        "route": "job",
+        "job": info,
+        "jobs_started": [info],
+        "pending_confirms": [],
+        "used_tools": [],
+        "speaker": speaker,
+        "request_id": request_id,
+        "uploads": [],
+    }
 
 
 async def _store(db, sess, user_id, request_id, user_text, assistant_text, meta, user_meta=None) -> None:

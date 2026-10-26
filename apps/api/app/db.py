@@ -74,7 +74,20 @@ async def _migrate() -> None:
         await conn.execute(text("ALTER TABLE workspace_agents ADD COLUMN IF NOT EXISTS unread BOOLEAN DEFAULT false"))
         await conn.execute(text("ALTER TABLE workspace_agents ADD COLUMN IF NOT EXISTS focus VARCHAR(40) DEFAULT ''"))
         await _migrate_github(conn)
+        await _migrate_jobs(conn)
         await _migrate_agent_scope(conn)
+
+
+async def _migrate_jobs(conn) -> None:
+    """agent_jobs / job_events come from create_all; keep later columns and indexes in step."""
+    for stmt in (
+        "ALTER TABLE agent_jobs ADD COLUMN IF NOT EXISTS scheduled_task_id UUID",
+        "ALTER TABLE agent_jobs ADD COLUMN IF NOT EXISTS attempts INTEGER DEFAULT 0",
+        "ALTER TABLE agent_jobs ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMPTZ",
+        "CREATE INDEX IF NOT EXISTS ix_job_events_root_id_id ON job_events (root_id, id)",
+        "CREATE INDEX IF NOT EXISTS ix_agent_jobs_user_status ON agent_jobs (user_id, status)",
+    ):
+        await conn.execute(text(stmt))
 
 
 async def _migrate_github(conn) -> None:
