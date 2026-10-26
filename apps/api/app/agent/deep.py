@@ -93,6 +93,13 @@ class RunContext:
     progress: Any = None
     job: Any = None  # AgentJob when running in the background worker
     jobs_started: list = field(default_factory=list)  # jobs this turn queued (start_coding_job / delegate)
+    question: dict | None = None  # ask_user: {question, options, waiting_for?} -> job waits / chat buttons
+    prs: list = field(default_factory=list)  # PRs opened or updated this turn
+    merged: list = field(default_factory=list)  # PRs merged this turn
+    repo: str = ""  # repo this turn worked on
+    overviews: dict = field(default_factory=dict)  # repo_overview cache per repo
+    check_results: dict = field(default_factory=dict)  # last run_checks per repo (for the PR body)
+    check_attempts: dict = field(default_factory=dict)
 
 
 def _json_size(value: Any) -> int:
@@ -1123,6 +1130,59 @@ def git_write_gate(conn, slug: str, tool: str, args: dict | None) -> bool:
     return is_git_write(str(getattr(conn, "provider", "") or ""), slug, tool, args, text)
 
 
+_APPROVAL_KEYS = ("repo", "number", "head", "branch", "method", "base", "state", "delete_branch")
+
+
+def _approved(ctx: RunContext, conn, slug: str, tool: str, args: dict) -> bool:
+    """Was this exact action approved? GitHub App writes (merge, push, PR edits) must match repo, PR and options,
+    so approving one merge never lets a different PR through."""
+    if not confirmed(ctx.confirmations, slug, tool):
+        return False
+    from app.connectors.github_app import WRITE_TOOLS
+
+    if str(getattr(conn, "provider", "") or "") != "github_app" or tool not in WRITE_TOOLS:
+        return True
+
+    def key(a: dict) -> tuple:
+        a = dict(a or {})
+        if tool == "merge_pull_request":
+            from app.connectors.github_app import merge_method
+
+            a["method"] = merge_method(a.get("method"))
+        return tuple("" if a.get(k) in (None, False, "") else str(a.get(k)).lower() for k in _APPROVAL_KEYS)
+
+    want = key(args)
+    return any(c.get("slug") == slug and c.get("tool") == tool and key(c.get("args") or {}) == want for c in ctx.confirmations)
+
+
+async def _track_github_writes(ctx: RunContext, conn, tool: str, args: dict, result: Any) -> None:
+    """PRs opened and merged through the GitHub App go on the job (Merge it? question, merge sha) and in coding memory."""
+    if str(getattr(conn, "provider", "") or "") != "github_app" or not isinstance(result, dict) or result.get("error"):
+        return
+    if tool not in ("create_pull_request", "merge_pull_request"):
+        return
+    from app.agent import coding_memory
+
+    repo = str(args.get("repo") or "")
+    rec = getattr(ctx.progress, "record", None) if ctx.progress is not None else None
+    if tool == "create_pull_request" and result.get("url"):
+        pr = {"url": result["url"], "repo": repo, "number": result.get("number"), "branch": args.get("head"), "title": args.get("title")}
+        if not any(p.get("url") == pr["url"] for p in ctx.prs):
+            ctx.prs.append(pr)
+        ctx.repo = ctx.repo or repo
+        if rec is not None:
+            await rec("pr", f"Pull request: {pr['url']}", pr)
+        await coding_memory.note(ctx, repo=repo, pr=pr)
+    elif tool == "merge_pull_request" and result.get("merged"):
+        m = {"repo": repo, "number": int(args.get("number") or 0), "sha": result.get("sha"), "method": result.get("method"), "url": result.get("url")}
+        ctx.merged.append(m)
+        ctx.repo = ctx.repo or repo
+        if rec is not None:
+            await rec("pr", f"Merged {repo}#{m['number']} ({m.get('method') or 'merge'}): {str(m.get('sha') or '')[:12]}", m)
+        url = m.get("url") or f"https://github.com/{repo}/pull/{m['number']}"
+        await coding_memory.note(ctx, repo=repo, pr={"url": url, "repo": repo, "number": m["number"], "branch": "", "state": "merged"})
+
+
 async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, args: dict | None = None) -> Any:
     args = as_dict(args)
     orig_tool = tool_name
@@ -1175,8 +1235,8 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
     destructive = bool(hit.destructive if hit is not None else (spec.destructive if spec else False))
     # Git writes (push, open PR, merge, commit) always need a human, even in auto_confirm runs (schedules, jobs).
     git_write = git_write_gate(conn, connector_slug, tool_name, args)
-    if (destructive or git_write) and (git_write or not ctx.auto_confirm) and not confirmed(
-        ctx.confirmations, connector_slug, tool_name
+    if (destructive or git_write) and (git_write or not ctx.auto_confirm) and not _approved(
+        ctx, conn, connector_slug, tool_name, args
     ):
         # Background jobs wait for the user, so their approval cards live longer than chat ones.
         ttl = JOB_CONFIRM_TTL if (ctx.job is not None or ctx.auto_confirm) else 600
@@ -1232,6 +1292,7 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
         )
         # #endregion
         result = await _hydrate_opened_mail(ctx, connector_slug, tool_name, result)
+        await _track_github_writes(ctx, conn, tool_name, args, result)
         # #region agent log
         if tool_name in {"search_messages", "list_messages"}:
             from app.debug_ndjson import dbg
@@ -1543,6 +1604,96 @@ class PushBranchInput(BaseModel):
     body: str = Field(default="", description="Pull request description: what changed, why, and how it was tested.")
     base: str = Field(default="", description="PR target branch. Defaults to the repo default branch.")
     draft: bool = Field(default=False, description="Open the PR as a draft.")
+    pr_number: int = Field(
+        default=0,
+        description="Only when the user asked you to update an existing PR: its number. Then branch must be that PR's head "
+        "branch (verified), and no new PR is opened.",
+    )
+
+
+class GitInspectInput(BaseModel):
+    repo: str = Field(description="owner/name (already checked out with git_checkout)")
+    action: str = Field(description="status | branches | log | show | diff | blame | grep | tree | read")
+    ref: str = Field(default="", description="Commit, branch or tag (log/show/diff/blame/tree/read).")
+    ref2: str = Field(default="", description="Second ref for diff (ref..ref2).")
+    path: str = Field(default="", description="File or directory path.")
+    query: str = Field(default="", description="Text to search for (grep).")
+    start: int = Field(default=0, description="First line (read/blame).")
+    end: int = Field(default=0, description="Last line (read/blame).")
+    limit: int = Field(default=50, description="Max commits/results.")
+    regex: bool = Field(default=False, description="grep: treat query as a regex instead of plain text.")
+
+
+class ToolchainInput(BaseModel):
+    extras: list[str] = Field(default_factory=list, description="Extra toolchains only when the repo needs them: go, java, rust.")
+    force: bool = Field(default=False, description="Re-check everything even if the toolchain marker exists.")
+
+
+class RepoOnlyInput(BaseModel):
+    repo: str = Field(description="owner/name (already checked out)")
+
+
+class SymbolInput(BaseModel):
+    repo: str = Field(description="owner/name (already checked out)")
+    symbol: str = Field(description="Function, class, type or variable name, e.g. parse_config or UserService.")
+    limit: int = Field(default=40, description="Max results.")
+
+
+class ReferencesInput(BaseModel):
+    repo: str = Field(description="owner/name (already checked out)")
+    symbol: str = Field(description="Identifier to find usages of (whole word).")
+    path: str = Field(default="", description="Only under this directory or file.")
+    limit: int = Field(default=80, description="Max lines.")
+
+
+class ReadRangeInput(BaseModel):
+    repo: str = Field(description="owner/name (already checked out)")
+    path: str = Field(description="File path in the repo.")
+    start: int = Field(default=1, description="First line.")
+    end: int = Field(default=200, description="Last line.")
+    ref: str = Field(default="", description="Read the file at this commit/branch instead of the working tree.")
+
+
+class CheckCommand(BaseModel):
+    kind: str = Field(default="unit", description="lint | typecheck | unit | integration | build | setup")
+    command: str
+    cwd: str = Field(default=".", description="Directory inside the repo.")
+
+
+class RunChecksInput(BaseModel):
+    repo: str = Field(description="owner/name (already checked out)")
+    kinds: list[str] = Field(default_factory=list, description="Subset of lint, typecheck, unit, integration, build. Empty = all found.")
+    commands: list[CheckCommand] = Field(default_factory=list, description="Override: exact commands to run instead of the detected ones.")
+    timeout_each: int = Field(default=600, description="Seconds per command (10-900).")
+
+
+class Finding(BaseModel):
+    path: str = Field(default="", description="File path (as in the PR diff).")
+    line: int = Field(default=0, description="Line number in the new version of the file; inline only when it is inside the diff.")
+    severity: str = Field(default="minor", description="blocker | major | minor | nit")
+    body: str = Field(description="What is wrong and how to fix it.")
+
+
+class ReviewInput(BaseModel):
+    repo: str = Field(description="owner/name")
+    number: int = Field(description="Pull request number")
+    verdict: str = Field(default="COMMENT", description="COMMENT, REQUEST_CHANGES, or APPROVE (APPROVE only when nothing blocks).")
+    summary: str = Field(default="", description="2-5 sentences: what the PR does and the overall assessment.")
+    findings: list[Finding] = Field(default_factory=list, description="Concrete issues, each with path/line when possible.")
+    include_checks: bool = Field(default=True, description="Add the latest run_checks table to the review.")
+
+
+class AskUserInput(BaseModel):
+    question: str = Field(description="One short question.")
+    options: list[str] = Field(description="2-5 short answer options shown as buttons, e.g. repo names or Yes / No.")
+    waiting_for: str = Field(default="", description="Set to github_app when blocked on the GitHub App install, so the job resumes after connecting.")
+
+
+class RememberCodingInput(BaseModel):
+    default_repo: str = Field(default="", description="owner/name the user works in by default.")
+    branch_convention: str = Field(default="", description="e.g. agent/<ticket>-<slug>, or feat/<name>.")
+    base_branch: str = Field(default="", description="Branch PRs usually target, e.g. main or develop.")
+    notes: str = Field(default="", description="Other lasting preferences (test command, reviewers, merge method).")
 
 
 async def set_agent_focus(ctx: RunContext, focus: str) -> dict:
@@ -1781,7 +1932,7 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
     if is_coding_agent(ctx.agent):
 
         async def coding_status() -> str:
-            """Check what you can do for coding work right now: computer (sandbox) and toolchain, git push credentials, GitHub and deploy connectors, and exactly what is missing. Call once per coding task, before building."""
+            """Check what you can do for coding work right now: computer (sandbox) and dev toolchain, git push credentials, the GitHub App, deploy connectors, and exactly what is missing. Call once per coding task, before building."""
             ctx.used_tools.append("coding_workspace_status")
             return dumps(await coding_workspace_status(ctx), 8000)
 
@@ -1790,6 +1941,7 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
             ctx.used_tools.append("sandbox_shell")
             return dumps(await sandbox_shell(ctx, command, cwd, timeout), 40000)
 
+        from app.agent import coding as coding_mod
         from app.agent import git_tools
 
         async def checkout(repo: str, branch: str = "", base: str = "") -> str:
@@ -1808,16 +1960,97 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
             return dumps(await git_tools.git_diff(ctx, repo, base), 20000)
 
         async def commit(repo: str, message: str, paths: list[str] | None = None) -> str:
-            """Commit changes in the checked-out repo (only on agent/* branches)."""
+            """Commit changes in the checked-out repo on your work branch (refuses the default branch, main/master and detached HEAD)."""
             ctx.used_tools.append("git_commit")
             return dumps(await git_tools.git_commit(ctx, repo, message, paths), 8000)
 
         async def push(
-            repo: str, branch: str, open_pr: bool = True, title: str = "", body: str = "", base: str = "", draft: bool = False
+            repo: str,
+            branch: str,
+            open_pr: bool = True,
+            title: str = "",
+            body: str = "",
+            base: str = "",
+            draft: bool = False,
+            pr_number: int = 0,
         ) -> str:
-            """Push an agent/* branch to GitHub and (by default) open a pull request. Always shows the user an approval card first; tell them it is waiting for approval. Never merge."""
+            """Push an agent/* branch to GitHub and (by default) open a pull request with a clear body (## Summary, ## Changes, ## Tests, ## Caveats; the latest run_checks table is added if the body has no Tests section). To update an existing PR the user named, pass pr_number and its head branch. Always shows the user an approval card first; tell them it is waiting for approval. Opening a PR never merges it. If GitHub access is missing it saves a patch and returns status=blocked with the install link."""
             ctx.used_tools.append("push_branch")
-            return dumps(await git_tools.push_branch(ctx, repo, branch, open_pr, title, body, base, draft), 8000)
+            return dumps(await git_tools.push_branch(ctx, repo, branch, open_pr, title, body, base, draft, pr_number), 8000)
+
+        from app.agent import dev_tools
+
+        async def inspect(
+            repo: str, action: str, ref: str = "", ref2: str = "", path: str = "", query: str = "",
+            start: int = 0, end: int = 0, limit: int = 50, regex: bool = False,
+        ) -> str:
+            """Read-only git and code exploration in the local clone: status, branches, log, show, diff (ref..ref2), blame, grep, tree, read (line ranges). Prefer the GitHub App read tools (get_tree, get_file, search_code, list_commits, compare_refs, blame_file) before cloning; use this once the repo is checked out."""
+            ctx.used_tools.append("git_inspect")
+            try:
+                _, name = coding_mod.split_repo(repo)
+                script = coding_mod.inspect_script(name, action, ref, ref2, path, query, start, end, limit, regex)
+            except Exception as exc:  # noqa: BLE001
+                return dumps({"error": str(exc)[:300]}, 1000)
+            return dumps(await git_tools.sandbox_exec(ctx, script, 120), 20000)
+
+        async def toolchain(extras: list[str] | None = None, force: bool = False) -> str:
+            """Set up the headless IDE on the computer once: git, gh, ripgrep, fd, jq, tree, universal-ctags, node + npm/pnpm/yarn (corepack), python + uv + pytest, and git identity. Pass extras (go, java, rust) only when the repo needs them. Cached with a marker file, so calling it again is cheap. Returns what was installed and what failed."""
+            ctx.used_tools.append("ensure_dev_toolchain")
+            return dumps(await dev_tools.ensure_dev_toolchain(ctx, extras or [], force), 4000)
+
+        async def overview(repo: str) -> str:
+            """Understand a checked-out repo before editing: languages, frameworks, entry points, manifests, CI workflows, and the setup / lint / typecheck / unit / integration / build commands (from CI first, manifests second). Run this before your first edit."""
+            ctx.used_tools.append("repo_overview")
+            return dumps(await dev_tools.repo_overview(ctx, repo), 12000)
+
+        async def symbol(repo: str, symbol: str, limit: int = 40) -> str:
+            """Find where a function, class, type or variable is defined (universal-ctags, with a ripgrep fallback)."""
+            ctx.used_tools.append("find_symbol")
+            return dumps(await dev_tools.find_symbol(ctx, repo, symbol, limit), 12000)
+
+        async def references(repo: str, symbol: str, path: str = "", limit: int = 80) -> str:
+            """Find every usage of an identifier (whole word) with file:line, to judge the impact of a change."""
+            ctx.used_tools.append("find_references")
+            return dumps(await dev_tools.find_references(ctx, repo, symbol, path, limit), 16000)
+
+        async def read_range(repo: str, path: str, start: int = 1, end: int = 200, ref: str = "") -> str:
+            """Read lines start..end of a file with line numbers (optionally at a ref)."""
+            ctx.used_tools.append("read_file_range")
+            return dumps(await dev_tools.read_file_range(ctx, repo, path, start, end, ref), 32000)
+
+        async def checks(repo: str, kinds: list[str] | None = None, commands: list | None = None, timeout_each: int = 600) -> str:
+            """Test all cases: install deps, then run lint, type-check, unit tests, integration tests and the build (detected from CI workflows first, manifests second). On failure fix the code and run again, up to 3 attempts. The results go to the timeline and into the PR body."""
+            ctx.used_tools.append("run_checks")
+            cmds = [c.model_dump() if hasattr(c, "model_dump") else dict(c) for c in (commands or [])]
+            return dumps(await dev_tools.run_checks(ctx, repo, kinds or [], cmds, timeout_each), 20000)
+
+        async def review(
+            repo: str, number: int, verdict: str = "COMMENT", summary: str = "", findings: list | None = None, include_checks: bool = True
+        ) -> str:
+            """Post a structured PR review through the Checkme GitHub App: summary, findings by severity (inline comments where the line is in the diff, the rest in the body), the latest checks, and a verdict (COMMENT, REQUEST_CHANGES or APPROVE). Read the PR first (get_pull_request / compare_refs) and run checks on its branch when you can."""
+            ctx.used_tools.append("review_pull_request")
+            items = [f.model_dump() if hasattr(f, "model_dump") else dict(f) for f in (findings or [])]
+            return dumps(await dev_tools.review_pull_request(ctx, repo, number, verdict, summary, items, include_checks), 4000)
+
+        async def ask(question: str, options: list[str], waiting_for: str = "") -> str:
+            """Ask the user one short question with 2-5 option buttons, only when something is genuinely ambiguous (which repo or branch, a destructive step) or you are blocked (waiting_for='github_app'). Otherwise decide and proceed. End your turn after asking."""
+            ctx.used_tools.append("ask_user")
+            opts = [str(o).strip() for o in options or [] if str(o).strip()][:5]
+            if not question.strip() or len(opts) < 2:
+                return dumps({"error": "Give a question and 2-5 options."}, 500)
+            ctx.question = {"question": question.strip()[:400], "options": opts}
+            if waiting_for.strip():
+                ctx.question["waiting_for"] = waiting_for.strip()[:40]
+            return dumps({"asked": True, "note": "The user sees the options as buttons. End your turn now with the question in one line."}, 500)
+
+        async def remember_coding(default_repo: str = "", branch_convention: str = "", base_branch: str = "", notes: str = "") -> str:
+            """Save lasting coding preferences in your own memory: default repo, branch naming convention, usual base branch, notes. Repos you work in and PRs you open are remembered automatically."""
+            from app.agent import coding_memory
+
+            ctx.used_tools.append("remember_coding")
+            prefs = {"default_repo": default_repo, "branch_convention": branch_convention, "base_branch": base_branch, "notes": notes}
+            merged = await coding_memory.note(ctx, prefs={k: v for k, v in prefs.items() if v})
+            return dumps({"saved": merged is not None, "memory": coding_memory.render(merged or {})}, 1500)
 
         tools.extend(
             [
@@ -1830,12 +2063,24 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
                 StructuredTool.from_function(coroutine=diff, name="git_diff", description=diff.__doc__, args_schema=GitDiffInput),
                 StructuredTool.from_function(coroutine=commit, name="git_commit", description=commit.__doc__, args_schema=GitCommitInput),
                 StructuredTool.from_function(coroutine=push, name="push_branch", description=push.__doc__, args_schema=PushBranchInput),
+                StructuredTool.from_function(coroutine=inspect, name="git_inspect", description=inspect.__doc__, args_schema=GitInspectInput),
+                StructuredTool.from_function(coroutine=toolchain, name="ensure_dev_toolchain", description=toolchain.__doc__, args_schema=ToolchainInput),
+                StructuredTool.from_function(coroutine=overview, name="repo_overview", description=overview.__doc__, args_schema=RepoOnlyInput),
+                StructuredTool.from_function(coroutine=symbol, name="find_symbol", description=symbol.__doc__, args_schema=SymbolInput),
+                StructuredTool.from_function(coroutine=references, name="find_references", description=references.__doc__, args_schema=ReferencesInput),
+                StructuredTool.from_function(coroutine=read_range, name="read_file_range", description=read_range.__doc__, args_schema=ReadRangeInput),
+                StructuredTool.from_function(coroutine=checks, name="run_checks", description=checks.__doc__, args_schema=RunChecksInput),
+                StructuredTool.from_function(coroutine=review, name="review_pull_request", description=review.__doc__, args_schema=ReviewInput),
+                StructuredTool.from_function(coroutine=remember_coding, name="remember_coding", description=remember_coding.__doc__, args_schema=RememberCodingInput),
             ]
         )
+        if ctx.job is None or (getattr(ctx.job, "depth", 1) or 1) <= 1:
+            # Only the user-facing level asks questions: chat turns and root jobs (children report to their parent).
+            tools.append(StructuredTool.from_function(coroutine=ask, name="ask_user", description=ask.__doc__, args_schema=AskUserInput))
         if ctx.job is None and ctx.teammate_depth == 0 and ctx.db is not None:
 
             async def start_job(task: str, title: str = "") -> str:
-                """Start a background coding job for multi-step work (code changes, fixes, features, reviews, deploys). It runs on the computer without the chat timeout and shows a live timeline with approval buttons in this chat. Give a self-contained task: repo (owner/name), goal and acceptance criteria."""
+                """Start a background coding job for multi-step work (code changes, fixes, features, reviews, merges, deploys). It runs on the computer without the chat timeout and shows a live timeline (todo list, steps, tests, PR links) with approval and answer buttons in this chat. Give a self-contained task: repo (owner/name), goal and acceptance criteria. Follow-ups in this chat continue the same job."""
                 ctx.used_tools.append("start_coding_job")
                 return dumps(await start_coding_job(ctx, task, title), 4000)
 
@@ -2234,6 +2479,14 @@ async def run_deep_agent(
     if progress is not None:
         await progress.emit("Recalling what I know about this" if not teammate_depth else "Picking up the task", kind="memory")
     memory = await load_memory(db, user, query, workspace_agent)
+    from app.agent.coding import is_coding_agent as _is_coder
+
+    if _is_coder(workspace_agent):
+        from app.agent import coding_memory
+
+        block = await coding_memory.read(db, user, workspace_agent)
+        if block and block not in (memory or ""):
+            memory = ((memory or "").rstrip() + "\n\nYour coding memory (repos, conventions, past PRs):\n" + block).strip()
     extra = []
     from langchain_core.messages import HumanMessage
 
@@ -2362,4 +2615,8 @@ async def run_deep_agent(
         "group_id": str(group.id) if group is not None else None,
         "workspace_changed": ctx.workspace_changed,
         "jobs_started": ctx.jobs_started,
+        "question": ctx.question,
+        "prs": ctx.prs,
+        "merged": ctx.merged,
+        "repo": ctx.repo,
     }

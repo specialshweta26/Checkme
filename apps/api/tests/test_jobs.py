@@ -121,7 +121,7 @@ def test_job_query_adds_role_brief_on_first_run_only():
 
     job = _job(role="reviewer", prompt="Review a/b#4")
     q = job_query(job)
-    assert "reviewer" in q and "Never merge" in q and "Review a/b#4" in q
+    assert "reviewer" in q and "never merge" in q and "review_pull_request" in q and "Review a/b#4" in q
     job.meta["history"] = [{"role": "user", "content": q}]
     job.meta["next_query"] = "continue"
     assert job_query(job) == "continue"
@@ -243,6 +243,12 @@ async def test_chat_route_starts_job_for_coding_request(monkeypatch):
             return None
 
     monkeypatch.setattr(worker, "wake", lambda: None)
+    from app.jobs import service as jobs_service
+
+    async def no_job(*a, **k):
+        return None
+
+    monkeypatch.setattr(jobs_service, "latest_chat_job", no_job)
     user = SimpleNamespace(id=uuid.uuid4())
     sess = SimpleNamespace(id=uuid.uuid4(), title="x", updated_at=None)
     coder = SimpleNamespace(id=uuid.uuid4(), name="Coder", focus="coding", color="#2f6bff", title="software engineer")
@@ -258,3 +264,42 @@ async def test_chat_route_starts_job_for_coding_request(monkeypatch):
     assert job.role == "planner" and "Recent conversation" in job.prompt
     reply = [o for o in added if type(o).__name__ == "ChatMessage" and o.role == "assistant"][0]
     assert reply.meta["job"]["id"] == str(job.id)
+    assert reply.content.startswith("On it: first I'll explore specialshweta26/Checkme and write a todo list")
+
+
+async def test_chat_followup_continues_the_same_job(monkeypatch):
+    from app.chat import routes
+    from app.jobs import service as jobs_service
+    from app.jobs import worker
+
+    added = []
+
+    class DB:
+        def add(self, obj):
+            added.append(obj)
+
+        async def commit(self):
+            return None
+
+    monkeypatch.setattr(worker, "wake", lambda: None)
+    user = SimpleNamespace(id=uuid.uuid4())
+    sess = SimpleNamespace(id=uuid.uuid4(), title="x", updated_at=None)
+    coder = SimpleNamespace(id=uuid.uuid4(), name="Coder", focus="coding", color="", title="")
+    job = _job(role="planner", prompt="Fix a/b")
+    job.status = "done"
+    job.meta = {"repo": "a/b", "prs": [{"url": "https://github.com/a/b/pull/3", "repo": "a/b", "number": 3}]}
+
+    async def latest(*a, **k):
+        return job
+
+    monkeypatch.setattr(jobs_service, "latest_chat_job", latest)
+    args = (DB(), user, sess, coder, None, [])
+    # a question stays inline; another repo starts fresh
+    assert await routes._maybe_start_job(*args, "what does the PR change?", "q", [], "r1") is None
+    out = await routes._maybe_start_job(*args, "also fix the typo in the README", "t", [], "r2")
+    assert out["route"] == "job" and job.status == "queued" and "also fix the typo" in job.meta["next_query"]
+    assert not [o for o in added if type(o).__name__ == "AgentJob"]  # no new job
+    job.status = "waiting_input"
+    job.meta["question"] = {"question": "Merge it? (a/b#3)", "options": ["Yes, merge it", "No, leave it open"], "pr": job.meta["prs"][0]}
+    out = await routes._maybe_start_job(*args, "Yes, merge it", "y", [], "r3")
+    assert job.status == "queued" and "check_merge" in job.meta["next_query"] and "merge_pull_request" in job.meta["next_query"]

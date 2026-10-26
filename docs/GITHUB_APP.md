@@ -31,11 +31,12 @@ GitHub → **Settings → Developer settings → GitHub Apps → New GitHub App*
 
 | Permission | Access | Why |
 | --- | --- | --- |
-| Contents | Read and write | Clone, read files, and push `agent/*` branches |
-| Pull requests | Read and write | List, open, review-comment, and merge (merge only after your approval) |
+| Contents | Read and write | Explore (tree, files, code search, history, diffs, blame), clone, push `agent/*` branches (or a PR branch you name), and merge |
+| Pull requests | Read and write | List, open, update, review (inline comments), request reviewers, and merge (merge only after your approval) |
 | Issues | Read and write | Nightly triage and comments |
 | Metadata | Read (mandatory) | Repo listing |
-| Checks | Read (optional) | Lets reviewers see CI state |
+| Checks | Read (recommended) | `check_merge` and merges refuse failing check runs |
+| Commit statuses | Read (recommended) | Same, for status-API CI (e.g. Render, Vercel previews) |
 | Actions | Read (optional) | Same |
 
 Account permissions: none. Subscribe to the **Installation** and **Installation repositories** events.
@@ -76,10 +77,22 @@ once they approve it.
 
 ## Safety rules enforced in code
 
-- Reads (`list_repos`, `get_file`, `list_prs`, `get_pull_request`, `list_issues`) need no approval.
-- `create_pull_request`, `push_files` and `merge_pull_request` are destructive. They always show an approval
+- Reads need no approval: `list_repos`, `list_branches`, `get_tree`, `get_file`, `search_code`, `list_commits`,
+  `get_commit`, `compare_refs`, `blame_file`, `list_prs`, `get_pull_request`, `get_pr_comments`, `list_issues`,
+  `get_issue` and `check_merge`. Without Checks / Commit statuses access, `check_merge` still reports
+  mergeability and says the checks could not be read.
+- `comment_pull_request`, `create_review` and `request_reviewers` post without a card (they don't change code).
+- `create_pull_request`, `update_pull_request`, `push_files` and `merge_pull_request` are destructive. They always show an approval
   card, including in scheduled runs and background jobs, where `auto_confirm` is ignored for git writes.
-- Pushes, whether through `push_files` or the sandbox `push_branch`, only go to branches named `agent/...`.
-- Merging is never automatic. A reviewer agent can only propose a merge, and you click approve.
+- Pushes, whether through `push_files` or the sandbox `push_branch`, only go to branches named `agent/...`. The one
+  exception: you name an existing open PR and the agent calls `push_branch(..., pr_number=N)`; the head branch is
+  verified through the App (open, same repo, not a fork) and the push still waits for your approval.
+- Merging is never automatic. The agent asks "Merge it?" after opening a PR; only an explicit yes leads to
+  `check_merge` and then `merge_pull_request` (default a merge commit; `squash` / `rebase` and `delete_branch` on
+  request), which shows a card with the live mergeability and checks. Conflicts are refused and reported, failing
+  checks are refused unless you ask to merge anyway, and the merge is pinned to the reviewed head sha. The approval
+  covers only that exact PR, method and branch-deletion choice.
+- If a push is blocked because the App isn't installed, the work is saved as patches on the computer
+  (`~/work/_patches/<repo>-<branch>/`) and the agent links the install page. Installing the App resumes the job.
 - The same git-write gate covers other GitHub connectors (MCP, Composio): any tool whose name looks like
   merge, push, create pull request, commit, or update file waits for approval.

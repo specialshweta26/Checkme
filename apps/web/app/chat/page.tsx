@@ -583,7 +583,38 @@ export default function ChatPage() {
                   <Markdown text={m.content} />
                   <ConnectCards meta={m.meta} />
                   {m.meta?.job?.id && !m.meta?.job_result ? (
-                    <JobTimeline jobId={String(m.meta.job.id)} onSettled={() => reloadSession(sessionId)} />
+                    <JobTimeline
+                      jobId={String(m.meta.job.id)}
+                      after={Number(m.meta.job_after) || 0}
+                      onSettled={() => reloadSession(sessionId)}
+                    />
+                  ) : null}
+                  {m.meta?.choices?.options?.length && i === messages.length - 1 ? (
+                    <div className="chips choices" style={{ marginTop: 8 }}>
+                      {m.meta.choices.options.map((opt: string) => (
+                        <button
+                          key={opt}
+                          className="chip"
+                          disabled={busyHere}
+                          onClick={async () => {
+                            if (m.meta.choices.job_id) {
+                              // A background job asked: answer it directly, then show its timeline again.
+                              await fetch(`/api/jobs/${m.meta.choices.job_id}/answer`, {
+                                method: "POST",
+                                credentials: "include",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({ text: opt }),
+                              }).catch(() => null);
+                              reloadSession(sessionId);
+                            } else {
+                              send(opt);
+                            }
+                          }}
+                        >
+                          {opt}
+                        </button>
+                      ))}
+                    </div>
                   ) : null}
                   {sourceLabel(m.meta) ? <div className="source-chip">{sourceLabel(m.meta)}</div> : null}
                   <EmailThreadButton refs={mailRefsFromMeta(m.meta)} />

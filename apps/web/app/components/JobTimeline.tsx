@@ -6,7 +6,9 @@
  * Polls `GET /api/jobs/{id}/events?after=` (the same short-poll pattern as chat progress)
  * and renders plan / step / test / diff / PR / approval / result entries. Approval entries
  * get Approve and Decline buttons that call `POST /api/jobs/{id}/approve|decline`; nothing
- * is pushed, opened or merged until the user approves.
+ * is pushed, opened, merged or deployed until the user approves. Questions (e.g. "Merge it?")
+ * get option buttons that call `POST /api/jobs/{id}/answer`. The latest write_todos plan is
+ * shown as a checklist, and check runs show their results table.
  */
 import { useEffect, useRef, useState } from "react";
 import { formatPreview } from "./preview";
@@ -20,7 +22,9 @@ type JobRow = {
   status: string;
   error?: string;
   pending: { token: string; title: string; preview: any; kind?: string }[];
+  question?: { question: string; options: string[] } | null;
 };
+type Todo = { content: string; status: "pending" | "in_progress" | "completed" };
 type JobEvent = { id: number; job_id: string; agent_name: string; kind: string; text: string; data: any; at: string | null };
 
 const STATUS_LABEL: Record<string, string> = {
@@ -28,6 +32,7 @@ const STATUS_LABEL: Record<string, string> = {
   running: "Working",
   waiting_approval: "Needs your approval",
   waiting_children: "Delegated",
+  waiting_input: "Needs your answer",
   done: "Done",
   failed: "Failed",
   cancelled: "Cancelled",
@@ -43,7 +48,9 @@ const ICON: Record<string, string> = {
   result: "★",
   error: "!",
   status: "·",
+  question: "?",
 };
+const TODO_MARK: Record<string, string> = { completed: "✓", in_progress: "▸", pending: "○" };
 
 async function post(path: string, body?: any) {
   const res = await fetch(path, {
@@ -57,14 +64,14 @@ async function post(path: string, body?: any) {
   return data;
 }
 
-export function JobTimeline({ jobId, onSettled }: { jobId: string; onSettled?: () => void }) {
+export function JobTimeline({ jobId, after: startAfter = 0, onSettled }: { jobId: string; after?: number; onSettled?: () => void }) {
   const [events, setEvents] = useState<JobEvent[]>([]);
   const [jobs, setJobs] = useState<JobRow[]>([]);
   const [done, setDone] = useState(false);
   const [busy, setBusy] = useState("");
   const [err, setErr] = useState("");
   const [nudge, setNudge] = useState(0);
-  const after = useRef(0);
+  const after = useRef(startAfter);
   const settled = useRef(false);
   const sawActive = useRef(false);
 
@@ -123,6 +130,22 @@ export function JobTimeline({ jobId, onSettled }: { jobId: string; onSettled?: (
     }
   }
 
+  async function reply(job: string, text: string) {
+    setBusy(`answer:${job}`);
+    setErr("");
+    try {
+      await post(`/api/jobs/${job}/answer`, { text });
+      setNudge((n) => n + 1);
+    } catch (e: any) {
+      setErr(e.message || "Could not send the answer");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  const planEvent = [...events].reverse().find((ev) => ev.kind === "plan" && Array.isArray(ev.data?.todos) && ev.data.todos.length);
+  const todos: Todo[] = planEvent ? planEvent.data.todos : [];
+
   async function cancel() {
     setBusy("cancel");
     try {
@@ -155,10 +178,21 @@ export function JobTimeline({ jobId, onSettled }: { jobId: string; onSettled?: (
           ))}
         </div>
       ) : null}
+      {todos.length ? (
+        <ul className="job-plan" aria-label="Plan">
+          {todos.map((t, i) => (
+            <li key={i} className={`job-todo ${t.status}`}>
+              <span className="job-todo-mark">{TODO_MARK[t.status] || "○"}</span>
+              <span>{t.content}</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
       <ol className="job-events">
         {events.map((ev) => {
           const owner = byId[ev.job_id];
           const stillPending = ev.kind === "approval" && owner?.status === "waiting_approval" && owner.pending.some((p) => p.token === ev.data?.token);
+          const openQuestion = ev.kind === "question" && owner?.status === "waiting_input" && owner.question?.question === ev.text;
           return (
             <li key={ev.id} className={`job-ev ${ev.kind}`}>
               <span className="job-ico">{ICON[ev.kind] || "•"}</span>
@@ -171,6 +205,21 @@ export function JobTimeline({ jobId, onSettled }: { jobId: string; onSettled?: (
                 ) : (
                   <span className="job-text">{ev.text}</span>
                 )}
+                {ev.kind === "test" && ev.data?.table ? (
+                  <details open={ev.data?.passed === false}>
+                    <summary>Check results{ev.data?.attempt ? ` (run ${ev.data.attempt})` : ""}</summary>
+                    <pre className="job-pre">{ev.data.table}</pre>
+                  </details>
+                ) : null}
+                {openQuestion ? (
+                  <div className="approval-actions job-choices">
+                    {(owner?.question?.options || []).map((opt) => (
+                      <button key={opt} className="btn secondary" type="button" disabled={!!busy} onClick={() => reply(ev.job_id, opt)}>
+                        {opt}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
                 {(ev.kind === "diff" || ev.kind === "test") && ev.data?.output ? (
                   <details>
                     <summary>{ev.kind === "diff" ? "Show diff" : "Show output"}</summary>
@@ -196,7 +245,7 @@ export function JobTimeline({ jobId, onSettled }: { jobId: string; onSettled?: (
             </li>
           );
         })}
-        {!done && status !== "waiting_approval" ? (
+        {!done && status !== "waiting_approval" && status !== "waiting_input" ? (
           <li className="job-ev live">
             <span className="think-orb" />
             <span className="job-text muted">{status === "queued" ? "Waiting for the computer…" : "Working…"}</span>

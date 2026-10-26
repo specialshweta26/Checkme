@@ -198,7 +198,27 @@ def describe_tool(name: str, args: dict | None, connector_names: dict[str, str] 
         f = str(a.get("focus") or "")
         return f"Setting my focus to {FOCUSES[f]['label'] if f in FOCUSES else f}"
     if n == "coding_workspace_status":
-        return "Checking the computer, GitHub and deploy setup"
+        return "Checking the computer, toolchain, GitHub and deploy setup"
+    if n == "ensure_dev_toolchain":
+        return "Setting up the dev toolchain on the computer"
+    if n == "repo_overview":
+        return f"Reading how {_clip(a.get('repo'), 50)} is built and tested"
+    if n == "find_symbol":
+        return f"Finding where {_quote(a.get('symbol'))} is defined"
+    if n == "find_references":
+        return f"Finding usages of {_quote(a.get('symbol'))}"
+    if n == "read_file_range":
+        return f"Reading {_clip(a.get('path'), 50)}"
+    if n == "git_inspect":
+        return f"Looking at {_clip(a.get('action'), 12)} in {_clip(a.get('repo'), 40)}"
+    if n == "run_checks":
+        return f"Running lint, type-check, tests and build in {_clip(a.get('repo'), 40)}"
+    if n == "review_pull_request":
+        return f"Posting a review on {_clip(a.get('repo'), 40)}#{a.get('number')}"
+    if n == "ask_user":
+        return f"Asking you: {_clip(a.get('question'), 70)}"
+    if n == "remember_coding":
+        return "Saving your coding preferences"
     if n == "git_checkout":
         return f"Checking out {_clip(a.get('repo'), 50)}" + (f" on {_clip(a.get('branch'), 40)}" if a.get("branch") else "")
     if n == "run_tests":
@@ -247,6 +267,16 @@ def _tool_short(name: str, args: dict | None, connector_names: dict[str, str] | 
     if name == "ask_teammate":
         return "your teammate"
     return humanize_tool(name)
+
+
+def plan_items(todos) -> list[dict]:
+    """write_todos items as [{content, status}] for the timeline checklist."""
+    out = []
+    for t in todos or []:
+        if isinstance(t, dict) and str(t.get("content") or "").strip():
+            status = str(t.get("status") or "pending")
+            out.append({"content": _clip(str(t["content"]), 140), "status": status if status in ("pending", "in_progress", "completed") else "pending"})
+    return out[:20]
 
 
 class ProgressReporter:
@@ -406,6 +436,13 @@ class ProgressCallback(AsyncCallbackHandler):
                 line = f"Asking {who}: {_clip(args.get('prompt'), 60)}"
                 self.last_tool = who
         self.tools_since_model += 1
+        record = getattr(self.reporter, "record", None)
+        if name == "write_todos" and record is not None:
+            # Background jobs show the plan as a checklist that updates in place.
+            todos = plan_items(args.get("todos"))
+            done = sum(1 for t in todos if t["status"] == "completed")
+            await record("plan", f"Plan: {done}/{len(todos)} done" + (f" · {line}" if line.startswith("Next:") else ""), {"todos": todos})
+            return
         await self.reporter.emit(line, kind="tool", tool=name)
 
     async def on_tool_error(self, error, **kwargs) -> None:  # noqa: ANN001

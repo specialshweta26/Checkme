@@ -70,6 +70,34 @@ async def decline(job_id: str, body: TokenIn, user: User = Depends(current_user)
     return await _decide(job_id, body, user, db, False)
 
 
+class AnswerIn(BaseModel):
+    text: str
+
+
+@router.post("/{job_id}/answer")
+async def answer(job_id: str, body: AnswerIn, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """The user picked one of the job's options (e.g. "Yes, merge it"). Shown in the chat as their message."""
+    from app.models import ChatMessage
+
+    job = await _owned(db, user, job_id)
+    try:
+        events = service.answer(job, body.text)
+    except service.JobError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    for ev in events:
+        db.add(ev)
+    if job.session_id is not None:
+        db.add(
+            ChatMessage(
+                session_id=job.session_id, user_id=user.id, role="user", content=body.text.strip()[:2000],
+                meta={"job_answer": str(job.id)}, request_id=f"answer-{str(job.id)[:8]}",
+            )
+        )
+    await db.commit()
+    wake()
+    return service.serialize_job(job)
+
+
 @router.post("/{job_id}/cancel")
 async def cancel(job_id: str, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     """Cancel the job and everything under it in the tree."""

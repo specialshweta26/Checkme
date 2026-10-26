@@ -130,17 +130,28 @@ def test_coding_focus_prompt_is_plan_then_build():
         "coding_workspace_status",
         "sandbox_shell",
         "git_checkout",
-        "branch=agent/<short-name>",
-        "run_tests",
+        "agent/<short-name>",
+        "ensure_dev_toolchain",
+        "repo_overview",
+        "find_symbol",
+        "run_checks",
         "push_branch",
         "approval card",
-        "create pull request",
-        "Never merge",
+        "do not merge by default",
+        "'Merge it?'",
+        "check_merge",
+        "merge commit sha",
+        "ask_user",
+        "remember_coding",
+        "waiting_for='github_app'",
+        "Explore remotely first",
+        "review_pull_request",
         "never put a token",
         "Render",
-        "say exactly what",
+        "exactly what is missing",
     ):
         assert needle in p, needle
+    assert "Never merge" not in p
 
 
 def test_research_focus_prompt_cites_sources():
