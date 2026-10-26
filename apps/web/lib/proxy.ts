@@ -32,4 +32,3 @@ export async function proxyApi(req: NextRequest, path: string) {
   });
   return new Response(upstream.body, { status: upstream.status, headers: out });
 }
-}
