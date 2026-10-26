@@ -47,6 +47,13 @@ export type WorkspaceRoster = {
   connector_assignments?: Record<string, string[]>;
 };
 
+/** Fired on window when a chat turn created, changed, or deleted agents or groups. */
+export const WORKSPACE_CHANGED_EVENT = "checkme:workspace-changed";
+
+export function announceWorkspaceChanged() {
+  if (typeof window !== "undefined") window.dispatchEvent(new Event(WORKSPACE_CHANGED_EVENT));
+}
+
 export async function loadWorkspace(): Promise<WorkspaceRoster> {
   const res = await fetch("/api/agents", { credentials: "include" });
   if (!res.ok) return { agents: [], groups: [] };

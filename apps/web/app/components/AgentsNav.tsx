@@ -16,6 +16,7 @@ import {
   moveAgentToGroup,
   nextAssignedAgents,
   updateAgent,
+  WORKSPACE_CHANGED_EVENT,
   type ChatSessionRow,
   type WorkspaceAgent,
   type WorkspaceRoster,
@@ -70,6 +71,14 @@ export function AgentsNav({
       .then((res) => res.json())
       .then((data) => setConnectors(data.connectors || []))
       .catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    const onChanged = () => {
+      refresh().catch(() => undefined);
+    };
+    window.addEventListener(WORKSPACE_CHANGED_EVENT, onChanged);
+    return () => window.removeEventListener(WORKSPACE_CHANGED_EVENT, onChanged);
   }, []);
 
   useEffect(() => {
