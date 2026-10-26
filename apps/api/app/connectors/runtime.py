@@ -26,6 +26,14 @@ class RuntimeConnector:
 
     async def call(self, name: str, args: dict[str, Any]) -> Any:
         if self.kind == "builtin":
+            if self.provider == "daytona":
+                from app.connectors.daytona_box import call_daytona
+
+                return await call_daytona(self.row, name, args)
+            if self.provider == "composio":
+                from app.connectors.composio_box import call_composio
+
+                return await call_composio(self.row, name, args)
             cls = _BUILTIN.get(self.provider)
             if cls is None:
                 raise ToolError(f"Unknown builtin provider {self.provider}")

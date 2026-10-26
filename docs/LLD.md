@@ -144,6 +144,8 @@ erDiagram
 ### Connectors / tasks / files
 
 - `GET/POST /connectors`, `PATCH/DELETE /connectors/{id}`, `POST .../sync`, MCP OAuth start/callback
+- `GET /connectors/marketplace`, `POST /connectors/marketplace/connect` — Composio app catalog + OAuth link
+- Builtin platform connectors (when keys are set): `@computer` (Daytona sandbox) and `@composio` (marketplace `find_tools` / `execute`)
 - `GET/POST /tasks`, `PATCH/DELETE /tasks/{id}`, `POST .../run`
 - `POST /files/upload`, `GET /files?t=&render=`
 

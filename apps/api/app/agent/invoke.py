@@ -127,6 +127,38 @@ async def invoke_named(db, user, conn, tool_name: str, args: dict, attachments: 
     if tool_name in {"bulk_delete", "empty_folder"}:
         args = {**args, "dry_run": False}
     result = await runtime.call(tool_name, args)
+    if is_binary(result):
+        if len(result.data) > get_settings().attachment_max_bytes:
+            return {"error": "File is larger than the 25 MB limit"}
+        card = await store_blob(user.id, result)
+        attachments.append(card)
+        return {
+            "filename": card["filename"],
+            "download_url": card["download_url"],
+            "preview_url": card.get("preview_url"),
+            "size": card["size"],
+            "kind": card["kind"],
+            "previewable": card.get("previewable"),
+            "hint": "Give the user download_url and preview_url. Never cite sandbox or /tmp paths.",
+        }
+    if conn.provider == "daytona" and isinstance(result, dict) and result.get("screenshot_path"):
+        published = await runtime.call(
+            "publish_file",
+            {"path": result["screenshot_path"], "filename": result.get("screenshot_name") or "page.png"},
+        )
+        if is_binary(published):
+            if len(published.data) <= get_settings().attachment_max_bytes:
+                card = await store_blob(user.id, published)
+                card["kind"] = "screen"
+                attachments.append(card)
+                result["screenshot"] = {
+                    "filename": card["filename"],
+                    "download_url": card["download_url"],
+                    "preview_url": card.get("preview_url"),
+                    "kind": "screen",
+                }
+        result.pop("screenshot_path", None)
+        result.pop("screenshot_name", None)
     if tool_name in {"get_message", "list_attachments"}:
         result = await process_message_result(user, runtime, result, attachments, summarize=False)
     if tool_name == "get_thread" and isinstance(result, dict):

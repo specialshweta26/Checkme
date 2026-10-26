@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.service import connector_assignment_map, filter_connectors
 from app.agent.confirm import sign_confirm
 from app.agent.invoke import bump_usage, confirmed, invoke_named, preview
 from app.agent.memory import load_memory, remember
@@ -31,8 +32,12 @@ from app.routing.retrieve import (
     GATEWAY_SEARCH_NAMES,
     capability_query,
     capability_terms,
+    extra_capability_terms,
     gateway_search_query,
+    is_calendar_query,
     is_catalog_tool,
+    keep_connector_scope,
+    matching_toolkit,
     nested_tool_rows,
     resolve_call_args,
     search_call_args,
@@ -53,6 +58,9 @@ CATALOG_TOOLS = {
     "gateway__list_mcps",
     "find_tools",
     "load_group",
+    "list_apps",
+    "list_connections",
+    "resolve",
 }
 
 
@@ -71,6 +79,12 @@ class RunContext:
     call_impl: Any = None
     results: list[dict] = field(default_factory=list)
     gateway_surface: dict[str, dict] = field(default_factory=dict)
+    agent: Any = None
+    group: Any = None
+    teammates: list = field(default_factory=list)
+    teammate_depth: int = 0
+    session_id: uuid.UUID | None = None
+    request_id: str = ""
 
 
 def _json_size(value: Any) -> int:
@@ -253,6 +267,52 @@ def as_dict(value: Any) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def _dbg_arg_peek(args: dict | None) -> dict:
+    raw = args or {}
+    inner = raw.get("arguments") if isinstance(raw.get("arguments"), dict) else raw
+    if not isinstance(inner, dict):
+        inner = {}
+    keep = ("brand", "brand_id", "entity", "preset", "since", "until", "start", "end", "query", "q", "trend")
+    peek = {k: str(inner.get(k))[:80] for k in keep if inner.get(k) not in (None, "")}
+    peek["arg_keys"] = list(inner.keys())[:16]
+    if raw.get("tool_name"):
+        peek["inner_tool"] = str(raw.get("tool_name"))[:120]
+    return peek
+
+
+def _dbg_result_peek(result: Any) -> dict:
+    if not isinstance(result, dict):
+        return {"type": type(result).__name__}
+    daily = result.get("daily") or result.get("days") or result.get("series")
+    rows = daily if isinstance(daily, list) else []
+
+    def _num(row: Any) -> float:
+        if not isinstance(row, dict):
+            return 0.0
+        for key in ("net_sales", "net", "sales", "revenue", "value"):
+            val = row.get(key)
+            if isinstance(val, dict):
+                val = val.get("value") or val.get("amount")
+            try:
+                return float(val or 0)
+            except (TypeError, ValueError):
+                continue
+        return 0.0
+
+    msgs = result.get("messages") or result.get("items") or []
+    return {
+        "keys": list(result.keys())[:16],
+        "brand": str(result.get("brand") or result.get("brand_id") or "")[:40],
+        "window": str(result.get("window") or "")[:80],
+        "daily_n": len(rows) if isinstance(daily, list) else (None if daily is None else type(daily).__name__),
+        "daily_nonzero": sum(1 for row in rows if _num(row) != 0),
+        "cat_empty": not bool(result.get("by_category")),
+        "msg_n": len(msgs) if isinstance(msgs, list) else None,
+        "too_large": bool(result.get("too_large")),
+        "has_error": bool(result.get("error")),
+    }
+
+
 def _now(tz: str) -> datetime:
     try:
         return datetime.now(ZoneInfo(tz or "Asia/Kolkata"))
@@ -350,7 +410,7 @@ async def _load_gateway_surface(ctx: RunContext, conn) -> dict:
 
 
 async def _expand_gateway_catalog(ctx: RunContext, conn, query: str) -> list[dict]:
-    if getattr(conn, "kind", None) == "builtin" or getattr(conn, "provider", None) in {"gmail", "outlook"}:
+    if getattr(conn, "provider", None) in {"gmail", "outlook", "daytona"}:
         return []
     surface = await _load_gateway_surface(ctx, conn)
     search_name = surface.get("search")
@@ -361,10 +421,22 @@ async def _expand_gateway_catalog(ctx: RunContext, conn, query: str) -> list[dic
     for candidate in (gateway_search_query(query), capability_query(query)):
         if candidate and candidate not in queries:
             queries.append(candidate)
+    toolkit = None
+    search_schema = surface.get("search_schema") or {}
+    if getattr(conn, "provider", None) == "composio" and "toolkit" in (search_schema.get("properties") or {}):
+        try:
+            linked = await _silent_call(ctx, conn, "list_connections", {})
+            conns = linked.get("connections") if isinstance(linked, dict) else []
+            toolkit = matching_toolkit(conns if isinstance(conns, list) else [], extra_capability_terms(query))
+        except Exception:  # noqa: BLE001
+            log.warning("composio list_connections failed on expand", exc_info=True)
     parsed: list[dict] = []
     for q in queries:
+        args = search_call_args(search_schema, q)
+        if toolkit:
+            args["toolkit"] = toolkit
         try:
-            raw = await _silent_call(ctx, conn, search_name, search_call_args(surface.get("search_schema"), q))
+            raw = await _silent_call(ctx, conn, search_name, args)
         except Exception:  # noqa: BLE001
             log.warning("gateway catalog search failed on %s", conn.slug, exc_info=True)
             continue
@@ -379,6 +451,25 @@ async def _expand_gateway_catalog(ctx: RunContext, conn, query: str) -> list[dic
         execute_name,
         capability_terms(query),
     )
+    # #region agent log
+    from app.debug_ndjson import dbg
+
+    dbg(
+        "D",
+        "deep.py:_expand_gateway_catalog",
+        "gateway expand",
+        {
+            "slug": conn.slug,
+            "provider": getattr(conn, "provider", "") or "",
+            "search": search_name or "",
+            "execute": execute_name or "",
+            "query": (query or "")[:80],
+            "toolkit": toolkit or "",
+            "parsed_n": len(parsed),
+            "names": [str(r.get("tool_name") or "")[:80] for r in rows[:10]],
+        },
+    )
+    # #endregion
     return rows
 
 
@@ -490,6 +581,151 @@ def _mail_threads(ctx: RunContext) -> list[dict]:
     return out
 
 
+def _browser_views(ctx: RunContext) -> list[dict]:
+    out: list[dict] = []
+    seen: set[str] = set()
+    for row in ctx.results:
+        tool = str(row.get("tool_name") or "")
+        if not any(token in tool for token in ("browse", "browser_", "computer_observe", "computer_act")):
+            continue
+        data = row.get("data") if isinstance(row.get("data"), dict) else {}
+        args = row.get("args") if isinstance(row.get("args"), dict) else {}
+        inner = args.get("arguments") if isinstance(args.get("arguments"), dict) else args
+        shot = data.get("screenshot") if isinstance(data.get("screenshot"), dict) else {}
+        url = str(data.get("url") or inner.get("url") or "").strip()
+        preview = str(shot.get("preview_url") or data.get("preview_url") or "")
+        download = str(shot.get("download_url") or data.get("download_url") or "")
+        if not url and not preview and not download:
+            continue
+        key = preview or url or download
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(
+            {
+                "url": url,
+                "title": data.get("title") or "",
+                "preview_url": preview,
+                "download_url": download,
+                "error": data.get("error") or "",
+            }
+        )
+    return out[-4:]
+
+
+def _computer_session(ctx: RunContext) -> dict:
+    views = _browser_views(ctx)
+    live = bool(views) or any(
+        any(token in str(name) for token in ("browser_", "browse_", "computer_observe", "computer_act", "handoff"))
+        for name in ctx.used_tools
+    )
+    last = views[-1] if views else {}
+    preview = str(last.get("preview_url") or "")
+    download = str(last.get("download_url") or "")
+    if not preview:
+        for card in reversed(ctx.attachments or []):
+            if not isinstance(card, dict):
+                continue
+            kind = str(card.get("kind") or "")
+            name = str(card.get("filename") or "").lower()
+            if kind in {"image", "screen"} or name.endswith(".png") or name.endswith(".jpg") or name == "page.png":
+                preview = str(card.get("preview_url") or "")
+                download = str(card.get("download_url") or download)
+                live = live or bool(preview)
+                break
+    handoff = next(
+        (p for p in ctx.pending if (p.get("kind") == "handoff" or (p.get("preview") or {}).get("kind") == "handoff")),
+        None,
+    )
+    live = live or bool(handoff)
+    return {
+        "live": live,
+        "url": last.get("url") or "",
+        "title": last.get("title") or "",
+        "preview_url": preview,
+        "download_url": download,
+        "handoff": bool(handoff),
+        "handoff_reason": ((handoff or {}).get("preview") or {}).get("reason") or ((handoff or {}).get("preview") or {}).get("instruction") or "",
+    }
+
+
+_CONNECT_HINTS = ("connect", "authorize", "sign in", "sign-in", "oauth", "link account")
+_CONNECT_STOP = frozenset(
+    {"connect", "connecting", "authorize", "authorization", "oauth", "sign", "signin", "link", "account", "app", "apps"}
+)
+
+
+def _is_connect_query(query: str) -> bool:
+    q = (query or "").lower()
+    return any(k in q for k in _CONNECT_HINTS)
+
+
+def _pick_connect_toolkit(apps: list, query: str) -> dict | None:
+    terms = [t for t in extra_capability_terms(query) if t not in _CONNECT_STOP]
+    q = (query or "").lower()
+    scored: list[tuple[int, int, dict]] = []
+    for app in apps:
+        if not isinstance(app, dict):
+            continue
+        slug = str(app.get("slug") or "").strip().lower()
+        name = str(app.get("name") or "").strip().lower()
+        if not slug:
+            continue
+        blob = f"{slug} {name}".replace("-", "_")
+        score = 0
+        if slug in q or (name and name in q):
+            score += 6
+        for term in terms:
+            t = term.replace("-", "_")
+            if t == slug or t == name or t in blob.split() or slug.endswith(f"_{t}") or slug.startswith(f"{t}_"):
+                score += 4
+            elif t in blob or blob in t:
+                score += 2
+        if score:
+            scored.append((score, len(slug), app))
+    if not scored:
+        return None
+    scored.sort(key=lambda row: (-row[0], row[1]))
+    return scored[0][2]
+
+
+async def _maybe_start_connect(ctx: RunContext, query: str) -> None:
+    if not _is_connect_query(query) or _connect_cards(ctx):
+        return
+    conn = next((c for c in ctx.connectors.values() if getattr(c, "provider", None) == "composio"), None)
+    if conn is None:
+        return
+    terms = [t for t in extra_capability_terms(query) if t not in _CONNECT_STOP]
+    listed = await call_user_tool(ctx, conn.slug, "list_apps", {"query": " ".join(terms) or query})
+    apps = listed.get("apps") if isinstance(listed, dict) else []
+    picked = _pick_connect_toolkit(apps if isinstance(apps, list) else [], query)
+    toolkit = str((picked or {}).get("slug") or "").strip()
+    if not toolkit:
+        return
+    await call_user_tool(ctx, conn.slug, "connect_app", {"toolkit": toolkit})
+
+
+def _connect_cards(ctx: RunContext) -> list[dict]:
+    out: list[dict] = []
+    seen: set[str] = set()
+    for row in ctx.results:
+        data = row.get("data") if isinstance(row.get("data"), dict) else {}
+        url = str(data.get("redirect_url") or "").strip()
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        out.append(
+            {
+                "toolkit": data.get("toolkit") or "",
+                "name": data.get("name") or data.get("toolkit") or "Connect app",
+                "logo": data.get("logo") or "",
+                "description": data.get("description") or "",
+                "redirect_url": url,
+            }
+        )
+    return out
+
+
 async def _invoke_follow(ctx: RunContext, slug: str, tool: str, args: dict) -> Any:
     conn = ctx.connectors[slug]
     if ctx.call_impl is not None:
@@ -560,27 +796,55 @@ async def list_user_connectors(ctx: RunContext) -> list[dict]:
             {
                 "slug": conn.slug,
                 "name": conn.alias or conn.name,
-                "kind": "mail+calendar" if conn.kind == "builtin" else "mcp",
+                "kind": (
+                    "mail+calendar"
+                    if conn.provider in {"gmail", "outlook"}
+                    else "computer"
+                    if conn.provider == "daytona"
+                    else "marketplace"
+                    if conn.provider == "composio"
+                    else "mcp"
+                ),
                 "description": getattr(conn, "description", "") or "",
                 "core_tools": core,
                 "tool_count": card.tool_count if card else None,
             }
         )
+    # #region agent log
+    from app.debug_ndjson import dbg
+
+    dbg(
+        "A",
+        "deep.py:list_user_connectors",
+        "listed connectors",
+        {
+            "slugs": [item["slug"] for item in out],
+            "kinds": [item["kind"] for item in out],
+            "has_composio": any(item["slug"] == "composio" or item["kind"] == "marketplace" for item in out),
+        },
+    )
+    # #endregion
     return out
 
 
 async def search_user_tools(ctx: RunContext, query: str, connector_slug: str | None = None) -> list[dict]:
     conns = list(ctx.connectors.values())
+    scoped = False
     if connector_slug:
         conn = ctx.connectors.get(connector_slug)
         if conn is None:
             return [{"error": f"connector '{connector_slug}' is not connected for this user"}]
-        conns = [conn]
+        if keep_connector_scope(getattr(conn, "provider", None), query):
+            conns = [conn]
+            scoped = True
     hits = await search_tools(ctx.db, conns, query, 40) if ctx.db is not None else []
     q = (query or "").lower()
     wanted: set[tuple[str, str]] = set()
     mail_conns = [c for c in conns if c.provider in {"gmail", "outlook"}]
-    calendary = any(k in q for k in ("invite", "meeting", "calendar", "event", "google meet", "teams", "free slot"))
+    computer_conns = [c for c in conns if getattr(c, "provider", None) == "daytona"]
+    composio_conns = [c for c in conns if getattr(c, "provider", None) == "composio"]
+    connecting = _is_connect_query(query)
+    calendary = is_calendar_query(query)
     if calendary:
         for c in mail_conns:
             wanted.update((c.slug, n) for n in ("create_event", "create_google_meet", "create_teams_meeting", "find_free_slots", "list_events"))
@@ -599,8 +863,93 @@ async def search_user_tools(ctx: RunContext, query: str, connector_slug: str | N
     if any(k in q for k in ("spam", "junk", "trash", "drafts", "drafted", "delete all", "empty", "clear all", "bulk")):
         for c in mail_conns:
             wanted.update((c.slug, n) for n in ("empty_folder", "bulk_delete", "list_drafts", "delete_draft"))
-    if wanted and ctx.db is not None:
-        extra = await load_named(ctx.db, mail_conns, wanted)
+    if any(
+        k in q
+        for k in (
+            "chart",
+            "plot",
+            "graph",
+            "html report",
+            "downloadable",
+            "visuali",
+            "matplotlib",
+            "png",
+            "csv",
+            "excel",
+            "report",
+            "dashboard",
+            "analytics",
+            "analysis",
+            "kpi",
+            "sales",
+            "inventory",
+            "metric",
+            "table",
+        )
+    ):
+        for c in computer_conns:
+            wanted.update((c.slug, n) for n in ("write_analytics_report", "run_code", "write_file", "publish_file", "read_file"))
+    if not connecting and any(
+        k in q
+        for k in (
+            "browser",
+            "website",
+            "web page",
+            "browse",
+            "scrape",
+            "open the site",
+            "playwright",
+            ".com",
+            "http://",
+            "https://",
+            "www.",
+            "news",
+            "headlines",
+            "current events",
+            "fill out",
+            "fill the form",
+            "login page",
+            "captcha",
+            "what is going on",
+            "what's going on",
+            "whats going on",
+            "happening now",
+            "live update",
+            "flight",
+            "flights",
+            "search the web",
+            "look up",
+            "look for",
+            "google",
+            "instagram",
+            "facebook",
+            "twitter",
+            "wikipedia",
+            "duckduckgo",
+        )
+    ):
+        for c in computer_conns:
+            wanted.update(
+                (c.slug, n)
+                for n in (
+                    "browser_navigate",
+                    "browser_snapshot",
+                    "browser_act",
+                    "computer_observe",
+                    "computer_act",
+                    "browser_handoff",
+                    "web_fetch",
+                    "browse_open",
+                    "browse_act",
+                    "publish_file",
+                )
+            )
+    if connecting:
+        for c in composio_conns:
+            wanted.update((c.slug, n) for n in ("connect_app", "list_apps", "list_connections"))
+    extra_conns = mail_conns + computer_conns + composio_conns
+    if wanted and ctx.db is not None and extra_conns:
+        extra = await load_named(ctx.db, extra_conns, wanted)
         hits = extra + [h for h in hits if (h.slug, h.tool_name) not in {(e.slug, e.tool_name) for e in extra}]
     local = [
         {
@@ -626,7 +975,10 @@ async def search_user_tools(ctx: RunContext, query: str, connector_slug: str | N
         ]
         if already:
             continue
+        if connecting and getattr(conn, "provider", None) == "composio":
+            continue
         nested.extend(await _expand_gateway_catalog(ctx, conn, query))
+    nested.sort(key=lambda row: float(row.get("score") or 0), reverse=True)
     nested_keys = {(row["connector_slug"], row["tool_name"]) for row in nested}
     data_local = [
         row
@@ -645,14 +997,26 @@ async def search_user_tools(ctx: RunContext, query: str, connector_slug: str | N
     from app.debug_ndjson import dbg
 
     dbg(
-        "D",
+        "B",
         "deep.py:search_user_tools",
         "catalog search results",
         {
             "query": (query or "")[:80],
             "slug": connector_slug or "",
-            "tools": [f"{row['connector_slug']}.{row['tool_name']}" for row in merged],
+            "scoped": scoped,
+            "extras": extra_capability_terms(query)[:8],
+            "conn_slugs": [c.slug for c in conns],
+            "calendary": calendary,
+            "has_composio_conn": any(getattr(c, "provider", None) == "composio" for c in conns),
+            "tools": [f"{row['connector_slug']}.{row['tool_name']}" for row in merged][:24],
             "nested": len(nested),
+            "teams_hits": [
+                f"{row['connector_slug']}.{row['tool_name']}"
+                for row in merged
+                if "team" in (row.get("tool_name") or "").lower()
+                or "chat" in (row.get("tool_name") or "").lower()
+            ][:12],
+            "composio_hits": [row["tool_name"] for row in merged if row.get("connector_slug") == "composio"][:12],
             "has_get_thread": any(row["tool_name"] == "get_thread" for row in merged),
             "has_get_message": any(row["tool_name"] == "get_message" for row in merged),
             "has_send_message": any(row["tool_name"] == "send_message" for row in merged),
@@ -691,10 +1055,16 @@ async def get_user_tool_schema(ctx: RunContext, connector_slug: str, tool_name: 
         from app.debug_ndjson import dbg
 
         dbg(
-            "A",
+            "F",
             "deep.py:get_user_tool_schema",
             "tool missing from index",
-            {"slug": connector_slug, "tool": tool_name, "server_key": bool(conn.server_key), "fallback": bool(fallback)},
+            {
+                "slug": connector_slug,
+                "tool": tool_name,
+                "server_key": bool(conn.server_key),
+                "fallback": bool(fallback),
+                "provider": getattr(conn, "provider", "") or "",
+            },
         )
         # #endregion
         if fallback:
@@ -740,6 +1110,8 @@ async def get_user_tool_schema(ctx: RunContext, connector_slug: str, tool_name: 
 
 async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, args: dict | None = None) -> Any:
     args = as_dict(args)
+    orig_tool = tool_name
+    orig_args = dict(args)
     conn = ctx.connectors.get(connector_slug)
     if conn is None:
         return {"error": f"connector '{connector_slug}' is not connected for this user"}
@@ -750,6 +1122,36 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
         recovered = await load_named(ctx.db, [conn], {(connector_slug, tool_name)})
         hit = recovered[0] if recovered else None
     spec = next((s for s in MAIL_CALENDAR_TOOLS if s.name == tool_name), None)
+    if tool_name in {"browser_handoff", "computer_handoff"}:
+        if not ctx.auto_confirm and not confirmed(ctx.confirmations, connector_slug, tool_name):
+            token = sign_confirm(
+                "tool",
+                {
+                    "slug": connector_slug,
+                    "tool": tool_name,
+                    "args": orig_args,
+                    "kind": "handoff",
+                },
+            )
+            pending = {
+                "needs_confirm": True,
+                "kind": "handoff",
+                "token": token,
+                "title": "Take control of the computer",
+                "preview": {
+                    "kind": "handoff",
+                    "reason": orig_args.get("reason") or orig_args.get("instruction") or "Finish this step on the live screen.",
+                    "instruction": orig_args.get("instruction") or orig_args.get("reason") or "",
+                },
+            }
+            ctx.pending.append(pending)
+            return {"status": "awaiting_user", "handoff": True, "reason": pending["preview"]["reason"]}
+        return {
+            "ok": True,
+            "status": "user_finished",
+            "handoff": False,
+            "message": "The user finished on the live computer. Call browser_snapshot, then continue the remaining steps.",
+        }
     if hit is None and spec is None:
         surface = await _load_gateway_surface(ctx, conn)
         execute = surface.get("execute")
@@ -769,6 +1171,7 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
     if tool_name == "get_thread":
         args = _complete_thread_args(ctx, args)
     try:
+        t_invoke = __import__("time").time()
         if ctx.call_impl is not None:
             result = await ctx.call_impl(connector_slug, tool_name, args)
         else:
@@ -776,19 +1179,34 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
         # #region agent log
         from app.debug_ndjson import dbg
 
-        payload_preview = result if isinstance(result, dict) else {"type": type(result).__name__}
+        dbg(
+            "C",
+            "deep.py:call_user_tool",
+            "tool elapsed",
+            {
+                "slug": connector_slug,
+                "orig_tool": orig_tool,
+                "tool": tool_name,
+                "ms": int((__import__("time").time() - t_invoke) * 1000),
+            },
+        )
+
+        peek = _dbg_result_peek(result)
         dbg(
             "C",
             "deep.py:call_user_tool",
             "tool invoked",
             {
                 "slug": connector_slug,
+                "orig_tool": orig_tool,
                 "tool": tool_name,
+                "args": _dbg_arg_peek(orig_args),
+                "wrapped": _dbg_arg_peek(args),
                 "has_error": bool(isinstance(result, dict) and result.get("error")),
                 "error": (result.get("error")[:160] if isinstance(result, dict) and result.get("error") else ""),
                 "has_message_id": bool(isinstance(result, dict) and (result.get("message_id") or (result.get("messages") or [{}])[0].get("message_id"))),
                 "attachment_count": len(result.get("attachments") or []) if isinstance(result, dict) else 0,
-                "keys": list(payload_preview.keys())[:12] if isinstance(payload_preview, dict) else [],
+                **peek,
             },
         )
         # #endregion
@@ -853,7 +1271,20 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
     except ToolError as exc:
         if ctx.db is not None:
             await bump_usage(ctx.db, ctx.user.id, conn.id, tool_name, False)
-        return {"error": str(exc)}
+        out = {"error": str(exc)}
+        if orig_tool.startswith("browse") and orig_args.get("url"):
+            out["url"] = str(orig_args.get("url") or "")
+            ctx.results.append(
+                {
+                    "result_id": f"r{len(ctx.results) + 1}",
+                    "source_tool": _source_tool(connector_slug, orig_tool, orig_args),
+                    "connector_slug": connector_slug,
+                    "tool_name": orig_tool,
+                    "args": orig_args,
+                    "data": out,
+                }
+            )
+        return out
     except Exception as exc:  # noqa: BLE001
         log.exception("tool failed")
         if ctx.db is not None:
@@ -885,8 +1316,11 @@ async def run_staff(ctx: RunContext, name: str, args: dict | None = None) -> Any
 
 
 class SearchToolsInput(BaseModel):
-    query: str = Field(description="Natural language description of the capability you need.")
-    connector_slug: str | None = Field(default=None, description="Optional slug from list_connectors to search one connector.")
+    query: str = Field(description="Short capability phrase for the tool you need, not the full user sentence.")
+    connector_slug: str | None = Field(
+        default=None,
+        description="Leave empty on the first search so every catalog expands. Set only after a data tool from that connector already appeared.",
+    )
 
 
 class GetSchemaInput(BaseModel):
@@ -928,13 +1362,18 @@ class InspectInput(BaseModel):
     limit: int = Field(default=80, description="How many list items or keys to return.")
 
 
+class AskTeammateInput(BaseModel):
+    agent_id: str = Field(description="Id of a teammate in this group.")
+    prompt: str = Field(description="Focused task for that teammate. Include only what they need.")
+
+
 def harness_tools(ctx: RunContext) -> list[StructuredTool]:
     async def list_connectors() -> str:
         """List this user's enabled connectors. Start here when you are unsure which source to use. Other users have different connectors."""
         return dumps_full(await list_user_connectors(ctx))
 
     async def search_tools_fn(query: str, connector_slug: str | None = None) -> str:
-        """Search this user's tool catalog by capability (what the tool must return). Pass a short phrase, not the full user sentence. Omit brand names; pass connector_slug when known. Gateway catalogs are expanded into data tools. Returns names and descriptions, not data."""
+        """Search this user's tool catalog by capability (what the tool must return). First call without connector_slug so mail, MCP, and marketplace catalogs all expand. Pass a short phrase, not the full user sentence. Omit people, brands, and dates. Returns names and descriptions, not data."""
         return dumps_full(await search_user_tools(ctx, query, connector_slug))
 
     async def get_tool_schema(connector_slug: str, tool_name: str) -> str:
@@ -963,7 +1402,11 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
         """Run an assistant staff capability (briefing, inbox question, commitments, scheduled tasks, automations, voice)."""
         return dumps(await run_staff(ctx, name, args))
 
-    return [
+    async def ask_teammate(agent_id: str, prompt: str) -> str:
+        """Ask another agent in this group to do a slice of the work. They reply in the shared thread. Do not ask yourself."""
+        return dumps(await _ask_teammate(ctx, agent_id, prompt), 12000)
+
+    tools = [
         StructuredTool.from_function(coroutine=list_connectors, name="list_connectors", description=list_connectors.__doc__),
         StructuredTool.from_function(
             coroutine=search_tools_fn,
@@ -1002,20 +1445,83 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
             args_schema=StaffInput,
         ),
     ]
+    if ctx.group is not None and ctx.teammate_depth == 0 and ctx.teammates:
+        tools.append(
+            StructuredTool.from_function(
+                coroutine=ask_teammate,
+                name="ask_teammate",
+                description=ask_teammate.__doc__,
+                args_schema=AskTeammateInput,
+            )
+        )
+    return tools
 
 
-def system_prompt(user, connectors: list, memory: str) -> str:
+def system_prompt(user, connectors: list, memory: str, agent=None, group=None, teammates: list | None = None) -> str:
     tz = getattr(user, "timezone", None) or "Asia/Kolkata"
     now = _now(tz)
     catalog = catalog_lines(connectors)
+    name = getattr(agent, "name", None) or "Chief"
+    title = (getattr(agent, "title", None) or "chief of staff").strip() or "chief of staff"
+    extra = (getattr(agent, "instructions", None) or "").strip()
+    identity = f"You are {name}, this user's {title}. You have mail, calendar, and connected MCP servers.\n"
+    if extra:
+        identity += extra + "\n"
+    group_bit = ""
+    peers = [p for p in (teammates or []) if str(getattr(p, "id", "")) != str(getattr(agent, "id", ""))]
+    if group is not None and peers:
+        roster = ", ".join(f"{getattr(p, 'name', 'agent')} (id={p.id})" for p in peers)
+        group_bit = (
+            f"You are working in the group '{getattr(group, 'name', 'group')}' with teammates: {roster}. "
+            "Split independent work with ask_teammate(agent_id, prompt). They reply in this thread. "
+            "Do not ask yourself. Combine their replies into the user's answer.\n"
+        )
     return (
-        "You are this user's personal chief of staff. You have mail, calendar, and connected MCP servers.\n"
-        f"Current date and time: {now.strftime('%Y-%m-%d %H:%M')} ({tz}). Interpret and display times in that timezone.\n"
+        identity
+        + group_bit
+        + f"Current date and time: {now.strftime('%Y-%m-%d %H:%M')} ({tz}). Interpret and display times in that timezone.\n"
         "Only use connectors listed below. Other users have different connectors.\n"
         "Discover first: list_connectors, then search_tools with a short capability phrase (what the tool must return), not the full user sentence. "
         "Omit brand names, people, and dates from the search query; pass those as tool arguments after get_tool_schema. "
-        "Once you know the source, pass connector_slug so search is not split across mail and analytics. "
-        "Mail and analytics are different connectors — do not treat a missing mail tool as a missing MCP connector.\n"
+        "First search_tools without connector_slug so mail, MCP, and marketplace catalogs all expand. "
+        "Only pass connector_slug after a data tool from that connector already appeared. "
+        "Pick the tool whose name and description match the capability — do not assume mail owns every 'message'. "
+        "Mail and analytics are different connectors — do not treat a missing mail tool as a missing MCP connector. "
+        "The computer connector is this user's cloud sandbox. The composio connector is an app marketplace of many apps: "
+        "search_tools expands its tools; list_connections shows which apps are authorized. "
+        "To connect an app the user named, call connect_app with that toolkit slug (gmail, github, slack) — never a different vendor such as a Gmail tool on another app. "
+        "connect_app returns redirect_url; the chat shows the Composio connect card. Do not only paste the URL.\n"
+        "When the user asks for a chart, plot, HTML report, or downloadable file: fetch the data first, then computer "
+        "write_analytics_report with tables and charts, or write_file / run_code plus publish_file. "
+        "Cite the download_url (and preview_url). Never cite sandbox: or /tmp paths — those are not downloadable.\n"
+        "Data, sales, inventory, KPI, dashboard, and analytics questions: you are a data analyst. Always answer as a report, not a chat recap. "
+        "Required sections, in order: title; period/as-of; executive summary; markdown pipe tables for every metric set, time series, and breakdown; findings; recommended actions; downloads. "
+        "Numeric rows belong in GitHub-flavored markdown tables (| Metric | Value |), never as bullets or inline 'label: number' lists. "
+        "After the data tools return, always call write_analytics_report with the real figures: tables (columns + rows) and charts. "
+        "Pick chart types that fit the data: line for a time series, bar for a comparison or ranking, pie for mix/share. "
+        "That HTML report includes interactive charts and tables with sort plus filter. Put its download_url in Downloads as a markdown link. "
+        "Do this even if the user did not say chart, HTML, or download. Never cite sandbox: or /tmp paths.\n"
+        "Pick a source in this order. Do not browse when a connected tool already has the answer.\n"
+        "1) Mail, calendar, CRM, sales, inventory, KPI, dashboards, and other already-connected apps: search_tools then call_tool. Do not open the browser.\n"
+        "2) Public lookup the user can do in a normal browser — flights, fares, news, hours, prices, people, "
+        "Instagram/Twitter/Facebook profiles, Wikipedia, 'just check', 'look up', 'open her/his page': "
+        "open the computer browser even if a marketplace app exists. If that app is not in list_connections, do not ask to connect it for a lookup. "
+        "browser_navigate DuckDuckGo or the named site so the right-hand screen shows the page. "
+        "Do not search_tools for Instagram/Twitter/Facebook unless list_connections already shows that app.\n"
+        "3) A named website or URL, or a page you must click or fill: the computer browser. "
+        "Use a connected data tool first only when list_connections shows that app is authorized.\n"
+        "This user's computer is one live machine: shell/files and a persistent Chromium tab the right-hand computer screen shows. "
+        "Live news or 'what is going on' questions: browser_navigate a search URL with the user's words "
+        "(https://html.duckduckgo.com/html/?q=...) then open at least two result links. Search the acronym; do not ask what it means first. "
+        "If navigate returns chrome-error, chromewebdata, or connection reset, web_fetch the same URL (or another source) and keep going. "
+        "web_fetch paints that HTML onto the same computer screen; then browser_snapshot and browser_act on it. Do not wake the computer after a page is showing. "
+        "Never stop after one failed page. Never say you cannot verify live updates until you have opened a search and at least one article.\n"
+        "End-to-end web work: browser_navigate, browser_snapshot for refs (e0, e1), then browser_act — click, fill, type, select, check, press, scroll. "
+        "Fill whole forms from the snapshot: one fill per field, then click submit. "
+        "If a page tool returns fallback computer_act, call computer_observe then computer_act (click x,y / type / key / scroll). "
+        "Login, 2FA, captcha, payment, or anything you cannot complete: browser_handoff with a short instruction so the user takes control of that same screen. After they finish, snapshot and continue. "
+        "Never attach page.png in chat; the computer screen already shows the tab. "
+        "Do not replay a completed or uncertain action. That is the computer browser, not Outlook or mail.\n"
         "search_tools already expands gateway catalogs into callable data tools. Prefer those names. "
         "Do not call gateway catalog tools from core_tools unless search_tools returned no data tool.\n"
         "Read get_tool_schema before filling arguments. Argument names come from that schema and description.\n"
@@ -1025,7 +1531,8 @@ def system_prompt(user, connectors: list, memory: str) -> str:
         "Call tools as many times as the task needs — different connectors, different argument sets, different windows. Combine results yourself.\n"
         "Gmail and Outlook are mail AND calendar. Never say there is no calendar connector when gmail or outlook is listed. "
         "Send mail with send_message. Create a calendar invite with create_event (attendees, start in IST). "
-        "Google Meet: create_google_meet on gmail. Teams: create_teams_meeting on outlook. "
+        "Google Meet or Teams calendar invites: create_google_meet on gmail, create_teams_meeting on outlook. "
+        "Chat, DMs, and channel messages on other apps are marketplace or MCP tools, not Outlook search_messages. "
         "After search_messages or list_messages, if the user asked to open, read, or summarize mail, call get_thread "
         "with thread_id AND message_id from the hit. Never call get_thread with an empty thread_id — pass message_id instead. "
         "Use every message in the thread, not only the latest reply. Then summarize_attachments if files exist. "
@@ -1042,8 +1549,8 @@ def system_prompt(user, connectors: list, memory: str) -> str:
         "If they want a calendar invite or meeting at a clock time, that time is the event start: call create_event now. "
         "Tell them the scheduled time only when you actually called schedule_task.\n"
         "Never invent emails, events, ids, or numbers that did not come from a tool result. "
-        "When connector data comes back, write a detailed analyst briefing — never a short brief. "
-        "Cover what the numbers mean, drivers, comparisons, risks, outliers, and recommended actions, with headings and specifics from the tool result.\n\n"
+        "When connector data comes back, write a detailed analyst report — never a short brief. "
+        "Cover what the numbers mean, drivers, comparisons, risks, outliers, and recommended actions, with headings, markdown tables, and a published download link from the tool result.\n\n"
         f"This user's connectors:\n{catalog}\n\nUser memory:\n{memory or '(none)'}"
     )
 
@@ -1165,6 +1672,72 @@ def _lc_messages(history: list[dict], query: str, extra: list | None = None):
     return out
 
 
+async def _ask_teammate(ctx: RunContext, agent_id: str, prompt: str) -> dict:
+    if ctx.teammate_depth >= 1:
+        return {"error": "A teammate cannot ask another teammate."}
+    task = (prompt or "").strip()
+    if not task:
+        return {"error": "prompt is required"}
+    member = next((peer for peer in ctx.teammates if str(getattr(peer, "id", "")) == str(agent_id).strip()), None)
+    if member is None:
+        return {"error": "That agent is not in this group.", "members": [{"id": str(p.id), "name": p.name} for p in ctx.teammates]}
+    if ctx.agent is not None and str(ctx.agent.id) == str(member.id):
+        return {"error": "Do not ask yourself. Pick a teammate."}
+    if ctx.db is None or ctx.session_id is None:
+        return {"error": "No group thread"}
+    nested = await run_deep_agent(
+        ctx.db,
+        ctx.user,
+        ctx.session_id,
+        ctx.request_id or "peer",
+        [],
+        task,
+        auto_confirm=ctx.auto_confirm,
+        workspace_agent=member,
+        group=ctx.group,
+        teammates=ctx.teammates,
+        teammate_depth=ctx.teammate_depth + 1,
+    )
+    ctx.used_tools.append(f"ask_teammate:{member.name}")
+    for item in nested.get("attachments") or []:
+        ctx.attachments.append(item)
+    for name in nested.get("used_tools") or []:
+        ctx.used_tools.append(str(name))
+    for view in nested.get("browser") or []:
+        ctx.results.append(
+            {
+                "result_id": f"r{len(ctx.results) + 1}",
+                "tool_name": "browser_navigate",
+                "data": view if isinstance(view, dict) else {},
+            }
+        )
+    from app.models import ChatMessage
+
+    ctx.db.add(
+        ChatMessage(
+            session_id=ctx.session_id,
+            user_id=ctx.user.id,
+            role="assistant",
+            content=nested.get("text") or "",
+            meta={
+                "agent_id": str(member.id),
+                "agent_name": member.name,
+                "agent_color": getattr(member, "color", "") or "",
+                "peer": True,
+                "used_tools": nested.get("used_tools"),
+                "computer": nested.get("computer") or {},
+                "attachments": nested.get("attachments") or [],
+            },
+            request_id=ctx.request_id or "",
+        )
+    )
+    try:
+        await ctx.db.flush()
+    except Exception:  # noqa: BLE001
+        log.warning("could not store teammate reply")
+    return {"from": member.name, "agent_id": str(member.id), "reply": nested.get("text") or ""}
+
+
 async def run_deep_agent(
     db: AsyncSession,
     user,
@@ -1174,9 +1747,27 @@ async def run_deep_agent(
     query: str,
     confirmations: list[dict] | None = None,
     auto_confirm: bool = False,
+    workspace_agent=None,
+    group=None,
+    teammates: list | None = None,
+    teammate_depth: int = 0,
 ) -> dict[str, Any]:
-    del request_id
+    from app.connectors.platform import ensure_platform_connectors
+    from app.debug_ndjson import dbg as _dbg_start
+
+    # #region agent log
+    _dbg_start("C", "deep.py:run_deep_agent", "agent start", {"query": (query or "")[:80], "n_history": len(history or [])})
+    # #endregion
+    await ensure_platform_connectors(db, user)
     conns = await user_connectors(db, user.id)
+    assignments = await connector_assignment_map(db, user)
+    teammate_ids = [getattr(peer, "id", None) for peer in (teammates or [])]
+    conns = filter_connectors(
+        conns,
+        getattr(workspace_agent, "id", None),
+        teammate_ids,
+        assignments,
+    )
     ctx = RunContext(
         db=db,
         user=user,
@@ -1184,6 +1775,12 @@ async def run_deep_agent(
         confirmations=list(confirmations or []),
         auto_confirm=auto_confirm,
         query=query,
+        agent=workspace_agent,
+        group=group,
+        teammates=list(teammates or []),
+        teammate_depth=teammate_depth,
+        session_id=session_id,
+        request_id=request_id,
     )
     memory = await load_memory(db, user, query)
     extra = []
@@ -1199,17 +1796,23 @@ async def run_deep_agent(
                 content=f"The user confirmed {tool} on {slug}. Result: {clip(dumps(result, 4000), 4000)}. Tell the user what happened."
             )
         )
-    agent = build_agent(ctx, system_prompt(user, conns, memory))
+    graph = build_agent(
+        ctx,
+        system_prompt(user, conns, memory, agent=workspace_agent, group=group, teammates=teammates),
+    )
     payload = {"messages": _lc_messages(history, query, extra)}
     limit = max(80, get_settings().max_agent_steps * 8)
+    if teammate_depth:
+        limit = min(max(24, get_settings().max_agent_steps * 3), 48)
     text = ""
+    peer = f":peer:{getattr(workspace_agent, 'id', 'x')}" if teammate_depth else ""
     for attempt in range(3):
         try:
-            result = await agent.ainvoke(
+            result = await graph.ainvoke(
                 payload,
                 config={
                     "recursion_limit": limit,
-                    "configurable": {"thread_id": f"{session_id}:r{attempt}"},
+                    "configurable": {"thread_id": f"{session_id}{peer}:r{attempt}"},
                 },
             )
             text = last_text(result.get("messages") if isinstance(result, dict) else [])
@@ -1239,7 +1842,21 @@ async def run_deep_agent(
         },
     )
     # #endregion
+    had_card = bool(_connect_cards(ctx))
+    await _maybe_start_connect(ctx, query)
+    cards = _connect_cards(ctx)
+    if cards and not had_card:
+        names = ", ".join(str(c.get("name") or c.get("toolkit") or "this app") for c in cards)
+        text = f"Connect {names} using the card below. That opens Composio's authorization page."
     await remember(db, user.id, "episodic", clip(f"Q: {query}\nA: {text}", 400))
+    speaker = None
+    if workspace_agent is not None:
+        speaker = {
+            "id": str(workspace_agent.id),
+            "name": workspace_agent.name,
+            "color": getattr(workspace_agent, "color", "") or "",
+            "title": getattr(workspace_agent, "title", "") or "",
+        }
     return {
         "text": text or "Done.",
         "pending_confirms": ctx.pending,
@@ -1248,4 +1865,9 @@ async def run_deep_agent(
         "route": "deep",
         "source": source,
         "mail_threads": _mail_threads(ctx),
+        "browser": _browser_views(ctx),
+        "computer": _computer_session(ctx),
+        "connect_cards": cards,
+        "speaker": speaker,
+        "group_id": str(group.id) if group is not None else None,
     }

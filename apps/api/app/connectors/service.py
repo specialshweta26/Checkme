@@ -6,6 +6,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.connectors.platform import PLATFORM, sync_platform
 from app.connectors.registry import mark_synced, server_key_for, spec_from_mcp, upsert_tool_index
 from app.connectors.virtual import VIRTUAL_MAIL_TOOLS
 from app.db import SessionLocal
@@ -53,6 +54,9 @@ async def ensure_builtin_connector(db: AsyncSession, user: User, account: Accoun
 
 async def sync_builtin(db: AsyncSession, connector: Connector) -> None:
     provider = connector.provider
+    if provider in PLATFORM:
+        await sync_platform(db, connector)
+        return
     meta = BUILTIN_META[provider]
     specs = list(MAIL_CALENDAR_TOOLS) + list(VIRTUAL_MAIL_TOOLS)
     await upsert_tool_index(db, connector.server_key or server_key_for("builtin", provider, None), meta["name"], specs)

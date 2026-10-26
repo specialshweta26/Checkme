@@ -57,7 +57,7 @@ services:
       S3_PUBLIC_ENDPOINT_URL: http://localhost:9000
       PUBLIC_WEB_URL: ${PUBLIC_WEB_URL:-http://localhost:3000}
       ALLOW_PRIVATE_MCP_URLS: "true"
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-exclude '*.log' --reload-exclude '.cursor*'
     ports:
       - "8001:8000"
     volumes:

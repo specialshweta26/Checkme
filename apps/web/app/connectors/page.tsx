@@ -2,7 +2,15 @@
 
 import { FormEvent, useEffect, useState } from "react";
 import { AppShell } from "../components/AppShell";
-import { errorFromQuery, getMe, type Me } from "../lib";
+import {
+  assignConnectorAgents,
+  errorFromQuery,
+  getMe,
+  loadWorkspace,
+  nextAssignedAgents,
+  type Me,
+  type WorkspaceAgent,
+} from "../lib";
 
 type Connector = {
   id: string;
@@ -21,6 +29,15 @@ type Connector = {
   card?: string;
 };
 
+type MarketApp = {
+  slug: string;
+  name: string;
+  description?: string;
+  logo?: string;
+  connected?: boolean;
+  tools_count?: number;
+};
+
 export default function ConnectorsPage() {
   const [me, setMe] = useState<Me | null>(null);
   const [rows, setRows] = useState<Connector[]>([]);
@@ -34,6 +51,14 @@ export default function ConnectorsPage() {
   const [drafts, setDrafts] = useState<Record<string, { alias: string; description: string }>>({});
   const [saving, setSaving] = useState<string>("");
   const [editing, setEditing] = useState<string>("");
+  const [apps, setApps] = useState<MarketApp[]>([]);
+  const [marketReady, setMarketReady] = useState(false);
+  const [marketQuery, setMarketQuery] = useState("");
+  const [connecting, setConnecting] = useState("");
+  const [notice, setNotice] = useState("");
+  const [agents, setAgents] = useState<WorkspaceAgent[]>([]);
+  const [assignments, setAssignments] = useState<Record<string, string[]>>({});
+  const [assigning, setAssigning] = useState("");
 
   async function refresh() {
     const res = await fetch("/api/connectors", { credentials: "include" });
@@ -43,6 +68,9 @@ export default function ConnectorsPage() {
     }
     const data = await res.json();
     setRows(data.connectors || []);
+    const roster = await loadWorkspace();
+    setAgents((roster.agents || []).filter((a) => !a.archived));
+    setAssignments(roster.connector_assignments || {});
   }
 
   useEffect(() => {
@@ -54,8 +82,43 @@ export default function ConnectorsPage() {
       setMe(user);
     });
     setError(errorFromQuery(window.location.search));
+    const q = new URLSearchParams(window.location.search);
+    if (q.get("composio") === "connected") setNotice("Composio app connected. You can use it from chat.");
     refresh();
+    loadMarket("");
   }, []);
+
+  async function loadMarket(q: string) {
+    const res = await fetch(`/api/connectors/marketplace?query=${encodeURIComponent(q)}`, { credentials: "include" });
+    if (!res.ok) return;
+    const data = await res.json();
+    setMarketReady(Boolean(data.configured));
+    setApps(data.apps || []);
+  }
+
+  async function connectApp(slug: string) {
+    setConnecting(slug);
+    setError("");
+    try {
+      const res = await fetch("/api/connectors/marketplace/connect", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ toolkit: slug }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : "Could not start Composio sign-in");
+      if (data.redirect_url) {
+        window.location.href = data.redirect_url;
+        return;
+      }
+      throw new Error("No sign-in URL returned");
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setConnecting("");
+    }
+  }
 
   async function add(e: FormEvent) {
     e.preventDefault();
@@ -141,7 +204,7 @@ export default function ConnectorsPage() {
         <div className="conn-hero page-hero">
           <div>
             <h1>Connectors</h1>
-            <p className="muted">Link the inbox and systems this workspace should speak for. Health and tools stay on each tile.</p>
+            <p className="muted">Link mail, a cloud computer, and marketplace apps, then choose which agents can use each one.</p>
           </div>
         </div>
         <div className="conn-connect">
@@ -161,6 +224,50 @@ export default function ConnectorsPage() {
           </a>
         </div>
         {error ? <p className="err">{error}</p> : null}
+        {notice ? <p className="ok">{notice}</p> : null}
+        {marketReady ? (
+          <div className="card stack" style={{ marginBottom: 18 }}>
+            <strong>Composio marketplace</strong>
+            <p className="muted" style={{ margin: 0 }}>
+              Connect GitHub, Slack, Notion, and other apps. The assistant searches and runs their tools from chat.
+            </p>
+            <form
+              className="row"
+              onSubmit={(e) => {
+                e.preventDefault();
+                loadMarket(marketQuery);
+              }}
+            >
+              <input
+                type="search"
+                placeholder="Search apps"
+                value={marketQuery}
+                onChange={(e) => setMarketQuery(e.target.value)}
+              />
+              <button className="btn secondary" type="submit">
+                Search
+              </button>
+            </form>
+            <div className="conn-grid">
+              {apps.map((app) => (
+                <div key={app.slug} className="conn-tile">
+                  <header>
+                    <strong>{app.name}</strong>
+                    <span className={`badge ${app.connected ? "ok" : "down"}`}>{app.connected ? "connected" : "available"}</span>
+                  </header>
+                  <p>{app.description || "Marketplace app"}</p>
+                  <div className="conn-count">
+                    @{app.slug}
+                    {app.tools_count != null ? ` · ${app.tools_count} tools` : ""}
+                  </div>
+                  <button className="btn" disabled={connecting === app.slug} onClick={() => connectApp(app.slug)}>
+                    {connecting === app.slug ? "Opening…" : app.connected ? "Reconnect" : "Connect"}
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
         <form className="card stack" onSubmit={add} style={{ marginBottom: 18 }}>
           <strong>Add a system</strong>
           <p className="muted" style={{ margin: 0 }}>
@@ -231,6 +338,52 @@ export default function ConnectorsPage() {
                     <button className="btn secondary" disabled={saving === c.id} onClick={() => saveDescribe(c)}>
                       {saving === c.id ? "Saving…" : "Save description"}
                     </button>
+                  </div>
+                ) : null}
+                {agents.length ? (
+                  <div className="conn-agents">
+                    <span className="conn-agents-label">Available to</span>
+                    {agents.map((agent) => {
+                      const restricted = assignments[c.id] || [];
+                      const checked = !restricted.length || restricted.includes(agent.id);
+                      return (
+                        <label key={agent.id} className="agent-check">
+                          <input
+                            type="checkbox"
+                            disabled={assigning === c.id}
+                            checked={checked}
+                            onChange={async () => {
+                              setAssigning(c.id);
+                              setError("");
+                              try {
+                                const next = await assignConnectorAgents(
+                                  c.id,
+                                  nextAssignedAgents(
+                                    restricted,
+                                    agent.id,
+                                    agents.map((a) => a.id),
+                                  ),
+                                );
+                                setAssignments((cur) => ({ ...cur, [c.id]: next.agent_ids || [] }));
+                              } catch (err: any) {
+                                setError(err.message || "Could not update agents");
+                              } finally {
+                                setAssigning("");
+                              }
+                            }}
+                          />
+                          <span className="agent-avatar tiny" style={{ background: agent.color }}>
+                            {(agent.name || "?").slice(0, 1).toUpperCase()}
+                          </span>
+                          {agent.name}
+                        </label>
+                      );
+                    })}
+                    <small className="muted">
+                      {(assignments[c.id] || []).length
+                        ? `${assignments[c.id].length} of ${agents.length} agents`
+                        : "Every agent"}
+                    </small>
                   </div>
                 ) : null}
                 <div className="row">

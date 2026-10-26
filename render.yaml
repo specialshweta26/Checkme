@@ -77,6 +77,14 @@ services:
         value: gpt-6-luna
       - key: OPENAI_REASONING_EFFORT
         value: none
+      - key: DAYTONA_API_KEY
+        sync: false
+      - key: DAYTONA_API_URL
+        value: https://app.daytona.io/api
+      - key: DAYTONA_TARGET
+        value: us
+      - key: COMPOSIO_API_KEY
+        sync: false
       - fromGroup: checkme-secrets
 
   - type: pserv
@@ -133,3 +141,7 @@ envVarGroups:
         value: common
       - key: ALLOW_PRIVATE_MCP_URLS
         value: "false"
+      - key: DAYTONA_API_KEY
+        sync: false
+      - key: COMPOSIO_API_KEY
+        sync: false

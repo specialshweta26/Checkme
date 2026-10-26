@@ -13,7 +13,7 @@ from app.auth.providers import get_provider
 from app.auth.tokens import invalidate, seed_access_token
 from app.cache import get_redis
 from app.config import get_settings
-from app.agent.memory import ensure_letta_agent
+from app.agent.memory import seed_letta
 from app.connectors.service import ensure_builtin_connector, sync_in_background
 from app.db import get_db
 from app.deps import current_user, optional_user
@@ -134,8 +134,9 @@ async def callback(
     await db.flush()
 
     connector = await ensure_builtin_connector(db, user, account)
-    if not user.letta_agent_id:
-        user.letta_agent_id = await ensure_letta_agent(user)
+    from app.connectors.platform import ensure_platform_connectors
+
+    await ensure_platform_connectors(db, user)
     sess = AuthSession(user_id=user.id, expires_at=session_expiry(), user_agent=request.headers.get("user-agent", "")[:300])
     db.add(sess)
     await db.commit()
@@ -143,6 +144,8 @@ async def callback(
     await invalidate(account_id=account.id)
     await seed_access_token(account.id, tokens["access_token"], int(tokens.get("expires_in", 3600)))
     background.add_task(sync_in_background, connector.id, True)
+    if not user.letta_agent_id:
+        background.add_task(seed_letta, user.id)
 
     target = "/connectors?linked=1" if saved.get("mode") == "link" else "/chat"
     resp = RedirectResponse(_web(target))

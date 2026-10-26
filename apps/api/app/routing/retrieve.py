@@ -77,18 +77,130 @@ _CATALOG_NAMES = frozenset(
         "list_mcps",
         "resolve",
         "search_tools",
+        "list_apps",
+        "connect_app",
+        "list_connections",
+        "list_toolkits",
+        "composio_search_tools",
+        "composio_manage_connections",
+        "composio_get_tool_schemas",
+        "composio_multi_execute_tool",
+        "composio_execute_tool",
     }
 )
 
-GATEWAY_SEARCH_NAMES = ("gateway__tool_search", "find_tools", "tool_search")
-GATEWAY_EXECUTE_NAMES = ("gateway__execute", "execute")
-GATEWAY_RESOLVE_NAMES = ("gateway__resolve", "resolve")
+GATEWAY_SEARCH_NAMES = (
+    "gateway__tool_search",
+    "find_tools",
+    "tool_search",
+    "COMPOSIO_SEARCH_TOOLS",
+)
+GATEWAY_EXECUTE_NAMES = ("gateway__execute", "execute", "COMPOSIO_MULTI_EXECUTE_TOOL", "COMPOSIO_EXECUTE_TOOL")
+GATEWAY_RESOLVE_NAMES = ("gateway__resolve", "resolve", "COMPOSIO_GET_TOOL_SCHEMAS")
 EXECUTE_TOOLS = frozenset(GATEWAY_EXECUTE_NAMES)
 
 _CAP_EXPAND = {
     "inventory": ("stock",),
     "stock": ("inventory",),
 }
+
+_MAIL_QUERY_HINTS = (
+    "email",
+    "e-mail",
+    "inbox",
+    "gmail",
+    "outlook",
+    "mailbox",
+    "spam",
+    "draft",
+)
+_CALENDAR_QUERY_HINTS = (
+    "invite",
+    "meeting",
+    "calendar",
+    "event",
+    "google meet",
+    "free slot",
+    "teams meeting",
+)
+_GENERIC_TOOL_TERMS = frozenset(
+    {
+        "search",
+        "get",
+        "list",
+        "find",
+        "show",
+        "fetch",
+        "query",
+        "lookup",
+        "message",
+        "messages",
+        "mail",
+        "email",
+        "inbox",
+        "sender",
+        "thread",
+        "subject",
+        "create",
+        "send",
+        "read",
+        "open",
+        "write",
+        "update",
+        "delete",
+        "by",
+    }
+)
+
+
+def _has_phrase(query: str, phrases: tuple[str, ...]) -> bool:
+    q = (query or "").lower()
+    for phrase in phrases:
+        if " " in phrase or "-" in phrase:
+            if phrase in q:
+                return True
+        elif re.search(rf"\b{re.escape(phrase)}\b", q):
+            return True
+    return False
+
+
+def is_calendar_query(query: str) -> bool:
+    return _has_phrase(query, _CALENDAR_QUERY_HINTS)
+
+
+def is_mail_query(query: str) -> bool:
+    q = query or ""
+    if is_calendar_query(q) or _has_phrase(q, _MAIL_QUERY_HINTS):
+        return True
+    return bool(re.search(r"\bmails?\b", q.lower()))
+
+
+def extra_capability_terms(query: str) -> list[str]:
+    return [term for term in capability_terms(query) if term not in _GENERIC_TOOL_TERMS]
+
+
+def matching_toolkit(connections: list, terms: list[str]) -> str | None:
+    useful = [term for term in terms if len(term) >= 4]
+    for item in connections:
+        if not isinstance(item, dict):
+            continue
+        slug = str(item.get("toolkit") or item.get("slug") or "").strip()
+        if not slug:
+            continue
+        blob = slug.lower().replace("-", "_")
+        for term in useful:
+            if term in blob or blob in term:
+                return slug
+    return None
+
+
+def keep_connector_scope(provider: str | None, query: str) -> bool:
+    """Honor an explicit slug unless a mail connector was chosen for a non-mail capability."""
+    if provider in {"gmail", "outlook"}:
+        if is_mail_query(query) or is_calendar_query(query):
+            return True
+        return not extra_capability_terms(query)
+    return True
 
 
 def capability_terms(query: str) -> list[str]:
@@ -129,7 +241,7 @@ def is_catalog_tool(name: str) -> bool:
 
 
 def is_execute_tool(name: str) -> bool:
-    return (name or "").lower() in EXECUTE_TOOLS
+    return (name or "").lower() in {item.lower() for item in EXECUTE_TOOLS}
 
 
 def gateway_search_query(query: str) -> str:

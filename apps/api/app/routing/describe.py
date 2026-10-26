@@ -75,12 +75,31 @@ def catalog_lines(connectors: list) -> str:
     for connector in connectors:
         label = connector.alias or connector.name
         desc = (getattr(connector, "description", "") or "").strip()
-        kind = "mail+calendar" if connector.kind == "builtin" else "mcp"
+        provider = getattr(connector, "provider", "") or ""
+        if provider in {"gmail", "outlook"} or (connector.kind == "builtin" and provider not in {"daytona", "composio"}):
+            kind = "mail+calendar"
+        elif provider == "daytona":
+            kind = "computer"
+        elif provider == "composio":
+            kind = "marketplace"
+        else:
+            kind = "mcp"
         extra = f" — {desc}" if desc else ""
-        if connector.kind == "builtin":
+        if kind == "mail+calendar":
             extra += (
                 " — mail and calendar: send_message, get_message, create_event, "
                 "create_google_meet, create_teams_meeting"
+            )
+        elif provider == "daytona":
+            extra += (
+                " — live computer: exec, run_code, write_file, write_analytics_report, publish_file, "
+                "browser_navigate / web_fetch / browser_snapshot / browser_act (click, fill, select), "
+                "browser_handoff, computer_observe / computer_act"
+            )
+        elif provider == "composio":
+            extra += (
+                " — marketplace of connected apps: search_tools expands find_tools; "
+                "list_connections shows authorized apps; connect_app if the user must authorize one"
             )
         lines.append(f"- @{connector.slug} ({label}, {kind}){extra}")
     return "\n".join(lines) if lines else "(none)"
