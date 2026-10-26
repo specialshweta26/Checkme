@@ -174,6 +174,11 @@ File: `apps/api/app/agent/deep.py`. This is the **only** chat execution path.
 | `inspect_result` | Slice stored `ctx.results` by path/search/offset |
 | `schedule_task` | Staff persist on the speaking agent’s routines |
 | `staff` | Briefing, inbox Q&A, commitments, voice |
+| `list_agents_and_groups` | This user's Checkme agents and groups (ids, titles, members, 2–10 limit). Built in, not a connector |
+| `create_agent` / `update_agent` | Create, rename, retitle, re-instruct, archive/restore a workspace agent via `agents/service.py` |
+| `create_agent_group` | New group from member names/ids, or `all_agents=true` (all non-archived agents). Clear error under 2 or over 10 |
+| `add_group_members` / `remove_group_members` / `rename_agent_group` | Edit an existing group; size rule re-checked |
+| `delete_agent` / `delete_agent_group` | Never delete directly: return a confirmation card (see 6.4). Refused for Chief and for unattended (`auto_confirm`) runs |
 
 System prompt rules that matter in production:
 
@@ -184,6 +189,7 @@ System prompt rules that matter in production:
 - Future work → `schedule_task`. Clock-time meetings → `create_event` now.
 - Connector answers are a **detailed analyst briefing**, not a short brief.
 - Destructive tools still `call_tool`; the app confirms.
+- Checkme's own agents/groups use the workspace tools above, never `search_tools`/`call_tool` or a third-party "group" (LiveChat, Slack…). After a change the reply says it is in the left sidebar under **Personal**. There is no group lead setting (the first member answers).
 
 Recursion: `max_agent_steps * 8` (floor 80), retry twice up to 200 if LangGraph hits the limit.
 
@@ -226,6 +232,14 @@ On `search_messages`, `list_messages`, `list_threads`, `get_message`:
 If the model later calls `get_thread` with an empty id, `_complete_thread_args` copies ids from the previous result.
 
 Chat response meta includes `mail_threads: [{ connector_slug, thread_id, message_id, subject }]`.
+
+### 6.4 Workspace (agents and groups) tools
+
+File: `apps/api/app/agents/chat_tools.py`, wired in `harness_tools`. Agents and groups are referenced by id or name (case-insensitive, unique partial match), so the model can pass what the user said. Every mutation goes through `app/agents/service.py`, so the sidebar's rules apply (unique names, 20-agent cap, 2–10 members, Chief protected).
+
+Deletes reuse the connector confirmation flow: `request_delete` signs `sign_confirm("tool", {slug: "__checkme_workspace__", tool: "delete_agent"|"delete_group", args: {id, name}})` and appends to `ctx.pending`. When the user presses Confirm, chat posts the token back; `run_deep_agent` sees the workspace slug in `confirmations` and runs `chat_tools.run_confirmed` (not `call_user_tool`). A teammate's pending cards are passed up to the lead's response.
+
+Any successful mutation sets `ctx.workspace_changed`; `run_deep_agent` returns `workspace_changed: true`, the chat page fires `checkme:workspace-changed` on `window`, and `AgentsNav` refetches `GET /api/agents` so new agents/groups appear without a reload.
 
 ## 7. Connector runtime
 
@@ -335,6 +349,7 @@ Staff `learn_voice` updates the speaking agent’s voice block from sent mail.
 | Attach | `uploadFiles` then state update (**await outside setState** — Next build requirement) |
 | Chat meta | Assistant bubble stores whole POST body (`used_tools`, `attachments`, `mail_threads`) |
 | Tasks | Filter by agent; create sheet sends `agent_id` (last chat agent, else Chief) |
+| Sidebar refresh | Chat response `workspace_changed` → `announceWorkspaceChanged()` → `AgentsNav` listens for `checkme:workspace-changed` and calls `loadWorkspace()` |
 
 ## 13. Error handling
 
@@ -358,6 +373,7 @@ Staff `learn_voice` updates the speaking agent’s voice block from sent mail.
 | `test_attachments.py` | Previewable types |
 | `test_routing*.py` | Tool search / describe |
 | `test_agent_scope.py` | Memory isolation, task `agent_id`, `execute_task` agent, Chief backfill |
+| `test_agent_chat_tools.py` | Workspace tools registered and in prompt; create/rename agent; group from all/named agents, 2–10 errors, add/remove/rename; deletes only via confirmation, Chief and unattended refused; confirmed delete runs in `run_deep_agent` |
 
 Run: `apps/api/.venv/bin/python -m pytest -q`.
 

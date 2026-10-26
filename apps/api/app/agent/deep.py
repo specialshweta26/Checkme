@@ -14,7 +14,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents.service import connector_assignment_map, filter_connectors
+from app.agents import chat_tools as workspace_tools
+from app.agents.service import GROUP_MEMBER_MAX, GROUP_MEMBER_MIN, connector_assignment_map, filter_connectors
 from app.agent.confirm import sign_confirm
 from app.agent.invoke import bump_usage, confirmed, invoke_named, preview
 from app.agent.memory import load_memory, remember
@@ -85,6 +86,7 @@ class RunContext:
     teammate_depth: int = 0
     session_id: uuid.UUID | None = None
     request_id: str = ""
+    workspace_changed: bool = False
 
 
 def _json_size(value: Any) -> int:
@@ -1362,6 +1364,40 @@ class InspectInput(BaseModel):
     limit: int = Field(default=80, description="How many list items or keys to return.")
 
 
+class CreateAgentInput(BaseModel):
+    name: str = Field(description="Short display name for the new agent, e.g. 'Dev' or 'Ori'.")
+    title: str = Field(default="", description="Role or area, e.g. 'tech work: GitHub and Render'.")
+    instructions: str = Field(default="", description="Standing instructions for this agent's focus, tone and limits.")
+
+
+class UpdateAgentInput(BaseModel):
+    agent: str = Field(description="Agent id or name from list_agents_and_groups.")
+    name: str | None = Field(default=None, description="New name, to rename it.")
+    title: str | None = Field(default=None, description="New role or area.")
+    instructions: str | None = Field(default=None, description="Replacement instructions.")
+    archived: bool | None = Field(default=None, description="True to archive, false to restore.")
+
+
+class CreateGroupInput(BaseModel):
+    name: str = Field(description="Group name the user gave, e.g. 'Software developers'.")
+    members: list[str] = Field(default_factory=list, description="Agent names or ids to add. Leave empty when all_agents is true.")
+    all_agents: bool = Field(default=False, description="True when the user said all, every, or all existing agents.")
+
+
+class GroupMembersInput(BaseModel):
+    group: str = Field(description="Group id or name.")
+    members: list[str] = Field(description="Agent names or ids.")
+
+
+class RenameGroupInput(BaseModel):
+    group: str = Field(description="Group id or name.")
+    name: str = Field(description="New group name.")
+
+
+class DeleteWorkspaceInput(BaseModel):
+    target: str = Field(description="Id or name of the agent or group to delete.")
+
+
 class AskTeammateInput(BaseModel):
     agent_id: str = Field(description="Id of a teammate in this group.")
     prompt: str = Field(description="Focused task for that teammate. Include only what they need.")
@@ -1406,6 +1442,57 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
         """Ask another agent in this group to do a slice of the work. They reply in the shared thread. Do not ask yourself."""
         return dumps(await _ask_teammate(ctx, agent_id, prompt), 12000)
 
+    async def list_agents_and_groups() -> str:
+        """List this user's own Checkme agents and agent groups (the sidebar under Personal), with ids, titles and members. Use for any question about their Checkme agents or groups. Not a connector."""
+        ctx.used_tools.append("list_agents_and_groups")
+        return dumps(await workspace_tools.list_agents_and_groups(ctx), 16000)
+
+    async def create_agent(name: str, title: str = "", instructions: str = "") -> str:
+        """Create a new Checkme agent for this user (shows in the sidebar under Personal). Use when the user asks to create, add, or set up an agent. Never use a connector for this."""
+        ctx.used_tools.append("create_agent")
+        return dumps(await workspace_tools.create_agent(ctx, name, title, instructions))
+
+    async def update_agent(
+        agent: str,
+        name: str | None = None,
+        title: str | None = None,
+        instructions: str | None = None,
+        archived: bool | None = None,
+    ) -> str:
+        """Rename a Checkme agent or change its title, instructions or archived state."""
+        ctx.used_tools.append("update_agent")
+        return dumps(await workspace_tools.update_agent(ctx, agent, name, title, instructions, archived))
+
+    async def create_agent_group(name: str, members: list[str] | None = None, all_agents: bool = False) -> str:
+        """Create a Checkme agent group (a shared chat room of 2 to 10 of this user's agents). Set all_agents=true for 'all my agents'. Use this, never a connector, for any request to group the user's agents."""
+        ctx.used_tools.append("create_agent_group")
+        return dumps(await workspace_tools.create_group(ctx, name, members or [], all_agents))
+
+    async def add_group_members(group: str, members: list[str]) -> str:
+        """Add agents to an existing Checkme agent group (max 10 members)."""
+        ctx.used_tools.append("add_group_members")
+        return dumps(await workspace_tools.add_group_members(ctx, group, members))
+
+    async def remove_group_members(group: str, members: list[str]) -> str:
+        """Remove agents from a Checkme agent group (a group keeps at least 2 members)."""
+        ctx.used_tools.append("remove_group_members")
+        return dumps(await workspace_tools.remove_group_members(ctx, group, members))
+
+    async def rename_agent_group(group: str, name: str) -> str:
+        """Rename a Checkme agent group."""
+        ctx.used_tools.append("rename_agent_group")
+        return dumps(await workspace_tools.rename_group(ctx, group, name))
+
+    async def delete_agent(target: str) -> str:
+        """Ask to delete a Checkme agent. This only shows the user a confirmation card; it is deleted after they confirm. Chief cannot be deleted."""
+        ctx.used_tools.append("delete_agent")
+        return dumps(await workspace_tools.request_delete(ctx, "agent", target))
+
+    async def delete_agent_group(target: str) -> str:
+        """Ask to delete a Checkme agent group. This only shows the user a confirmation card; it is deleted after they confirm. Member agents are kept."""
+        ctx.used_tools.append("delete_agent_group")
+        return dumps(await workspace_tools.request_delete(ctx, "group", target))
+
     tools = [
         StructuredTool.from_function(coroutine=list_connectors, name="list_connectors", description=list_connectors.__doc__),
         StructuredTool.from_function(
@@ -1444,6 +1531,50 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
             description=run_staff_tool.__doc__,
             args_schema=StaffInput,
         ),
+        StructuredTool.from_function(
+            coroutine=list_agents_and_groups,
+            name="list_agents_and_groups",
+            description=list_agents_and_groups.__doc__,
+        ),
+        StructuredTool.from_function(
+            coroutine=create_agent, name="create_agent", description=create_agent.__doc__, args_schema=CreateAgentInput
+        ),
+        StructuredTool.from_function(
+            coroutine=update_agent, name="update_agent", description=update_agent.__doc__, args_schema=UpdateAgentInput
+        ),
+        StructuredTool.from_function(
+            coroutine=create_agent_group,
+            name="create_agent_group",
+            description=create_agent_group.__doc__,
+            args_schema=CreateGroupInput,
+        ),
+        StructuredTool.from_function(
+            coroutine=add_group_members,
+            name="add_group_members",
+            description=add_group_members.__doc__,
+            args_schema=GroupMembersInput,
+        ),
+        StructuredTool.from_function(
+            coroutine=remove_group_members,
+            name="remove_group_members",
+            description=remove_group_members.__doc__,
+            args_schema=GroupMembersInput,
+        ),
+        StructuredTool.from_function(
+            coroutine=rename_agent_group,
+            name="rename_agent_group",
+            description=rename_agent_group.__doc__,
+            args_schema=RenameGroupInput,
+        ),
+        StructuredTool.from_function(
+            coroutine=delete_agent, name="delete_agent", description=delete_agent.__doc__, args_schema=DeleteWorkspaceInput
+        ),
+        StructuredTool.from_function(
+            coroutine=delete_agent_group,
+            name="delete_agent_group",
+            description=delete_agent_group.__doc__,
+            args_schema=DeleteWorkspaceInput,
+        ),
     ]
     if ctx.group is not None and ctx.teammate_depth == 0 and ctx.teammates:
         tools.append(
@@ -1477,9 +1608,20 @@ def system_prompt(user, connectors: list, memory: str, agent=None, group=None, t
             "Split independent work with ask_teammate(agent_id, prompt). They reply in this thread. "
             "Do not ask yourself. Combine their replies into the user's answer.\n"
         )
+    workspace_bit = (
+        "Checkme agents and groups: this user's own agents (you, Chief, and the others in the sidebar under Personal) and their groups "
+        "are built into this app, not a connector. To list, create, rename or edit agents, or to create, rename, or change members of a group of agents, "
+        "use list_agents_and_groups, create_agent, update_agent, create_agent_group, add_group_members, remove_group_members, rename_agent_group. "
+        "Never search_tools, list_connectors, or call_tool for these, and never offer a third-party app's 'group' (LiveChat, Slack, Teams, CRM) for them. "
+        f"A group has {GROUP_MEMBER_MIN} to {GROUP_MEMBER_MAX} agents; for 'all my agents' pass all_agents=true. "
+        "Groups have no separate lead setting. If a tool returns an error about the size, explain it and ask which agents to use. "
+        "delete_agent and delete_agent_group only show a confirmation card; say it is waiting for their confirmation. "
+        "After creating or changing one, tell the user its name and that it is in the left sidebar under Personal, where they can open it.\n"
+    )
     return (
         identity
         + group_bit
+        + workspace_bit
         + f"Current date and time: {now.strftime('%Y-%m-%d %H:%M')} ({tz}). Interpret and display times in that timezone.\n"
         "Only use connectors listed below. Other users have different connectors.\n"
         "Discover first: list_connectors, then search_tools with a short capability phrase (what the tool must return), not the full user sentence. "
@@ -1545,7 +1687,7 @@ def system_prompt(user, connectors: list, memory: str, agent=None, group=None, t
         "Cite source_tool (connector slug and tool name, plus the downstream name if a gateway executed one).\n"
         "If asked how a number was produced, cite tool evidence from this thread or fetch again. Do not invent figures.\n"
         "If you cannot tell which connector fits, ask the user.\n"
-        "Destructive actions still need call_tool; the app asks the user to confirm.\n"
+        "Destructive connector actions still need call_tool; the app asks the user to confirm.\n"
         "If the user wants work done later (email a report in N minutes, tonight, every day), schedule_task and do not fetch now. "
         "If they want a calendar invite or meeting at a clock time, that time is the event start: call create_event now. "
         "Tell them the scheduled time only when you actually called schedule_task.\n"
@@ -1704,6 +1846,10 @@ async def _ask_teammate(ctx: RunContext, agent_id: str, prompt: str) -> dict:
         ctx.attachments.append(item)
     for name in nested.get("used_tools") or []:
         ctx.used_tools.append(str(name))
+    if nested.get("workspace_changed"):
+        ctx.workspace_changed = True
+    for item in nested.get("pending_confirms") or []:
+        ctx.pending.append(item)
     for view in nested.get("browser") or []:
         ctx.results.append(
             {
@@ -1791,6 +1937,15 @@ async def run_deep_agent(
         slug, tool = payload.get("slug"), payload.get("tool")
         if not slug or not tool:
             continue
+        if slug == workspace_tools.WORKSPACE_SLUG:
+            result = await workspace_tools.run_confirmed(ctx, tool, payload.get("args") or {})
+            ctx.used_tools.append(tool)
+            extra.append(
+                HumanMessage(
+                    content=f"The user confirmed {tool} in Checkme. Result: {clip(dumps(result, 2000), 2000)}. Tell the user what happened."
+                )
+            )
+            continue
         result = await call_user_tool(ctx, slug, tool, payload.get("args") or {})
         extra.append(
             HumanMessage(
@@ -1877,4 +2032,5 @@ async def run_deep_agent(
         "connect_cards": cards,
         "speaker": speaker,
         "group_id": str(group.id) if group is not None else None,
+        "workspace_changed": ctx.workspace_changed,
     }

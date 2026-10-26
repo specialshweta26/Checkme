@@ -8,7 +8,7 @@ import { cardsFromMeta, ConnectCards } from "../components/ConnectCard";
 import { EmailThreadButton, mailRefsFromMeta } from "../components/EmailThread";
 import { Markdown } from "../components/Markdown";
 import { Thinking } from "../components/Thinking";
-import { chatHref, deleteSession, getMe, listSessions, loadSession, rememberScope, uploadFiles, type ChatSessionRow, type Me, type UploadedFile, type WorkspaceRoster } from "../lib";
+import { announceWorkspaceChanged, chatHref, deleteSession, getMe, listSessions, loadSession, rememberScope, uploadFiles, type ChatSessionRow, type Me, type UploadedFile, type WorkspaceRoster } from "../lib";
 
 const STORE = "assistant.session";
 
@@ -209,6 +209,7 @@ export default function ChatPage() {
         const detail = typeof data.detail === "string" ? data.detail : data.detail?.[0]?.msg;
         throw new Error(detail || raw.slice(0, 280) || "Chat failed");
       }
+      if (data.workspace_changed) announceWorkspaceChanged();
       const loaded = data.session_id ? await loadSession(data.session_id) : null;
       const doneMessages: Msg[] = loaded?.messages?.length
         ? loaded.messages
