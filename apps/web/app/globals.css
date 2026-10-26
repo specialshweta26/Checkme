@@ -615,7 +615,10 @@ textarea.field { min-height: 110px; resize: vertical; }
   box-shadow: 0 0 0 4px var(--highlight-soft);
   animation: pulse 1.4s ease-in-out infinite;
 }
-.think-copy { font-size: 13.5px; }
+.think-copy { font-size: 13.5px; animation: think-in 0.25s ease-out; }
+.think-trail { list-style: none; margin: 0 0 8px; padding: 0; display: grid; gap: 4px; font-size: 12.5px; color: var(--muted); opacity: 0.75; }
+.think-trail li::before { content: "✓"; margin-right: 8px; color: var(--highlight); }
+@keyframes think-in { from { opacity: 0; transform: translateY(2px); } }
 .think-bars { display: grid; gap: 8px; margin-top: 14px; }
 .bar { height: 10px; border-radius: 6px; background: linear-gradient(90deg, var(--lift), #e2e8f0, var(--lift)); background-size: 200% 100%; animation: shimmer 1.6s linear infinite; }
 .bar.w1 { width: 92%; }
