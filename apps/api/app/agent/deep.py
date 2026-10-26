@@ -65,6 +65,9 @@ CATALOG_TOOLS = {
 }
 
 
+JOB_CONFIRM_TTL = 3 * 24 * 3600
+
+
 @dataclass
 class RunContext:
     db: AsyncSession | None
@@ -88,6 +91,8 @@ class RunContext:
     request_id: str = ""
     workspace_changed: bool = False
     progress: Any = None
+    job: Any = None  # AgentJob when running in the background worker
+    jobs_started: list = field(default_factory=list)  # jobs this turn queued (start_coding_job / delegate)
 
 
 def _json_size(value: Any) -> int:
@@ -1173,7 +1178,9 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
     if (destructive or git_write) and (git_write or not ctx.auto_confirm) and not confirmed(
         ctx.confirmations, connector_slug, tool_name
     ):
-        token = sign_confirm("tool", {"slug": connector_slug, "tool": tool_name, "args": args})
+        # Background jobs wait for the user, so their approval cards live longer than chat ones.
+        ttl = JOB_CONFIRM_TTL if ctx.job is not None else 600
+        token = sign_confirm("tool", {"slug": connector_slug, "tool": tool_name, "args": args}, ttl=ttl)
         pending = {
             "needs_confirm": True,
             "token": token,
@@ -1446,6 +1453,37 @@ class GitCommitInput(BaseModel):
     repo: str = Field(description="owner/name (already checked out, on an agent/* branch)")
     message: str = Field(description="Commit message: a short summary line, then details if useful.")
     paths: list[str] | None = Field(default=None, description="Only these paths. Empty = all changes.")
+
+
+class StartJobInput(BaseModel):
+    task: str = Field(description="Self-contained task: the repo (owner/name), what to change or check, and acceptance criteria.")
+    title: str = Field(default="", description="Short title for the timeline.")
+
+
+async def start_coding_job(ctx: "RunContext", task: str, title: str = "", role: str = "coder") -> dict:
+    """Queue a background job for this agent in the current chat (chat turns only)."""
+    from app.jobs import service as jobs
+    from app.jobs.worker import wake
+
+    if ctx.db is None or ctx.agent is None:
+        return {"error": "Background jobs need a saved agent."}
+    try:
+        job = await jobs.create_job(
+            ctx.db, ctx.user, agent=ctx.agent, prompt=task, title=title, role=role, kind="chat", session_id=ctx.session_id
+        )
+    except jobs.JobError as exc:
+        return {"error": str(exc)}
+    await ctx.db.commit()
+    wake()
+    info = jobs.serialize_job(job)
+    ctx.jobs_started.append(info)
+    return {
+        "started": True,
+        "job_id": info["id"],
+        "title": info["title"],
+        "note": "The job is running in the background; the user sees its live timeline under this reply. "
+        "Reply in one or two lines that it started; do not do the work yourself in this turn.",
+    }
 
 
 class PushBranchInput(BaseModel):
@@ -1745,6 +1783,18 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
                 StructuredTool.from_function(coroutine=push, name="push_branch", description=push.__doc__, args_schema=PushBranchInput),
             ]
         )
+        if ctx.job is None and ctx.teammate_depth == 0 and ctx.db is not None:
+
+            async def start_job(task: str, title: str = "") -> str:
+                """Start a background coding job for multi-step work (code changes, fixes, features, reviews, deploys). It runs on the computer without the chat timeout and shows a live timeline with approval buttons in this chat. Give a self-contained task: repo (owner/name), goal and acceptance criteria."""
+                ctx.used_tools.append("start_coding_job")
+                return dumps(await start_coding_job(ctx, task, title), 4000)
+
+            tools.append(
+                StructuredTool.from_function(
+                    coroutine=start_job, name="start_coding_job", description=start_job.__doc__, args_schema=StartJobInput
+                )
+            )
     if ctx.group is not None and ctx.teammate_depth == 0 and ctx.teammates:
         tools.append(
             StructuredTool.from_function(
@@ -2082,6 +2132,7 @@ async def run_deep_agent(
     teammates: list | None = None,
     teammate_depth: int = 0,
     progress: Any = None,
+    job: Any = None,
 ) -> dict[str, Any]:
     from app.connectors.platform import ensure_platform_connectors
     from app.debug_ndjson import dbg as _dbg_start
@@ -2113,6 +2164,7 @@ async def run_deep_agent(
         session_id=session_id,
         request_id=request_id,
         progress=progress,
+        job=job,
     )
     callbacks = _progress_callbacks(ctx, conns, query)
     if progress is not None:
@@ -2245,4 +2297,5 @@ async def run_deep_agent(
         "speaker": speaker,
         "group_id": str(group.id) if group is not None else None,
         "workspace_changed": ctx.workspace_changed,
+        "jobs_started": ctx.jobs_started,
     }

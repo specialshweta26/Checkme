@@ -98,6 +98,9 @@ erDiagram
   Connector }o--o| ServerCard : server_key
   ServerCard ||--o{ ToolIndex : catalogs
   ChatSession ||--o{ ChatMessage : contains
+  User ||--o{ AgentJob : has
+  AgentJob ||--o{ AgentJob : delegates
+  AgentJob ||--o{ JobEvent : timeline
 ```
 
 | Table | Keys / notes |
@@ -119,6 +122,8 @@ erDiagram
 | `automations` | Staff routines. `agent_id` is the agent that created the automation |
 | `commitments` / `admin_items` | Staff extractions. Still per user (not per agent) |
 | `tool_usage` / `tool_edges` | Routing feedback |
+| `agent_jobs` | Background runs (§10.1). `role` planner\|coder\|reviewer, `kind` chat\|delegate\|scheduled, `status` queued\|running\|waiting_approval\|waiting_children\|done\|failed\|cancelled, `parent_id` / `root_id` / `depth` (≤ 3), `meta` (history, next_query, confirmations, pending cards, children), `attempts`, `heartbeat_at` |
+| `job_events` | Timeline rows for a job tree (`root_id`, id order): step, plan, diff, test, pr, message, approval, result, error, status |
 
 `init_db` uses `create_all` plus `ALTER TABLE … ADD COLUMN IF NOT EXISTS` patches (inbox headers, chat `agent_id` / `group_id`, and per-agent memory/routine columns). No separate migration tool.
 
@@ -157,6 +162,7 @@ Startup backfill (`app/agents/scope.py`, applied from `db.py`): promote an exist
 - Builtin platform connectors (when keys are set): `@computer` (Daytona sandbox) and `@composio` (marketplace `find_tools` / `execute`)
 - `GET/POST /tasks`, `PATCH/DELETE /tasks/{id}`, `POST .../run`. `GET` accepts `agent_id` and `status`. `POST` body is `{ prompt, agent_id? }` — omitted `agent_id` uses Chief
 - `POST /files/upload`, `GET /files?t=&render=`
+- `GET /jobs?active=1` (root jobs), `GET /jobs/{id}`, `GET /jobs/{id}/events?after=` (whole tree: `{ root, jobs, events, waiting, done }`), `POST /jobs/{id}/approve|decline` `{ token }`, `POST /jobs/{id}/cancel` (cancels the subtree) — §10.1
 
 Health: FastAPI `GET /health`, web `GET /up`.
 
@@ -368,6 +374,24 @@ Upload returns `{ key, filename, download_url, preview_url, previewable, extract
 
 Chat `schedule_task` parses natural time in `tasks/parse.py` (IST) and stores the speaking agent on the row. Creating a calendar event at a clock time is **not** a scheduled task; that is `create_event` immediately. The Tasks page can filter by agent and the create sheet picks an agent (default: the last agent you chatted with, otherwise Chief).
 
+### 10.1 Background jobs
+
+Package `app/jobs/` (`service.py` transitions, `runner.py` one turn, `worker.py` loop, `routes.py`). The worker is started in the API lifespan next to the scheduler, in the same process.
+
+**Why.** A plan → build → test → push run takes longer than one chat request (the proxy gives up after about 5 minutes). A job runs the same `run_deep_agent` outside the request and streams a timeline instead.
+
+**Start.** A coding agent's chat turn becomes a job in two ways: `POST /chat` short-circuits when `looks_like_coding_task(text)` (a repo / PR / branch reference plus a change verb; questions stay inline) and replies at once with `meta.job`; or the model calls `start_coding_job(task, title)` (chat only, never inside a job). Both create a root `kind=chat` job in the current chat session.
+
+**Worker.** Every 3s (or when woken after approve / enqueue): claim queued jobs with `FOR UPDATE SKIP LOCKED`, oldest first, **one running job per user** (one shared sandbox) and at most 4 overall. A running job writes `heartbeat_at` every 60s and on every event; jobs with a heartbeat older than 5 minutes (process died, redeploy) are requeued, and failed after 3 attempts.
+
+**One turn** (`run_job`): role brief + task on the first run, otherwise `meta.next_query`; history is the job's own last 16 turns; `confirmations` are replayed through the normal `run_deep_agent` path. `JobProgress` is the progress reporter: status lines become `step` events (`write_todos` → `plan`), and `git_tools` adds `test` / `diff` / `pr` events through `progress.record`. Outcome (`apply_outcome`):
+
+- approval cards pending → `waiting_approval` + one `approval` event per card (tokens signed with a 3-day TTL inside jobs). `POST /jobs/{id}/approve` validates the token is one of the job's pending cards, puts its payload in `meta.confirmations` and requeues; `decline` requeues with "do not retry, wrap up".
+- delegated children (§10.2) → `waiting_children`; when every child is terminal the parent is requeued with their results.
+- otherwise → `done` with `result`. A root job posts its result to the chat session as an assistant message (`meta.job`, `job_result`) and marks the agent unread; failures post a short failure note.
+
+**Web.** `components/JobTimeline.tsx` renders under the assistant message that has `meta.job`: polls `/api/jobs/{id}/events?after=` every 2.5s (6s while waiting for approval), shows status chips per job in the tree, steps, plan, collapsible diff / test output, PR links, and Approve / Decline on pending approval events; Cancel cancels the tree. When it sees the job finish it reloads the session so the final reply appears.
+
 ## 11. Memory
 
 Memory is per workspace agent, not per user. Chief is the default agent (`ensure_default_agent`).
@@ -432,6 +456,9 @@ Staff `learn_voice` updates the speaking agent’s voice block from sent mail.
 | `test_progress.py` | Status lines from real tool/model events (connector, query, URL, group, teammate, todos), Redis buffer + TTL + dedupe, Redis outage tolerated, teammate prefix, nested callbacks not double-reported, `run_deep_agent` wires the callback, `GET /chat/progress/{id}` |
 
 | `test_agent_focus.py` | A–D order, focus normalize/reject, `update_agent` focus + default title, route models, coding/research/unset prompts, coding-only tools, `set_my_focus`, `sandbox_shell` → computer `exec` (timeout clamp, missing computer), `coding_workspace_status` ready/missing, bigger step budget |
+
+| `test_jobs.py` | Job depth cap, outcome → done / waiting_approval / waiting_children, approve (pending token only, expired refused) / decline / cancel, parent resumes only when all children finish, role brief on first run, `JobProgress` events + plan + dedupe, git tools emit test / PR events, coding-task routing heuristic, `start_coding_job` only in chat for coding agents |
+| `test_jobs_db.py` | Against real Postgres when `CHECKME_TEST_DATABASE_URL` is set: claim + run + approval + resume + chat post-back, one running job per user, stale recovery, failure path |
 
 Run: `apps/api/.venv/bin/python -m pytest -q`.
 

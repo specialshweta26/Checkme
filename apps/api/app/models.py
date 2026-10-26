@@ -355,6 +355,60 @@ class ScheduledTask(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
 
+class AgentJob(Base):
+    """A background agent run (coding work, delegated sub-tasks, scheduled runs). See app/jobs."""
+
+    __tablename__ = "agent_jobs"
+    __table_args__ = (Index("ix_agent_jobs_status_created", "status", "created_at"),)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    agent_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workspace_agents.id", ondelete="SET NULL"), index=True
+    )
+    session_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("chat_sessions.id", ondelete="SET NULL"), index=True
+    )
+    parent_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("agent_jobs.id", ondelete="CASCADE"), index=True
+    )
+    root_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    depth: Mapped[int] = mapped_column(Integer, default=1)
+    role: Mapped[str] = mapped_column(String(20), default="coder")  # planner | coder | reviewer
+    kind: Mapped[str] = mapped_column(String(20), default="chat")  # chat | delegate | scheduled
+    title: Mapped[str] = mapped_column(String(200), default="")
+    prompt: Mapped[str] = mapped_column(Text, default="")
+    # queued | running | waiting_approval | waiting_children | done | failed | cancelled
+    status: Mapped[str] = mapped_column(String(20), default="queued")
+    result: Mapped[str] = mapped_column(Text, default="")
+    error: Mapped[str] = mapped_column(Text, default="")
+    meta: Mapped[dict] = mapped_column(JSONB, default=dict)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    scheduled_task_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("scheduled_tasks.id", ondelete="SET NULL")
+    )
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class JobEvent(Base):
+    """Timeline entries for a job tree: steps, plans, diffs, test output, PR links, approvals, results."""
+
+    __tablename__ = "job_events"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    job_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("agent_jobs.id", ondelete="CASCADE"), index=True)
+    root_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
+    agent_name: Mapped[str] = mapped_column(String(80), default="")
+    # step | plan | diff | test | pr | message | approval | result | error | status
+    kind: Mapped[str] = mapped_column(String(20), default="step")
+    text: Mapped[str] = mapped_column(Text, default="")
+    data: Mapped[dict] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
 class MemoryPassage(Base):
     """Fallback archival + episodic memory when Letta is not configured."""
 

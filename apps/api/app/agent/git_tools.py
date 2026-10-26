@@ -126,6 +126,17 @@ async def git_checkout(ctx, repo: str, branch: str = "", base: str = "") -> dict
     return res
 
 
+async def _record(ctx, kind: str, text: str, data: dict | None = None) -> None:
+    """Timeline entry for background jobs (diff, test output, PR links). No-op in plain chat."""
+    rec = getattr(getattr(ctx, "progress", None), "record", None)
+    if rec is None:
+        return
+    try:
+        await rec(kind, text, data or {})
+    except Exception:  # noqa: BLE001
+        pass
+
+
 async def run_tests(ctx, repo: str, command: str = "", timeout: int = 600) -> dict:
     try:
         _, name = coding.split_repo(repo)
@@ -134,6 +145,12 @@ async def run_tests(ctx, repo: str, command: str = "", timeout: int = 600) -> di
     res = await sandbox_exec(ctx, coding.test_script(name, command or ""), timeout)
     if not res.get("error"):
         res["passed"] = res.get("exit_code") == 0
+        await _record(
+            ctx,
+            "test",
+            f"Tests {'passed' if res['passed'] else 'failed'} in {repo}",
+            {"repo": repo, "passed": res["passed"], "output": str(res.get("output") or "")[-3000:]},
+        )
     return res
 
 
@@ -143,7 +160,10 @@ async def git_diff(ctx, repo: str, base: str = "") -> dict:
         base = coding.check_ref(base, "base branch")
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
-    return await sandbox_exec(ctx, coding.diff_script(name, base), 120)
+    res = await sandbox_exec(ctx, coding.diff_script(name, base), 120)
+    if not res.get("error"):
+        await _record(ctx, "diff", f"Diff for {repo}", {"repo": repo, "output": str(res.get("output") or "")[:6000]})
+    return res
 
 
 async def git_commit(ctx, repo: str, message: str, paths: list[str] | None = None) -> dict:
@@ -243,6 +263,8 @@ async def run_push(ctx, args: dict) -> dict:
     if res.get("error"):
         return res
     out: dict[str, Any] = {"repo": full, "branch": branch, "pushed": res.get("exit_code") == 0, "output": res["output"]}
+    if out["pushed"]:
+        await _record(ctx, "step", f"Pushed {branch} to {full}", {"repo": full, "branch": branch})
     if not out["pushed"]:
         status = await github_app_status(ctx)
         if not token:
@@ -290,5 +312,8 @@ async def run_push(ctx, args: dict) -> dict:
 
 async def run_confirmed(ctx, tool: str, args: dict) -> dict:
     if tool == "push_branch":
-        return await run_push(ctx, args)
+        out = await run_push(ctx, args)
+        if out.get("pr_url"):
+            await _record(ctx, "pr", f"Pull request: {out['pr_url']}", {"url": out["pr_url"], "repo": out.get("repo"), "branch": out.get("branch")})
+        return out
     return {"error": f"unknown coding action {tool}"}
