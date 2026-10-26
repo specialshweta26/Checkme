@@ -60,10 +60,11 @@ async def lifespan(_app: FastAPI):
     ]
     cfg = get_settings()
     log.info(
-        "oauth google=%s microsoft=%s public_web_url=%s",
+        "oauth google=%s microsoft=%s public_web_url=%s db=%s",
         bool(cfg.google_client_id),
         bool(cfg.microsoft_client_id),
         cfg.public_web_url,
+        cfg.database_host,
     )
     try:
         yield
