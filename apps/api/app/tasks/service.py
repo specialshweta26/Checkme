@@ -206,6 +206,34 @@ def advance(task: ScheduledTask) -> None:
     task.status = "active"
 
 
+async def hold_for_approval(db, user, task, agent, sess, instruction: str, text: str, pending: list) -> dict | None:
+    """A scheduled run that hit an approval card (git push / PR / merge are never auto-confirmed)
+    becomes a background job parked in waiting_approval, so the user approves it on the job timeline
+    in the task's chat and the run continues from there. Returns None when nothing is pending."""
+    from app.jobs import service as jobs
+
+    cards = [p for p in pending if isinstance(p, dict) and p.get("token")]
+    if not cards:
+        return None
+    job = jobs.new_job(
+        user.id,
+        agent=agent,
+        prompt=task.instruction or task.prompt or task.title,
+        title=f"Scheduled · {task.title}",
+        role="coder",
+        kind="scheduled",
+        session_id=sess.id,
+        scheduled_task_id=task.id,
+        history=[],
+    )
+    job.status = "running"
+    db.add(job)
+    for ev in jobs.apply_outcome(job, instruction, {"text": text, "pending_confirms": cards}):
+        db.add(ev)
+    agent.unread = True
+    return {"job": jobs.serialize_job(job), "pending_titles": ", ".join(str(c.get("title") or "an action") for c in cards)}
+
+
 async def execute_task(db: AsyncSession, user: User, task: ScheduledTask, *, from_scheduler: bool) -> dict:
     prev_status = task.status
     if prev_status == "running" and not from_scheduler:
@@ -234,6 +262,9 @@ async def execute_task(db: AsyncSession, user: User, task: ScheduledTask, *, fro
         )
         text = result.get("text") or "Done."
         used = result.get("used_tools") or []
+        held = await hold_for_approval(db, user, task, agent, sess, instruction, text, result.get("pending_confirms") or [])
+        if held is not None:
+            text = f"{text}\n\nWaiting for your approval: {held['pending_titles']}. Approve it in the task's chat."
         task.last_result = clip(text, 8000)
         task.last_error = ""
         task.last_run_at = datetime.now(timezone.utc)
@@ -248,7 +279,7 @@ async def execute_task(db: AsyncSession, user: User, task: ScheduledTask, *, fro
                 user_id=user.id,
                 role="assistant",
                 content=text,
-                meta={"used_tools": used, "scheduled": True},
+                meta={"used_tools": used, "scheduled": True, **({"job": held["job"]} if held else {})},
                 request_id=request_id,
             )
         )

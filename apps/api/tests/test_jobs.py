@@ -255,6 +255,6 @@ async def test_chat_route_starts_job_for_coding_request(monkeypatch):
     out = await routes._maybe_start_job(*args, coder, None, [], text, text, [{"role": "user", "content": "hi"}], "r1")
     assert out["route"] == "job" and out["job"]["status"] == "queued" and out["job"]["session_id"] == str(sess.id)
     job = next(o for o in added if type(o).__name__ == "AgentJob")
-    assert job.role == "coder" and "Recent conversation" in job.prompt
+    assert job.role == "planner" and "Recent conversation" in job.prompt
     reply = [o for o in added if type(o).__name__ == "ChatMessage" and o.role == "assistant"][0]
     assert reply.meta["job"]["id"] == str(job.id)

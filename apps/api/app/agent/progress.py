@@ -209,6 +209,10 @@ def describe_tool(name: str, args: dict | None, connector_names: dict[str, str] 
         return f"Committing: {_clip(a.get('message'), 60)}"
     if n == "push_branch":
         return f"Asking to push {_clip(a.get('branch'), 40)} to {_clip(a.get('repo'), 40)}"
+    if n == "start_coding_job":
+        return f"Starting a background job: {_clip(a.get('title') or a.get('task'), 60)}"
+    if n == "delegate":
+        return f"Handing off to a {_clip(a.get('role') or 'teammate', 12)}: {_clip(a.get('title') or a.get('task'), 60)}"
     if n == "sandbox_shell":
         return f"Running `{_clip(a.get('command'), 70)}` on the computer"
     # deepagents built-ins

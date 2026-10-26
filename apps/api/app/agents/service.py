@@ -187,6 +187,16 @@ async def ensure_coder_agent(db: AsyncSession, user: User) -> WorkspaceAgent | N
     return existing
 
 
+async def find_agent_by_name(db: AsyncSession, user: User, name: str) -> WorkspaceAgent | None:
+    """Case-insensitive lookup of one of the user's (non-archived) agents by name."""
+    want = (name or "").strip().lstrip("@").lower()
+    if not want:
+        return None
+    rows = (await db.execute(select(WorkspaceAgent).where(WorkspaceAgent.user_id == user.id))).scalars().all()
+    live = [a for a in rows if not getattr(a, "archived", False)]
+    return next((a for a in live if (a.name or "").lower() == want), None)
+
+
 async def list_workspace(db: AsyncSession, user: User) -> dict:
     chief = await ensure_default_agent(db, user)
     await ensure_coder_agent(db, user)

@@ -1179,7 +1179,7 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
         ctx.confirmations, connector_slug, tool_name
     ):
         # Background jobs wait for the user, so their approval cards live longer than chat ones.
-        ttl = JOB_CONFIRM_TTL if ctx.job is not None else 600
+        ttl = JOB_CONFIRM_TTL if (ctx.job is not None or ctx.auto_confirm) else 600
         token = sign_confirm("tool", {"slug": connector_slug, "tool": tool_name, "args": args}, ttl=ttl)
         pending = {
             "needs_confirm": True,
@@ -1373,6 +1373,10 @@ class ScheduleTaskInput(BaseModel):
     prompt: str = Field(
         description="The user's full request, including what to do and when (in N minutes, tonight, every day, a clock time)."
     )
+    agent_name: str = Field(
+        default="",
+        description="Optional: the name of another of the user's agents that should own and run it (e.g. Coder). Empty means you.",
+    )
 
 
 class InspectInput(BaseModel):
@@ -1460,7 +1464,7 @@ class StartJobInput(BaseModel):
     title: str = Field(default="", description="Short title for the timeline.")
 
 
-async def start_coding_job(ctx: "RunContext", task: str, title: str = "", role: str = "coder") -> dict:
+async def start_coding_job(ctx: "RunContext", task: str, title: str = "", role: str = "planner") -> dict:
     """Queue a background job for this agent in the current chat (chat turns only)."""
     from app.jobs import service as jobs
     from app.jobs.worker import wake
@@ -1483,6 +1487,51 @@ async def start_coding_job(ctx: "RunContext", task: str, title: str = "", role: 
         "title": info["title"],
         "note": "The job is running in the background; the user sees its live timeline under this reply. "
         "Reply in one or two lines that it started; do not do the work yourself in this turn.",
+    }
+
+
+class DelegateInput(BaseModel):
+    role: str = Field(description="coder, reviewer or planner")
+    task: str = Field(description="Self-contained instructions for the child job.")
+    agent_name: str = Field(default="", description="Optional: which of the user's agents runs it. Defaults to you.")
+    title: str = Field(default="", description="Short title for the timeline.")
+
+
+async def delegate_job(ctx: "RunContext", role: str, task: str, agent_name: str = "", title: str = "") -> dict:
+    """Create a child job under the current background job (depth capped, fan-out capped per turn)."""
+    from app.agents.service import find_agent_by_name
+    from app.jobs import service as jobs
+
+    parent = ctx.job
+    if parent is None or ctx.db is None:
+        return {"error": "delegate only works inside a background job."}
+    role = (role or "").strip().lower()
+    if role not in jobs.ROLES:
+        return {"error": f"role must be one of {', '.join(jobs.ROLES)}"}
+    if len(ctx.jobs_started) >= jobs.MAX_CHILDREN:
+        return {"error": f"At most {jobs.MAX_CHILDREN} delegated jobs per step. Wait for these to finish."}
+    agent = ctx.agent
+    if agent_name.strip():
+        agent = await find_agent_by_name(ctx.db, ctx.user, agent_name)
+        if agent is None:
+            return {"error": f"No agent named {agent_name}."}
+    try:
+        child = await jobs.create_job(
+            ctx.db, ctx.user, agent=agent, prompt=task, title=title, role=role, kind="delegate", parent=parent
+        )
+    except jobs.JobError as exc:
+        return {"error": str(exc)}
+    await ctx.db.flush()
+    info = jobs.serialize_job(child)
+    ctx.jobs_started.append(info)
+    if ctx.progress is not None and hasattr(ctx.progress, "record"):
+        await ctx.progress.record("status", f"Delegated to {info['agent_name'] or role} ({role}): {info['title']}", {"child_id": info["id"]})
+    return {
+        "delegated": True,
+        "job_id": info["id"],
+        "role": role,
+        "note": "The child job runs after this turn. End your turn now with one line saying what you handed off; "
+        "you will be resumed with its result.",
     }
 
 
@@ -1559,9 +1608,9 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
         """Run a tool on one of this user's connectors now. Do not use this to send or fetch if the user named a future time — call schedule_task instead. Catalog/search/resolve/list tools are not answers. Large results are stored; use inspect_result for the slice the user asked for."""
         return dumps(await call_user_tool(ctx, connector_slug, tool_name, args), 60000)
 
-    async def schedule_task(prompt: str) -> str:
-        """Queue work for a future time on this agent's own routines. Required when the user says in N minutes, later, tonight, tomorrow, every day, or any clock. Pass their full request. Do not fetch data or send mail in this turn."""
-        return dumps(await run_staff(ctx, "schedule_task", {"prompt": prompt}))
+    async def schedule_task(prompt: str, agent_name: str = "") -> str:
+        """Queue work for a future time on this agent's own routines (or on a named agent with agent_name). Required when the user says in N minutes, later, tonight, tomorrow, every day, or any clock. Pass their full request. Do not fetch data or send mail in this turn. Scheduled git pushes, PRs and merges still wait for the user's approval."""
+        return dumps(await run_staff(ctx, "schedule_task", {"prompt": prompt, "agent_name": agent_name}))
 
     async def inspect_result(
         result_id: str | None = None,
@@ -1793,6 +1842,21 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
             tools.append(
                 StructuredTool.from_function(
                     coroutine=start_job, name="start_coding_job", description=start_job.__doc__, args_schema=StartJobInput
+                )
+            )
+    if ctx.job is not None and ctx.teammate_depth == 0 and ctx.db is not None:
+        from app.jobs.service import MAX_DEPTH
+
+        if (getattr(ctx.job, "depth", 1) or 1) < MAX_DEPTH:
+
+            async def delegate_tool(role: str, task: str, agent_name: str = "", title: str = "") -> str:
+                """Hand a step of this background job to a child job: role 'coder' builds and opens the PR, 'reviewer' reviews a PR and comments, 'planner' splits a large piece further. The child runs after this turn; you resume with its result. Give a self-contained task (repo, branch, PR number, acceptance criteria). End your turn after delegating."""
+                ctx.used_tools.append("delegate")
+                return dumps(await delegate_job(ctx, role, task, agent_name, title), 4000)
+
+            tools.append(
+                StructuredTool.from_function(
+                    coroutine=delegate_tool, name="delegate", description=delegate_tool.__doc__, args_schema=DelegateInput
                 )
             )
     if ctx.group is not None and ctx.teammate_depth == 0 and ctx.teammates:

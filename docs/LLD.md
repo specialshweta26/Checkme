@@ -370,9 +370,9 @@ Upload returns `{ key, filename, download_url, preview_url, previewable, extract
 
 ## 10. Scheduler
 
-`tasks/scheduler.py`: every 20s, up to 6 due `active` rows → `running` → `execute_task` (deep agent, `auto_confirm=True`, **as the task’s workspace agent**) → store `last_result` / `last_error`, bump `run_count`, set next run or `done`. The run’s chat session is filed under that agent (`ChatSession.agent_id`), and the agent’s persona, memory, and connector limits apply. `auto_confirm` is unchanged.
+`tasks/scheduler.py`: every 20s, up to 6 due `active` rows → `running` → `execute_task` (deep agent, `auto_confirm=True`, **as the task’s workspace agent**) → store `last_result` / `last_error`, bump `run_count`, set next run or `done`. The run’s chat session is filed under that agent (`ChatSession.agent_id`), and the agent’s persona, memory, and connector limits apply. `auto_confirm=True` still skips ordinary confirmations, but **git writes never auto-confirm** (the `git_write_gate` in `call_user_tool` and `push_branch` always create a card, with a 3-day token in unattended runs). When a run ends with cards pending, `hold_for_approval` parks it as a `kind=scheduled` job in `waiting_approval` (§10.1); the run's chat message carries `meta.job`, so the user approves on the timeline and the worker resumes the run with that confirmation.
 
-Chat `schedule_task` parses natural time in `tasks/parse.py` (IST) and stores the speaking agent on the row. Creating a calendar event at a clock time is **not** a scheduled task; that is `create_event` immediately. The Tasks page can filter by agent and the create sheet picks an agent (default: the last agent you chatted with, otherwise Chief).
+Chat `schedule_task(prompt, agent_name?)` can hand the routine to another named agent (e.g. "every morning have Coder check CI"); it parses natural time in `tasks/parse.py` (IST) and stores the speaking agent on the row. Creating a calendar event at a clock time is **not** a scheduled task; that is `create_event` immediately. The Tasks page can filter by agent and the create sheet picks an agent (default: the last agent you chatted with, otherwise Chief).
 
 ### 10.1 Background jobs
 
@@ -391,6 +391,10 @@ Package `app/jobs/` (`service.py` transitions, `runner.py` one turn, `worker.py`
 - otherwise → `done` with `result`. A root job posts its result to the chat session as an assistant message (`meta.job`, `job_result`) and marks the agent unread; failures post a short failure note.
 
 **Web.** `components/JobTimeline.tsx` renders under the assistant message that has `meta.job`: polls `/api/jobs/{id}/events?after=` every 2.5s (6s while waiting for approval), shows status chips per job in the tree, steps, plan, collapsible diff / test output, PR links, and Approve / Decline on pending approval events; Cancel cancels the tree. When it sees the job finish it reloads the session so the final reply appears.
+
+### 10.2 Delegation (planner → coder → reviewer)
+
+Inside a job (never in chat) the agent gets `delegate(role, task, agent_name?, title?)`: it creates a child `kind=delegate` job under the current one (same chat session and root), up to `MAX_CHILDREN=4` per turn and **depth ≤ 3** (the tool is not offered at depth 3; `new_job` refuses deeper). The parent goes to `waiting_children` and is requeued with the children's results when all are finished (§10.1). Chat-started coding jobs start as a **planner**: plan (write_todos) → delegate a coder (branch `agent/<name>`, opens the PR through `push_branch`, which waits for approval) → delegate a reviewer (`get_pull_request`, `comment_pull_request`; never pushes or merges) → optionally one fix round → propose the merge with `merge_pull_request`, which only creates the user's approval card. Only the root job posts its final reply to the chat. Group chats keep the inline `ask_teammate`.
 
 ## 11. Memory
 
@@ -458,7 +462,8 @@ Staff `learn_voice` updates the speaking agent’s voice block from sent mail.
 | `test_agent_focus.py` | A–D order, focus normalize/reject, `update_agent` focus + default title, route models, coding/research/unset prompts, coding-only tools, `set_my_focus`, `sandbox_shell` → computer `exec` (timeout clamp, missing computer), `coding_workspace_status` ready/missing, bigger step budget |
 
 | `test_jobs.py` | Job depth cap, outcome → done / waiting_approval / waiting_children, approve (pending token only, expired refused) / decline / cancel, parent resumes only when all children finish, role brief on first run, `JobProgress` events + plan + dedupe, git tools emit test / PR events, coding-task routing heuristic, `start_coding_job` only in chat for coding agents |
-| `test_jobs_db.py` | Against real Postgres when `CHECKME_TEST_DATABASE_URL` is set: claim + run + approval + resume + chat post-back, one running job per user, stale recovery, failure path |
+| `test_jobs_delegate.py` | `delegate` only inside jobs and below depth 3, child linkage / fan-out cap / role check, planner/coder/reviewer briefs keep merge manual, scheduled run with a git card is held as a waiting job, `auto_confirm` still gates git writes with a long-lived token |
+| `test_jobs_db.py` | Against real Postgres when `CHECKME_TEST_DATABASE_URL` is set: claim + run + approval + resume + chat post-back, one running job per user, stale recovery, failure path, full planner → coder → reviewer → merge approval, scheduled push held then resumed, `schedule_task` for a named agent |
 
 Run: `apps/api/.venv/bin/python -m pytest -q`.
 

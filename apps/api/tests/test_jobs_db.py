@@ -146,3 +146,136 @@ async def test_failure_marks_failed_and_tells_chat(factory):
     async with factory() as db:
         row = await db.get(AgentJob, job.id)
         assert "sandbox unavailable" in row.error
+
+
+async def _drain(factory, agent_impl, user_id, limit=20):
+    """Run queued jobs for one user until nothing is claimable."""
+    from app.jobs import worker
+    from app.jobs.runner import run_job
+
+    seen = []
+    for _ in range(limit):
+        picked = [p for p in await worker.claim(factory, 4, set()) if p[1] == user_id]
+        if not picked:
+            break
+        for job_id, _ in picked:
+            seen.append((job_id, await run_job(job_id, factory, agent_impl)))
+    return seen
+
+
+async def test_planner_coder_reviewer_then_user_approves_merge(factory):
+    from app.agent.deep import RunContext, delegate_job
+    from app.jobs import service
+    from app.models import AgentJob, ChatMessage, ChatSession
+
+    user, agent = await _user_and_agent(factory)
+    async with factory() as db:
+        sess = ChatSession(user_id=user.id, title="t", state={}, agent_id=agent.id)
+        db.add(sess)
+        await db.flush()
+        root = await service.create_job(db, user, agent=agent, prompt="Add /health to a/b", role="planner", session_id=sess.id)
+        await db.commit()
+    from app.agent.confirm import sign_confirm
+
+    merge_token = sign_confirm("tool", {"slug": "github-app", "tool": "merge_pull_request", "args": {"repo": "a/b", "number": 7}}, ttl=3600)
+    log = []
+
+    async def agent_impl(db, user_, session_id, request_id, history, query, confirmations, **kw):
+        job = kw["job"]
+        log.append((job.role, job.depth, bool(confirmations)))
+        ctx = RunContext(db=db, user=user_, connectors={}, agent=kw["workspace_agent"], job=job, progress=kw["progress"])
+        if job.role == "planner":
+            if confirmations:
+                return {"text": "Merged PR #7 after your approval."}
+            if "delegated jobs finished" not in query:
+                await delegate_job(ctx, "coder", "Build /health on agent/health and open a PR")
+                return {"text": "Plan ready; coder is building.", "jobs_started": ctx.jobs_started}
+            if "reviewer" not in query:
+                await delegate_job(ctx, "reviewer", "Review a/b#7")
+                return {"text": "PR open; reviewer is checking.", "jobs_started": ctx.jobs_started}
+            return {"text": "Review passed. Merge needs your approval.", "pending_confirms": [{"token": merge_token, "title": "Merge a/b#7"}]}
+        if job.role == "coder":
+            await kw["progress"].record("pr", "Pull request: https://github.com/a/b/pull/7", {"url": "https://github.com/a/b/pull/7"})
+            return {"text": "Opened https://github.com/a/b/pull/7"}
+        return {"text": "LGTM, commented on #7"}
+
+    ran = await _drain(factory, agent_impl, user.id)
+    assert [r for r, _, _ in log] == ["planner", "coder", "planner", "reviewer", "planner"]
+    assert ran[-1][1] == "waiting_approval"
+    async with factory() as db:
+        top = await db.get(AgentJob, root.id)
+        assert top.status == "waiting_approval"
+        tree = await service.tree(db, user, root.id)
+        assert {j["role"] for j in tree["jobs"]} == {"planner", "coder", "reviewer"}
+        assert all(j["depth"] == 2 for j in tree["jobs"] if j["role"] != "planner")
+        assert any(e["kind"] == "pr" for e in tree["events"])
+        for ev in service.approve(top, merge_token):
+            db.add(ev)
+        await db.commit()
+    ran = await _drain(factory, agent_impl, user.id)
+    assert log[-1] == ("planner", 1, True)
+    async with factory() as db:
+        top = await db.get(AgentJob, root.id)
+        assert top.status == "done" and "Merged" in top.result
+        msgs = (await db.execute(select(ChatMessage).where(ChatMessage.session_id == sess.id))).scalars().all()
+        assert len(msgs) == 1 and msgs[0].meta["job"]["id"] == str(root.id)  # only the root posts to chat
+
+
+async def test_scheduled_git_push_waits_for_approval_then_resumes(factory, monkeypatch):
+    from app.agent.confirm import sign_confirm
+    from app.jobs import service
+    from app.models import AgentJob, ChatMessage, ScheduledTask
+    from app.tasks import service as tasks
+
+    user, agent = await _user_and_agent(factory)
+    token = sign_confirm("tool", {"slug": "coding", "tool": "push_branch", "args": {"repo": "a/b", "branch": "agent/deps"}}, ttl=3600)
+
+    async def fake_run(db, user_, session_id, request_id, history, query, confirmations=None, auto_confirm=False, workspace_agent=None, **kw):
+        assert auto_confirm is True
+        return {"text": "Bumped deps; push is waiting.", "pending_confirms": [{"token": token, "title": "Push agent/deps to a/b"}], "used_tools": []}
+
+    async def no_apps(*a, **k):
+        return []
+
+    monkeypatch.setattr(tasks, "run_deep_agent", fake_run)
+    monkeypatch.setattr(tasks, "apps_from_used", no_apps)
+    async with factory() as db:
+        task = ScheduledTask(user_id=user.id, agent_id=agent.id, title="Deps", instruction="Bump deps in a/b", schedule_kind="once", status="active")
+        db.add(task)
+        await db.commit()
+        u = await db.get(type(user), user.id)
+        await tasks.execute_task(db, u, task, from_scheduler=False)
+        job = (await db.execute(select(AgentJob).where(AgentJob.scheduled_task_id == task.id))).scalar_one()
+        assert job.status == "waiting_approval" and job.kind == "scheduled"
+        msg = (await db.execute(select(ChatMessage).where(ChatMessage.session_id == job.session_id, ChatMessage.role == "assistant"))).scalar_one()
+        assert msg.meta["job"]["id"] == str(job.id) and "Waiting for your approval" in msg.content
+        for ev in service.approve(job, token):
+            db.add(ev)
+        await db.commit()
+        job_id = job.id
+
+    seen = []
+
+    async def resume(db, user_, session_id, request_id, history, query, confirmations, **kw):
+        seen.append((kw["auto_confirm"], confirmations))
+        return {"text": "Pushed and opened https://github.com/a/b/pull/12"}
+
+    await _drain(factory, resume, user.id)
+    assert seen and seen[0][0] is True and seen[0][1][0]["tool"] == "push_branch"
+    async with factory() as db:
+        assert (await db.get(AgentJob, job_id)).status == "done"
+
+
+async def test_schedule_task_for_named_agent(factory):
+    from app.agent.staff import schedule_task
+    from app.models import ScheduledTask, User
+
+    user, coder = await _user_and_agent(factory, name="Coder")
+    async with factory() as db:
+        u = await db.get(User, user.id)
+        out = await schedule_task(db, u, {"prompt": "every day at 9am check CI on a/b", "agent_name": "coder"})
+        assert out.get("created"), out
+        row = (await db.execute(select(ScheduledTask).where(ScheduledTask.user_id == user.id))).scalar_one()
+        assert row.agent_id == coder.id
+        bad = await schedule_task(db, u, {"prompt": "tomorrow 9am x", "agent_name": "Nobody"})
+        assert "No agent named" in bad["error"]
