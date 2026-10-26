@@ -6,6 +6,8 @@ from sqlalchemy import delete as sql_delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.focus import FOCUSES, focus_label, normalize_focus
+
 from app.models import (
     AgentConnector,
     AgentGroup,
@@ -35,6 +37,13 @@ class AgentError(ValueError):
     pass
 
 
+def _clean_focus(value) -> str:
+    try:
+        return normalize_focus(value)
+    except ValueError as exc:
+        raise AgentError(str(exc)) from exc
+
+
 def pick_color(index: int) -> str:
     return AGENT_COLORS[index % len(AGENT_COLORS)]
 
@@ -45,6 +54,8 @@ def serialize_agent(row: WorkspaceAgent) -> dict:
         "name": row.name,
         "title": row.title or "",
         "instructions": row.instructions or "",
+        "focus": getattr(row, "focus", "") or "",
+        "focus_label": focus_label(getattr(row, "focus", "") or ""),
         "color": row.color or DEFAULT_AGENT_COLOR,
         "kind": row.kind or "custom",
         "pinned": bool(getattr(row, "pinned", False)),
@@ -263,6 +274,7 @@ async def create_agent(db: AsyncSession, user: User, body: dict) -> WorkspaceAge
         name=name,
         title=_clean_name(body.get("title") or "specialist") if (body.get("title") or "").strip() else "",
         instructions=_clean_instructions(body.get("instructions") or ""),
+        focus=_clean_focus(body.get("focus")),
         color=str(body.get("color") or pick_color(count)),
         kind="custom",
     )
@@ -297,6 +309,10 @@ async def update_agent(db: AsyncSession, user: User, agent_id: uuid.UUID, body: 
         row.title = _clean_name(title) if title else ""
     if "instructions" in body and body["instructions"] is not None:
         row.instructions = _clean_instructions(body["instructions"])
+    if "focus" in body and body["focus"] is not None:
+        row.focus = _clean_focus(body["focus"])
+        if row.focus and not (row.title or "").strip():
+            row.title = FOCUSES[row.focus]["title"]
     if body.get("color"):
         row.color = str(body["color"])[:16]
     if "pinned" in body and body["pinned"] is not None:
@@ -400,7 +416,7 @@ async def duplicate_agent(db: AsyncSession, user: User, agent_id: uuid.UUID) -> 
     row = await create_agent(
         db,
         user,
-        {"name": name, "title": src.title or "", "instructions": src.instructions or "", "color": src.color},
+        {"name": name, "title": src.title or "", "instructions": src.instructions or "", "focus": getattr(src, "focus", "") or "", "color": src.color},
     )
     links = (await db.execute(select(AgentConnector).where(AgentConnector.agent_id == src.id))).scalars().all()
     for link in links:
