@@ -12,6 +12,7 @@ from app.auth.routes import me_router, router as auth_router
 from app.chat.routes import router as chat_router
 from app.config import get_settings
 from app.connectors.routes import router as connectors_router
+from app.connectors.deploy_routes import router as deploy_router
 from app.connectors.github_routes import router as github_router
 from app.files import router as files_router
 from app.db import init_db
@@ -96,6 +97,7 @@ app.include_router(me_router, prefix="/api")
 app.include_router(chat_router, prefix="/api")
 app.include_router(agents_router, prefix="/api")
 app.include_router(github_router, prefix="/api")
+app.include_router(deploy_router, prefix="/api")
 app.include_router(connectors_router, prefix="/api")
 app.include_router(tasks_router, prefix="/api")
 app.include_router(jobs_router, prefix="/api")

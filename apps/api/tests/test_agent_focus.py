@@ -147,7 +147,10 @@ def test_coding_focus_prompt_is_plan_then_build():
         "Explore remotely first",
         "review_pull_request",
         "never put a token",
-        "Render",
+        "detect_deploy_targets",
+        "deploy_rollback",
+        "never see",
+        "waiting_for='deploy_<platform>'",
         "exactly what is missing",
     ):
         assert needle in p, needle

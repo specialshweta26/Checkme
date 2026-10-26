@@ -1126,8 +1126,13 @@ async def get_user_tool_schema(ctx: RunContext, connector_slug: str, tool_name: 
 def git_write_gate(conn, slug: str, tool: str, args: dict | None) -> bool:
     from app.connectors.github_app import is_git_write
 
+    from app.agent.deploy import is_deploy_write
+
     text = f"{getattr(conn, 'name', '') or ''} {getattr(conn, 'alias', '') or ''} {getattr(conn, 'server_url', '') or ''}"
-    return is_git_write(str(getattr(conn, "provider", "") or ""), slug, tool, args, text)
+    if is_git_write(str(getattr(conn, "provider", "") or ""), slug, tool, args, text):
+        return True
+    # Deploy writes through a Render / Vercel / … connector are just as destructive: always a card.
+    return is_deploy_write(conn, slug, tool, args)
 
 
 _APPROVAL_KEYS = ("repo", "number", "head", "branch", "method", "base", "state", "delete_branch")
@@ -1683,10 +1688,44 @@ class ReviewInput(BaseModel):
     include_checks: bool = Field(default=True, description="Add the latest run_checks table to the review.")
 
 
+class DeployParams(BaseModel):
+    service: str = Field(default="", description="Render srv-… id, Cloud Run / App Engine service, Railway service")
+    app: str = Field(default="", description="Fly app, Vercel project, Azure Container App")
+    stack: str = Field(default="", description="AWS CloudFormation stack")
+    stage: str = Field(default="", description="Serverless stage")
+    region: str = Field(default="", description="Cloud region when the platform needs one")
+    group: str = Field(default="", description="Azure resource group")
+    ref: str = Field(default="", description="Commit sha to deploy (Render)")
+    deployment: str = Field(default="", description="Deploy id / URL (status, logs, rollback target)")
+    version: str = Field(default="", description="Version / revision for rollback (App Engine, Cloud Run, Azure)")
+    image: str = Field(default="", description="Image to roll back to (Fly)")
+    flavor: str = Field(default="", description="aws: serverless|sam|cdk; gcloud: appengine|run")
+    production: bool = Field(default=True, description="Vercel / Netlify: production (true) or preview (false)")
+
+
+class DetectDeployInput(BaseModel):
+    repo: str = Field(description="owner/name, already checked out with git_checkout")
+
+
+class DeployInput(BaseModel):
+    repo: str = Field(description="owner/name, checked out on the computer")
+    platform: str = Field(description="render, vercel, fly, netlify, railway, aws, gcloud or azure")
+    params: DeployParams = Field(default_factory=DeployParams)
+    cwd: str = Field(default=".", description="Directory inside the repo with the deploy config (from detect_deploy_targets)")
+    use_cli: bool = Field(default=False, description="Use the CLI even though a connector for this platform exists")
+
+
+class DeployReadInput(BaseModel):
+    repo: str = Field(default="", description="owner/name (optional for status)")
+    platform: str = Field(description="render, vercel, fly, netlify, railway, aws, gcloud or azure")
+    params: DeployParams = Field(default_factory=DeployParams)
+    cwd: str = Field(default=".", description="Directory inside the repo")
+
+
 class AskUserInput(BaseModel):
     question: str = Field(description="One short question.")
     options: list[str] = Field(description="2-5 short answer options shown as buttons, e.g. repo names or Yes / No.")
-    waiting_for: str = Field(default="", description="Set to github_app when blocked on the GitHub App install, so the job resumes after connecting.")
+    waiting_for: str = Field(default="", description="Set to github_app (GitHub App install) or deploy_<platform> (e.g. deploy_render) when blocked on a connection, so the job resumes after the user connects.")
 
 
 class RememberCodingInput(BaseModel):
@@ -1724,9 +1763,11 @@ async def coding_workspace_status(ctx: RunContext) -> dict:
             probe_error = str(data["error"])
         else:
             probe = coding.parse_probe(str(inner.get("stdout") or inner.get("result") or ""))
+    from app.agent import deploy
     from app.agent.git_tools import github_app_status
 
-    return coding.readiness(ctx.connectors, probe, probe_error, await github_app_status(ctx))
+    out = coding.readiness(ctx.connectors, probe, probe_error, await github_app_status(ctx))
+    return deploy.add_readiness(out, ctx.connectors, await deploy.saved_env_names(ctx))
 
 
 async def sandbox_shell(ctx: RunContext, command: str, cwd: str | None = None, timeout: int = 300) -> Any:
@@ -2052,6 +2093,46 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
             merged = await coding_memory.note(ctx, prefs={k: v for k, v in prefs.items() if v})
             return dumps({"saved": merged is not None, "memory": coding_memory.render(merged or {})}, 1500)
 
+        from app.agent import deploy as deploy_mod
+
+        def _params(params) -> dict:
+            raw = params.model_dump() if hasattr(params, "model_dump") else dict(params or {})
+            return {k: v for k, v in raw.items() if v not in ("", None) and not (k == "production" and v is True)}
+
+        async def detect_targets(repo: str) -> str:
+            """Find how this repo deploys: render.yaml, vercel.json, fly.toml, netlify.toml, railway.json/toml, serverless.yml, SAM, CDK, app.yaml, azure.yaml, Dockerfile. For each platform it says the route: a connected connector (preferred), a saved CLI credential, or the link the user opens to connect one. Call before any deploy."""
+            ctx.used_tools.append("detect_deploy_targets")
+            return dumps(await deploy_mod.detect_deploy_targets(ctx, repo), 8000)
+
+        async def deploy_tool(repo: str, platform: str, params=None, cwd: str = ".", use_cli: bool = False) -> str:
+            """Deploy the checked-out repo to a platform. Never runs directly: it always shows the user an approval card with the exact command and target (also in scheduled runs). Prefers a connected connector for that platform; otherwise installs the CLI on the computer and uses the user's saved credential, which you never see. If not connected, returns the connect link: tell the user exactly what is missing. Deploy only what is merged or what the user asked for."""
+            ctx.used_tools.append("deploy")
+            return dumps(await deploy_mod.request_action(ctx, "deploy", repo, platform, _params(params or DeployParams()), cwd, use_cli), 8000)
+
+        async def rollback_tool(repo: str, platform: str, params=None, cwd: str = ".", use_cli: bool = False) -> str:
+            """Roll a deployment back to an earlier deploy / version / image. Always shows an approval card first. Find the target with deploy_status."""
+            ctx.used_tools.append("deploy_rollback")
+            return dumps(await deploy_mod.request_action(ctx, "rollback", repo, platform, _params(params or DeployParams()), cwd, use_cli), 8000)
+
+        async def deploy_status_tool(platform: str, repo: str = "", params=None, cwd: str = ".") -> str:
+            """Read-only: recent deploys / revisions / services on a platform (no approval needed). Use to find service ids, deploy ids for rollback, and whether a deploy is live."""
+            ctx.used_tools.append("deploy_status")
+            return dumps(await deploy_mod.read_action(ctx, "status", repo, platform, _params(params or DeployParams()), cwd), 12000)
+
+        async def deploy_logs_tool(platform: str, repo: str = "", params=None, cwd: str = ".") -> str:
+            """Read-only: recent logs for a service / deploy on a platform (no approval needed). Use after a failed deploy to find the cause."""
+            ctx.used_tools.append("deploy_logs")
+            return dumps(await deploy_mod.read_action(ctx, "logs", repo, platform, _params(params or DeployParams()), cwd), 12000)
+
+        tools.extend(
+            [
+                StructuredTool.from_function(coroutine=detect_targets, name="detect_deploy_targets", description=detect_targets.__doc__, args_schema=DetectDeployInput),
+                StructuredTool.from_function(coroutine=deploy_tool, name="deploy", description=deploy_tool.__doc__, args_schema=DeployInput),
+                StructuredTool.from_function(coroutine=rollback_tool, name="deploy_rollback", description=rollback_tool.__doc__, args_schema=DeployInput),
+                StructuredTool.from_function(coroutine=deploy_status_tool, name="deploy_status", description=deploy_status_tool.__doc__, args_schema=DeployReadInput),
+                StructuredTool.from_function(coroutine=deploy_logs_tool, name="deploy_logs", description=deploy_logs_tool.__doc__, args_schema=DeployReadInput),
+            ]
+        )
         tools.extend(
             [
                 StructuredTool.from_function(coroutine=coding_status, name="coding_workspace_status", description=coding_status.__doc__),
@@ -2514,7 +2595,7 @@ async def run_deep_agent(
             ctx.used_tools.append(tool)
             extra.append(
                 HumanMessage(
-                    content=f"The user approved {tool}. Result: {clip(dumps(result, 4000), 4000)}. Tell the user what happened and share any PR link."
+                    content=f"The user approved {tool}. Result: {clip(dumps(result, 4000), 4000)}. Tell the user what happened and share any PR or deploy link."
                 )
             )
             continue

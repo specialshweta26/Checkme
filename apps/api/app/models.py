@@ -200,6 +200,21 @@ class GitHubInstallation(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
 
+class DeployCredential(Base):
+    """A user's CLI credential for one deploy platform (Render, Vercel, Fly, …), Fernet-encrypted.
+
+    Entered on the Connectors page only; the agent gets env names, never values (app/agent/deploy.py)."""
+
+    __tablename__ = "deploy_credentials"
+    __table_args__ = (UniqueConstraint("user_id", "platform"),)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    platform: Mapped[str] = mapped_column(String(20))
+    credentials_enc: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
 class AgentConnector(Base):
     """When rows exist for a connector, only those agents may use it. No rows = every agent."""
 

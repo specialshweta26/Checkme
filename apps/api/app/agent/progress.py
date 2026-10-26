@@ -219,6 +219,15 @@ def describe_tool(name: str, args: dict | None, connector_names: dict[str, str] 
         return f"Asking you: {_clip(a.get('question'), 70)}"
     if n == "remember_coding":
         return "Saving your coding preferences"
+    if n == "detect_deploy_targets":
+        return f"Looking for deploy configs in {_clip(a.get('repo'), 40)}"
+    if n in ("deploy", "deploy_rollback"):
+        what = "deploy" if n == "deploy" else "rollback"
+        return f"Preparing the {what} on {_clip(a.get('platform'), 20)} for your approval"
+    if n == "deploy_status":
+        return f"Checking deploys on {_clip(a.get('platform'), 20)}"
+    if n == "deploy_logs":
+        return f"Reading deploy logs on {_clip(a.get('platform'), 20)}"
     if n == "git_checkout":
         return f"Checking out {_clip(a.get('repo'), 50)}" + (f" on {_clip(a.get('branch'), 40)}" if a.get("branch") else "")
     if n == "run_tests":

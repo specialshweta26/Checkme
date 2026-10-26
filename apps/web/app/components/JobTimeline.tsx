@@ -49,6 +49,7 @@ const ICON: Record<string, string> = {
   error: "!",
   status: "·",
   question: "?",
+  deploy: "🚀",
 };
 const TODO_MARK: Record<string, string> = { completed: "✓", in_progress: "▸", pending: "○" };
 
@@ -198,7 +199,7 @@ export function JobTimeline({ jobId, after: startAfter = 0, onSettled }: { jobId
               <span className="job-ico">{ICON[ev.kind] || "•"}</span>
               <div className="job-body">
                 {ev.agent_name && jobs.length > 1 ? <span className="job-who">{ev.agent_name}</span> : null}
-                {ev.kind === "pr" && ev.data?.url ? (
+                {(ev.kind === "pr" || ev.kind === "deploy") && ev.data?.url ? (
                   <a href={ev.data.url} target="_blank" rel="noreferrer">
                     {ev.text}
                   </a>
@@ -220,7 +221,7 @@ export function JobTimeline({ jobId, after: startAfter = 0, onSettled }: { jobId
                     ))}
                   </div>
                 ) : null}
-                {(ev.kind === "diff" || ev.kind === "test") && ev.data?.output ? (
+                {(ev.kind === "diff" || ev.kind === "test" || ev.kind === "deploy") && ev.data?.output ? (
                   <details>
                     <summary>{ev.kind === "diff" ? "Show diff" : "Show output"}</summary>
                     <pre className="job-pre">{ev.data.output}</pre>

@@ -72,16 +72,24 @@ async def app_token(ctx, repo: str, *, write: bool) -> str | None:
     return await gh.repo_token(ctx.user.id, repo, write=write, installs=installs)
 
 
-async def sandbox_exec(ctx, script: str, timeout: int = 300, token: str | None = None) -> dict:
-    """Run a bash script on the computer without going through call_user_tool's arg logging."""
+async def sandbox_exec(ctx, script: str, timeout: int = 300, token: str | None = None, env: dict | None = None) -> dict:
+    """Run a bash script on the computer without going through call_user_tool's arg logging.
+
+    ``token`` / ``env`` values only travel as exec env and are scrubbed from the output."""
     from app.connectors.runtime import RuntimeConnector
 
     conn = ctx.connectors.get(coding.COMPUTER_SLUG)
     if conn is None:
         return {"error": coding.readiness(ctx.connectors)["missing"][0]}
     args: dict[str, Any] = {"command": coding.bash(script), "timeout": coding.clamp_timeout(timeout)}
+    hidden = [token or ""]
+    if env:
+        from app.agent.deploy import secrets_of
+
+        args["env"] = {str(k): str(v) for k, v in env.items()}
+        hidden += secrets_of(env)
     if token:
-        args["env"] = {coding.TOKEN_ENV: token}
+        args["env"] = {**(args.get("env") or {}), coding.TOKEN_ENV: token}
     try:
         if getattr(ctx, "call_impl", None) is not None:
             raw = await ctx.call_impl(coding.COMPUTER_SLUG, "exec", args)
@@ -91,8 +99,8 @@ async def sandbox_exec(ctx, script: str, timeout: int = 300, token: str | None =
         return _err(exc)
     raw = raw if isinstance(raw, dict) else {"stdout": str(raw)}
     if raw.get("error"):
-        return {"error": coding.scrub(str(raw["error"]), [token or ""])[:600]}
-    out = coding.scrub(str(raw.get("stdout") or raw.get("result") or ""), [token or ""])
+        return {"error": coding.scrub(str(raw["error"]), hidden)[:600]}
+    out = coding.scrub(str(raw.get("stdout") or raw.get("result") or ""), hidden)
     return {"exit_code": raw.get("exit_code"), "output": coding.clip_output(out)}
 
 
@@ -416,6 +424,10 @@ async def _note_pr(ctx, repo: str, branch: str, out: dict, args: dict) -> None:
 
 
 async def run_confirmed(ctx, tool: str, args: dict) -> dict:
+    if tool == "deploy_action":
+        from app.agent import deploy
+
+        return await deploy.run_action(ctx, args)
     if tool == "push_branch":
         out = await run_push(ctx, args)
         if out.get("pr_url"):
