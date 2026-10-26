@@ -425,7 +425,7 @@ def test_system_prompt_has_no_product_recipes():
     assert "browser_handoff" in lowered
     assert "fill whole forms" in lowered
     assert "never attach page.png" in lowered
-    assert "html.duckduckgo.com" in lowered
+    assert "google.com/search" in lowered
     assert "web_fetch" in lowered
     assert "never stop after one failed page" in lowered
     assert "never cite sandbox" in lowered

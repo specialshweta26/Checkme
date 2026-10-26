@@ -147,13 +147,14 @@ h1, h2, .display {
 .sidebar {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 12px;
   padding: 18px 14px;
   background: var(--sidebar);
   border-right: 1px solid var(--line);
   height: 100dvh;
   max-height: 100dvh;
   overflow: hidden;
+  z-index: 40;
 }
 .logo {
   display: flex;
@@ -355,19 +356,55 @@ textarea.field { min-height: 110px; resize: vertical; }
 
 .workspace {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) var(--rail-w);
+  grid-template-columns: minmax(0, 1fr);
   height: 100dvh;
   min-height: 0;
+  position: relative;
 }
 .chat { height: 100%; min-height: 0; display: grid; grid-template-rows: auto 1fr auto; }
 .chat-head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 10px;
-  padding: 16px 24px 0;
-  min-height: 44px;
+  padding: 12px 20px;
+  min-height: 56px;
+  border-bottom: 1px solid var(--line);
+  background: #fff;
 }
-.chat-head strong { font-size: 16px; letter-spacing: -0.02em; }
+.chat-head-face { flex: none; }
+.chat-head-copy { min-width: 0; display: grid; flex: 1; }
+.chat-head-copy strong { font-size: 16px; letter-spacing: -0.02em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-head-copy .muted { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-computer-btn, .topbar-icon {
+  width: 38px;
+  height: 38px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--muted);
+}
+.chat-computer-btn:hover, .topbar-icon:hover, .chat-computer-btn.on, .topbar-icon.on {
+  background: var(--accent-soft);
+  color: var(--text);
+}
+.chat-computer-btn.live, .topbar-icon.live {
+  color: var(--ok);
+  position: relative;
+}
+.chat-computer-btn.live::after, .topbar-icon.live::after {
+  content: "";
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  width: 7px;
+  height: 7px;
+  border-radius: 99px;
+  background: var(--ok);
+  box-shadow: 0 0 0 2px #fff;
+}
 .transcript { overflow: auto; min-height: 0; }
 .thread { width: min(760px, calc(100% - 40px)); margin: 0 auto; padding: 36px 0 20px; }
 .welcome { padding: 48px 0 24px; }
@@ -936,6 +973,13 @@ textarea.field { min-height: 110px; resize: vertical; }
   background: #fff;
 }
 
+.screen-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 44;
+  border: 0;
+  background: rgba(15, 23, 42, 0.35);
+}
 .screen-rail {
   display: flex;
   flex-direction: column;
@@ -946,7 +990,17 @@ textarea.field { min-height: 110px; resize: vertical; }
   min-height: 0;
   overflow: auto;
 }
+.screen-rail.overlay {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 45;
+  width: min(420px, 100vw);
+  box-shadow: var(--shadow);
+}
 .screen-rail-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; min-height: 24px; }
+.screen-rail-actions { display: flex; align-items: center; gap: 6px; flex: none; }
 .screen-state {
   font-size: 13px;
   color: var(--muted);
@@ -1089,6 +1143,7 @@ textarea.field { min-height: 110px; resize: vertical; }
   padding: 4px 8px 2px;
   color: inherit;
   min-width: 0;
+  text-decoration: none;
 }
 .side-brand > div { display: grid; line-height: 1.2; }
 .side-brand strong, .side-brand > div { font-weight: 600; letter-spacing: -0.02em; }
@@ -1113,16 +1168,23 @@ textarea.field { min-height: 110px; resize: vertical; }
   color: #fff;
   font-weight: 600;
   font-size: 13.5px;
+  text-decoration: none;
 }
 .side-new:hover { filter: brightness(1.06); }
-.side-nav { display: grid; gap: 4px; }
+.side-nav { display: grid; gap: 4px; flex: none; }
 .side-link {
   display: flex;
   align-items: center;
   gap: 10px;
+  width: 100%;
   padding: 9px 10px;
+  border: 0;
+  background: none;
   border-radius: 10px;
   color: var(--muted);
+  cursor: pointer;
+  text-align: left;
+  text-decoration: none;
 }
 .side-link svg { flex: none; opacity: 0.85; }
 .side-link.on, .side-link:hover { background: var(--accent-soft); color: var(--text); }
@@ -1376,7 +1438,14 @@ textarea.field { min-height: 110px; resize: vertical; }
   text-transform: uppercase;
   color: var(--faint);
 }
-.convo-list { flex: 1; min-height: 0; overflow: auto; display: grid; align-content: start; gap: 2px; }
+.convo-list { flex: 0.7 1 0; min-height: 72px; overflow: auto; display: grid; align-content: start; gap: 2px; }
+.agents-nav {
+  flex: 1.4 1 0;
+  min-height: 140px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
 .convo {
   display: grid;
   grid-template-columns: 1fr auto;
@@ -1386,7 +1455,7 @@ textarea.field { min-height: 110px; resize: vertical; }
   border-radius: 10px;
 }
 .convo:hover, .convo.on { background: var(--lift); }
-.convo-open { text-align: left; min-width: 0; padding: 4px 0; border: 0; background: none; color: inherit; }
+.convo-open { display: block; text-align: left; min-width: 0; padding: 4px 0; border: 0; background: none; color: inherit; text-decoration: none; }
 .convo-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13.5px; }
 .convo-meta { font-size: 11px; color: var(--faint); }
 .convo-x {
@@ -1439,7 +1508,7 @@ textarea.field { min-height: 110px; resize: vertical; }
   color: inherit;
 }
 .agents-menu button:hover { background: var(--lift); }
-.agent-list { max-height: 34vh; overflow: auto; display: grid; gap: 2px; }
+.agent-list { flex: 1; min-height: 0; overflow: auto; display: grid; gap: 2px; }
 .agent-row {
   display: grid;
   grid-template-columns: 1fr auto;
@@ -1459,6 +1528,7 @@ textarea.field { min-height: 110px; resize: vertical; }
   background: none;
   color: inherit;
   padding: 4px 0;
+  text-decoration: none;
 }
 .agent-copy { min-width: 0; display: grid; }
 .agent-copy strong { font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1600,6 +1670,7 @@ textarea.field { min-height: 110px; resize: vertical; }
   border-top: 1px solid var(--line);
   flex: none;
 }
+.side-brand-row, .side-new { flex: none; }
 .side-user .logout {
   margin-left: 42px;
   grid-column: auto;
@@ -1613,7 +1684,13 @@ textarea.field { min-height: 110px; resize: vertical; }
   align-items: center;
   gap: 8px;
   font-weight: 600;
+  min-width: 0;
 }
+.topbar-who { flex: 1; }
+.topbar-copy { display: grid; min-width: 0; text-align: left; line-height: 1.15; }
+.topbar-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.topbar-copy small { font-size: 11px; color: var(--faint); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.topbar-actions { display: flex; align-items: center; gap: 4px; flex: none; }
 
 @media (max-width: 860px) {
   .auth { grid-template-columns: 1fr; }
@@ -1650,7 +1727,7 @@ textarea.field { min-height: 110px; resize: vertical; }
     position: fixed;
     inset: 0 auto 0 0;
     width: min(300px, 88vw);
-    z-index: 30;
+    z-index: 50;
     transform: translateX(-105%);
     transition: transform 0.2s ease;
     min-height: 100dvh;
@@ -1693,15 +1770,20 @@ textarea.field { min-height: 110px; resize: vertical; }
   }
   .workspace {
     grid-template-columns: 1fr;
-    grid-template-rows: 1fr auto;
     height: auto;
     flex: 1 1 auto;
     min-height: 0;
   }
-  .screen-rail {
+  .chat-head { display: none; }
+  .screen-rail.overlay {
+    top: auto;
+    left: 0;
+    width: 100%;
+    height: min(78dvh, 640px);
     border-left: 0;
     border-top: 1px solid var(--line);
-    max-height: 38vh;
+    border-radius: 16px 16px 0 0;
+    max-height: 78dvh;
   }
   .chat { height: auto; flex: 1 1 auto; min-height: 0; }
   .main > .page {

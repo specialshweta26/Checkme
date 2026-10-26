@@ -9,12 +9,13 @@ from pathlib import Path
 
 HOST = "127.0.0.1"
 PORT = 18765
-VERSION = "8"
+VERSION = "9"
 SHOT = "/tmp/checkme-browser.png"
 PROFILE = "/tmp/checkme-browser-profile"
 LAST = "/tmp/checkme-browser-last.json"
 VIEW_W = 1280
 VIEW_H = 800
+GOOGLE_HOME = "https://www.google.com/"
 READY_HTML = (
     "<!doctype html><html><head><meta charset='utf-8'><title>Computer</title>"
     "<style>"
@@ -256,11 +257,17 @@ def _needs_desktop(page) -> bool:
 
 
 def _paint_desktop(page):
-    page.set_content(READY_HTML, wait_until="domcontentloaded", timeout=10000)
-    page.wait_for_timeout(150)
-    Path(LAST).write_text(
-        json.dumps({"url": "about:blank", "title": "Computer", "viewport": {"width": VIEW_W, "height": VIEW_H}})
-    )
+    try:
+        page.goto(GOOGLE_HOME, wait_until="domcontentloaded", timeout=25000)
+        page.wait_for_timeout(250)
+        _dump(page)
+        return
+    except Exception:
+        page.set_content(READY_HTML, wait_until="domcontentloaded", timeout=10000)
+        page.wait_for_timeout(150)
+        Path(LAST).write_text(
+            json.dumps({"url": "about:blank", "title": "Computer", "viewport": {"width": VIEW_W, "height": VIEW_H}})
+        )
 
 
 def _ensure_page():

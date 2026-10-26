@@ -148,6 +148,15 @@ async function sendControl(payload: Record<string, unknown>) {
   }
 }
 
+export function ComputerIcon() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <rect x="3.5" y="4.5" width="17" height="12" rx="2" stroke="currentColor" strokeWidth="1.8" />
+      <path d="M8 20h8M12 16.5V20" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 export function ScreenRail({
   session,
   watching = false,
@@ -156,6 +165,7 @@ export function ScreenRail({
   status = "",
   onTakeControl,
   onRelease,
+  onClose,
 }: {
   session?: ComputerSession | null;
   watching?: boolean;
@@ -164,6 +174,7 @@ export function ScreenRail({
   status?: string;
   onTakeControl?: () => void;
   onRelease?: () => void;
+  onClose?: () => void;
 }) {
   const still = useCredentialedImage(session?.preview_url || session?.download_url);
   const [machine, setMachine] = useState<"stopped" | "booting" | "running" | "suspended">("stopped");
@@ -258,9 +269,10 @@ export function ScreenRail({
   }
 
   return (
-    <aside className="screen-rail" aria-label={`${agentName}'s screen`}>
+    <aside className="screen-rail overlay" aria-label={`${agentName}'s screen`}>
       <div className="screen-rail-head">
         <span className={`screen-state${controlling ? " control" : watching ? " live" : asleep ? " asleep" : ""}`}>{label}</span>
+        <div className="screen-rail-actions">
         {!controlling && !frame && machine !== "booting" ? (
           <button type="button" className="screen-control-btn primary" onClick={() => void wake()}>
             Open
@@ -276,6 +288,12 @@ export function ScreenRail({
             Done
           </button>
         ) : null}
+        {onClose ? (
+          <button type="button" className="screen-control-btn" onClick={onClose} aria-label="Close computer">
+            Close
+          </button>
+        ) : null}
+        </div>
       </div>
       <div
         ref={previewRef}

@@ -110,7 +110,7 @@ def test_catalog_lines_label_computer_and_marketplace():
 
 
 def test_daemon_version_is_current():
-    assert DAEMON_VERSION == "8"
+    assert DAEMON_VERSION == "9"
 
 
 def test_blank_and_chrome_error_pages_count_as_empty():

@@ -110,8 +110,8 @@ DAYTONA_TOOLS = [
         name="browser_navigate",
         description=(
             "Open an http(s) URL in the live Chromium tab on this user's computer. "
-            "Same visible browser the chat screen shows. For current events, open a search URL "
-            "such as https://html.duckduckgo.com/html/?q=the+user+query then open result links. "
+            "Same visible browser the chat screen shows. For current events, open a Google search URL "
+            "such as https://www.google.com/search?q=the+user+query then open result links. "
             "If a site fails, try another source — do not stop after one error."
         ),
         input_schema={
@@ -456,7 +456,7 @@ async def _install_daemon(proc, fs=None) -> None:
 async def _daemon_up(proc) -> bool:
     ping = await _exec(proc, "curl -sf http://127.0.0.1:18765/health && echo OK || echo DOWN", 8)
     out = _out(ping)
-    return "OK" in out and '"version": "8"' in out
+    return "OK" in out and '"version": "9"' in out
 
 
 async def _ensure_daemon(proc, fs=None) -> None:
@@ -575,7 +575,7 @@ async def _open_in_browser(proc, fs, url: str, wait_ms: int = 1200) -> dict:
         page = await fetch_public_page(url)
     except Exception as vis_exc:  # noqa: BLE001
         data["error"] = (data.get("error") or str(vis_exc))[:500]
-        data["hint"] = "Open https://html.duckduckgo.com/html/?q= plus the user's words, then open result links."
+        data["hint"] = "Open https://www.google.com/search?q= plus the user's words, then open result links."
         return data
     shown = await _browser_rpc(
         proc, {"command": "load_html", "html": page.get("html") or "", "url": page.get("url") or url}, 60, fs
