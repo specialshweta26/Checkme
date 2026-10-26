@@ -74,9 +74,10 @@ async def test_delegate_requires_job_context():
 def test_planner_brief_keeps_merge_manual():
     from app.jobs.runner import ROLE_BRIEF
 
-    assert "approval card" in ROLE_BRIEF["planner"] and "merging is their call" in ROLE_BRIEF["planner"]
-    assert "Never merge" in ROLE_BRIEF["reviewer"] and "comment_pull_request" in ROLE_BRIEF["reviewer"]
-    assert "Never merge" in ROLE_BRIEF["coder"]
+    planner = ROLE_BRIEF["planner"]
+    assert "approval card" in planner and "Merge it?" in planner and "explicit yes" in planner and "check_merge" in planner
+    assert "never merge" in ROLE_BRIEF["reviewer"] and "review_pull_request" in ROLE_BRIEF["reviewer"]
+    assert "explicitly says the user said yes" in ROLE_BRIEF["coder"] and "run_checks" in ROLE_BRIEF["coder"]
 
 
 async def test_scheduled_run_with_git_card_is_held_for_approval():

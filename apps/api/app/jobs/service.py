@@ -9,6 +9,9 @@ Status flow:
   queued -> running -> done | failed
                     -> waiting_approval  (an approval card is pending; approve/decline requeues)
                     -> waiting_children  (delegated; requeued when every child is finished)
+                    -> waiting_input     (asked the user a question with option buttons, e.g. "Merge it?";
+                                          the answer or any follow-up message requeues it)
+  done | failed -> queued                (a follow-up in the same chat reopens the job: same repo/branch)
   any non-terminal -> cancelled
 """
 
@@ -29,7 +32,9 @@ from connector_core.text import clip
 log = logging.getLogger(__name__)
 
 TERMINAL = {"done", "failed", "cancelled"}
-ACTIVE = {"queued", "running", "waiting_approval", "waiting_children"}
+ACTIVE = {"queued", "running", "waiting_approval", "waiting_children", "waiting_input"}
+MERGE_OPTIONS = ("Yes, merge it", "No, leave it open")
+MAX_OPTIONS = 5
 ROLES = ("planner", "coder", "reviewer")
 KINDS = ("chat", "delegate", "scheduled")
 MAX_DEPTH = 3
@@ -68,6 +73,9 @@ def serialize_job(job: AgentJob, agent_name: str = "") -> dict:
         "pending": [
             {k: p.get(k) for k in ("token", "title", "preview", "kind")} for p in (meta.get("pending") or [])
         ],
+        "question": meta.get("question") if job.status == "waiting_input" else None,
+        "repo": meta.get("repo") or "",
+        "prs": list(meta.get("prs") or [])[-5:],
         "created_at": _iso(job.created_at),
         "started_at": _iso(job.started_at),
         "finished_at": _iso(job.finished_at),
@@ -162,6 +170,68 @@ async def create_job(db: AsyncSession, user: User, **kwargs: Any) -> AgentJob:
 # ---- transitions (pure: they only mutate the job and return events to add) ----
 
 
+def clean_question(raw: Any) -> dict | None:
+    """{question, options[], waiting_for?} from ask_user, or None."""
+    if not isinstance(raw, dict):
+        return None
+    q = clip(str(raw.get("question") or "").strip(), 400)
+    opts = [clip(str(o).strip(), 80) for o in raw.get("options") or [] if str(o).strip()][:MAX_OPTIONS]
+    if not q or len(opts) < 2:
+        return None
+    out = {"question": q, "options": opts}
+    if raw.get("waiting_for"):
+        out["waiting_for"] = str(raw["waiting_for"])[:40]
+    if raw.get("pr"):
+        out["pr"] = raw["pr"]
+    return out
+
+
+def _merge_prs(meta: dict, result: dict) -> None:
+    prs = list(meta.get("prs") or [])
+    for pr in result.get("prs") or []:
+        if isinstance(pr, dict) and pr.get("url") and not any(p.get("url") == pr["url"] for p in prs):
+            prs.append({k: pr.get(k) for k in ("url", "repo", "number", "branch", "title") if pr.get(k) is not None})
+    for m in result.get("merged") or []:
+        if not isinstance(m, dict):
+            continue
+        for p in prs:
+            if str(p.get("repo", "")).lower() == str(m.get("repo", "")).lower() and int(p.get("number") or 0) == int(m.get("number") or -1):
+                p["merged"] = True
+                p["merge_sha"] = m.get("sha")
+    if prs:
+        meta["prs"] = prs[-10:]
+    if result.get("repo") and not meta.get("repo"):
+        meta["repo"] = result["repo"]
+
+
+def merge_question(meta: dict) -> dict | None:
+    """After a PR is opened, the job ends by asking "Merge it?" instead of merging by default."""
+    open_prs = [p for p in meta.get("prs") or [] if not p.get("merged")]
+    if not open_prs or meta.get("merge_asked"):
+        return None
+    pr = open_prs[-1]
+    label = f"{pr.get('repo')}#{pr.get('number')}" if pr.get("number") else pr.get("url")
+    return {"question": f"Merge it? ({label})", "options": list(MERGE_OPTIONS), "pr": pr}
+
+
+def _take_followups(job: AgentJob, meta: dict) -> list[JobEvent] | None:
+    ups = list(meta.get("followups") or [])
+    if not ups:
+        return None
+    meta["followups"] = []
+    meta["next_query"] = followup_query(ups)
+    job.status = "queued"
+    return [event(job, "status", "Picking up your follow-up", {"status": "queued"})]
+
+
+def followup_query(texts: list[str]) -> str:
+    joined = "\n".join(f"- {t}" for t in texts)
+    return (
+        "Follow-up from the user in the same chat (continue this job: same repo, same branch and PR unless they say "
+        f"otherwise):\n{joined}\nAcknowledge in one line, update the todo list, then do it."
+    )
+
+
 def apply_outcome(job: AgentJob, query: str, result: dict) -> list[JobEvent]:
     """Fold one finished agent turn into the job. Returns the timeline events to store."""
     meta = dict(job.meta or {})
@@ -171,8 +241,11 @@ def apply_outcome(job: AgentJob, query: str, result: dict) -> list[JobEvent]:
     meta["history"] = history[-HISTORY_TURNS:]
     meta["confirmations"] = []
     meta.pop("next_query", None)
+    meta.pop("question", None)
+    _merge_prs(meta, result)
     pending = [p for p in (result.get("pending_confirms") or []) if isinstance(p, dict) and p.get("token")]
     children = [str(c.get("id") if isinstance(c, dict) else c) for c in (result.get("jobs_started") or [])]
+    question = clean_question(result.get("question"))
     events: list[JobEvent] = []
     job.heartbeat_at = _now()
     if children:
@@ -197,12 +270,88 @@ def apply_outcome(job: AgentJob, query: str, result: dict) -> list[JobEvent]:
         events.append(event(job, "status", f"Waiting for {len(children)} delegated job(s)", {"status": "waiting_children"}))
     else:
         meta["pending"] = []
-        job.status = "done"
-        job.result = text
-        job.finished_at = _now()
-        events.append(event(job, "result", text, {"status": "done"}))
+        more = _take_followups(job, meta)
+        if more is not None:
+            events.append(event(job, "message", text))
+            job.meta = meta
+            return events + more
+        if question is None and job.parent_id is None and job.kind == "chat":
+            question = merge_question(meta)
+        if question is not None:
+            if question.get("pr"):
+                meta["merge_asked"] = True
+            meta["question"] = question
+            job.status = "waiting_input"
+            job.result = text
+            events.append(event(job, "result", text, {"status": "waiting_input"}))
+            events.append(event(job, "question", question["question"], question))
+        else:
+            job.status = "done"
+            job.result = text
+            job.finished_at = _now()
+            events.append(event(job, "result", text, {"status": "done"}))
     job.meta = meta
     return events
+
+
+def answer(job: AgentJob, text: str) -> list[JobEvent]:
+    """The user picked an option (or typed a reply) for the job's question."""
+    if job.status != "waiting_input":
+        raise JobError("This job is not waiting for an answer.")
+    meta = dict(job.meta or {})
+    q = meta.pop("question", None) or {}
+    text = clip((text or "").strip(), 2000)
+    if not text:
+        raise JobError("Empty answer.")
+    extra = ""
+    if q.get("pr"):
+        pr = q["pr"]
+        extra = (
+            f" This was the merge question for {pr.get('repo')}#{pr.get('number')} ({pr.get('url')}). If the answer is yes, "
+            "call check_merge, report any blockers (conflicts, failing checks) and, if it is mergeable, call "
+            "merge_pull_request (merge commit unless they asked for squash/rebase); its approval card is the final "
+            "confirmation. Then report the merge commit. If no, leave the PR open and finish."
+        )
+    meta["next_query"] = f"The user answered {q.get('question') or 'your question'!r}: {text!r}.{extra}"
+    job.meta = meta
+    job.status = "queued"
+    job.finished_at = None
+    return [event(job, "status", f"You answered: {clip(text, 120)}", {"status": "queued", "answer": text})]
+
+
+def followup(job: AgentJob, text: str) -> list[JobEvent]:
+    """A new chat message for an existing job: answer, queue, or reopen it (same repo and branch)."""
+    text = clip((text or "").strip(), 4000)
+    if job.status == "waiting_input":
+        return answer(job, text)
+    meta = dict(job.meta or {})
+    if job.status in {"done", "failed"}:
+        meta["next_query"] = followup_query([text])
+        meta["pending"] = []
+        job.meta = meta
+        job.status = "queued"
+        job.finished_at = None
+        job.error = ""
+        job.attempts = 0
+        return [event(job, "status", f"Follow-up: {clip(text, 120)}", {"status": "queued", "reopened": True})]
+    if job.status in TERMINAL:
+        raise JobError("This job was cancelled.")
+    meta["followups"] = [*(meta.get("followups") or []), text][-5:]
+    job.meta = meta
+    return [event(job, "status", f"Follow-up queued: {clip(text, 120)}", {"followup": True})]
+
+
+def resume_waiting_for(job: AgentJob, what: str, note: str) -> list[JobEvent]:
+    """Requeue a job that asked the user to connect something (e.g. the GitHub App) once it is connected."""
+    q = (job.meta or {}).get("question") or {}
+    if job.status != "waiting_input" or q.get("waiting_for") != what:
+        return []
+    meta = dict(job.meta or {})
+    meta.pop("question", None)
+    meta["next_query"] = note
+    job.meta = meta
+    job.status = "queued"
+    return [event(job, "status", note.split(".")[0], {"status": "queued"})]
 
 
 def fail(job: AgentJob, error: str) -> JobEvent:
@@ -344,7 +493,7 @@ async def tree(db: AsyncSession, user: User, root_id, after: int = 0) -> dict:
         "jobs": [serialize_job(j) for j in jobs],
         "events": [serialize_event(e) for e in events],
         "done": bool(jobs) and all(j.status in TERMINAL for j in jobs),
-        "waiting": [serialize_job(j) for j in jobs if j.status == "waiting_approval"],
+        "waiting": [serialize_job(j) for j in jobs if j.status in {"waiting_approval", "waiting_input"}],
     }
 
 
@@ -362,23 +511,60 @@ async def after_terminal(db: AsyncSession, job: AgentJob) -> None:
 
 
 async def post_to_chat(db: AsyncSession, job: AgentJob, text: str | None = None) -> None:
+    """The job's result (or its question, with option buttons) as one assistant message in the chat."""
     if job.session_id is None:
         return
-    body = text or (job.result if job.status == "done" else f"The background job stopped: {job.error or job.status}.")
+    body = text or (job.result if job.status in {"done", "waiting_input"} else f"The background job stopped: {job.error or job.status}.")
+    meta: dict[str, Any] = {"job": serialize_job(job), "job_result": True, "agent_id": str(job.agent_id) if job.agent_id else None}
+    q = (job.meta or {}).get("question") if job.status == "waiting_input" else None
+    if q:
+        meta["choices"] = {"job_id": str(job.id), "question": q.get("question"), "options": list(q.get("options") or [])}
+        if q.get("question") and q["question"] not in (body or ""):
+            body = f"{body}\n\n{q['question']}" if body else q["question"]
     db.add(
         ChatMessage(
             session_id=job.session_id,
             user_id=job.user_id,
             role="assistant",
             content=body or "Done.",
-            meta={"job": serialize_job(job), "job_result": True, "agent_id": str(job.agent_id) if job.agent_id else None},
-            request_id=f"job-{str(job.id)[:8]}",
+            meta=meta,
+            request_id=f"job-{str(job.id)[:8]}-{len((job.meta or {}).get('history') or [])}",
         )
     )
     if job.agent_id:
         agent = await db.get(WorkspaceAgent, job.agent_id)
         if agent is not None:
             agent.unread = True
+
+
+async def latest_chat_job(db: AsyncSession, user_id, session_id, agent_id, within_s: int = 12 * 3600) -> AgentJob | None:
+    """The most recent root chat job of this agent in this chat that a follow-up can continue."""
+    from datetime import timedelta
+
+    if session_id is None or agent_id is None:
+        return None
+    job = (
+        await db.execute(
+            select(AgentJob)
+            .where(
+                AgentJob.user_id == user_id,
+                AgentJob.session_id == session_id,
+                AgentJob.agent_id == agent_id,
+                AgentJob.parent_id.is_(None),
+            )
+            .order_by(AgentJob.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if job is None or job.status == "cancelled":
+        return None
+    if job.status in {"done", "failed"}:
+        ts = job.finished_at or job.updated_at or job.created_at
+        if ts is not None and ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        if ts is not None and _now() - ts > timedelta(seconds=within_s):
+            return None
+    return job
 
 
 async def user_has_running(db: AsyncSession, user_id) -> bool:

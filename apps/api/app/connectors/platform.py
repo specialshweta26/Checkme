@@ -38,7 +38,10 @@ PLATFORM = {
         "name": "GitHub",
         "slug": GITHUB_SLUG,
         "tags": ["github", "code", "pull requests", "issues"],
-        "description": "Checkme GitHub App: read repos, files, PRs and issues; open, push and merge only with approval.",
+        "description": (
+            "Checkme GitHub App: explore repos (branches, tree, files, code search, history, diffs, blame), PRs and issues; "
+            "comment, review and request reviewers; open, update, push and merge only with approval."
+        ),
         "tools": GITHUB_TOOLS,
     },
 }

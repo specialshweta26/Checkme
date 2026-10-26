@@ -174,14 +174,17 @@ async def git_commit(ctx, repo: str, message: str, paths: list[str] | None = Non
     if not (message or "").strip():
         return {"error": "A commit message is required."}
     paths = [p for p in (paths or []) if isinstance(p, str) and p.strip() and not p.startswith("-")]
-    res = await sandbox_exec(ctx, coding.commit_script(name, message.strip(), paths or None), 120)
+    from app.agent.dev_tools import identity_for
+
+    author = identity_for(await installs_for(ctx))
+    res = await sandbox_exec(ctx, coding.commit_script(name, message.strip(), paths or None, author), 120)
     if not res.get("error"):
         res["committed"] = res.get("exit_code") == 0
     return res
 
 
-def _push_args(repo, branch, open_pr, title, body, base, draft) -> dict:
-    return {
+def _push_args(repo, branch, open_pr, title, body, base, draft, pr_number: int = 0) -> dict:
+    out = {
         "repo": repo,
         "branch": branch,
         "open_pr": bool(open_pr),
@@ -190,6 +193,58 @@ def _push_args(repo, branch, open_pr, title, body, base, draft) -> dict:
         "base": base or "",
         "draft": bool(draft),
     }
+    if pr_number:
+        out["pr_number"] = int(pr_number)
+    return out
+
+
+async def pr_head(ctx, repo: str, number: int) -> dict:
+    """The open PR's head branch, verified through the GitHub App (same repo, still open)."""
+    from app.connectors import github_app as gh
+
+    row = type("Row", (), {"user_id": ctx.user.id})()
+    pr = await gh.call_github_app(row, "get_pull_request", {"repo": repo, "number": int(number)}, installs=await installs_for(ctx))
+    if pr.get("state") != "open":
+        raise coding.GitToolError(f"{repo}#{number} is not open, so I will not push to it.")
+    if str(pr.get("head_repo") or "").lower() != repo.lower():
+        raise coding.GitToolError(f"{repo}#{number} comes from a fork ({pr.get('head_repo')}); I can only push to branches in {repo}.")
+    return {"branch": pr.get("head") or "", "url": pr.get("url"), "title": pr.get("title"), "number": int(number)}
+
+
+def _patch_slug(branch: str) -> str:
+    return coding._re.sub(r"[^A-Za-z0-9._-]+", "-", branch).strip("-")[:80] or "work"
+
+
+async def blocked_push(ctx, owner: str, name: str, branch: str, base: str) -> dict | None:
+    """No GitHub App for this owner and no git credentials on the computer: save the work as a patch and say what is missing."""
+    try:
+        if await app_token(ctx, f"{owner}/{name}", write=False):
+            return None
+    except Exception:  # noqa: BLE001
+        pass
+    probe = await sandbox_exec(ctx, coding.creds_script(), 30)
+    if "creds=ok" in str(probe.get("output") or ""):
+        return None
+    slug = _patch_slug(branch)
+    saved = await sandbox_exec(ctx, coding.save_patch_script(name, branch, base, slug), 60)
+    status = await github_app_status(ctx)
+    patch_dir = f"~/work/_patches/{name}-{slug}"
+    missing = (
+        f"GitHub access to {owner}/{name}: the Checkme GitHub App is not installed on {owner}, and the computer has no git credentials."
+    )
+    out = {
+        "status": "blocked",
+        "missing": missing,
+        "saved": "commits saved as patches in " + patch_dir if saved.get("exit_code") == 0 else "could not save a patch",
+        "patch_dir": patch_dir,
+        "branch": branch,
+        "next": "Tell the user exactly what is missing and give the install link. Call ask_user with "
+        "waiting_for='github_app' so the job resumes after they connect; then call push_branch again (the commits are still on the branch).",
+    }
+    if status.get("install_url"):
+        out["install_url"] = status["install_url"]
+    await _record(ctx, "status", f"Blocked: {missing}", {"install_url": status.get("install_url"), "patch_dir": patch_dir})
+    return out
 
 
 def _push_confirmed(ctx, repo: str, branch: str) -> bool:
@@ -210,20 +265,35 @@ async def push_branch(
     body: str = "",
     base: str = "",
     draft: bool = False,
+    pr_number: int = 0,
 ) -> dict:
-    """Always needs the user's approval (also in scheduled runs and background jobs)."""
+    """Always needs the user's approval (also in scheduled runs and background jobs).
+
+    Pushes go to agent/* branches. With pr_number, the branch may instead be the head branch of
+    that open PR in the same repo (the user named it), verified through the GitHub App."""
+    from app.agent import dev_tools
     from app.agent.confirm import sign_confirm
 
     try:
         owner, name = coding.split_repo(repo)
-        branch = coding.check_agent_branch(branch)
+        full = f"{owner}/{name}"
+        pr_branch = ""
+        if pr_number:
+            head = await pr_head(ctx, full, int(pr_number))
+            pr_branch = head["branch"]
+            open_pr = False
+        branch = coding.check_push_branch(branch, pr_branch)
         base = coding.check_ref(base, "base branch")
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
-    full = f"{owner}/{name}"
-    args = _push_args(full, branch, open_pr, title, body, base, draft)
+    if open_pr:
+        body = dev_tools.pr_body_with_tests(ctx, full, body)
+    args = _push_args(full, branch, open_pr, title, body, base, draft, int(pr_number or 0))
     if _push_confirmed(ctx, full, branch):
         return await run_push(ctx, args)
+    blocked = await blocked_push(ctx, owner, name, branch, base)
+    if blocked is not None:
+        return blocked
     peek = await sandbox_exec(ctx, coding.preview_script(name, branch, base), 60)
     commits, _, stat = str(peek.get("output") or "").partition("--")
     preview = {
@@ -231,6 +301,7 @@ async def push_branch(
         "branch": branch,
         "base": base or "default branch",
         "open_pr": bool(open_pr),
+        "pr_number": int(pr_number or 0) or None,
         "title": args["title"] or branch,
         "commits": [line for line in commits.strip().splitlines() if line][:10],
         "diffstat": stat.strip()[:300],
@@ -240,7 +311,8 @@ async def push_branch(
         "needs_confirm": True,
         "token": token,
         "kind": "git_push",
-        "title": f"Push {branch} to {full}" + (" and open a pull request" if open_pr else ""),
+        "title": f"Push {branch} to {full}"
+        + (" and open a pull request" if open_pr else (f" (updates PR #{int(pr_number)})" if pr_number else "")),
         "preview": preview,
     }
     ctx.pending.append(pending)
@@ -253,7 +325,10 @@ async def run_push(ctx, args: dict) -> dict:
 
     try:
         owner, name = coding.split_repo(args.get("repo") or "")
-        branch = coding.check_agent_branch(args.get("branch") or "")
+        pr_branch = ""
+        if args.get("pr_number"):
+            pr_branch = (await pr_head(ctx, f"{owner}/{name}", int(args["pr_number"])))["branch"]
+        branch = coding.check_push_branch(args.get("branch") or "", pr_branch)
         token = await app_token(ctx, f"{owner}/{name}", write=True)
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
@@ -275,7 +350,11 @@ async def run_push(ctx, args: dict) -> dict:
                 "'create pull request') or connect GitHub with connect_app github."
             )
         return out
+    if args.get("pr_number"):
+        out["pr_number"] = int(args["pr_number"])
+        out["pull_request_note"] = f"Updated the existing pull request #{int(args['pr_number'])}."
     if not args.get("open_pr"):
+        await _note_pr(ctx, full, branch, out, args)
         return out
     title = args.get("title") or branch.removeprefix("agent/").replace("-", " ")
     if token:
@@ -289,11 +368,13 @@ async def run_push(ctx, args: dict) -> dict:
             )
             out["pull_request"] = pr
             out["pr_url"] = pr.get("url")
+            out["pr_number"] = pr.get("number")
         except gh.GitHubError as exc:
             if exc.status == 422:
                 out["pull_request_note"] = "A pull request for this branch already exists; the push updated it."
             else:
                 out["pull_request_error"] = coding.scrub(str(exc))
+        await _note_pr(ctx, full, branch, out, args)
         return out
     q = coding._shlex.quote
     base_flag = f" --base {q(args['base'])}" if args.get("base") else ""
@@ -305,9 +386,33 @@ async def run_push(ctx, args: dict) -> dict:
     url = next((w for w in str(pr.get("output") or "").split() if w.startswith("https://github.com/")), "")
     if url:
         out["pr_url"] = url
+        tail = url.rstrip("/").rsplit("/", 1)[-1]
+        if tail.isdigit():
+            out["pr_number"] = int(tail)
     else:
         out["pull_request_note"] = "Pushed. Open the PR with the connected GitHub tools (create pull request)."
+    await _note_pr(ctx, full, branch, out, args)
     return out
+
+
+async def _note_pr(ctx, repo: str, branch: str, out: dict, args: dict) -> None:
+    """Remember the PR on the job (for the "Merge it?" question) and in the agent's coding memory."""
+    from app.agent import coding_memory
+
+    url = out.get("pr_url")
+    if not url and args.get("pr_number"):
+        url = f"https://github.com/{repo}/pull/{int(args['pr_number'])}"
+    if not url:
+        return
+    pr = {"url": url, "repo": repo, "number": out.get("pr_number") or args.get("pr_number"), "branch": branch, "title": args.get("title") or branch}
+    prs = getattr(ctx, "prs", None)
+    if isinstance(prs, list) and not any(p.get("url") == url for p in prs):
+        prs.append(pr)
+    try:
+        ctx.repo = getattr(ctx, "repo", "") or repo
+    except AttributeError:
+        pass
+    await coding_memory.note(ctx, repo=repo, pr=pr)
 
 
 async def run_confirmed(ctx, tool: str, args: dict) -> dict:

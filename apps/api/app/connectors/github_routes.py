@@ -156,7 +156,39 @@ async def callback(
         return RedirectResponse(f"{web}/connectors?error=github_install_failed")
     await save_installation(db, user, data)
     await ensure_connector(db, user)
+    await resume_blocked_jobs(db, user, (data.get("account") or {}).get("login") or "")
     return RedirectResponse(f"{web}/connectors?github=connected")
+
+
+async def resume_blocked_jobs(db: AsyncSession, user: User, account: str) -> int:
+    """Jobs that stopped because the GitHub App was missing pick up where they left off."""
+    from sqlalchemy import select
+
+    from app.jobs import service as jobs
+    from app.models import AgentJob
+
+    try:
+        rows = (
+            await db.execute(select(AgentJob).where(AgentJob.user_id == user.id, AgentJob.status == "waiting_input"))
+        ).scalars().all()
+        note = (
+            f"The user installed the Checkme GitHub App{' on ' + account if account else ''}. Continue where you stopped: "
+            "push the saved branch with push_branch (it asks for approval), open the PR, and finish the task."
+        )
+        n = 0
+        for job in rows:
+            for ev in jobs.resume_waiting_for(job, "github_app", note):
+                db.add(ev)
+                n += 1
+        if n:
+            await db.commit()
+            from app.jobs.worker import wake
+
+            wake()
+        return n
+    except Exception as exc:  # noqa: BLE001
+        log.warning("resuming jobs after the GitHub install failed: %s", exc)
+        return 0
 
 
 @router.delete("/installations/{installation_id}")

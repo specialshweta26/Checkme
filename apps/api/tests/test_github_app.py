@@ -45,6 +45,14 @@ class FakeGitHub:
         self.calls = []
         self.token_requests = []
         self.refs = {"main": "sha-main"}
+        self.pr8 = {
+            "number": 8, "title": "T", "state": "open", "draft": False, "merged": False, "mergeable": True,
+            "mergeable_state": "clean", "html_url": "https://github.com/octo/app/pull/8", "user": {"login": "bot"},
+            "head": {"ref": "agent/x", "sha": "headsha", "repo": {"full_name": "octo/app"}},
+            "base": {"ref": "main", "repo": {"full_name": "octo/app"}},
+        }
+        self.check_runs = [{"name": "ci", "status": "completed", "conclusion": "success"}]
+        self.deleted = []
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -79,6 +87,20 @@ class FakeGitHub:
             return httpx.Response(201, json={})
         if path == "/repos/octo/app/pulls/8/merge":
             return httpx.Response(200, json={"merged": True, "sha": "m"})
+        if path == "/repos/octo/app/pulls/8" and request.method == "GET":
+            return httpx.Response(200, json=self.pr8)
+        if path == "/repos/octo/app/pulls/8/files":
+            return httpx.Response(200, json=[{"filename": "app.py", "status": "modified", "additions": 2, "deletions": 1,
+                                               "patch": "@@ -1,2 +1,3 @@\n a\n-b\n+c\n+d"}])
+        if path == "/repos/octo/app/pulls/8/reviews" and request.method == "POST":
+            return httpx.Response(200, json={"id": 1, "state": body.get("event"), "html_url": "https://github.com/octo/app/pull/8#r1"})
+        if path == "/repos/octo/app/commits/headsha/check-runs":
+            return httpx.Response(200, json={"check_runs": self.check_runs})
+        if path == "/repos/octo/app/commits/headsha/status":
+            return httpx.Response(200, json={"statuses": []})
+        if path.startswith("/repos/octo/app/git/refs/heads/") and request.method == "DELETE":
+            self.deleted.append(path.rsplit("/heads/", 1)[1])
+            return httpx.Response(204)
         if path == "/user/installations":
             return httpx.Response(200, json={"installations": [{"id": 42}]})
         return httpx.Response(404, json={"message": f"unhandled {path}"})
@@ -170,7 +192,46 @@ async def test_open_pr_and_merge(fake):
     pr = await gh.call_github_app(ROW, "create_pull_request", {"repo": "octo/app", "head": "agent/x", "title": "T"}, installs=INSTALLS)
     assert pr["url"].endswith("/pull/8") and pr["base"] == "main"
     merged = await gh.call_github_app(ROW, "merge_pull_request", {"repo": "octo/app", "number": 8}, installs=INSTALLS)
-    assert merged["merged"] is True
+    assert merged["merged"] is True and merged["method"] == "merge" and merged["sha"] == "m"
+    put = [c for c in fake.calls if c[0] == "PUT"][-1]
+    assert put[2] == {"merge_method": "merge", "sha": "headsha"}
+
+
+async def test_merge_squash_and_delete_branch(fake):
+    out = await gh.call_github_app(
+        ROW, "merge_pull_request", {"repo": "octo/app", "number": 8, "method": "squash", "delete_branch": True}, installs=INSTALLS
+    )
+    assert out["merged"] and out["method"] == "squash" and out["branch_deleted"] == "agent/x"
+    assert fake.deleted == ["agent/x"]
+
+
+async def test_merge_refuses_conflicts_with_fix_steps(fake):
+    fake.pr8.update(mergeable=False, mergeable_state="dirty")
+    st = await gh.call_github_app(ROW, "check_merge", {"repo": "octo/app", "number": 8}, installs=INSTALLS)
+    assert st["conflicts"] and not st["ready"] and "merge conflicts with main" in st["blockers"][0]
+    out = await gh.call_github_app(ROW, "merge_pull_request", {"repo": "octo/app", "number": 8}, installs=INSTALLS)
+    assert out["merged"] is False and out["blocked"] and "offer to fix the conflicts" in out["note"]
+    assert not [c for c in fake.calls if c[0] == "PUT"]
+
+
+async def test_merge_waits_for_failing_checks_unless_allowed(fake):
+    fake.check_runs = [{"name": "tests", "status": "completed", "conclusion": "failure"}]
+    out = await gh.call_github_app(ROW, "merge_pull_request", {"repo": "octo/app", "number": 8}, installs=INSTALLS)
+    assert out["merged"] is False and "Checks are failing: tests (failure)" in out["blockers"]
+    out = await gh.call_github_app(
+        ROW, "merge_pull_request", {"repo": "octo/app", "number": 8, "allow_failing_checks": True}, installs=INSTALLS
+    )
+    assert out["merged"] is True
+
+
+async def test_merge_card_preview_shows_live_status(fake):
+    from app.connectors.github_app import preview_live
+
+    card = await preview_live(ROW, "merge_pull_request", {"repo": "octo/app", "number": 8, "method": "rebase"}, installs=INSTALLS)
+    assert card["method"] == "rebase" and card.get("ready") is True and card["checks"] == "passing"
+    fake.pr8.update(mergeable=False, mergeable_state="dirty")
+    card = await preview_live(ROW, "merge_pull_request", {"repo": "octo/app", "number": 8}, installs=INSTALLS)
+    assert card["ready"] is False and "merge conflicts" in card["blockers"][0]
 
 
 def test_error_messages_scrub_tokens():

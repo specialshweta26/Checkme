@@ -1,8 +1,10 @@
-"""Plan-and-build helpers for agents whose focus is Coding and deployments.
+"""Plan-and-build helpers for coding agents (focus "coding").
 
-Everything runs through existing infrastructure: the `computer` connector (Daytona
-sandbox `exec`), whatever GitHub connector or Composio GitHub toolkit the user has,
-and any deploy connector (Render MCP, Vercel, ...). Nothing new is provisioned here.
+The Coder is a general-purpose software engineer: explore a repo, change code, test,
+commit, open/update/review PRs and merge (merge behind an approval card), and help with
+deploys. Everything runs through existing infrastructure: the `computer` connector
+(Daytona sandbox `exec`), the Checkme GitHub App or another GitHub connector, and any
+deploy connector (Render MCP, Vercel, ...).
 """
 
 from __future__ import annotations
@@ -21,6 +23,8 @@ PROBE_COMMAND = (
     "echo gh_auth=$(gh auth status >/dev/null 2>&1 && echo ok || echo none); "
     "echo git_cred=$(git config --global credential.helper 2>/dev/null || echo none); "
     "echo node=$(node --version 2>/dev/null); echo python=$(python3 --version 2>/dev/null); "
+    "echo rg=$(command -v rg >/dev/null 2>&1 && echo ok); echo ctags=$(command -v ctags >/dev/null 2>&1 && echo ok); "
+    "echo dev_toolchain=$([ -f \"$HOME/.checkme/toolchain-v1\" ] && echo ready || echo none); "
     "echo home=$HOME; mkdir -p ~/work && echo work=$(cd ~/work && pwd)"
 )
 
@@ -78,12 +82,23 @@ def readiness(
         )
         if probe and not probe.get("git"):
             can.append("install git on the computer (git_checkout does it automatically)")
+        if probe and probe.get("dev_toolchain") != "ready":
+            can.append(
+                "set up the headless IDE once with ensure_dev_toolchain (gh, ripgrep, fd, jq, tree, ctags, node package "
+                "managers, uv, pytest); it is not set up on this computer yet"
+            )
+        elif probe:
+            can.append(
+                "understand code (repo_overview, find_symbol, find_references, read_file_range, git_inspect) and test all "
+                "cases (run_checks: lint, type-check, unit, integration, build)"
+            )
     git_push = probe.get("gh_auth") == "ok" or probe.get("git_cred", "none") not in {"", "none"}
     if app.get("installed"):
         can.append(
-            "clone private repos, push agent/* branches and open pull requests through the Checkme GitHub App ("
+            "explore repos (tree, files, code search, history, blame, PRs, issues), clone private repos, push agent/* "
+            "branches, open/update/review pull requests and merge them through the Checkme GitHub App ("
             + ", ".join(app.get("accounts") or [])
-            + ") with push_branch; every push and merge waits for the user's approval"
+            + "); every push, PR edit and merge waits for the user's approval"
         )
     elif app.get("configured") and not found["github"] and not git_push:
         missing.append(
@@ -111,7 +126,8 @@ def readiness(
         missing.append("No deploy connector (Render, Vercel, Netlify, ...) is connected, so I cannot trigger or check deploys.")
     return {
         "computer": "ready" if computer is not None and not probe_error else "missing",
-        "toolchain": {k: v for k, v in probe.items() if k in {"git", "gh", "node", "python", "work"} and v},
+        "toolchain": {k: v for k, v in probe.items() if k in {"git", "gh", "node", "python", "rg", "ctags", "work"} and v},
+        "dev_toolchain": probe.get("dev_toolchain") or "unknown",
         "git_push_credentials": git_push,
         "github_connectors": [{"slug": c.slug, "name": c.name} for c in found["github"]],
         "deploy_connectors": [{"slug": c.slug, "name": c.name} for c in found["deploy"]],
@@ -147,7 +163,8 @@ def is_coding_agent(agent) -> bool:
 #   one repo) and passed as the CHECKME_GIT_TOKEN env var. A one-shot `-c
 #   credential.helper` reads it, so the token never appears in the command string,
 #   the clone URL, .git/config, the credential store, logs or tool output.
-# * Pushes only go to agent/* branches, and always behind an approval card.
+# * Pushes only go to agent/* branches (or the verified head branch of a PR the user
+#   named), and always behind an approval card.
 # * Output is scrubbed of the token before anything sees it.
 
 import re as _re
@@ -158,7 +175,7 @@ TOKEN_ENV = "CHECKME_GIT_TOKEN"
 AGENT_BRANCH = _re.compile(r"^agent/[A-Za-z0-9._/-]{1,120}$")
 REF_RE = _re.compile(r"^[A-Za-z0-9._/-]{1,200}$")
 OUTPUT_MAX = 16_000
-GIT_TOOLS = ("git_checkout", "run_tests", "git_diff", "git_commit", "push_branch")
+GIT_TOOLS = ("git_checkout", "git_inspect", "run_tests", "git_diff", "git_commit", "push_branch")
 AUTHOR_NAME = "Checkme Coder"
 AUTHOR_EMAIL = "checkme-coder@users.noreply.github.com"
 
@@ -216,6 +233,71 @@ def check_agent_branch(branch: str) -> str:
             "Check out such a branch with git_checkout first."
         )
     return branch
+
+
+def check_push_branch(branch: str, pr_branch: str = "") -> str:
+    """agent/* branches always; another branch only when it is the verified head of the PR the user named."""
+    branch = check_ref(branch)
+    if AGENT_BRANCH.match(branch or ""):
+        return branch
+    if branch and pr_branch and branch == pr_branch:
+        return branch
+    return check_agent_branch(branch)
+
+
+INSPECT_ACTIONS = ("status", "branches", "log", "show", "diff", "blame", "grep", "tree", "read")
+
+
+def inspect_script(name: str, action: str, ref: str = "", ref2: str = "", path: str = "", query: str = "",
+                   start: int = 0, end: int = 0, limit: int = 50, regex: bool = False) -> str:
+    """Read-only git and code exploration in the sandbox clone (fallback for the GitHub App reads)."""
+    q = _shlex.quote
+    action = (action or "").strip().lower()
+    if action not in INSPECT_ACTIONS:
+        raise GitToolError(f"action must be one of {', '.join(INSPECT_ACTIONS)}")
+    ref, ref2 = check_ref(ref, "ref"), check_ref(ref2, "ref")
+    path = (path or "").strip()
+    if path.startswith("-") or "\n" in path:
+        raise GitToolError("Bad path")
+    limit = max(1, min(int(limit or 50), 500))
+    pathspec = f" -- {q(path)}" if path else ""
+    cd = f"cd {repo_dir(name)} || {{ echo 'run git_checkout first'; exit 1; }}; "
+    if action == "status":
+        body = "git status -sb; git log --oneline -5"
+    elif action == "branches":
+        body = "git fetch --quiet --prune origin 2>/dev/null; git branch -a --sort=-committerdate | head -200"
+    elif action == "log":
+        body = f"git log --format='%h %ad %an  %s' --date=short -n {limit} {q(ref) if ref else ''}{pathspec}"
+    elif action == "show":
+        body = f"git show --stat --patch {q(ref or 'HEAD')}{pathspec} | head -c 14000"
+    elif action == "diff":
+        left = q(ref or "origin/HEAD")
+        right = q(ref2) if ref2 else ""
+        rng = f"{left}...{right}" if right else left
+        body = f"git diff --stat {rng}{pathspec} | tail -40; echo '--'; git diff {rng}{pathspec} | head -c 14000"
+    elif action == "blame":
+        if not path:
+            raise GitToolError("blame needs path")
+        lines = f" -L {int(start)},{int(end or start + 80)}" if start else ""
+        body = f"git blame --date=short{lines} {q(ref) if ref else ''} -- {q(path)} | head -400"
+    elif action == "grep":
+        if not (query or "").strip():
+            raise GitToolError("grep needs query")
+        where = q(path) if path else "."
+        rg_flag, gg_flag = ("", "-E") if regex else ("-F", "-F")
+        body = (
+            f"if command -v rg >/dev/null; then rg -n --hidden -g '!.git' -m 20 {rg_flag} -e {q(query)} -- {where}; "
+            f"else git grep -n {gg_flag} -e {q(query)} -- {where}; fi | head -{limit * 4}"
+        )
+    elif action == "tree":
+        body = f"git ls-tree -r --name-only {q(ref or 'HEAD')}{pathspec} | head -{limit * 20}"
+    else:  # read
+        if not path:
+            raise GitToolError("read needs path")
+        a, b = (int(start) or 1), (int(end) or (int(start) or 1) + 400)
+        src = f"git show {q(ref)}:{q(path)}" if ref else f"cat -- {q(path)}"
+        body = f"{src} | awk 'NR>={a} && NR<={b} {{ printf \"%6d  %s\\n\", NR, $0 }}' | head -c 30000"
+    return cd + "{ " + body + "; } 2>&1"
 
 
 def repo_dir(name: str) -> str:
@@ -294,15 +376,18 @@ def diff_script(name: str, base: str = "") -> str:
     )
 
 
-def commit_script(name: str, message: str, paths: list[str] | None = None) -> str:
+def commit_script(name: str, message: str, paths: list[str] | None = None, author: tuple[str, str] | None = None) -> str:
     q = _shlex.quote
     add = "git add -- " + " ".join(q(p) for p in paths) if paths else "git add -A"
     return (
         f"cd {repo_dir(name)} || {{ echo 'run git_checkout first'; exit 1; }}; "
-        'BR=$(git rev-parse --abbrev-ref HEAD); case "$BR" in agent/*) ;; '
-        "*) echo \"refusing to commit on $BR: check out an agent/* branch with git_checkout first\"; exit 3;; esac; "
+        'BR=$(git rev-parse --abbrev-ref HEAD); '
+        "DEF=$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##'); "
+        'if [ "$BR" = HEAD ] || [ "$BR" = "$DEF" ] || [ "$BR" = main ] || [ "$BR" = master ]; then '
+        "echo \"refusing to commit on $BR: check out an agent/* branch (or the PR branch you were asked to update) "
+        "with git_checkout first\"; exit 3; fi; "
         f"{add} && "
-        f"git -c user.name={q(AUTHOR_NAME)} -c user.email={q(AUTHOR_EMAIL)} commit --quiet -m {q(message)} && "
+        f"git -c user.name={q((author or (AUTHOR_NAME, AUTHOR_EMAIL))[0])} -c user.email={q((author or (AUTHOR_NAME, AUTHOR_EMAIL))[1])} commit --quiet -m {q(message)} && "
         "git log --oneline -1 && git show --stat --format= HEAD | tail -20"
     )
 
@@ -324,6 +409,26 @@ def preview_script(name: str, branch: str, base: str = "") -> str:
         f"cd {repo_dir(name)} 2>/dev/null || exit 0; "
         f"git log --oneline {base_ref}..{q(branch)} 2>/dev/null | head -10; echo '--'; "
         f"git diff --shortstat {base_ref}...{q(branch)} 2>/dev/null"
+    )
+
+
+def creds_script() -> str:
+    """Does the computer have its own git credentials (gh auth or a credential helper)?"""
+    return (
+        "if gh auth status >/dev/null 2>&1 || [ -n \"$(git config --global credential.helper 2>/dev/null)\" ]; "
+        "then echo creds=ok; else echo creds=none; fi"
+    )
+
+
+def save_patch_script(name: str, branch: str, base: str, slug: str) -> str:
+    """Keep the work when pushing is blocked: format-patch of the branch (plus a diff of anything uncommitted)."""
+    q = _shlex.quote
+    base_ref = f"origin/{q(base)}" if base else "origin/HEAD"
+    out = f'"$HOME/work/_patches/{name}-{slug}"'
+    return (
+        f"cd {repo_dir(name)} || exit 1; mkdir -p {out} && "
+        f"git format-patch --quiet -o {out} {base_ref}..{q(branch)} && "
+        f"git diff HEAD > {out}/uncommitted.diff; ls {out} | head -20"
     )
 
 
@@ -352,7 +457,7 @@ def clip_output(text: str, limit: int = OUTPUT_MAX) -> str:
 _REPO_REF = _re.compile(r"(github\.com/[\w.-]+/[\w.-]+|\b[\w-]{2,39}/[\w.-]{2,100}\b|\b(repo|repository|codebase|pull request|pr|branch)\b)", _re.I)
 _DO_VERB = _re.compile(
     r"\b(fix|implement|add|build|create|refactor|rename|bump|upgrade|migrate|write (?:a )?tests?|"
-    r"open (?:a )?(?:pr|pull request)|review (?:the )?(?:pr|pull request)|ship|deploy|port|remove|delete|update|change)\b",
+    r"open (?:a )?(?:pr|pull request)|review (?:the )?(?:pr|pull request)|merge|ship|deploy|port|remove|delete|update|change)\b",
     _re.I,
 )
 _QUESTION = _re.compile(r"^\s*(what|why|how|which|who|when|where|can you explain|explain|is|are|does|do)\b.*\?\s*$", _re.I | _re.S)
@@ -365,3 +470,48 @@ def looks_like_coding_task(text: str) -> bool:
     if _re.search(r"\b(and/or|either/or|\d+/\d+)\b", t) and not _re.search(r"github\.com|\b(repo|repository|pr|branch)\b", t, _re.I):
         return False
     return bool(_REPO_REF.search(t) and _DO_VERB.search(t))
+
+
+_FOLLOW = _re.compile(
+    r"^\s*(also|and|now|then|next|please|pls|ok(ay)?|yes|yep|yeah|no|nope|go ahead|do it|ship it|merge( it)?|deploy( it)?|"
+    r"squash|rebase|retry|try again|continue)\b",
+    _re.I,
+)
+_OWNER_REPO = _re.compile(r"(?:github\.com/)?\b([\w-]{2,39}/[\w.-]{2,100})\b")
+
+
+def named_repos(text: str) -> set[str]:
+    return {m.group(1).lower().removesuffix(".git") for m in _OWNER_REPO.finditer(text or "") if not _re.match(r"^\d+/\d+$", m.group(1))}
+
+
+def continues_job(text: str, status: str, job_repo: str = "") -> bool:
+    """Does this chat message continue the latest coding job (same repo, branch and PR)?
+
+    A job waiting for an answer takes any reply. Otherwise instructions ("also fix X", "merge it")
+    continue it; questions stay inline, and a message naming a different repo starts fresh."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    repos = named_repos(t)
+    if job_repo and repos and job_repo.lower() not in repos:
+        return False
+    if status == "waiting_input":
+        return True
+    if _QUESTION.match(t):
+        return False
+    return bool(_FOLLOW.search(t) or (_DO_VERB.search(t) and (_REPO_REF.search(t) or _re.search(r"\b(it|that|this|the (?:tests?|build|bug|typo|lint))\b", t, _re.I))))
+
+
+def first_step(text: str) -> str:
+    """The first thing the job will do, for the one-line acknowledgement."""
+    t = (text or "").lower()
+    m = next((m for m in _OWNER_REPO.finditer(text or "") if not _re.match(r"^\d+/\d+$", m.group(1))), None)
+    repo = m.group(1).removesuffix(".git") if m else ""
+    where = f" {repo}" if repo else " the repo"
+    if _re.search(r"\breview\b", t):
+        return "first I'll read the pull request and its diff"
+    if _re.search(r"\bmerge\b", t):
+        return "first I'll check that the pull request can merge (conflicts and checks)"
+    if _re.search(r"\bdeploy|release|rollback\b", t):
+        return "first I'll check the deploy setup"
+    return f"first I'll explore{where} and write a todo list"

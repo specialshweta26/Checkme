@@ -1896,4 +1896,10 @@ input.tasks-search { width: min(260px, 100%); }
   white-space: pre;
 }
 .job-approval { display: grid; gap: 8px; }
+.job-plan { list-style: none; margin: 0 0 8px; padding: 8px 10px; border-radius: 8px; background: var(--lift); display: grid; gap: 3px; font-size: 13px; }
+.job-todo { display: flex; gap: 8px; align-items: baseline; }
+.job-todo.completed { color: var(--muted); text-decoration: line-through; }
+.job-todo.in_progress { font-weight: 600; }
+.job-todo-mark { width: 14px; flex: none; text-align: center; }
+.job-choices { flex-wrap: wrap; }
 .btn.small { padding: 4px 10px; font-size: 12px; }

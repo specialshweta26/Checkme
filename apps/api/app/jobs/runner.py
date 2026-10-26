@@ -15,24 +15,30 @@ log = logging.getLogger(__name__)
 
 ROLE_BRIEF = {
     "planner": (
-        "You are the planner for this background coding job. Check coding_workspace_status, look at the repo if needed, "
-        "and write a short plan with write_todos. Then hand the build to a coder with delegate(role='coder', ...) giving "
-        "the repo, an agent/<short-name> branch and acceptance criteria, and end your turn. When the coder reports a PR, "
-        "delegate(role='reviewer', ...) naming the repo and PR number. If the reviewer asks for changes, delegate one fix "
-        "round to the coder, then review again. When review passes, propose the merge: call the GitHub merge tool "
-        "(github-app merge_pull_request). That only puts an approval card in front of the user; merging is their call, "
-        "so never say it is merged until the result says so. Finish with the PR link, the review verdict and what is "
-        "waiting for the user's approval."
+        "You are the planner for this background coding job. Acknowledge, then write_todos with a short plan. Check "
+        "coding_workspace_status and explore the repo remotely with the GitHub App read tools. Small, clear changes you may "
+        "build yourself; otherwise hand the build to a coder with delegate(role='coder', ...) giving the repo, the branch "
+        "(the user's convention or agent/<short-name>) and acceptance criteria, and end your turn. When the coder reports a "
+        "PR, delegate(role='reviewer', ...) naming the repo and PR number. If the reviewer asks for changes, delegate one fix "
+        "round to the coder, then review again. Do not merge by default: the job ends by asking the user 'Merge it?'. Merge "
+        "only after an explicit yes (or when the task says to merge): check_merge first, then github-app "
+        "merge_pull_request, whose approval card the user must approve; never say it is merged until the result says so. "
+        "Finish with the PR link, what changed, the checks, the review verdict and any caveats."
     ),
     "coder": (
-        "You are the coder for this background job. Use git_checkout with branch=agent/<short-name>, edit with "
-        "sandbox_shell, run_tests, git_diff, git_commit, then push_branch to open the pull request (it waits for the "
-        "user's approval). Never merge. Finish with the PR link, what changed and the test result."
+        "You are the coder for this background job. write_todos first. git_checkout the branch (agent/<short-name> unless "
+        "you were given an existing PR branch), ensure_dev_toolchain if needed, repo_overview before editing, then "
+        "find_symbol / find_references / read_file_range, edit with sandbox_shell, run_checks until they pass (up to 3 "
+        "attempts), git_diff, git_commit, then push_branch with a body of ## Summary, ## Changes, ## Tests, ## Caveats (it "
+        "waits for the user's approval; pr_number updates an existing PR). Merge only if the task explicitly says the user "
+        "said yes. Finish with the PR link, what changed and the check results."
     ),
     "reviewer": (
-        "You are the reviewer for this background job. Read the pull request (get_pull_request, its diff with "
-        "git_checkout/git_diff if useful), check correctness, tests and risk, and post your review with "
-        "comment_pull_request. Never merge and never push. Finish with a verdict: approve, or the changes needed."
+        "You are the reviewer for this background job. Read the pull request (get_pull_request, compare_refs, "
+        "get_pr_comments), check out its branch and run_checks when useful, then post a structured review with "
+        "review_pull_request: summary, findings by severity with path and line, and a verdict (APPROVE only when nothing "
+        "blocks, otherwise REQUEST_CHANGES or COMMENT). Never push and never merge. Finish with the verdict and the "
+        "changes needed."
     ),
 }
 
@@ -173,6 +179,8 @@ async def run_job(job_id, session_factory: Callable | None = None, agent_impl: C
             db.add(ev)
         if job.status in service.TERMINAL:
             await service.after_terminal(db, job)
+        elif job.status == "waiting_input" and job.parent_id is None:
+            await service.post_to_chat(db, job)
         elif job.status == "waiting_approval" and job.parent_id is None and job.agent_id:
             agent_row = await db.get(WorkspaceAgent, job.agent_id)
             if agent_row is not None:
