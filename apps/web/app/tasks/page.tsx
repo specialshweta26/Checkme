@@ -2,10 +2,13 @@
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { AppShell } from "../components/AppShell";
-import { getMe, type Me } from "../lib";
+import { getMe, loadWorkspace, rememberedScope, type Me, type WorkspaceAgent } from "../lib";
 
 type Task = {
   id: string;
+  agent_id?: string | null;
+  agent_name?: string;
+  agent_color?: string;
   title: string;
   instruction: string;
   prompt: string;
@@ -32,6 +35,9 @@ export default function TasksPage() {
   const [open, setOpen] = useState(false);
   const [prompt, setPrompt] = useState("");
   const [expanded, setExpanded] = useState("");
+  const [agents, setAgents] = useState<WorkspaceAgent[]>([]);
+  const [agentFilter, setAgentFilter] = useState("all");
+  const [createAgentId, setCreateAgentId] = useState("");
 
   useEffect(() => {
     getMe().then((u) => {
@@ -43,8 +49,20 @@ export default function TasksPage() {
     });
   }, []);
 
+  useEffect(() => {
+    loadWorkspace().then((roster) => {
+      const rows = roster.agents || [];
+      setAgents(rows);
+      const remembered = rememberedScope().agent;
+      const known = rows.some((agent) => agent.id === remembered);
+      const fallback = roster.default_agent_id || rows[0]?.id || "";
+      setCreateAgentId((current) => current || (known ? remembered : fallback));
+    });
+  }, []);
+
   async function refresh() {
-    const res = await fetch("/api/tasks", { credentials: "include" });
+    const agentQuery = agentFilter !== "all" ? `?agent_id=${encodeURIComponent(agentFilter)}` : "";
+    const res = await fetch(`/api/tasks${agentQuery}`, { credentials: "include" });
     if (res.status === 401) {
       window.location.replace("/");
       return;
@@ -62,7 +80,7 @@ export default function TasksPage() {
     refresh();
     const timer = window.setInterval(refresh, 15000);
     return () => window.clearInterval(timer);
-  }, [me]);
+  }, [me, agentFilter]);
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -70,7 +88,7 @@ export default function TasksPage() {
       if (tab === "active" && t.status !== "active" && t.status !== "running") return false;
       if (tab === "paused" && t.status !== "paused") return false;
       if (!q) return true;
-      const blob = `${t.title} ${t.instruction} ${t.prompt} ${t.schedule_label} ${t.connected_apps.join(" ")}`.toLowerCase();
+      const blob = `${t.title} ${t.instruction} ${t.prompt} ${t.schedule_label} ${t.agent_name || ""} ${t.connected_apps.join(" ")}`.toLowerCase();
       return blob.includes(q);
     });
   }, [tasks, tab, query]);
@@ -85,7 +103,7 @@ export default function TasksPage() {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt }),
+        body: JSON.stringify({ prompt, agent_id: createAgentId || undefined }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : "Could not create task");
@@ -127,7 +145,7 @@ export default function TasksPage() {
           <div>
             <h1>Scheduled work</h1>
             <p className="muted">
-              Work that should run on a clock — briefs, sends, and pulls from connected systems.
+              Work that should run on a clock. Each agent keeps its own routines, memory, and persona.
             </p>
           </div>
           <button className="btn" onClick={() => setOpen(true)}>
@@ -143,13 +161,23 @@ export default function TasksPage() {
               </button>
             ))}
           </div>
-          <input
-            className="tasks-search"
-            type="search"
-            placeholder="Search tasks"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-          />
+          <div className="tasks-filters">
+            <select className="tasks-agent" value={agentFilter} onChange={(e) => setAgentFilter(e.target.value)} aria-label="Filter by agent">
+              <option value="all">All agents</option>
+              {agents.map((agent) => (
+                <option key={agent.id} value={agent.id}>
+                  {agent.name}
+                </option>
+              ))}
+            </select>
+            <input
+              className="tasks-search"
+              type="search"
+              placeholder="Search tasks"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+          </div>
         </div>
 
         {error ? <p className="err">{error}</p> : null}
@@ -178,6 +206,12 @@ export default function TasksPage() {
                     <span className="muted">{t.instruction}</span>
                     <div className="task-meta">
                       <span className={`status-dot ${t.status}`}>{labelStatus(t.status)}</span>
+                      {t.agent_name ? (
+                        <span className="agent-chip">
+                          <i style={{ background: t.agent_color || "#f97316" }} />
+                          {t.agent_name}
+                        </span>
+                      ) : null}
                       <span className="muted">{t.next_run_label}</span>
                       <span className="faint">{t.schedule_label}</span>
                       <div className="task-apps">
@@ -241,7 +275,19 @@ export default function TasksPage() {
         <div className="sheet" onClick={() => setOpen(false)}>
           <form className="panel stack" onClick={(e) => e.stopPropagation()} onSubmit={create}>
             <strong>Create a task</strong>
-            <p className="muted">Describe the work and the schedule in plain English. Times are India Standard Time.</p>
+            <p className="muted">Describe the work and the schedule in plain English. Times are India Standard Time. The task runs as the agent you pick.</p>
+            {agents.length ? (
+              <label className="stack">
+                <span className="muted">Agent</span>
+                <select className="field" value={createAgentId} onChange={(e) => setCreateAgentId(e.target.value)}>
+                  {agents.map((agent) => (
+                    <option key={agent.id} value={agent.id}>
+                      {agent.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : null}
             <textarea
               className="field"
               required

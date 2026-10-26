@@ -1307,7 +1307,7 @@ async def run_staff(ctx: RunContext, name: str, args: dict | None = None) -> Any
     }:
         return {"error": "No mail connector is enabled for this user."}
     try:
-        result = await staff_dispatch(ctx.db, ctx.user, runtime, name, as_dict(args))
+        result = await staff_dispatch(ctx.db, ctx.user, runtime, name, as_dict(args), agent=ctx.agent)
         ctx.sources.append({"source_tool": name, "args": as_dict(args), "snippet": compact_payload(result, 2000)})
         return compact_payload(result)
     except Exception as exc:  # noqa: BLE001
@@ -1385,7 +1385,7 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
         return dumps(await call_user_tool(ctx, connector_slug, tool_name, args), 60000)
 
     async def schedule_task(prompt: str) -> str:
-        """Queue work for a future time. Required when the user says in N minutes, later, tonight, tomorrow, every day, or any clock. Pass their full request. Do not fetch data or send mail in this turn."""
+        """Queue work for a future time on this agent's own routines. Required when the user says in N minutes, later, tonight, tomorrow, every day, or any clock. Pass their full request. Do not fetch data or send mail in this turn."""
         return dumps(await run_staff(ctx, "schedule_task", {"prompt": prompt}))
 
     async def inspect_result(
@@ -1467,6 +1467,7 @@ def system_prompt(user, connectors: list, memory: str, agent=None, group=None, t
     identity = f"You are {name}, this user's {title}. You have mail, calendar, and connected MCP servers.\n"
     if extra:
         identity += extra + "\n"
+    identity += "Your memory and scheduled routines belong only to you, not to other agents.\n"
     group_bit = ""
     peers = [p for p in (teammates or []) if str(getattr(p, "id", "")) != str(getattr(agent, "id", ""))]
     if group is not None and peers:
@@ -1782,7 +1783,7 @@ async def run_deep_agent(
         session_id=session_id,
         request_id=request_id,
     )
-    memory = await load_memory(db, user, query)
+    memory = await load_memory(db, user, query, workspace_agent)
     extra = []
     from langchain_core.messages import HumanMessage
 
@@ -1848,7 +1849,13 @@ async def run_deep_agent(
     if cards and not had_card:
         names = ", ".join(str(c.get("name") or c.get("toolkit") or "this app") for c in cards)
         text = f"Connect {names} using the card below. That opens Composio's authorization page."
-    await remember(db, user.id, "episodic", clip(f"Q: {query}\nA: {text}", 400))
+    await remember(
+        db,
+        user.id,
+        "episodic",
+        clip(f"Q: {query}\nA: {text}", 400),
+        getattr(workspace_agent, "id", None),
+    )
     speaker = None
     if workspace_agent is not None:
         speaker = {

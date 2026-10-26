@@ -91,6 +91,9 @@ erDiagram
   User ||--o{ ChatSession : has
   User ||--o{ InboxItem : has
   User ||--o{ ScheduledTask : has
+  User ||--o{ WorkspaceAgent : has
+  WorkspaceAgent ||--o{ ScheduledTask : owns
+  WorkspaceAgent ||--o{ MemoryBlock : owns
   Account ||--o| Connector : builtin
   Connector }o--o| ServerCard : server_key
   ServerCard ||--o{ ToolIndex : catalogs
@@ -99,22 +102,27 @@ erDiagram
 
 | Table | Keys / notes |
 | --- | --- |
-| `users` | `id`, email, timezone default `Asia/Kolkata`, optional `letta_agent_id` |
+| `users` | `id`, email, timezone default `Asia/Kolkata`, optional `letta_agent_id` (mirror of Chief’s Letta id) |
 | `accounts` | Unique `(provider, subject)`. `refresh_token_enc` |
 | `auth_sessions` | `expires_at`, `revoked` |
 | `connectors` | Unique `(user_id, slug)`. `kind` builtin\|mcp, `provider` gmail\|outlook\|mcp, `health` |
 | `server_cards` | PK `server_key` (`builtin:gmail`, `mcp:<hash>`). `core_tools`, `groups` JSON |
 | `tool_index` | Unique `(server_key, tool_name)`. `search_tsv` generated, HNSW on `embedding` |
-| `chat_sessions` | `state` JSON (last source, confirm tools) |
+| `workspace_agents` | Named bot. `kind` `default` (Chief) or `custom`. Optional `letta_agent_id` — one Letta agent per workspace agent |
+| `chat_sessions` | `state` JSON. `agent_id` / `group_id` file the thread under one agent or one group |
 | `chat_messages` | `meta`: attachments, used_tools, pending_confirms, mail_threads, source |
 | `inbox_items` | Unique `(user_id, message_id)`. `to_header`, `cc_header`, `recipient_role` (`to`\|`cc`\|`bcc`). `classification` reply\|respond\|discard, `status` pending\|sent\|discarded |
-| `scheduled_tasks` | Index `(status, next_run_at)` |
+| `scheduled_tasks` | Index `(status, next_run_at)`. `agent_id` is the workspace agent that owns and runs the routine |
 | `thread_summaries` | Cache for `summarize_thread` until `last_message_id` changes |
-| `memory_blocks` / `memory_passages` | Voice + episodic when Letta is unset |
-| `commitments` / `admin_items` / `automations` | Staff tools |
+| `memory_blocks` | PK `(user_id, agent_id, label)`. Fallback core memory for that agent |
+| `memory_passages` | Fallback episodic/archival rows, filtered by `agent_id` |
+| `automations` | Staff routines. `agent_id` is the agent that created the automation |
+| `commitments` / `admin_items` | Staff extractions. Still per user (not per agent) |
 | `tool_usage` / `tool_edges` | Routing feedback |
 
-`init_db` uses `create_all` plus a few `ALTER TABLE IF NOT EXISTS` patches (`inbox_items.to_header`, `cc_header`, `recipient_role`). No separate migration tool.
+`init_db` uses `create_all` plus `ALTER TABLE … ADD COLUMN IF NOT EXISTS` patches (inbox headers, chat `agent_id` / `group_id`, and per-agent memory/routine columns). No separate migration tool.
+
+Startup backfill (`app/agents/scope.py`, applied from `db.py`): promote an existing agent named Chief to `kind=default` when the user has no default; insert Chief for users who still have unscoped memory, tasks, automations, or a legacy `users.letta_agent_id`; set `agent_id` on those rows to that user’s Chief and copy `users.letta_agent_id` onto Chief. Rows that already have an `agent_id` are left alone. Memory rows that still cannot be assigned are dropped. `memory_blocks` primary key becomes `(user_id, agent_id, label)`.
 
 ## 5. HTTP API (FastAPI, prefix `/api`)
 
@@ -146,7 +154,7 @@ erDiagram
 - `GET/POST /connectors`, `PATCH/DELETE /connectors/{id}`, `POST .../sync`, MCP OAuth start/callback
 - `GET /connectors/marketplace`, `POST /connectors/marketplace/connect` — Composio app catalog + OAuth link
 - Builtin platform connectors (when keys are set): `@computer` (Daytona sandbox) and `@composio` (marketplace `find_tools` / `execute`)
-- `GET/POST /tasks`, `PATCH/DELETE /tasks/{id}`, `POST .../run`
+- `GET/POST /tasks`, `PATCH/DELETE /tasks/{id}`, `POST .../run`. `GET` accepts `agent_id` and `status`. `POST` body is `{ prompt, agent_id? }` — omitted `agent_id` uses Chief
 - `POST /files/upload`, `GET /files?t=&render=`
 
 Health: FastAPI `GET /health`, web `GET /up`.
@@ -164,7 +172,7 @@ File: `apps/api/app/agent/deep.py`. This is the **only** chat execution path.
 | `get_tool_schema` | JSON schema from the index, or `gateway__resolve` / a generic object schema for nested tools |
 | `call_tool` | `invoke_named` / MCP / builtin. Nested names run through `gateway__execute`. |
 | `inspect_result` | Slice stored `ctx.results` by path/search/offset |
-| `schedule_task` | Staff persist |
+| `schedule_task` | Staff persist on the speaking agent’s routines |
 | `staff` | Briefing, inbox Q&A, commitments, voice |
 
 System prompt rules that matter in production:
@@ -290,19 +298,29 @@ Upload returns `{ key, filename, download_url, preview_url, previewable, extract
 
 ## 10. Scheduler
 
-`tasks/scheduler.py`: every 20s, up to 6 due `active` rows → `running` → `execute_task` (deep agent, `auto_confirm=True`) → store `last_result` / `last_error`, bump `run_count`, set next run or `done`.
+`tasks/scheduler.py`: every 20s, up to 6 due `active` rows → `running` → `execute_task` (deep agent, `auto_confirm=True`, **as the task’s workspace agent**) → store `last_result` / `last_error`, bump `run_count`, set next run or `done`. The run’s chat session is filed under that agent (`ChatSession.agent_id`), and the agent’s persona, memory, and connector limits apply. `auto_confirm` is unchanged.
 
-Chat `schedule_task` parses natural time in `tasks/parse.py` (IST). Creating a calendar event at a clock time is **not** a scheduled task; that is `create_event` immediately.
+Chat `schedule_task` parses natural time in `tasks/parse.py` (IST) and stores the speaking agent on the row. Creating a calendar event at a clock time is **not** a scheduled task; that is `create_event` immediately. The Tasks page can filter by agent and the create sheet picks an agent (default: the last agent you chatted with, otherwise Chief).
 
 ## 11. Memory
 
-If `LETTA_BASE_URL` is set, `ensure_letta_agent` + Letta passages. Otherwise:
+Memory is per workspace agent, not per user. Chief is the default agent (`ensure_default_agent`).
 
-- `memory_blocks` label `voice` (inbox draft tone)
-- `memory_passages` kind `episodic` / `archival` with embeddings
-- Each chat turn `remember`s a clipped Q/A
+If `LETTA_BASE_URL` is set, each workspace agent has its own Letta agent (`workspace_agents.letta_agent_id`). Chief reuses the legacy `users.letta_agent_id` when that was the only id. A custom agent never reads or writes Chief’s Letta agent. `load_memory` reads that Letta agent and merges this agent’s fallback rows so backfilled notes still show. `remember` / `upsert_core` write both the Letta agent and the fallback tables.
 
-Staff `learn_voice` updates the voice block from sent mail.
+When Letta is unset or unreachable:
+
+- `memory_blocks` label `voice` and any other core labels, keyed by `agent_id`
+- `memory_passages` kind `episodic` / `archival` with embeddings, filtered by `agent_id`
+- Each chat turn `remember`s a clipped Q/A onto the speaking agent
+
+**Group chats.** The lead and each teammate call `run_deep_agent` with their own `WorkspaceAgent`. Each speaker loads and writes only that agent’s memory. The lead’s episodic note is the user question plus the lead’s combined answer. A teammate’s note is the delegated prompt plus their reply. A routine created while speaking belongs to the speaker, not the group.
+
+**Inbox voice.** Triage drafts read Chief’s `voice` block only. `learn_voice` in another agent’s chat updates that agent’s block and does not change Chief.
+
+**Deleting an agent.** Custom agents can be deleted; Chief cannot. Delete removes that agent’s memory blocks, passages, scheduled tasks, and automations (foreign keys cascade the same rows). The remote Letta agent is deleted when its id is not Chief’s shared user id; a Letta outage does not block the local delete. Chat sessions are left in place with the old `agent_id` so transcripts are not copied onto Chief.
+
+Staff `learn_voice` updates the speaking agent’s voice block from sent mail.
 
 ## 12. Frontend behavior that matches the API
 
@@ -316,6 +334,7 @@ Staff `learn_voice` updates the voice block from sent mail.
 | Confirm | `pending_confirms[]` with `token`; POST chat `{ confirmations: [{ token }] }` |
 | Attach | `uploadFiles` then state update (**await outside setState** — Next build requirement) |
 | Chat meta | Assistant bubble stores whole POST body (`used_tools`, `attachments`, `mail_threads`) |
+| Tasks | Filter by agent; create sheet sends `agent_id` (last chat agent, else Chief) |
 
 ## 13. Error handling
 
@@ -338,6 +357,7 @@ Staff `learn_voice` updates the voice block from sent mail.
 | `test_inbox_triage.py` | Classification aliases, serialize slug/role, newest-40 split, `recipient_role`, `merge_message_lists`, `_address_list` |
 | `test_attachments.py` | Previewable types |
 | `test_routing*.py` | Tool search / describe |
+| `test_agent_scope.py` | Memory isolation, task `agent_id`, `execute_task` agent, Chief backfill |
 
 Run: `apps/api/.venv/bin/python -m pytest -q`.
 
