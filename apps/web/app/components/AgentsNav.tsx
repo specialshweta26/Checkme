@@ -1,7 +1,7 @@
 "use client";
 
 import { usePathname } from "next/navigation";
-import { FormEvent, useEffect, useMemo, useState, type MouseEvent } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState, type MouseEvent, type TouchEvent } from "react";
 import { createPortal } from "react-dom";
 import {
   assignConnectorAgents,
@@ -57,7 +57,11 @@ export function AgentsNav({
   const [showArchived, setShowArchived] = useState(false);
   const [connectors, setConnectors] = useState<{ id: string; name: string; alias?: string; slug: string }[]>([]);
   const [saving, setSaving] = useState(false);
+  const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const longPressTriggered = useRef(false);
   const pathname = usePathname();
+
+  useEffect(() => () => cancelLongPress(), []);
 
   async function refresh() {
     const next = await loadWorkspace();
@@ -196,14 +200,36 @@ export function AgentsNav({
     await refresh();
   }
 
+  function openContext(kind: "agent" | "group", id: string, clientX: number, clientY: number) {
+    setMenu(false);
+    setMoveOpen(false);
+    const x = Math.max(8, Math.min(clientX, window.innerWidth - 240));
+    const y = Math.max(8, Math.min(clientY, window.innerHeight - 320));
+    setCtx({ kind, id, x, y });
+  }
+
   function onContext(e: MouseEvent, kind: "agent" | "group", id: string) {
     e.preventDefault();
     e.stopPropagation();
-    setMenu(false);
-    setMoveOpen(false);
-    const x = Math.min(e.clientX, window.innerWidth - 240);
-    const y = Math.min(e.clientY, window.innerHeight - 320);
-    setCtx({ kind, id, x, y });
+    openContext(kind, id, e.clientX, e.clientY);
+  }
+
+  function cancelLongPress() {
+    if (longPressTimer.current) clearTimeout(longPressTimer.current);
+    longPressTimer.current = null;
+  }
+
+  function startLongPress(e: TouchEvent, kind: "agent" | "group", id: string) {
+    cancelLongPress();
+    const touch = e.touches[0];
+    if (!touch) return;
+    const { clientX, clientY } = touch;
+    longPressTriggered.current = false;
+    longPressTimer.current = setTimeout(() => {
+      longPressTriggered.current = true;
+      openContext(kind, id, clientX, clientY);
+      longPressTimer.current = null;
+    }, 500);
   }
 
   const formOpen = form !== null;
@@ -251,6 +277,11 @@ export function AgentsNav({
               onSelectAgent?.(agent.id);
             }}
             onContext={(e) => onContext(e, "agent", agent.id)}
+            onLongPress={(e) => startLongPress(e, "agent", agent.id)}
+            wasLongPress={() => longPressTriggered.current}
+            onTouchMove={cancelLongPress}
+            onTouchEnd={cancelLongPress}
+            onTouchCancel={cancelLongPress}
           />
         ))}
         {groups.map((group) => (
@@ -258,12 +289,20 @@ export function AgentsNav({
             key={group.id}
             className={`agent-row${activeGroupId === group.id ? " on" : ""}`}
             onContextMenu={(e) => onContext(e, "group", group.id)}
+            onTouchStart={(e) => startLongPress(e, "group", group.id)}
+            onTouchMove={cancelLongPress}
+            onTouchEnd={cancelLongPress}
+            onTouchCancel={cancelLongPress}
           >
             <a
               className="agent-open"
               href={chatHref({ group: group.id })}
               onClick={(e) => {
                 e.preventDefault();
+                if (longPressTriggered.current) {
+                  longPressTriggered.current = false;
+                  return;
+                }
                 if (pathname === "/chat") {
                   onSelectGroup?.(group.id);
                   return;
@@ -295,6 +334,11 @@ export function AgentsNav({
                 stay={pathname === "/chat"}
                 onOpen={() => onSelectAgent?.(agent.id)}
                 onContext={(e) => onContext(e, "agent", agent.id)}
+                onLongPress={(e) => startLongPress(e, "agent", agent.id)}
+                wasLongPress={() => longPressTriggered.current}
+                onTouchMove={cancelLongPress}
+                onTouchEnd={cancelLongPress}
+                onTouchCancel={cancelLongPress}
               />
             ))
           : null}
@@ -502,6 +546,11 @@ function AgentRow({
   stay,
   onOpen,
   onContext,
+  onLongPress,
+  wasLongPress,
+  onTouchMove,
+  onTouchEnd,
+  onTouchCancel,
 }: {
   agent: WorkspaceAgent;
   href: string;
@@ -510,14 +559,29 @@ function AgentRow({
   stay?: boolean;
   onOpen: () => void;
   onContext: (e: MouseEvent) => void;
+  onLongPress: (e: TouchEvent) => void;
+  wasLongPress: () => boolean;
+  onTouchMove: () => void;
+  onTouchEnd: () => void;
+  onTouchCancel: () => void;
 }) {
   return (
-    <div className={`agent-row${active ? " on" : ""}${agent.unread ? " unread" : ""}`} onContextMenu={onContext}>
+    <div
+      className={`agent-row${active ? " on" : ""}${agent.unread ? " unread" : ""}`}
+      onContextMenu={onContext}
+      onTouchStart={onLongPress}
+      onTouchMove={onTouchMove}
+      onTouchEnd={onTouchEnd}
+      onTouchCancel={onTouchCancel}
+    >
       <a
         className="agent-open"
         href={href}
         onClick={(e) => {
           e.preventDefault();
+          if (wasLongPress()) {
+            return;
+          }
           if (stay) {
             onOpen();
             return;
@@ -558,51 +622,3 @@ function ConnectorPicker({
     return <p className="muted">No connectors yet. Add them on the Connectors page, then assign them here.</p>;
   }
   return (
-    <fieldset>
-      <legend>This agent can use</legend>
-      {connectors.map((conn) => {
-        const restricted = assignments[conn.id] || [];
-        const checked = !restricted.length || restricted.includes(agentId);
-        return (
-          <label key={conn.id} className="agent-check">
-            <input
-              type="checkbox"
-              checked={checked}
-              onChange={async () => {
-                await onSave(conn.id, nextAssignedAgents(restricted, agentId, agents.map((a) => a.id)));
-              }}
-            />
-            {conn.alias || conn.name}
-            <span className="muted"> @{conn.slug}</span>
-          </label>
-        );
-      })}
-    </fieldset>
-  );
-}
-
-function CtxIcon({ d }: { d: string }) {
-  return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden>
-      <path d={d} stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function previewFor(threads: ChatSessionRow[], agentId: string | null, groupId: string | null) {
-  const row = threads.find((s) => (groupId ? s.group_id === groupId : s.agent_id === agentId && !s.group_id));
-  return (row?.title || "").trim();
-}
-
-function GroupStack({ members }: { members: WorkspaceAgent[] }) {
-  const shown = useMemo(() => members.slice(0, 3), [members]);
-  return (
-    <span className="group-stack" aria-hidden>
-      {shown.map((m) => (
-        <span key={m.id} className="agent-avatar tiny" style={{ background: m.color }}>
-          {(m.name || "?").slice(0, 1).toUpperCase()}
-        </span>
-      ))}
-    </span>
-  );
-}
