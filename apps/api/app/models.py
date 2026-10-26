@@ -182,6 +182,23 @@ class WorkspaceAgent(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
 
+class GitHubInstallation(Base):
+    """A Checkme GitHub App installation this user installed (or verified they can access)."""
+
+    __tablename__ = "github_installations"
+    __table_args__ = (UniqueConstraint("user_id", "installation_id"),)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    installation_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    account_login: Mapped[str] = mapped_column(String(100), default="")
+    account_type: Mapped[str] = mapped_column(String(20), default="")  # User | Organization
+    repository_selection: Mapped[str] = mapped_column(String(20), default="")  # all | selected
+    permissions: Mapped[dict] = mapped_column(JSONB, default=dict)
+    suspended: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
 class AgentConnector(Base):
     """When rows exist for a connector, only those agents may use it. No rows = every agent."""
 

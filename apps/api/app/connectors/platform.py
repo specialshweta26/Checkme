@@ -11,6 +11,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.connectors.composio_box import COMPOSIO_TOOLS
 from app.connectors.daytona_box import DAYTONA_TOOLS
+from app.connectors.github_app import GITHUB_TOOLS
+from app.connectors.github_app import SLUG as GITHUB_SLUG
+from app.connectors.github_app import is_configured as github_app_configured
 from app.connectors.registry import mark_synced, server_key_for, upsert_tool_index
 from app.models import Connector, User
 
@@ -31,7 +34,29 @@ PLATFORM = {
         "description": "Composio app marketplace. Search and run tools from connected apps, or connect a new app.",
         "tools": COMPOSIO_TOOLS,
     },
+    "github_app": {
+        "name": "GitHub",
+        "slug": GITHUB_SLUG,
+        "tags": ["github", "code", "pull requests", "issues"],
+        "description": "Checkme GitHub App: read repos, files, PRs and issues; open, push and merge only with approval.",
+        "tools": GITHUB_TOOLS,
+    },
 }
+
+
+async def has_github_installation(db: AsyncSession, user: User) -> bool:
+    from app.models import GitHubInstallation
+
+    try:
+        row = (
+            await db.execute(
+                select(GitHubInstallation.id).where(GitHubInstallation.user_id == user.id).limit(1)
+            )
+        ).first()
+    except Exception as vis_exc:  # noqa: BLE001
+        log.warning("github installation lookup failed: %s", vis_exc)
+        return False
+    return row is not None
 
 
 def platform_specs(provider: str):
@@ -53,6 +78,7 @@ async def ensure_platform_connectors(db: AsyncSession, user: User) -> list[Conne
     wanted: list[tuple[str, bool]] = [
         ("daytona", bool(s.daytona_api_key)),
         ("composio", bool(s.composio_api_key)),
+        ("github_app", github_app_configured() and await has_github_installation(db, user)),
     ]
     out: list[Connector] = []
     for provider, enabled in wanted:
