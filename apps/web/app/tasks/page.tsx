@@ -119,8 +119,6 @@ export default function TasksPage() {
     }
   }
 
-  if (!me) return <div className="center">Loading your workspace…</div>;
-
   return (
     <AppShell me={me} current="tasks">
       <div className="page">

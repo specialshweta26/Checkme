@@ -153,6 +153,40 @@ export async function deleteGroup(id: string) {
   return res.ok;
 }
 
+export const LAST_AGENT_KEY = "assistant.lastAgent";
+export const LAST_GROUP_KEY = "assistant.lastGroup";
+
+export function chatHref(opts: { agent?: string | null; group?: string | null; conversation?: string | null; fresh?: boolean } = {}) {
+  const q = new URLSearchParams();
+  if (opts.group) q.set("group", opts.group);
+  else if (opts.agent) q.set("agent", opts.agent);
+  if (opts.conversation) q.set("c", opts.conversation);
+  if (opts.fresh) q.set("new", "1");
+  const search = q.toString();
+  return search ? `/chat?${search}` : "/chat";
+}
+
+export function rememberScope(agentId?: string | null, groupId?: string | null) {
+  if (typeof window === "undefined") return;
+  if (groupId) {
+    window.localStorage.setItem(LAST_GROUP_KEY, groupId);
+    window.localStorage.removeItem(LAST_AGENT_KEY);
+    return;
+  }
+  if (agentId) {
+    window.localStorage.setItem(LAST_AGENT_KEY, agentId);
+    window.localStorage.removeItem(LAST_GROUP_KEY);
+  }
+}
+
+export function rememberedScope() {
+  if (typeof window === "undefined") return { agent: "", group: "" };
+  return {
+    agent: window.localStorage.getItem(LAST_AGENT_KEY) || "",
+    group: window.localStorage.getItem(LAST_GROUP_KEY) || "",
+  };
+}
+
 export async function getMe(): Promise<Me | null> {
   const res = await fetch("/api/me", { credentials: "include" });
   if (res.status === 401) return null;

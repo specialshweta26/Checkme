@@ -196,8 +196,6 @@ export default function ConnectorsPage() {
     return drafts[c.id] || { alias: c.alias || "", description: c.description || "" };
   }
 
-  if (!me) return <div className="center">Loading your workspace…</div>;
-
   return (
     <AppShell me={me} current="connectors">
       <div className="page">
@@ -350,26 +348,23 @@ export default function ConnectorsPage() {
                         <label key={agent.id} className="agent-check">
                           <input
                             type="checkbox"
-                            disabled={assigning === c.id}
                             checked={checked}
-                            onChange={async () => {
+                            onChange={() => {
+                              const nextIds = nextAssignedAgents(
+                                restricted,
+                                agent.id,
+                                agents.map((a) => a.id),
+                              );
+                              setAssignments((cur) => ({ ...cur, [c.id]: nextIds }));
                               setAssigning(c.id);
                               setError("");
-                              try {
-                                const next = await assignConnectorAgents(
-                                  c.id,
-                                  nextAssignedAgents(
-                                    restricted,
-                                    agent.id,
-                                    agents.map((a) => a.id),
-                                  ),
-                                );
-                                setAssignments((cur) => ({ ...cur, [c.id]: next.agent_ids || [] }));
-                              } catch (err: any) {
-                                setError(err.message || "Could not update agents");
-                              } finally {
-                                setAssigning("");
-                              }
+                              void assignConnectorAgents(c.id, nextIds)
+                                .then((next) => setAssignments((cur) => ({ ...cur, [c.id]: next.agent_ids || nextIds })))
+                                .catch((err: any) => {
+                                  setAssignments((cur) => ({ ...cur, [c.id]: restricted }));
+                                  setError(err.message || "Could not update agents");
+                                })
+                                .finally(() => setAssigning(""));
                             }}
                           />
                           <span className="agent-avatar tiny" style={{ background: agent.color }}>

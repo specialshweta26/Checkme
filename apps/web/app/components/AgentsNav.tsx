@@ -1,9 +1,11 @@
 "use client";
 
+import { usePathname } from "next/navigation";
 import { FormEvent, useEffect, useMemo, useState, type MouseEvent } from "react";
 import { createPortal } from "react-dom";
 import {
   assignConnectorAgents,
+  chatHref,
   clearAgentChat,
   createAgent,
   createGroup,
@@ -54,6 +56,7 @@ export function AgentsNav({
   const [showArchived, setShowArchived] = useState(false);
   const [connectors, setConnectors] = useState<{ id: string; name: string; alias?: string; slug: string }[]>([]);
   const [saving, setSaving] = useState(false);
+  const pathname = usePathname();
 
   async function refresh() {
     const next = await loadWorkspace();
@@ -68,6 +71,19 @@ export function AgentsNav({
       .then((data) => setConnectors(data.connectors || []))
       .catch(() => undefined);
   }, []);
+
+  useEffect(() => {
+    setMenu(false);
+    setCtx(null);
+    setMoveOpen(false);
+  }, [pathname]);
+
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => setMenu(false);
+    window.addEventListener("click", close);
+    return () => window.removeEventListener("click", close);
+  }, [menu]);
 
   useEffect(() => {
     if (!ctx) return;
@@ -189,11 +205,19 @@ export function AgentsNav({
       <div className="side-label-row">
         <div className="side-label">Personal</div>
         <div className="agents-plus-wrap">
-          <button className="agents-plus" type="button" aria-label="Create" onClick={() => setMenu((v) => !v)}>
+          <button
+            className="agents-plus"
+            type="button"
+            aria-label="Create"
+            onClick={(e) => {
+              e.stopPropagation();
+              setMenu((v) => !v);
+            }}
+          >
             +
           </button>
           {menu ? (
-            <div className="agents-menu">
+            <div className="agents-menu" onClick={(e) => e.stopPropagation()}>
               <button type="button" onClick={() => { setMenu(false); setForm("agent"); }}>
                 New agent
               </button>
@@ -209,8 +233,10 @@ export function AgentsNav({
           <AgentRow
             key={agent.id}
             agent={agent}
+            href={chatHref({ agent: agent.id })}
             active={activeAgentId === agent.id && !activeGroupId}
             preview={busyScopes.includes(`a.${agent.id}`) ? "Working…" : previewFor(threads, agent.id, null) || agent.preview || agent.title || "New chat"}
+            stay={pathname === "/chat"}
             onOpen={() => {
               if (agent.unread) void patchAgent(agent.id, { unread: false });
               onSelectAgent?.(agent.id);
@@ -224,13 +250,24 @@ export function AgentsNav({
             className={`agent-row${activeGroupId === group.id ? " on" : ""}`}
             onContextMenu={(e) => onContext(e, "group", group.id)}
           >
-            <button className="agent-open" type="button" onClick={() => onSelectGroup?.(group.id)}>
+            <a
+              className="agent-open"
+              href={chatHref({ group: group.id })}
+              onClick={(e) => {
+                e.preventDefault();
+                if (pathname === "/chat") {
+                  onSelectGroup?.(group.id);
+                  return;
+                }
+                window.location.assign(chatHref({ group: group.id }));
+              }}
+            >
               <GroupStack members={group.members} />
               <span className="agent-copy">
                 <strong>{group.name}</strong>
                 <small>{busyScopes.includes(`g.${group.id}`) ? "Working…" : previewFor(threads, null, group.id) || group.preview || group.members.map((m) => m.name).join(", ") || "Group"}</small>
               </span>
-            </button>
+            </a>
           </div>
         ))}
         {archivedAgents.length ? (
@@ -243,8 +280,10 @@ export function AgentsNav({
               <AgentRow
                 key={agent.id}
                 agent={agent}
+                href={chatHref({ agent: agent.id })}
                 active={activeAgentId === agent.id && !activeGroupId}
                 preview="Archived"
+                stay={pathname === "/chat"}
                 onOpen={() => onSelectAgent?.(agent.id)}
                 onContext={(e) => onContext(e, "agent", agent.id)}
               />
@@ -448,20 +487,35 @@ export function AgentsNav({
 
 function AgentRow({
   agent,
+  href,
   active,
   preview,
+  stay,
   onOpen,
   onContext,
 }: {
   agent: WorkspaceAgent;
+  href: string;
   active: boolean;
   preview: string;
+  stay?: boolean;
   onOpen: () => void;
   onContext: (e: MouseEvent) => void;
 }) {
   return (
     <div className={`agent-row${active ? " on" : ""}${agent.unread ? " unread" : ""}`} onContextMenu={onContext}>
-      <button className="agent-open" type="button" onClick={onOpen}>
+      <a
+        className="agent-open"
+        href={href}
+        onClick={(e) => {
+          e.preventDefault();
+          if (stay) {
+            onOpen();
+            return;
+          }
+          window.location.assign(href);
+        }}
+      >
         <span className="agent-avatar" style={{ background: agent.color }}>
           {(agent.name || "?").slice(0, 1).toUpperCase()}
         </span>
@@ -473,7 +527,7 @@ function AgentRow({
           <small>{preview}</small>
         </span>
         {agent.unread ? <span className="agent-unread" aria-label="Unread" /> : null}
-      </button>
+      </a>
     </div>
   );
 }

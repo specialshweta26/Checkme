@@ -3,12 +3,12 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { AttachmentWidget } from "../AttachmentWidget";
 import { AppShell } from "../components/AppShell";
-import { chatAttachments, computerFromMeta, ScreenRail } from "../components/ComputerPanel";
+import { chatAttachments, ComputerIcon, computerFromMeta, ScreenRail } from "../components/ComputerPanel";
 import { cardsFromMeta, ConnectCards } from "../components/ConnectCard";
 import { EmailThreadButton, mailRefsFromMeta } from "../components/EmailThread";
 import { Markdown } from "../components/Markdown";
 import { Thinking } from "../components/Thinking";
-import { deleteSession, getMe, listSessions, loadSession, uploadFiles, type ChatSessionRow, type Me, type UploadedFile, type WorkspaceRoster } from "../lib";
+import { chatHref, deleteSession, getMe, listSessions, loadSession, rememberScope, uploadFiles, type ChatSessionRow, type Me, type UploadedFile, type WorkspaceRoster } from "../lib";
 
 const STORE = "assistant.session";
 
@@ -52,9 +52,11 @@ export default function ChatPage() {
   const [uploadError, setUploadError] = useState("");
   const [watching, setWatching] = useState(false);
   const [controlling, setControlling] = useState(false);
+  const [screenOpen, setScreenOpen] = useState(false);
   const [agentId, setAgentId] = useState<string | null>(null);
   const [groupId, setGroupId] = useState<string | null>(null);
   const [roster, setRoster] = useState<WorkspaceRoster>({ agents: [], groups: [] });
+  const [hello, setHello] = useState("Hello");
 
   async function refreshSessions() {
     setSessions(await listSessions());
@@ -94,7 +96,11 @@ export default function ChatPage() {
     setPending([]);
     setGroupId(nextGroup);
     setAgentId(nextAgent);
+    rememberScope(nextAgent, nextGroup);
     window.localStorage.setItem(scopeStore(nextAgent, nextGroup), id);
+    if (typeof window !== "undefined") {
+      window.history.replaceState(null, "", chatHref({ agent: nextAgent, group: nextGroup, conversation: id }));
+    }
   }
 
   function newChat() {
@@ -106,12 +112,17 @@ export default function ChatPage() {
     setUploads([]);
     setWatching(false);
     setControlling(false);
+    setScreenOpen(false);
     if (key && !inflightRef.current.has(key)) {
       viewsRef.current[key] = { sessionId: null, messages: [], pending: [] };
     }
     window.localStorage.removeItem(scopeStore(agentId, groupId));
     box.current?.focus();
   }
+
+  useEffect(() => {
+    setHello(greeting(me));
+  }, [me]);
 
   useEffect(() => {
     getMe().then(async (u) => {
@@ -134,6 +145,17 @@ export default function ChatPage() {
     const q = new URLSearchParams(window.location.search);
     if (q.get("mcp") === "connected") setNotice("MCP connected. You can use it in this chat.");
     if (q.get("error")) setNotice(q.get("error")?.replaceAll("_", " ") || "");
+    if (q.get("agent")) setAgentId(q.get("agent"));
+    if (q.get("group")) {
+      setGroupId(q.get("group"));
+      setAgentId(null);
+    }
+    if (q.get("new") === "1") {
+      setSessionId(null);
+      setMessages([]);
+      setPending([]);
+      window.history.replaceState(null, "", chatHref({ agent: q.get("agent"), group: q.get("group") }));
+    }
   }, []);
 
   useEffect(() => {
@@ -162,10 +184,6 @@ export default function ChatPage() {
     setText("");
     setUploads([]);
     setUploadError("");
-    const t0 = Date.now();
-    // #region agent log
-    fetch('http://127.0.0.1:7755/ingest/7762fe36-1f54-4ec2-b56d-3aaac63261c6',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'daee2b'},body:JSON.stringify({sessionId:'daee2b',location:'chat/page.tsx:send',message:'chat send start',data:{len:message.length,watching:["browser","website","web page","browse","http://","https://",".com","open the site"].some((k)=>message.toLowerCase().includes(k))},timestamp:Date.now(),hypothesisId:'A',runId:'pre-fix'})}).catch(()=>{});
-    // #endregion
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
@@ -191,9 +209,6 @@ export default function ChatPage() {
         const detail = typeof data.detail === "string" ? data.detail : data.detail?.[0]?.msg;
         throw new Error(detail || raw.slice(0, 280) || "Chat failed");
       }
-      // #region agent log
-      fetch('http://127.0.0.1:7755/ingest/7762fe36-1f54-4ec2-b56d-3aaac63261c6',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'daee2b'},body:JSON.stringify({sessionId:'daee2b',location:'chat/page.tsx:send',message:'chat send ok',data:{ms:Date.now()-t0,nTools:(data.used_tools||[]).length,head:String(data.text||'').slice(0,80)},timestamp:Date.now(),hypothesisId:'A',runId:'pre-fix'})}).catch(()=>{});
-      // #endregion
       const loaded = data.session_id ? await loadSession(data.session_id) : null;
       const doneMessages: Msg[] = loaded?.messages?.length
         ? loaded.messages
@@ -211,13 +226,11 @@ export default function ChatPage() {
         showView(doneView);
         if (nextPending.some((p) => p.kind === "handoff" || p.preview?.kind === "handoff")) {
           setControlling(true);
+          setScreenOpen(true);
         }
       }
       await refreshSessions();
     } catch (err: any) {
-      // #region agent log
-      fetch('http://127.0.0.1:7755/ingest/7762fe36-1f54-4ec2-b56d-3aaac63261c6',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'daee2b'},body:JSON.stringify({sessionId:'daee2b',location:'chat/page.tsx:send',message:'chat send catch',data:{name:err?.name||'',msg:String(err?.message||'').slice(0,160),ms:Date.now()-t0,ok:false},timestamp:Date.now(),hypothesisId:'A',runId:'pre-fix'})}).catch(()=>{});
-      // #endregion
       const failView: AgentView = {
         sessionId,
         messages: [...nextMessages, { role: "assistant", content: err.message || "Something went wrong" }],
@@ -247,11 +260,11 @@ export default function ChatPage() {
   scopeRef.current = currentKey;
   const busyHere = busyScopes.includes(currentKey);
 
-  if (!me) return <div className="center">Loading your workspace…</div>;
-
   const activeAgent = roster.agents.find((a) => a.id === agentId) || roster.agents[0];
   const activeGroup = roster.groups.find((g) => g.id === groupId) || null;
   const screenName = activeGroup?.name || activeAgent?.name || "Chief";
+  const screenColor = activeGroup?.members[0]?.color || activeAgent?.color || "#f97316";
+  const screenMeta = activeGroup ? activeGroup.members.map((m) => m.name).join(" · ") : activeAgent?.title || "";
   const scopedSessions = sessions.filter((s) => sessionInScopeRow(s, agentId, groupId));
   const computer = [...messages].reverse().map((m) => computerFromMeta(m.meta)).find(Boolean) || null;
 
@@ -261,6 +274,8 @@ export default function ChatPage() {
     setWatching(false);
     setAgentId(id);
     setGroupId(null);
+    rememberScope(id, null);
+    if (typeof window !== "undefined") window.history.replaceState(null, "", chatHref({ agent: id }));
     const next = scopeKey(id, null);
     scopeRef.current = next;
     const cached = viewsRef.current[next];
@@ -278,6 +293,8 @@ export default function ChatPage() {
     setWatching(false);
     setGroupId(id);
     setAgentId(null);
+    rememberScope(null, id);
+    if (typeof window !== "undefined") window.history.replaceState(null, "", chatHref({ group: id }));
     const next = scopeKey(null, id);
     scopeRef.current = next;
     const cached = viewsRef.current[next];
@@ -330,6 +347,12 @@ export default function ChatPage() {
       activeAgentId={agentId}
       activeGroupId={groupId}
       busyScopes={busyScopes}
+      headline={screenName}
+      headlineMeta={screenMeta}
+      headlineColor={screenColor}
+      computerOpen={screenOpen}
+      computerLive={Boolean(watching || controlling || computer?.live)}
+      onToggleComputer={() => setScreenOpen((open) => !open)}
       onNewChat={newChat}
       onOpenChat={openSession}
       onDeleteChat={removeChat}
@@ -348,25 +371,72 @@ export default function ChatPage() {
       }}
       onRoster={(next) => {
         setRoster(next);
-        setAgentId((id) => {
-          const aid = id || next.default_agent_id || next.agents[0]?.id || null;
-          if (!id && aid) void restoreScope(aid, null, sessions, next);
-          return aid;
-        });
+        const q = typeof window !== "undefined" ? new URLSearchParams(window.location.search) : null;
+        const wantGroup = q?.get("group");
+        const wantAgent = q?.get("agent");
+        if (wantGroup && next.groups.some((g) => g.id === wantGroup)) {
+          if (groupId !== wantGroup) {
+            setGroupId(wantGroup);
+            setAgentId(null);
+            rememberScope(null, wantGroup);
+            void restoreScope(null, wantGroup, sessions, next);
+          }
+          return;
+        }
+        if (wantAgent && next.agents.some((a) => a.id === wantAgent)) {
+          if (agentId !== wantAgent || groupId) {
+            setGroupId(null);
+            setAgentId(wantAgent);
+            rememberScope(wantAgent, null);
+            void restoreScope(wantAgent, null, sessions, next);
+          }
+          return;
+        }
+        if (agentId || groupId) return;
+        const aid = next.default_agent_id || next.agents[0]?.id || null;
+        setAgentId(aid);
+        if (aid) {
+          rememberScope(aid, null);
+          void restoreScope(aid, null, sessions, next);
+        }
       }}
     >
       <div className="workspace">
       <div className="chat">
         <div className="chat-head">
-          <strong>{screenName}</strong>
-          {activeGroup ? <span className="muted">{activeGroup.members.map((m) => m.name).join(" · ")}</span> : activeAgent?.title ? <span className="muted">{activeAgent.title}</span> : null}
+          {activeGroup ? (
+            <span className="group-stack chat-head-face" aria-hidden>
+              {activeGroup.members.slice(0, 3).map((m) => (
+                <span key={m.id} className="agent-avatar tiny" style={{ background: m.color }}>
+                  {(m.name || "?").slice(0, 1).toUpperCase()}
+                </span>
+              ))}
+            </span>
+          ) : (
+            <span className="agent-avatar chat-head-face" style={{ background: screenColor }}>
+              {screenName.slice(0, 1).toUpperCase()}
+            </span>
+          )}
+          <div className="chat-head-copy">
+            <strong>{screenName}</strong>
+            {screenMeta ? <span className="muted">{screenMeta}</span> : null}
+          </div>
+          <button
+            type="button"
+            className={`chat-computer-btn${screenOpen ? " on" : ""}${watching || controlling || computer?.live ? " live" : ""}`}
+            aria-label={screenOpen ? "Hide computer" : "Open computer"}
+            aria-pressed={screenOpen}
+            onClick={() => setScreenOpen((open) => !open)}
+          >
+            <ComputerIcon />
+          </button>
         </div>
         <div className="transcript">
           <div className="thread">
             {notice ? <p className="notice">{notice}</p> : null}
             {messages.length === 0 && !busyHere ? (
               <div className="welcome">
-                <h1>{greeting(me)}</h1>
+                <h1>{hello}</h1>
                 <p>Here&apos;s what&apos;s happening today — brief the inbox, ask a connected system, or schedule a send.</p>
                 <div className="hero-cards">
                   <button className="hero-card" onClick={() => send("What matters today? Give me my chief of staff briefing.")}>
@@ -438,7 +508,7 @@ export default function ChatPage() {
                 <pre className="approval-preview">{formatPreview(p.preview)}</pre>
                 <div className="approval-actions">
                   {p.kind === "handoff" || p.preview?.kind === "handoff" ? (
-                    <button className="btn" type="button" onClick={() => setControlling(true)}>
+                    <button className="btn" type="button" onClick={() => { setControlling(true); setScreenOpen(true); }}>
                       Take control
                     </button>
                   ) : null}
@@ -526,29 +596,35 @@ export default function ChatPage() {
         </div>
         </div>
       </div>
-      <ScreenRail
-        session={computer}
-        watching={Boolean((busyHere && watching) || controlling || computer?.live)}
-        controlling={controlling}
-        agentName={screenName}
-        status={busyHere ? "working" : controlling ? "you have control" : ""}
-        onTakeControl={() => setControlling(true)}
-        onRelease={() => {
-          const handoff = pending.filter((p) => p.kind === "handoff" || p.preview?.kind === "handoff");
-          setControlling(false);
-          if (handoff.length) {
-            setPending([]);
-            send("I finished on the computer. Continue.", handoff);
-          }
-        }}
-      />
+      {screenOpen ? (
+        <>
+          <button type="button" className="screen-scrim" aria-label="Close computer" onClick={() => setScreenOpen(false)} />
+          <ScreenRail
+            session={computer}
+            watching={Boolean((busyHere && watching) || controlling || computer?.live)}
+            controlling={controlling}
+            agentName={screenName}
+            status={busyHere ? "working" : controlling ? "you have control" : ""}
+            onClose={() => setScreenOpen(false)}
+            onTakeControl={() => setControlling(true)}
+            onRelease={() => {
+              const handoff = pending.filter((p) => p.kind === "handoff" || p.preview?.kind === "handoff");
+              setControlling(false);
+              if (handoff.length) {
+                setPending([]);
+                send("I finished on the computer. Continue.", handoff);
+              }
+            }}
+          />
+        </>
+      ) : null}
       </div>
     </AppShell>
   );
 }
 
-function greeting(me: Me) {
-  const raw = (me.name || me.email || "there").trim().split(/[\s@]+/)[0];
+function greeting(me: Me | null) {
+  const raw = (me?.name || me?.email || "there").trim().split(/[\s@]+/)[0];
   const first = raw ? raw[0].toUpperCase() + raw.slice(1) : "there";
   const hour = Number(
     new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Kolkata", hour: "numeric", hour12: false }).format(new Date()),

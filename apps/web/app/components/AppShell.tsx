@@ -1,7 +1,21 @@
 "use client";
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { deleteSession, initials, listSessions, markInboxSeen, relativeTime, subscribeInbox, type ChatSessionRow, type InboxAlert, type Me, type WorkspaceRoster } from "../lib";
+import {
+  chatHref,
+  deleteSession,
+  initials,
+  listSessions,
+  markInboxSeen,
+  rememberScope,
+  rememberedScope,
+  relativeTime,
+  subscribeInbox,
+  type ChatSessionRow,
+  type InboxAlert,
+  type Me,
+  type WorkspaceRoster,
+} from "../lib";
 import { AgentsNav } from "./AgentsNav";
 import { BrandMark } from "./BrandMark";
 
@@ -47,6 +61,15 @@ function IconPlug() {
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
       <path d="M9 7v4M15 7v4M8 11h8v3a4 4 0 0 1-8 0v-3Z" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
       <path d="M12 18v2" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function IconComputer() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <rect x="3.5" y="4.5" width="17" height="12" rx="2" stroke="currentColor" strokeWidth="1.8" />
+      <path d="M8 20h8M12 16.5V20" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
     </svg>
   );
 }
@@ -125,9 +148,15 @@ export function AppShell({
   onRoster,
   onConversationCleared,
   busyScopes,
+  headline,
+  headlineMeta,
+  headlineColor,
+  onToggleComputer,
+  computerOpen,
+  computerLive,
   children,
 }: {
-  me: Me;
+  me?: Me | null;
   current: Nav;
   conversations?: ChatSessionRow[];
   threads?: ChatSessionRow[];
@@ -142,9 +171,16 @@ export function AppShell({
   onSelectGroup?: (id: string) => void;
   onRoster?: (roster: WorkspaceRoster) => void;
   onConversationCleared?: (agentId: string) => void;
+  headline?: string;
+  headlineMeta?: string;
+  headlineColor?: string;
+  onToggleComputer?: () => void;
+  computerOpen?: boolean;
+  computerLive?: boolean;
   children: ReactNode;
 }) {
   const [open, setOpen] = useState(false);
+  const [scope, setScope] = useState({ agent: "", group: "" });
   const [own, setOwn] = useState<ChatSessionRow[]>([]);
   const [badge, setBadge] = useState(0);
   const [pending, setPending] = useState(0);
@@ -154,6 +190,10 @@ export function AppShell({
   const last = useRef(-1);
   const seenGen = useRef(0);
   const alertsOpenRef = useRef(false);
+
+  useEffect(() => {
+    setScope(rememberedScope());
+  }, []);
 
   useEffect(() => {
     if (conversations) return;
@@ -230,23 +270,68 @@ export function AppShell({
 
   const rows = conversations || own;
   const titles: Record<Nav, string> = { chat: "Chat", inbox: "Inbox", tasks: "Tasks", connectors: "Connectors" };
+  const agentId = activeAgentId || scope.agent || null;
+  const groupId = activeGroupId || scope.group || null;
 
-  function goNew() {
-    if (onNewChat) {
-      onNewChat();
-      setOpen(false);
-      return;
-    }
-    window.location.href = "/chat";
+  function closeMenu() {
+    setOpen(false);
   }
 
-  function goOpen(id: string) {
-    if (onOpenChat) {
-      onOpenChat(id);
-      setOpen(false);
+  function chatUrl(extra: { agent?: string | null; group?: string | null; conversation?: string | null; fresh?: boolean } = {}) {
+    return chatHref({
+      agent: extra.agent ?? agentId,
+      group: extra.group ?? groupId,
+      conversation: extra.conversation,
+      fresh: extra.fresh,
+    });
+  }
+
+  function visit(href: string) {
+    closeMenu();
+    if (typeof window !== "undefined") window.location.assign(href);
+  }
+
+  function goAgent(id: string) {
+    rememberScope(id, null);
+    setScope({ agent: id, group: "" });
+    if (onSelectAgent && current === "chat") {
+      onSelectAgent(id);
+      closeMenu();
       return;
     }
-    window.location.href = `/chat?c=${id}`;
+    visit(chatHref({ agent: id }));
+  }
+
+  function goGroup(id: string) {
+    rememberScope(null, id);
+    setScope({ agent: "", group: id });
+    if (onSelectGroup && current === "chat") {
+      onSelectGroup(id);
+      closeMenu();
+      return;
+    }
+    visit(chatHref({ group: id }));
+  }
+
+  function goNew(e: { preventDefault: () => void }) {
+    e.preventDefault();
+    if (onNewChat && current === "chat") {
+      onNewChat();
+      closeMenu();
+      return;
+    }
+    visit(chatUrl({ fresh: true }));
+  }
+
+  function goOpen(e: { preventDefault: () => void }, id: string) {
+    e.preventDefault();
+    if (onOpenChat && current === "chat") {
+      onOpenChat(id);
+      closeMenu();
+      return;
+    }
+    const row = rows.find((s) => s.id === id);
+    visit(chatHref({ agent: row?.agent_id || agentId, group: row?.group_id || groupId, conversation: id }));
   }
 
   async function goDelete(id: string) {
@@ -263,7 +348,7 @@ export function AppShell({
       <div className={`scrim${open ? " show" : ""}`} onClick={() => setOpen(false)} />
       <aside className={`sidebar${open ? " open" : ""}`}>
         <div className="side-brand-row">
-          <a className="side-brand" href="/chat">
+          <a className="side-brand" href={chatUrl()} onClick={(e) => { e.preventDefault(); visit(chatUrl()); }}>
             <BrandMark size={28} />
             <div>
               <strong>Assistant</strong>
@@ -272,43 +357,47 @@ export function AppShell({
           </a>
           <NotifyBell count={badge} items={alerts} toast={toast} open={alertsOpen} onToggle={toggleAlerts} />
         </div>
-        <button className="side-new" type="button" onClick={goNew}>
+        <a className="side-new" href={chatUrl({ fresh: true })} onClick={goNew}>
           New chat
-        </button>
-        <AgentsNav
-          activeAgentId={activeAgentId}
-          activeGroupId={activeGroupId}
-          threads={threads || conversations}
-          busyScopes={busyScopes}
-          onSelectAgent={onSelectAgent}
-          onSelectGroup={onSelectGroup}
-          onRoster={onRoster}
-          onConversationCleared={onConversationCleared}
-        />
+        </a>
         <nav className="side-nav">
-          <a className={`side-link${current === "chat" ? " on" : ""}`} href="/chat">
+          <a className={`side-link${current === "chat" ? " on" : ""}`} href={chatUrl()} onClick={(e) => { e.preventDefault(); visit(chatUrl()); }}>
             <IconChat /> Chat
           </a>
-          <a className={`side-link${current === "inbox" ? " on" : ""}`} href="/inbox">
+          <a className={`side-link${current === "inbox" ? " on" : ""}`} href="/inbox" onClick={(e) => { e.preventDefault(); visit("/inbox"); }}>
             <IconInbox /> Inbox
             {pending > 0 ? <span className="nav-count">{pending > 9 ? "9+" : pending}</span> : null}
           </a>
-          <a className={`side-link${current === "tasks" ? " on" : ""}`} href="/tasks">
+          <a className={`side-link${current === "tasks" ? " on" : ""}`} href="/tasks" onClick={(e) => { e.preventDefault(); visit("/tasks"); }}>
             <IconClock /> Tasks
           </a>
-          <a className={`side-link${current === "connectors" ? " on" : ""}`} href="/connectors">
+          <a className={`side-link${current === "connectors" ? " on" : ""}`} href="/connectors" onClick={(e) => { e.preventDefault(); visit("/connectors"); }}>
             <IconPlug /> Connectors
           </a>
         </nav>
+        <AgentsNav
+          activeAgentId={agentId}
+          activeGroupId={groupId}
+          threads={threads || conversations}
+          busyScopes={busyScopes}
+          onSelectAgent={goAgent}
+          onSelectGroup={goGroup}
+          onRoster={onRoster}
+          onConversationCleared={onConversationCleared}
+        />
         <div className="side-label">Recent</div>
         <div className="convo-list">
           {rows.length === 0 ? <div className="muted" style={{ padding: "8px 10px", fontSize: 13 }}>No conversations yet</div> : null}
           {rows.map((s) => (
             <div key={s.id} className={`convo${activeId === s.id ? " on" : ""}`}>
-              <button className="convo-open" type="button" onClick={() => goOpen(s.id)}>
+              <a
+                className="convo-open"
+                href={chatHref({ agent: s.agent_id || agentId, group: s.group_id || groupId, conversation: s.id })}
+                onClick={(e) => goOpen(e, s.id)}
+              >
                 <div className="convo-title">{s.title || "Untitled"}</div>
                 <div className="convo-meta">{relativeTime(s.updated_at)}</div>
-              </button>
+              </a>
               <button className="convo-x" type="button" title="Delete conversation" onClick={() => goDelete(s.id)}>
                 ×
               </button>
@@ -317,10 +406,10 @@ export function AppShell({
         </div>
         <div className="side-user">
           <div className="who">
-            <span className="avatar">{initials(me.name, me.email)}</span>
+            <span className="avatar">{me ? initials(me.name, me.email) : "…"}</span>
             <div>
-              <strong>{me.name || "Signed in"}</strong>
-              <span>{me.email}</span>
+              <strong>{me?.name || "Workspace"}</strong>
+              <span>{me?.email || "Loading…"}</span>
             </div>
           </div>
           <form action="/api/auth/logout" method="post">
@@ -332,11 +421,33 @@ export function AppShell({
       </aside>
       <div className="main">
         <header className="topbar">
-          <button className="ghost" type="button" onClick={() => setOpen(true)} aria-label="Open menu">
-            <BrandMark size={22} />
-            {titles[current]}
+          <button className="ghost topbar-who" type="button" onClick={() => setOpen(true)} aria-label="Open menu">
+            {headlineColor ? (
+              <span className="agent-avatar tiny" style={{ background: headlineColor }}>
+                {(headline || "?").slice(0, 1).toUpperCase()}
+              </span>
+            ) : (
+              <BrandMark size={22} />
+            )}
+            <span className="topbar-copy">
+              <strong>{headline || titles[current]}</strong>
+              {headlineMeta ? <small>{headlineMeta}</small> : null}
+            </span>
           </button>
-          <NotifyBell count={badge} items={alerts} toast={toast} open={alertsOpen} onToggle={toggleAlerts} />
+          <div className="topbar-actions">
+            {onToggleComputer ? (
+              <button
+                type="button"
+                className={`topbar-icon${computerOpen ? " on" : ""}${computerLive ? " live" : ""}`}
+                aria-label={computerOpen ? "Hide computer" : "Open computer"}
+                aria-pressed={Boolean(computerOpen)}
+                onClick={onToggleComputer}
+              >
+                <IconComputer />
+              </button>
+            ) : null}
+            <NotifyBell count={badge} items={alerts} toast={toast} open={alertsOpen} onToggle={toggleAlerts} />
+          </div>
         </header>
         {children}
       </div>

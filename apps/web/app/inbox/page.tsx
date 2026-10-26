@@ -253,8 +253,6 @@ export default function InboxPage() {
     });
   }
 
-  if (!me) return <div className="center">Loading your workspace…</div>;
-
   return (
     <AppShell me={me} current="inbox">
       <div className="page inbox-page">
