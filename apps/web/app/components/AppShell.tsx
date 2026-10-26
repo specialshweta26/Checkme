@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { deleteSession, initials, listSessions, markInboxSeen, relativeTime, subscribeInbox, type ChatSessionRow, type InboxAlert, type Me } from "../lib";
+import { deleteSession, initials, listSessions, markInboxSeen, relativeTime, subscribeInbox, type ChatSessionRow, type InboxAlert, type Me, type WorkspaceRoster } from "../lib";
+import { AgentsNav } from "./AgentsNav";
 import { BrandMark } from "./BrandMark";
 
 type Nav = "chat" | "inbox" | "tasks" | "connectors";
@@ -112,19 +113,35 @@ export function AppShell({
   me,
   current,
   conversations,
+  threads,
   activeId,
+  activeAgentId,
+  activeGroupId,
   onNewChat,
   onOpenChat,
   onDeleteChat,
+  onSelectAgent,
+  onSelectGroup,
+  onRoster,
+  onConversationCleared,
+  busyScopes,
   children,
 }: {
   me: Me;
   current: Nav;
   conversations?: ChatSessionRow[];
+  threads?: ChatSessionRow[];
   activeId?: string | null;
+  activeAgentId?: string | null;
+  activeGroupId?: string | null;
+  busyScopes?: string[];
   onNewChat?: () => void;
   onOpenChat?: (id: string) => void;
   onDeleteChat?: (id: string) => void;
+  onSelectAgent?: (id: string) => void;
+  onSelectGroup?: (id: string) => void;
+  onRoster?: (roster: WorkspaceRoster) => void;
+  onConversationCleared?: (agentId: string) => void;
   children: ReactNode;
 }) {
   const [open, setOpen] = useState(false);
@@ -258,6 +275,16 @@ export function AppShell({
         <button className="side-new" type="button" onClick={goNew}>
           New chat
         </button>
+        <AgentsNav
+          activeAgentId={activeAgentId}
+          activeGroupId={activeGroupId}
+          threads={threads || conversations}
+          busyScopes={busyScopes}
+          onSelectAgent={onSelectAgent}
+          onSelectGroup={onSelectGroup}
+          onRoster={onRoster}
+          onConversationCleared={onConversationCleared}
+        />
         <nav className="side-nav">
           <a className={`side-link${current === "chat" ? " on" : ""}`} href="/chat">
             <IconChat /> Chat

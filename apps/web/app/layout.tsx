@@ -7,6 +7,7 @@ const sans = IBM_Plex_Sans({
   weight: ["400", "500", "600"],
   variable: "--font-sans",
   display: "swap",
+  preload: false,
 });
 
 const serif = Newsreader({
@@ -15,6 +16,7 @@ const serif = Newsreader({
   style: ["normal", "italic"],
   variable: "--font-serif",
   display: "swap",
+  preload: false,
 });
 
 export const metadata: Metadata = {

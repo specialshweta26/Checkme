@@ -1,11 +1,16 @@
 import { Fragment, type ReactNode } from "react";
+import { DataTable, textNodes } from "./DataTable";
 
 function inline(text: string): ReactNode[] {
-  const parts = text.split(/(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`|\[[^\]]+\]\([^)]+\))/g);
+  const parts = text.split(/(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`|!\[[^\]]*\]\([^)]+\)|\[[^\]]+\]\([^)]+\))/g);
   return parts.map((part, i) => {
     if (part.startsWith("**") && part.endsWith("**")) return <strong key={i}>{part.slice(2, -2)}</strong>;
     if (part.startsWith("*") && part.endsWith("*")) return <em key={i}>{part.slice(1, -1)}</em>;
     if (part.startsWith("`") && part.endsWith("`")) return <code key={i}>{part.slice(1, -1)}</code>;
+    const image = part.match(/^!\[([^\]]*)\]\((https?:[^)]+)\)$/);
+    if (image) {
+      return <img key={i} src={image[2]} alt={image[1]} />;
+    }
     const link = part.match(/^\[([^\]]+)\]\((https?:[^)]+)\)$/);
     if (link) {
       return (
@@ -34,26 +39,7 @@ function table(lines: string[], key: string) {
     );
   const head = rows[0] || [];
   const body = rows.slice(1);
-  return (
-    <table key={key}>
-      <thead>
-        <tr>
-          {head.map((c, i) => (
-            <th key={i}>{inline(c)}</th>
-          ))}
-        </tr>
-      </thead>
-      <tbody>
-        {body.map((row, ri) => (
-          <tr key={ri}>
-            {row.map((c, ci) => (
-              <td key={ci}>{inline(c)}</td>
-            ))}
-          </tr>
-        ))}
-      </tbody>
-    </table>
-  );
+  return <DataTable key={key} head={head} body={body} cell={(text) => textNodes(text)} />;
 }
 
 function flushParagraph(buf: string[], out: ReactNode[], key: string) {

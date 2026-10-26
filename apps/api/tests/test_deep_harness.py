@@ -4,6 +4,10 @@ from types import SimpleNamespace
 
 from app.agent.deep import (
     RunContext,
+    _computer_session,
+    _connect_cards,
+    _maybe_start_connect,
+    _pick_connect_toolkit,
     call_user_tool,
     compact_payload,
     dumps,
@@ -62,6 +66,18 @@ def test_catalog_dumps_are_not_truncated():
     assert isinstance(compact, dict) and compact.get("too_large") is True
 
 
+async def test_browser_handoff_pauses_for_user():
+    computer = _conn(slug="computer", provider="daytona", kind="builtin", name="Computer", alias="computer")
+    ctx = _ctx([computer])
+    result = await call_user_tool(ctx, "computer", "browser_handoff", {"reason": "Log in to the site."})
+    assert result["handoff"] is True
+    assert ctx.pending[0]["kind"] == "handoff"
+    ctx.confirmations = [{"slug": "computer", "tool": "browser_handoff"}]
+    done = await call_user_tool(ctx, "computer", "browser_handoff", {"reason": "Log in to the site."})
+    assert done["status"] == "user_finished"
+    assert done["handoff"] is False
+
+
 async def test_unknown_slug_is_rejected():
     ctx = _ctx([_conn()])
     result = await call_user_tool(ctx, "gmail", "list_messages", {})
@@ -109,6 +125,179 @@ def _gateway_surface(**kwargs):
     }
     surface.update(kwargs)
     return surface
+
+
+def test_mail_scope_ignores_chat_apps():
+    from app.routing.retrieve import extra_capability_terms, is_calendar_query, keep_connector_scope
+
+    chat = "search Teams messages by sender"
+    assert "teams" in extra_capability_terms(chat)
+    assert not is_calendar_query(chat)
+    assert keep_connector_scope("outlook", chat) is False
+    assert keep_connector_scope("outlook", "search messages by sender") is True
+    assert keep_connector_scope("outlook", "teams meeting with shyam") is True
+    assert keep_connector_scope("composio", chat) is True
+
+
+def test_pick_connect_toolkit_uses_named_app():
+    apps = [
+        {"slug": "replyio", "name": "Reply.io"},
+        {"slug": "gmail", "name": "Gmail"},
+        {"slug": "github", "name": "GitHub"},
+    ]
+    picked = _pick_connect_toolkit(apps, "connect to gmail")
+    assert picked["slug"] == "gmail"
+
+
+async def test_connect_query_starts_composio_card():
+    calls = []
+
+    async def fake_call(slug, tool, args):
+        calls.append((tool, dict(args)))
+        if tool == "list_apps":
+            return {"apps": [{"slug": "gmail", "name": "Gmail", "logo": "https://example.com/g.png"}]}
+        if tool == "connect_app":
+            return {
+                "toolkit": args.get("toolkit"),
+                "name": "Gmail",
+                "redirect_url": "https://connect.composio.dev/link/gmail",
+            }
+        return {}
+
+    market = _conn(slug="composio", provider="composio", kind="builtin", name="Composio", alias="composio")
+    ctx = _ctx([market], call_impl=fake_call)
+    ctx.gateway_surface["composio"] = {
+        "search": "find_tools",
+        "search_schema": {"type": "object", "properties": {"query": {"type": "string"}}},
+        "execute": "execute",
+        "resolve": "resolve",
+        "resolve_schema": {},
+    }
+    await _maybe_start_connect(ctx, "connect to gmail")
+    cards = _connect_cards(ctx)
+    assert any(tool == "connect_app" and args.get("toolkit") == "gmail" for tool, args in calls)
+    assert cards[0]["redirect_url"] == "https://connect.composio.dev/link/gmail"
+    assert not any(tool == "execute" for tool, _ in calls)
+
+
+def test_computer_session_marks_live_browser():
+    ctx = _ctx([_conn()])
+    ctx.used_tools.append("computer__browser_navigate")
+    ctx.results.append(
+        {
+            "tool_name": "browser_navigate",
+            "data": {
+                "url": "https://example.com",
+                "title": "Example",
+                "screenshot": {"preview_url": "/api/files/page.png", "download_url": "/api/files/page.png"},
+            },
+        }
+    )
+    session = _computer_session(ctx)
+    assert session["live"] is True
+    assert session["url"] == "https://example.com"
+    assert session["preview_url"] == "/api/files/page.png"
+
+
+def test_computer_session_uses_screen_attachment():
+    ctx = _ctx([_conn()])
+    ctx.attachments.append({"kind": "screen", "filename": "page.png", "preview_url": "/api/files/x.png", "download_url": "/api/files/x.png"})
+    session = _computer_session(ctx)
+    assert session["live"] is True
+    assert session["preview_url"] == "/api/files/x.png"
+
+
+def test_connect_cards_come_from_redirect_url():
+    ctx = _ctx([_conn()])
+    ctx.results.append(
+        {
+            "tool_name": "connect_app",
+            "data": {
+                "toolkit": "gmail",
+                "name": "Gmail",
+                "redirect_url": "https://connect.composio.dev/link/abc",
+            },
+        }
+    )
+    cards = _connect_cards(ctx)
+    assert cards[0]["toolkit"] == "gmail"
+    assert cards[0]["redirect_url"].startswith("https://connect.composio.dev")
+
+
+async def test_connect_query_does_not_expand_marketplace_execute_tools():
+    calls = []
+
+    async def fake_call(slug, tool, args):
+        calls.append(tool)
+        return {"candidates": [{"public_name": "REPLYIO_SEND_GMAIL", "description": "Send via Reply.io"}]}
+
+    market = _conn(slug="composio", provider="composio", kind="builtin", name="Composio", alias="composio")
+    ctx = _ctx([market], call_impl=fake_call)
+    ctx.gateway_surface["composio"] = {
+        "search": "find_tools",
+        "search_schema": {"type": "object", "properties": {"query": {"type": "string"}}},
+        "execute": "execute",
+        "resolve": "resolve",
+        "resolve_schema": {},
+    }
+    rows = await search_user_tools(ctx, "connect to gmail")
+    assert "find_tools" not in calls
+    assert not any(row["tool_name"] == "REPLYIO_SEND_GMAIL" for row in rows)
+
+
+async def test_outlook_slug_still_expands_marketplace_for_chat():
+    calls = []
+
+    async def fake_call(slug, tool, args):
+        calls.append((slug, tool, dict(args)))
+        if tool == "list_connections":
+            return {"connections": [{"toolkit": "microsoft_teams", "status": "ACTIVE"}]}
+        if tool == "find_tools":
+            return {
+                "candidates": [
+                    {"public_name": "TEAMS_LIST_CHATS", "description": "List Microsoft Teams chats", "score": 0.9}
+                ]
+            }
+        return {"candidates": []}
+
+    outlook = _conn(slug="outlook", provider="outlook", kind="builtin", name="Outlook", alias="outlook")
+    market = _conn(slug="composio", provider="composio", kind="builtin", name="Composio", alias="composio")
+    ctx = _ctx([outlook, market], call_impl=fake_call)
+    ctx.gateway_surface["composio"] = {
+        "search": "find_tools",
+        "search_schema": {
+            "type": "object",
+            "properties": {"query": {"type": "string"}, "toolkit": {"type": "string"}},
+        },
+        "execute": "execute",
+        "resolve": "resolve",
+        "resolve_schema": {},
+    }
+    rows = await search_user_tools(ctx, "search Teams messages by sender", "outlook")
+    names = [row["tool_name"] for row in rows]
+    assert "TEAMS_LIST_CHATS" in names
+    assert any(tool == "find_tools" and args.get("toolkit") == "microsoft_teams" for _, tool, args in calls)
+
+
+async def test_mail_slug_stays_scoped_for_mail_search():
+    calls = []
+
+    async def fake_call(slug, tool, args):
+        calls.append((slug, tool))
+        return {"candidates": []}
+
+    outlook = _conn(slug="outlook", provider="outlook", kind="builtin", name="Outlook", alias="outlook")
+    market = _conn(slug="composio", provider="composio", kind="builtin", name="Composio", alias="composio")
+    ctx = _ctx([outlook, market], call_impl=fake_call)
+    ctx.gateway_surface["composio"] = {
+        "search": "find_tools",
+        "search_schema": {"type": "object", "properties": {"query": {"type": "string"}}},
+        "execute": "execute",
+        "resolve": None,
+        "resolve_schema": {},
+    }
+    await search_user_tools(ctx, "search messages by sender", "outlook")
+    assert calls == []
 
 
 async def test_search_tools_expands_gateway_catalog():
@@ -214,16 +403,44 @@ def test_system_prompt_has_no_product_recipes():
     assert "capability phrase" in lowered
     assert "gateway__tool_search return catalogs" in lowered
     assert "expands gateway catalogs" in lowered
+    assert "cloud sandbox" in lowered or "composio connector is an app marketplace" in lowered
     assert "call_tool" in lowered
     assert "inspect_result" in lowered
     assert "schedule_task" in lowered
     assert "create_event" in lowered
     assert "create_google_meet" in lowered
     assert "create_teams_meeting" in lowered
+    assert "publish_file" in lowered
+    assert "connect_app" in lowered
+    assert "connect card" in lowered
+    assert "browse_open" in lowered or "browser_navigate" in lowered
+    assert "browser_snapshot" in lowered
+    assert "computer_act" in lowered
+    assert "live computer" in lowered or "persistent chromium" in lowered
+    assert "do not open the browser" in lowered
+    assert "not in list_connections" in lowered
+    assert "google flights" in lowered or "public lookup" in lowered
+    assert "instagram" in lowered
+    assert "web_fetch paints" in lowered or "paints that html" in lowered
+    assert "browser_handoff" in lowered
+    assert "fill whole forms" in lowered
+    assert "never attach page.png" in lowered
+    assert "html.duckduckgo.com" in lowered
+    assert "web_fetch" in lowered
+    assert "never stop after one failed page" in lowered
+    assert "never cite sandbox" in lowered
+    assert "without connector_slug" in lowered
+    assert "not outlook search_messages" in lowered
+    assert "once you know the source" not in lowered
     assert "empty_folder" in lowered
     assert "get_thread" in lowered
     assert "never call get_thread with an empty thread_id" in lowered
     assert "detailed analyst" in lowered
+    assert "markdown pipe tables" in lowered or "markdown tables" in lowered
+    assert "download_url" in lowered
+    assert "data analyst" in lowered
+    assert "write_analytics_report" in lowered
+    assert "line for a time series" in lowered
     assert "keep answers short" not in lowered
     assert "schedule_task and do not fetch now" in lowered
     assert "one8" not in lowered

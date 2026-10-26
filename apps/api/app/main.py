@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.agents.routes import router as agents_router
 from app.auth.routes import me_router, router as auth_router
 from app.chat.routes import router as chat_router
 from app.config import get_settings
@@ -21,13 +22,8 @@ log = logging.getLogger("assistant")
 logging.basicConfig(level=logging.INFO)
 
 
-@asynccontextmanager
-async def lifespan(_app: FastAPI):
-    await init_db()
-    try:
-        ensure_bucket()
-    except Exception as exc:  # noqa: BLE001
-        log.warning("object storage not ready: %s", exc)
+async def _sync_builtins_later() -> None:
+    await asyncio.sleep(0.2)
     try:
         from sqlalchemy import select
 
@@ -40,14 +36,28 @@ async def lifespan(_app: FastAPI):
             for row in rows:
                 try:
                     await sync_builtin(db, row)
-                except Exception as exc:  # noqa: BLE001
-                    log.warning("builtin sync skipped for %s: %s", row.slug, exc)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("startup connector sync skipped: %s", exc)
+                except Exception as vis_exc:  # noqa: BLE001
+                    log.warning("builtin sync skipped for %s: %s", row.slug, vis_exc)
+                await asyncio.sleep(0)
+    except Exception as vis_exc:  # noqa: BLE001
+        log.warning("startup connector sync skipped: %s", vis_exc)
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    await init_db()
+    try:
+        ensure_bucket()
+    except Exception as vis_exc:  # noqa: BLE001
+        log.warning("object storage not ready: %s", vis_exc)
     from app.inbox.worker import start_inbox_worker
     from app.tasks.scheduler import start_scheduler
 
-    workers = [await start_scheduler(), await start_inbox_worker()]
+    workers = [
+        asyncio.create_task(_sync_builtins_later(), name="startup-sync"),
+        await start_scheduler(),
+        await start_inbox_worker(),
+    ]
     cfg = get_settings()
     log.info(
         "oauth google=%s microsoft=%s public_web_url=%s",
@@ -79,6 +89,7 @@ app.add_middleware(
 app.include_router(auth_router, prefix="/api")
 app.include_router(me_router, prefix="/api")
 app.include_router(chat_router, prefix="/api")
+app.include_router(agents_router, prefix="/api")
 app.include_router(connectors_router, prefix="/api")
 app.include_router(tasks_router, prefix="/api")
 app.include_router(inbox_router, prefix="/api")

@@ -12,7 +12,146 @@ export type ChatSessionRow = {
   id: string;
   title: string;
   updated_at: string;
+  agent_id?: string | null;
+  group_id?: string | null;
 };
+
+export type WorkspaceAgent = {
+  id: string;
+  name: string;
+  title?: string;
+  instructions?: string;
+  color: string;
+  kind?: string;
+  pinned?: boolean;
+  archived?: boolean;
+  unread?: boolean;
+  session_id?: string;
+  preview?: string;
+  updated_at?: string;
+};
+
+export type AgentGroup = {
+  id: string;
+  name: string;
+  members: WorkspaceAgent[];
+  session_id?: string;
+  preview?: string;
+  updated_at?: string;
+};
+
+export type WorkspaceRoster = {
+  agents: WorkspaceAgent[];
+  groups: AgentGroup[];
+  default_agent_id?: string;
+  connector_assignments?: Record<string, string[]>;
+};
+
+export async function loadWorkspace(): Promise<WorkspaceRoster> {
+  const res = await fetch("/api/agents", { credentials: "include" });
+  if (!res.ok) return { agents: [], groups: [] };
+  return res.json();
+}
+
+export function apiError(data: unknown, fallback: string) {
+  const detail = data && typeof data === "object" ? (data as { detail?: unknown }).detail : undefined;
+  if (typeof detail === "string" && detail.trim()) return detail;
+  if (Array.isArray(detail)) {
+    const first = detail
+      .map((row) => (typeof row === "string" ? row : row && typeof row === "object" ? (row as { msg?: string }).msg : ""))
+      .find((row) => row);
+    if (first) return String(first);
+  }
+  return fallback;
+}
+
+export async function createAgent(body: { name: string; title?: string; instructions?: string; color?: string }) {
+  const res = await fetch("/api/agents", {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(apiError(data, "Could not create agent"));
+  return data as WorkspaceAgent;
+}
+
+export async function deleteAgent(id: string) {
+  const res = await fetch(`/api/agents/${id}`, { method: "DELETE", credentials: "include" });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : "Could not delete agent");
+  return res.ok;
+}
+
+async function agentAction(path: string, method: string, body?: unknown) {
+  const res = await fetch(path, {
+    method,
+    credentials: "include",
+    headers: body ? { "Content-Type": "application/json" } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(apiError(data, "Could not update agent"));
+  return data;
+}
+
+export async function updateAgent(
+  id: string,
+  body: {
+    name?: string;
+    title?: string;
+    instructions?: string;
+    color?: string;
+    pinned?: boolean;
+    archived?: boolean;
+    unread?: boolean;
+  },
+) {
+  return agentAction(`/api/agents/${id}`, "PATCH", body) as Promise<WorkspaceAgent>;
+}
+
+export async function duplicateAgent(id: string) {
+  return agentAction(`/api/agents/${id}/duplicate`, "POST") as Promise<WorkspaceAgent>;
+}
+
+export async function clearAgentChat(id: string) {
+  return agentAction(`/api/agents/${id}/clear`, "POST");
+}
+
+export async function moveAgentToGroup(agentId: string, groupId: string) {
+  return agentAction(`/api/agents/${agentId}/move`, "POST", { group_id: groupId });
+}
+
+export async function assignConnectorAgents(connectorId: string, agentIds: string[]) {
+  return agentAction(`/api/agents/connector-assignments/${connectorId}`, "PUT", { agent_ids: agentIds });
+}
+
+export function nextAssignedAgents(assigned: string[] | undefined, agentId: string, allAgentIds: string[]) {
+  const restricted = assigned || [];
+  const current = restricted.length ? restricted : allAgentIds;
+  const checked = !restricted.length || restricted.includes(agentId);
+  return checked ? current.filter((id) => id !== agentId) : [...current.filter((id) => id !== agentId), agentId];
+}
+
+export async function createGroup(body: { name: string; member_ids: string[] }) {
+  const res = await fetch("/api/agents/groups", {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : "Could not create group");
+  return data as AgentGroup;
+}
+
+export async function deleteGroup(id: string) {
+  const res = await fetch(`/api/agents/groups/${id}`, { method: "DELETE", credentials: "include" });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : "Could not delete group");
+  return res.ok;
+}
 
 export async function getMe(): Promise<Me | null> {
   const res = await fetch("/api/me", { credentials: "include" });

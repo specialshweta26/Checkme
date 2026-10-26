@@ -160,12 +160,60 @@ class ToolEdge(Base):
     count: Mapped[int] = mapped_column(Integer, default=0)
 
 
+class WorkspaceAgent(Base):
+    """A named bot the user can chat with. Groups of these can talk to each other."""
+
+    __tablename__ = "workspace_agents"
+    __table_args__ = (UniqueConstraint("user_id", "name"),)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(80))
+    title: Mapped[str] = mapped_column(String(160), default="")
+    instructions: Mapped[str] = mapped_column(Text, default="")
+    color: Mapped[str] = mapped_column(String(16), default="#f97316")
+    kind: Mapped[str] = mapped_column(String(20), default="custom")  # default | custom
+    pinned: Mapped[bool] = mapped_column(Boolean, default=False)
+    archived: Mapped[bool] = mapped_column(Boolean, default=False)
+    unread: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class AgentConnector(Base):
+    """When rows exist for a connector, only those agents may use it. No rows = every agent."""
+
+    __tablename__ = "agent_connectors"
+    __table_args__ = (UniqueConstraint("agent_id", "connector_id"),)
+    agent_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("workspace_agents.id", ondelete="CASCADE"), primary_key=True)
+    connector_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("connectors.id", ondelete="CASCADE"), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class AgentGroup(Base):
+    __tablename__ = "agent_groups"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(80))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class AgentGroupMember(Base):
+    __tablename__ = "agent_group_members"
+    __table_args__ = (UniqueConstraint("group_id", "agent_id"),)
+    group_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("agent_groups.id", ondelete="CASCADE"), primary_key=True)
+    agent_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("workspace_agents.id", ondelete="CASCADE"), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
 class ChatSession(Base):
     __tablename__ = "chat_sessions"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     title: Mapped[str] = mapped_column(String(200), default="New chat")
     state: Mapped[dict] = mapped_column(JSONB, default=dict)  # working memory
+    agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    group_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 

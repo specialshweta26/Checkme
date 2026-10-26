@@ -69,7 +69,7 @@ async def inbox_events(user: User = Depends(current_user)):
                     current = await db.get(User, user_id)
                     if current is None:
                         break
-                    if ticks % 5 == 0:
+                    if ticks > 0 and ticks % 15 == 0:
                         await service.refresh_mailboxes(db, current, unread_only=False, classify=False)
                     badge = await service.badge(db, current)
                     inbox = await service.list_inbox(db, current, live=False, mark_seen=False)

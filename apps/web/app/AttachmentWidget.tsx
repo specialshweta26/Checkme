@@ -48,6 +48,7 @@ function kindOf(a: Attachment): string {
   if (a.kind) return a.kind;
   if (a.content_type?.startsWith("image/")) return "image";
   if (a.content_type?.includes("pdf") || a.filename?.toLowerCase().endsWith(".pdf")) return "pdf";
+  if (a.content_type?.includes("html") || a.filename?.toLowerCase().endsWith(".html")) return "html";
   return "file";
 }
 
@@ -171,12 +172,15 @@ function AttachmentRow({ item }: { item: Attachment }) {
               </a>
             </p>
           ) : null}
+          {kind === "html" ? (
+            <iframe className="att-preview-frame" title={item.filename || "Report"} src={preview} />
+          ) : null}
           {previewSrc && (pdfRender || showImage) ? (
             <div className="att-preview-scroll">
               <img src={previewSrc} alt={item.filename || "Attachment preview"} />
             </div>
           ) : null}
-          {!pdfRender && !showImage && !loading ? (
+          {!pdfRender && !showImage && kind !== "html" && !loading ? (
             <a className="muted att-preview-status" href={preview} target="_blank" rel="noreferrer">
               Open preview
             </a>

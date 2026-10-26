@@ -77,6 +77,11 @@ class Settings(BaseSettings):
 
     allow_private_mcp_urls: bool = False
 
+    daytona_api_key: str = ""
+    daytona_api_url: str = "https://app.daytona.io/api"
+    daytona_target: str = "us"
+    composio_api_key: str = ""
+
     # Routing knobs, tuned by the routing eval.
     route_margin: float = 0.08
     max_tool_schemas: int = 12

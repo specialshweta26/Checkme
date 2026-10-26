@@ -535,6 +535,7 @@ async def _ingest_locked(
             log.warning("inbox list failed for %s: %s", runtime.slug, exc)
             continue
         for msg in listed:
+            await asyncio.sleep(0)
             mid = msg.get("message_id")
             if not mid:
                 continue

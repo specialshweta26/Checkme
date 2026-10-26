@@ -42,7 +42,9 @@ def _kind(filename: str, content_type: str) -> str:
         return "pdf"
     if ctype.startswith("image/") or name.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp")):
         return "image"
-    if name.endswith((".txt", ".csv", ".md", ".html")) or ctype.startswith("text/"):
+    if name.endswith(".html") or "html" in ctype:
+        return "html"
+    if name.endswith((".txt", ".csv", ".md")) or ctype.startswith("text/"):
         return "text"
     if name.endswith(".docx"):
         return "docx"

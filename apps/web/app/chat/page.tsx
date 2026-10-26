@@ -3,15 +3,35 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { AttachmentWidget } from "../AttachmentWidget";
 import { AppShell } from "../components/AppShell";
+import { chatAttachments, computerFromMeta, ScreenRail } from "../components/ComputerPanel";
+import { cardsFromMeta, ConnectCards } from "../components/ConnectCard";
 import { EmailThreadButton, mailRefsFromMeta } from "../components/EmailThread";
 import { Markdown } from "../components/Markdown";
 import { Thinking } from "../components/Thinking";
-import { deleteSession, getMe, listSessions, loadSession, uploadFiles, type ChatSessionRow, type Me, type UploadedFile } from "../lib";
+import { deleteSession, getMe, listSessions, loadSession, uploadFiles, type ChatSessionRow, type Me, type UploadedFile, type WorkspaceRoster } from "../lib";
 
 const STORE = "assistant.session";
 
+function scopeKey(agentId?: string | null, groupId?: string | null) {
+  if (groupId) return `g.${groupId}`;
+  if (agentId) return `a.${agentId}`;
+  return "";
+}
+
+function scopeStore(agentId?: string | null, groupId?: string | null) {
+  const key = scopeKey(agentId, groupId);
+  return key ? `${STORE}.${key}` : STORE;
+}
+
+function sessionInScopeRow(row: ChatSessionRow | undefined, agentId?: string | null, groupId?: string | null) {
+  if (!row) return false;
+  if (groupId) return row.group_id === groupId;
+  return !row.group_id && !!agentId && row.agent_id === agentId;
+}
+
 type Msg = { role: "user" | "assistant"; content: string; meta?: any };
-type Confirm = { token: string; title: string; preview: any };
+type Confirm = { token: string; title: string; preview: any; kind?: string };
+type AgentView = { sessionId: string | null; messages: Msg[]; pending: Confirm[] };
 
 export default function ChatPage() {
   const [me, setMe] = useState<Me | null>(null);
@@ -20,38 +40,76 @@ export default function ChatPage() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [sessions, setSessions] = useState<ChatSessionRow[]>([]);
   const [pending, setPending] = useState<Confirm[]>([]);
-  const [busy, setBusy] = useState(false);
+  const [busyScopes, setBusyScopes] = useState<string[]>([]);
+  const viewsRef = useRef<Record<string, AgentView>>({});
+  const scopeRef = useRef("");
+  const inflightRef = useRef<Set<string>>(new Set());
   const [notice, setNotice] = useState("");
   const end = useRef<HTMLDivElement>(null);
   const box = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const [uploads, setUploads] = useState<UploadedFile[]>([]);
   const [uploadError, setUploadError] = useState("");
+  const [watching, setWatching] = useState(false);
+  const [controlling, setControlling] = useState(false);
+  const [agentId, setAgentId] = useState<string | null>(null);
+  const [groupId, setGroupId] = useState<string | null>(null);
+  const [roster, setRoster] = useState<WorkspaceRoster>({ agents: [], groups: [] });
 
   async function refreshSessions() {
     setSessions(await listSessions());
   }
 
+  function persistView(key: string, extra?: Partial<AgentView>) {
+    if (!key) return;
+    const prev = viewsRef.current[key];
+    if (inflightRef.current.has(key) && prev && !extra) return;
+    viewsRef.current[key] = {
+      sessionId,
+      messages,
+      pending,
+      ...extra,
+    };
+  }
+
+  function showView(view: AgentView) {
+    setSessionId(view.sessionId);
+    setMessages(view.messages);
+    setPending(view.pending);
+  }
+
   async function openSession(id: string) {
     const data = await loadSession(id);
     if (!data) return;
+    const sess = data.session || {};
+    const nextAgent = sess.group_id ? null : sess.agent_id || roster.default_agent_id || null;
+    const nextGroup = sess.group_id || null;
+    const nextMessages = (data.messages || [])
+      .filter((m: Msg) => m.role === "user" || m.role === "assistant")
+      .map((m: Msg) => ({ role: m.role, content: m.content || "", meta: m.meta }));
+    const view = { sessionId: id, messages: nextMessages, pending: [] as Confirm[] };
+    viewsRef.current[scopeKey(nextAgent, nextGroup)] = view;
     setSessionId(id);
-    window.localStorage.setItem(STORE, id);
-    setMessages(
-      (data.messages || [])
-        .filter((m: Msg) => m.role === "user" || m.role === "assistant")
-        .map((m: Msg) => ({ role: m.role, content: m.content || "", meta: m.meta })),
-    );
+    setMessages(nextMessages);
     setPending([]);
+    setGroupId(nextGroup);
+    setAgentId(nextAgent);
+    window.localStorage.setItem(scopeStore(nextAgent, nextGroup), id);
   }
 
   function newChat() {
+    const key = scopeKey(agentId, groupId);
     setSessionId(null);
     setMessages([]);
     setPending([]);
     setNotice("");
     setUploads([]);
-    window.localStorage.removeItem(STORE);
+    setWatching(false);
+    setControlling(false);
+    if (key && !inflightRef.current.has(key)) {
+      viewsRef.current[key] = { sessionId: null, messages: [], pending: [] };
+    }
+    window.localStorage.removeItem(scopeStore(agentId, groupId));
     box.current?.focus();
   }
 
@@ -71,10 +129,7 @@ export default function ChatPage() {
         u = { ...u, timezone: "Asia/Kolkata" };
       }
       setMe(u);
-      const rows = await listSessions();
-      setSessions(rows);
-      const wanted = new URLSearchParams(window.location.search).get("c") || window.localStorage.getItem(STORE);
-      if (wanted && rows.some((r) => r.id === wanted)) await openSession(wanted);
+      setSessions(await listSessions());
     });
     const q = new URLSearchParams(window.location.search);
     if (q.get("mcp") === "connected") setNotice("MCP connected. You can use it in this chat.");
@@ -82,23 +137,48 @@ export default function ChatPage() {
   }, []);
 
   useEffect(() => {
+    const cards = document.querySelectorAll(".connect-card");
+    const card = cards[cards.length - 1];
+    if (card) {
+      card.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
     end.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, pending, busy]);
+  }, [messages, pending, busyScopes]);
 
   async function send(message: string, confirmations: any[] = []) {
-    if ((!message.trim() && !uploads.length) || busy) return;
+    const key = scopeKey(agentId, groupId);
+    if ((!message.trim() && !uploads.length) || !key || busyScopes.includes(key)) return;
+    const sendAgent = agentId;
+    const sendGroup = groupId;
     const pendingFiles = uploads;
-    setBusy(true);
-    setMessages((m) => [...m, { role: "user", content: message || "Attached files", meta: pendingFiles.length ? { uploads: pendingFiles } : undefined }]);
+    const userTurn: Msg = { role: "user", content: message || "Attached files", meta: pendingFiles.length ? { uploads: pendingFiles } : undefined };
+    const nextMessages = [...messages, userTurn];
+    setWatching(true);
+    inflightRef.current.add(key);
+    setBusyScopes((keys) => (keys.includes(key) ? keys : [...keys, key]));
+    setMessages(nextMessages);
+    persistView(key, { messages: nextMessages, pending: [] });
     setText("");
     setUploads([]);
     setUploadError("");
+    const t0 = Date.now();
+    // #region agent log
+    fetch('http://127.0.0.1:7755/ingest/7762fe36-1f54-4ec2-b56d-3aaac63261c6',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'daee2b'},body:JSON.stringify({sessionId:'daee2b',location:'chat/page.tsx:send',message:'chat send start',data:{len:message.length,watching:["browser","website","web page","browse","http://","https://",".com","open the site"].some((k)=>message.toLowerCase().includes(k))},timestamp:Date.now(),hypothesisId:'A',runId:'pre-fix'})}).catch(()=>{});
+    // #endregion
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message, session_id: sessionId, confirmations, attachments: pendingFiles }),
+        body: JSON.stringify({
+          message,
+          session_id: sessionInScopeRow(sessions.find((s) => s.id === sessionId), sendAgent, sendGroup) ? sessionId : null,
+          confirmations,
+          attachments: pendingFiles,
+          agent_id: sendGroup ? null : sendAgent,
+          group_id: sendGroup,
+        }),
       });
       const raw = await res.text();
       let data: any = {};
@@ -111,15 +191,44 @@ export default function ChatPage() {
         const detail = typeof data.detail === "string" ? data.detail : data.detail?.[0]?.msg;
         throw new Error(detail || raw.slice(0, 280) || "Chat failed");
       }
-      setSessionId(data.session_id);
-      if (data.session_id) window.localStorage.setItem(STORE, data.session_id);
-      setMessages((m) => [...m, { role: "assistant", content: data.text || "", meta: data }]);
-      setPending(data.pending_confirms || []);
+      // #region agent log
+      fetch('http://127.0.0.1:7755/ingest/7762fe36-1f54-4ec2-b56d-3aaac63261c6',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'daee2b'},body:JSON.stringify({sessionId:'daee2b',location:'chat/page.tsx:send',message:'chat send ok',data:{ms:Date.now()-t0,nTools:(data.used_tools||[]).length,head:String(data.text||'').slice(0,80)},timestamp:Date.now(),hypothesisId:'A',runId:'pre-fix'})}).catch(()=>{});
+      // #endregion
+      const loaded = data.session_id ? await loadSession(data.session_id) : null;
+      const doneMessages: Msg[] = loaded?.messages?.length
+        ? loaded.messages
+            .filter((m: Msg) => m.role === "user" || m.role === "assistant")
+            .map((m: Msg) => ({ role: m.role, content: m.content || "", meta: m.meta }))
+        : [
+            ...nextMessages,
+            { role: "assistant", content: data.text || "", meta: { ...data, connect_cards: cardsFromMeta(data) } },
+          ];
+      const nextPending: Confirm[] = data.pending_confirms || [];
+      const doneView: AgentView = { sessionId: data.session_id || sessionId, messages: doneMessages, pending: nextPending };
+      viewsRef.current[key] = doneView;
+      if (data.session_id) window.localStorage.setItem(scopeStore(sendAgent, sendGroup), data.session_id);
+      if (scopeRef.current === key) {
+        showView(doneView);
+        if (nextPending.some((p) => p.kind === "handoff" || p.preview?.kind === "handoff")) {
+          setControlling(true);
+        }
+      }
       await refreshSessions();
     } catch (err: any) {
-      setMessages((m) => [...m, { role: "assistant", content: err.message || "Something went wrong" }]);
+      // #region agent log
+      fetch('http://127.0.0.1:7755/ingest/7762fe36-1f54-4ec2-b56d-3aaac63261c6',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'daee2b'},body:JSON.stringify({sessionId:'daee2b',location:'chat/page.tsx:send',message:'chat send catch',data:{name:err?.name||'',msg:String(err?.message||'').slice(0,160),ms:Date.now()-t0,ok:false},timestamp:Date.now(),hypothesisId:'A',runId:'pre-fix'})}).catch(()=>{});
+      // #endregion
+      const failView: AgentView = {
+        sessionId,
+        messages: [...nextMessages, { role: "assistant", content: err.message || "Something went wrong" }],
+        pending: [],
+      };
+      viewsRef.current[key] = failView;
+      if (scopeRef.current === key) showView(failView);
     } finally {
-      setBusy(false);
+      inflightRef.current.delete(key);
+      setBusyScopes((keys) => keys.filter((k) => k !== key));
+      if (scopeRef.current === key) setWatching(false);
     }
   }
 
@@ -134,23 +243,128 @@ export default function ChatPage() {
     send(text);
   }
 
+  const currentKey = scopeKey(agentId, groupId);
+  scopeRef.current = currentKey;
+  const busyHere = busyScopes.includes(currentKey);
+
   if (!me) return <div className="center">Loading your workspace…</div>;
+
+  const activeAgent = roster.agents.find((a) => a.id === agentId) || roster.agents[0];
+  const activeGroup = roster.groups.find((g) => g.id === groupId) || null;
+  const screenName = activeGroup?.name || activeAgent?.name || "Chief";
+  const scopedSessions = sessions.filter((s) => sessionInScopeRow(s, agentId, groupId));
+  const computer = [...messages].reverse().map((m) => computerFromMeta(m.meta)).find(Boolean) || null;
+
+  function selectAgent(id: string) {
+    persistView(scopeKey(agentId, groupId));
+    setControlling(false);
+    setWatching(false);
+    setAgentId(id);
+    setGroupId(null);
+    const next = scopeKey(id, null);
+    scopeRef.current = next;
+    const cached = viewsRef.current[next];
+    if (cached) {
+      showView(cached);
+      return;
+    }
+    showView({ sessionId: null, messages: [], pending: [] });
+    void restoreScope(id, null, sessions, roster);
+  }
+
+  function selectGroup(id: string) {
+    persistView(scopeKey(agentId, groupId));
+    setControlling(false);
+    setWatching(false);
+    setGroupId(id);
+    setAgentId(null);
+    const next = scopeKey(null, id);
+    scopeRef.current = next;
+    const cached = viewsRef.current[next];
+    if (cached) {
+      showView(cached);
+      return;
+    }
+    showView({ sessionId: null, messages: [], pending: [] });
+    void restoreScope(null, id, sessions, roster);
+  }
+
+  async function restoreScope(nextAgent: string | null, nextGroup: string | null, rows: ChatSessionRow[], nextRoster: WorkspaceRoster) {
+    const wanted = scopeKey(nextAgent, nextGroup);
+    if (inflightRef.current.has(wanted) && viewsRef.current[wanted]) {
+      if (scopeRef.current === wanted) showView(viewsRef.current[wanted]);
+      return;
+    }
+    const scoped = rows.filter((s) => sessionInScopeRow(s, nextAgent, nextGroup));
+    const stored = typeof window !== "undefined" ? window.localStorage.getItem(scopeStore(nextAgent, nextGroup)) : null;
+    const hinted = nextGroup
+      ? nextRoster.groups.find((g) => g.id === nextGroup)?.session_id
+      : nextRoster.agents.find((a) => a.id === nextAgent)?.session_id;
+    const pick = (stored && scoped.some((s) => s.id === stored) ? stored : null) || scoped[0]?.id || hinted || null;
+    const apply = (view: AgentView) => {
+      viewsRef.current[wanted] = view;
+      if (scopeRef.current === wanted) showView(view);
+    };
+    if (pick) {
+      const data = await loadSession(pick);
+      if (!data) {
+        apply({ sessionId: null, messages: [], pending: [] });
+        return;
+      }
+      const nextMessages = (data.messages || [])
+        .filter((m: Msg) => m.role === "user" || m.role === "assistant")
+        .map((m: Msg) => ({ role: m.role, content: m.content || "", meta: m.meta }));
+      apply({ sessionId: pick, messages: nextMessages, pending: [] });
+      return;
+    }
+    apply({ sessionId: null, messages: [], pending: [] });
+  }
 
   return (
     <AppShell
       me={me}
       current="chat"
-      conversations={sessions}
+      conversations={scopedSessions}
+      threads={sessions}
       activeId={sessionId}
+      activeAgentId={agentId}
+      activeGroupId={groupId}
+      busyScopes={busyScopes}
       onNewChat={newChat}
       onOpenChat={openSession}
       onDeleteChat={removeChat}
+      onSelectAgent={selectAgent}
+      onSelectGroup={selectGroup}
+      onConversationCleared={(id) => {
+        const key = scopeKey(id, null);
+        viewsRef.current[key] = { sessionId: null, messages: [], pending: [] };
+        window.localStorage.removeItem(scopeStore(id, null));
+        if (scopeRef.current === key) {
+          setSessionId(null);
+          setMessages([]);
+          setPending([]);
+        }
+        void refreshSessions();
+      }}
+      onRoster={(next) => {
+        setRoster(next);
+        setAgentId((id) => {
+          const aid = id || next.default_agent_id || next.agents[0]?.id || null;
+          if (!id && aid) void restoreScope(aid, null, sessions, next);
+          return aid;
+        });
+      }}
     >
+      <div className="workspace">
       <div className="chat">
+        <div className="chat-head">
+          <strong>{screenName}</strong>
+          {activeGroup ? <span className="muted">{activeGroup.members.map((m) => m.name).join(" · ")}</span> : activeAgent?.title ? <span className="muted">{activeAgent.title}</span> : null}
+        </div>
         <div className="transcript">
           <div className="thread">
             {notice ? <p className="notice">{notice}</p> : null}
-            {messages.length === 0 && !busy ? (
+            {messages.length === 0 && !busyHere ? (
               <div className="welcome">
                 <h1>{greeting(me)}</h1>
                 <p>Here&apos;s what&apos;s happening today — brief the inbox, ask a connected system, or schedule a send.</p>
@@ -181,10 +395,19 @@ export default function ChatPage() {
                 </div>
               ) : (
                 <div key={i} className="turn assistant">
+                  {m.meta?.agent_name ? (
+                    <div className="agent-chip">
+                      <span className="agent-avatar tiny" style={{ background: m.meta.agent_color || "#f97316" }}>
+                        {String(m.meta.agent_name).slice(0, 1)}
+                      </span>
+                      {m.meta.agent_name}
+                    </div>
+                  ) : null}
                   <Markdown text={m.content} />
+                  <ConnectCards meta={m.meta} />
                   {sourceLabel(m.meta) ? <div className="source-chip">{sourceLabel(m.meta)}</div> : null}
                   <EmailThreadButton refs={mailRefsFromMeta(m.meta)} />
-                  {m.meta?.attachments?.length ? <AttachmentWidget items={m.meta.attachments} /> : null}
+                  {chatAttachments(m.meta?.attachments).length ? <AttachmentWidget items={chatAttachments(m.meta.attachments)} /> : null}
                   {m.meta?.clarify?.length ? (
                     <div className="chips" style={{ marginTop: 8 }}>
                       {m.meta.clarify.map((c: any) => (
@@ -197,29 +420,43 @@ export default function ChatPage() {
                 </div>
               ),
             )}
-            {busy ? <Thinking /> : null}
+            {busyHere ? <Thinking /> : null}
             <div ref={end} />
           </div>
         </div>
+        <div className="chat-footer">
         {pending.length ? (
           <div className="approval">
             {pending.map((p) => (
               <div key={p.token}>
                 <h3>{p.title || "Approve this action"}</h3>
                 <p className="muted" style={{ margin: "0 0 8px" }}>
-                  Review the recipient and preview, then confirm. Nothing sends until you do.
+                  {p.kind === "handoff" || p.preview?.kind === "handoff"
+                    ? "Take control on the computer screen, finish the step, then continue."
+                    : "Review the recipient and preview, then confirm. Nothing sends until you do."}
                 </p>
                 <pre className="approval-preview">{formatPreview(p.preview)}</pre>
                 <div className="approval-actions">
+                  {p.kind === "handoff" || p.preview?.kind === "handoff" ? (
+                    <button className="btn" type="button" onClick={() => setControlling(true)}>
+                      Take control
+                    </button>
+                  ) : null}
                   <button
                     className="btn"
-                    disabled={busy}
+                    disabled={busyHere}
                     onClick={() => {
                       setPending([]);
-                      send("Confirmed. Continue.", pending);
+                      setControlling(false);
+                      send(
+                        p.kind === "handoff" || p.preview?.kind === "handoff"
+                          ? "I finished on the computer. Continue."
+                          : "Confirmed. Continue.",
+                        pending,
+                      );
                     }}
                   >
-                    Confirm
+                    {p.kind === "handoff" || p.preview?.kind === "handoff" ? "Continue" : "Confirm"}
                   </button>
                   <button className="btn secondary" onClick={() => setPending([])}>
                     Cancel
@@ -262,7 +499,7 @@ export default function ChatPage() {
                 }
               }}
             />
-            <button className="attach-icon" type="button" aria-label="Attach files" disabled={busy} onClick={() => fileRef.current?.click()}>
+            <button className="attach-icon" type="button" aria-label="Attach files" disabled={busyHere} onClick={() => fileRef.current?.click()}>
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden>
                 <path d="M16 7v8.5a4 4 0 0 1-8 0V7.8A2.8 2.8 0 0 1 13.6 7v7.2" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
               </svg>
@@ -280,13 +517,31 @@ export default function ChatPage() {
                 }
               }}
             />
-            <button className="send" type="submit" disabled={busy || (!text.trim() && !uploads.length)} aria-label="Send">
+            <button className="send" type="submit" disabled={busyHere || (!text.trim() && !uploads.length)} aria-label="Send">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
                 <path d="M12 19V5M12 5 6 11M12 5l6 6" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
               </svg>
             </button>
           </form>
         </div>
+        </div>
+      </div>
+      <ScreenRail
+        session={computer}
+        watching={Boolean((busyHere && watching) || controlling || computer?.live)}
+        controlling={controlling}
+        agentName={screenName}
+        status={busyHere ? "working" : controlling ? "you have control" : ""}
+        onTakeControl={() => setControlling(true)}
+        onRelease={() => {
+          const handoff = pending.filter((p) => p.kind === "handoff" || p.preview?.kind === "handoff");
+          setControlling(false);
+          if (handoff.length) {
+            setPending([]);
+            send("I finished on the computer. Continue.", handoff);
+          }
+        }}
+      />
       </div>
     </AppShell>
   );
@@ -326,7 +581,7 @@ function sourceLabel(meta?: any): string | null {
 function formatPreview(preview: any): string {
   if (!preview) return "No preview.";
   if (typeof preview === "string") return preview;
-  const order = ["folder", "count", "to", "cc", "bcc", "reply_all", "recipient", "subject", "when", "schedule", "body", "preview", "text", "sample"];
+  const order = ["folder", "count", "to", "cc", "bcc", "reply_all", "recipient", "subject", "when", "schedule", "body", "preview", "text", "sample", "reason", "instruction"];
   const lines = order
     .filter((k) => preview[k] != null && preview[k] !== "")
     .map((k) => {

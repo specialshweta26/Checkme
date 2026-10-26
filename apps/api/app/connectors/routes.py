@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import secrets
+import time
 import uuid
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,6 +26,7 @@ from app.connectors.mcp_oauth import (
     register_client,
 )
 from app.connectors.registry import server_key_for
+from app.connectors.platform import ensure_platform_connectors
 from app.connectors.service import next_slug, sync_in_background
 from app.connectors.urlsafety import UnsafeUrl, validate_public_url
 from app.db import get_db
@@ -32,6 +35,9 @@ from app.models import Connector, ServerCard, User
 from app.security import decrypt_json, encrypt, pkce_pair
 
 log = logging.getLogger(__name__)
+_screen_lock = asyncio.Lock()
+_screen_last = b""
+_screen_at = 0.0
 router = APIRouter(prefix="/connectors", tags=["connectors"])
 
 
@@ -75,8 +81,186 @@ def _public(c: Connector, card: ServerCard | None = None) -> dict:
     }
 
 
+@router.get("/marketplace")
+async def marketplace(query: str = "", user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    from app.connectors.composio_box import list_connections, list_toolkits
+
+    if not get_settings().composio_api_key:
+        return {"apps": [], "connections": [], "configured": False}
+    await ensure_platform_connectors(db, user)
+    apps = await list_toolkits(query, 48)
+    connections = await list_connections(str(user.id))
+    active = {
+        row.get("toolkit")
+        for row in connections
+        if str(row.get("status") or "").upper() in {"ACTIVE", "SUCCESS", "ENABLED", "CONNECTED"}
+    }
+    for app in apps:
+        app["connected"] = app.get("slug") in active
+    return {"apps": apps, "connections": connections, "configured": True}
+
+
+class ConnectAppBody(BaseModel):
+    toolkit: str
+
+
+@router.post("/marketplace/connect")
+async def marketplace_connect(body: ConnectAppBody, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    from app.connectors.composio_box import start_link
+
+    if not get_settings().composio_api_key:
+        raise HTTPException(400, "COMPOSIO_API_KEY is not configured")
+    await ensure_platform_connectors(db, user)
+    callback = f"{get_settings().public_web_url.rstrip('/')}/connectors?composio=connected"
+    try:
+        data = await start_link(str(user.id), body.toolkit.strip().lower(), callback)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, str(exc)[:300])
+    if not data.get("redirect_url"):
+        raise HTTPException(400, "Composio did not return a sign-in URL. This app may need an API key instead of OAuth.")
+    return data
+
+
+async def _computer_row(db: AsyncSession, user: User, provision: bool = True):
+    if provision:
+        await ensure_platform_connectors(db, user)
+    row = (
+        await db.execute(select(Connector).where(Connector.user_id == user.id, Connector.slug == "computer"))
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(404, "No computer")
+    return row
+
+
+@router.get("/computer/screen")
+async def computer_screen(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Latest live Chromium frame. Prefer the PNG captured during browse so polls do not wipe the page."""
+    global _screen_last, _screen_at
+    from app.connectors.daytona_box import call_daytona, live_screen_png, remember_screen
+
+    cached = live_screen_png()
+    if cached:
+        _screen_last = cached
+        _screen_at = time.monotonic()
+        return Response(content=cached, media_type="image/png", headers={"Cache-Control": "no-store"})
+    if _screen_last:
+        return Response(content=_screen_last, media_type="image/png", headers={"Cache-Control": "no-store"})
+    if _screen_lock.locked():
+        raise HTTPException(404, "No live screen yet")
+    row = await _computer_row(db, user, provision=False)
+    async with _screen_lock:
+        cached = live_screen_png() or _screen_last
+        if cached:
+            return Response(content=cached, media_type="image/png", headers={"Cache-Control": "no-store"})
+        try:
+            data = await asyncio.wait_for(call_daytona(row, "screen_png", {}), timeout=6)
+        except Exception as vis_exc:  # noqa: BLE001
+            raise HTTPException(404, str(vis_exc)[:200]) from vis_exc
+        if not isinstance(data, (bytes, bytearray)) or not data:
+            raise HTTPException(404, "No live screen yet")
+        remember_screen(bytes(data))
+        _screen_last = bytes(data)
+        _screen_at = time.monotonic()
+        return Response(content=_screen_last, media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
+@router.get("/computer/status")
+async def computer_status(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Whether the live computer is stopped, asleep, or running."""
+    try:
+        row = await _computer_row(db, user, provision=False)
+    except HTTPException:
+        return {"state": "stopped", "screenAvailable": False, "url": "", "title": ""}
+    from app.connectors.daytona_box import call_daytona
+
+    try:
+        data = await call_daytona(row, "status", {})
+    except Exception:  # noqa: BLE001
+        return {"state": "stopped", "screenAvailable": False, "url": "", "title": ""}
+    if not isinstance(data, dict):
+        return {"state": "stopped", "screenAvailable": False, "url": "", "title": ""}
+    return {
+        "state": data.get("state") or "stopped",
+        "screenAvailable": bool(data.get("screenAvailable")),
+        "url": data.get("url") or "",
+        "title": data.get("title") or "",
+    }
+
+
+@router.post("/computer/boot")
+async def computer_boot(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Wake the Daytona computer and Chromium tab so the right-rail screen can stream."""
+    row = await _computer_row(db, user, provision=True)
+    from app.connectors.daytona_box import call_daytona
+
+    try:
+        data = await call_daytona(row, "boot", {})
+    except Exception as vis_exc:  # noqa: BLE001
+        raise HTTPException(400, str(vis_exc)[:240]) from vis_exc
+    if not isinstance(data, dict):
+        return {"state": "running", "screenAvailable": True, "url": "", "title": ""}
+    await db.commit()
+    return {
+        "ok": data.get("ok", True),
+        "state": data.get("state") or "running",
+        "screenAvailable": True,
+        "url": data.get("url") or "",
+        "title": data.get("title") or "Computer",
+        "error": data.get("error") or "",
+    }
+
+
+class ComputerControlBody(BaseModel):
+    kind: str
+    x: int | None = None
+    y: int | None = None
+    text: str | None = None
+    key: str | None = None
+    direction: str | None = None
+    amount: int | None = None
+    dx: int | None = None
+    dy: int | None = None
+    ms: int | None = None
+
+
+@router.post("/computer/control")
+async def computer_control(body: ComputerControlBody, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """User takeover: click, type, key, and scroll on the same live computer screen."""
+    kind = (body.kind or "").strip().lower()
+    if kind not in {"click", "type", "fill", "key", "press", "scroll", "wait", "move"}:
+        raise HTTPException(400, "unsupported action")
+    row = await _computer_row(db, user)
+    from app.connectors.daytona_box import call_daytona
+
+    step = {
+        "kind": "key" if kind == "press" else kind,
+        "x": body.x,
+        "y": body.y,
+        "text": body.text,
+        "key": body.key or body.text,
+        "direction": body.direction,
+        "amount": body.amount,
+        "dx": body.dx,
+        "dy": body.dy,
+        "ms": body.ms,
+    }
+    try:
+        data = await call_daytona(row, "computer_act", {"actions": [step]})
+    except Exception as vis_exc:  # noqa: BLE001
+        raise HTTPException(400, str(vis_exc)[:240]) from vis_exc
+    if not isinstance(data, dict):
+        return {"ok": True}
+    return {
+        "ok": not data.get("error"),
+        "url": data.get("url") or "",
+        "title": data.get("title") or "",
+        "error": data.get("error") or "",
+    }
+
+
 @router.get("")
 async def list_connectors(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    await ensure_platform_connectors(db, user)
     rows = (await db.execute(select(Connector).where(Connector.user_id == user.id))).scalars().all()
     cards = {}
     keys = [r.server_key for r in rows if r.server_key]

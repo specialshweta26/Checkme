@@ -10,7 +10,7 @@ from app.inbox.service import classify_pending, refresh_mailboxes
 from app.models import Connector, User
 
 log = logging.getLogger(__name__)
-INTERVAL_SEC = 8
+INTERVAL_SEC = 90
 _classify_task: asyncio.Task | None = None
 
 
@@ -34,6 +34,9 @@ async def _mail_user_ids() -> list:
 
 async def ingest_all_inboxes() -> int:
     """Store new mail for every connected account. Does not need a browser session."""
+    import time
+
+    t0 = time.time()
     arrived = 0
     for user_id in await _mail_user_ids():
         try:
@@ -45,8 +48,14 @@ async def ingest_all_inboxes() -> int:
                     refresh_mailboxes(db, user, unread_only=False, classify=False),
                     timeout=45,
                 )
+            await asyncio.sleep(0)
         except Exception:  # noqa: BLE001
             log.exception("inbox ingest failed for user %s", user_id)
+    # #region agent log
+    from app.debug_ndjson import dbg
+
+    dbg("B", "inbox/worker.py:ingest", "ingest end", {"ms": int((time.time() - t0) * 1000), "arrived": arrived})
+    # #endregion
     return arrived
 
 
@@ -64,12 +73,14 @@ async def classify_all_inboxes() -> None:
 
 async def inbox_loop() -> None:
     global _classify_task
-    await asyncio.sleep(2)
+    await asyncio.sleep(30)
     while True:
         try:
-            count = await ingest_all_inboxes()
+            count = await asyncio.wait_for(ingest_all_inboxes(), timeout=20)
             if count:
                 log.info("inbox worker stored %s new messages", count)
+        except asyncio.TimeoutError:
+            log.warning("inbox ingest timed out; yielding to HTTP")
         except Exception:  # noqa: BLE001
             log.exception("inbox worker tick failed")
         if _classify_task is None or _classify_task.done():
