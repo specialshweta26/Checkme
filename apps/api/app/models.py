@@ -42,6 +42,7 @@ class User(Base):
     primary_provider: Mapped[str] = mapped_column(String(20))
     timezone: Mapped[str] = mapped_column(String(64), default="Asia/Kolkata")
     letta_agent_id: Mapped[str | None] = mapped_column(String(100))
+    coder_seeded: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 

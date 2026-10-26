@@ -159,8 +159,37 @@ async def ensure_default_agent(db: AsyncSession, user: User) -> WorkspaceAgent:
     return row
 
 
+CODER_AGENT_NAME = "Coder"
+CODER_AGENT_COLOR = "#2f6bff"
+
+
+async def ensure_coder_agent(db: AsyncSession, user: User) -> WorkspaceAgent | None:
+    """Seed one "Coder" (focus coding) per user, once. Deleting it later is respected."""
+    if getattr(user, "coder_seeded", False):
+        return None
+    rows = (await db.execute(select(WorkspaceAgent).where(WorkspaceAgent.user_id == user.id))).scalars().all()
+    existing = next((a for a in rows if (a.focus or "") == "coding" or a.name.lower() == CODER_AGENT_NAME.lower()), None)
+    if existing is None:
+        existing = WorkspaceAgent(
+            user_id=user.id,
+            name=CODER_AGENT_NAME,
+            title=FOCUSES["coding"]["title"],
+            instructions="",
+            focus="coding",
+            color=CODER_AGENT_COLOR,
+            kind="custom",
+        )
+        db.add(existing)
+    elif not (existing.focus or ""):
+        existing.focus = "coding"
+    user.coder_seeded = True
+    await db.flush()
+    return existing
+
+
 async def list_workspace(db: AsyncSession, user: User) -> dict:
     chief = await ensure_default_agent(db, user)
+    await ensure_coder_agent(db, user)
     agents = (
         (
             await db.execute(

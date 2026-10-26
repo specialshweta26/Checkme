@@ -1425,6 +1425,39 @@ class SandboxShellInput(BaseModel):
     timeout: int = Field(default=300, description="Seconds to wait (10-900). Use more for installs and test suites.")
 
 
+class GitCheckoutInput(BaseModel):
+    repo: str = Field(description="owner/name, e.g. octocat/hello-world")
+    branch: str = Field(default="", description="Work branch to create or reuse. Use agent/<short-name> for changes you will push.")
+    base: str = Field(default="", description="Branch to start from. Defaults to the repo default branch.")
+
+
+class RunTestsInput(BaseModel):
+    repo: str = Field(description="owner/name (already checked out)")
+    command: str = Field(default="", description="Test command. Empty = auto-detect (npm test, pytest, go test, cargo test).")
+    timeout: int = Field(default=600, description="Seconds (10-900).")
+
+
+class GitDiffInput(BaseModel):
+    repo: str = Field(description="owner/name (already checked out)")
+    base: str = Field(default="", description="Compare against origin/<base>. Defaults to the remote default branch.")
+
+
+class GitCommitInput(BaseModel):
+    repo: str = Field(description="owner/name (already checked out, on an agent/* branch)")
+    message: str = Field(description="Commit message: a short summary line, then details if useful.")
+    paths: list[str] | None = Field(default=None, description="Only these paths. Empty = all changes.")
+
+
+class PushBranchInput(BaseModel):
+    repo: str = Field(description="owner/name")
+    branch: str = Field(description="The agent/* branch to push. Other branches are refused.")
+    open_pr: bool = Field(default=True, description="Also open a pull request after pushing.")
+    title: str = Field(default="", description="Pull request title.")
+    body: str = Field(default="", description="Pull request description: what changed, why, and how it was tested.")
+    base: str = Field(default="", description="PR target branch. Defaults to the repo default branch.")
+    draft: bool = Field(default=False, description="Open the PR as a draft.")
+
+
 async def set_agent_focus(ctx: RunContext, focus: str) -> dict:
     from app.agents import service as agents_service
     from app.agents.focus import FOCUSES
@@ -1446,14 +1479,16 @@ async def coding_workspace_status(ctx: RunContext) -> dict:
     probe: dict = {}
     probe_error = ""
     if coding.COMPUTER_SLUG in ctx.connectors:
-        result = await call_user_tool(ctx, coding.COMPUTER_SLUG, "exec", {"command": coding.PROBE_COMMAND, "timeout": 40})
+        result = await call_user_tool(ctx, coding.COMPUTER_SLUG, "exec", {"command": coding.bash(coding.PROBE_COMMAND), "timeout": 60})
         data = as_dict(result)
         inner = as_dict(data.get("data")) if isinstance(data.get("data"), dict) else data
         if data.get("error"):
             probe_error = str(data["error"])
         else:
             probe = coding.parse_probe(str(inner.get("stdout") or inner.get("result") or ""))
-    return coding.readiness(ctx.connectors, probe, probe_error)
+    from app.agent.git_tools import github_app_status
+
+    return coding.readiness(ctx.connectors, probe, probe_error, await github_app_status(ctx))
 
 
 async def sandbox_shell(ctx: RunContext, command: str, cwd: str | None = None, timeout: int = 300) -> Any:
@@ -1664,9 +1699,38 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
             return dumps(await coding_workspace_status(ctx), 8000)
 
         async def shell(command: str, cwd: str | None = None, timeout: int = 300) -> str:
-            """Run a bash command on the user's computer (Daytona sandbox): git clone/branch/commit/push, rg, sed, package installs, tests, builds. Returns exit_code and output."""
+            """Run a bash command on the user's computer (Daytona sandbox): read and edit files (rg, sed, cat, heredocs, python patches), install packages, run builds. For git use git_checkout, git_diff, git_commit and push_branch instead: they handle GitHub auth safely. Never put tokens or credentials in a command. Returns exit_code and output."""
             ctx.used_tools.append("sandbox_shell")
             return dumps(await sandbox_shell(ctx, command, cwd, timeout), 40000)
+
+        from app.agent import git_tools
+
+        async def checkout(repo: str, branch: str = "", base: str = "") -> str:
+            """Clone (or update) a GitHub repo into ~/work/<name> on the computer and check out a branch. Private repos work through the Checkme GitHub App. Start every code change here with branch=agent/<short-name>."""
+            ctx.used_tools.append("git_checkout")
+            return dumps(await git_tools.git_checkout(ctx, repo, branch, base), 20000)
+
+        async def tests(repo: str, command: str = "", timeout: int = 600) -> str:
+            """Run the repo's tests on the computer (auto-detects npm test / pytest / go test / cargo test, or pass command). Returns exit_code, passed and the output tail."""
+            ctx.used_tools.append("run_tests")
+            return dumps(await git_tools.run_tests(ctx, repo, command, timeout), 20000)
+
+        async def diff(repo: str, base: str = "") -> str:
+            """Show status, commits and the diff of the checked-out repo against the base branch. Use before committing and before push_branch."""
+            ctx.used_tools.append("git_diff")
+            return dumps(await git_tools.git_diff(ctx, repo, base), 20000)
+
+        async def commit(repo: str, message: str, paths: list[str] | None = None) -> str:
+            """Commit changes in the checked-out repo (only on agent/* branches)."""
+            ctx.used_tools.append("git_commit")
+            return dumps(await git_tools.git_commit(ctx, repo, message, paths), 8000)
+
+        async def push(
+            repo: str, branch: str, open_pr: bool = True, title: str = "", body: str = "", base: str = "", draft: bool = False
+        ) -> str:
+            """Push an agent/* branch to GitHub and (by default) open a pull request. Always shows the user an approval card first; tell them it is waiting for approval. Never merge."""
+            ctx.used_tools.append("push_branch")
+            return dumps(await git_tools.push_branch(ctx, repo, branch, open_pr, title, body, base, draft), 8000)
 
         tools.extend(
             [
@@ -1674,6 +1738,11 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
                 StructuredTool.from_function(
                     coroutine=shell, name="sandbox_shell", description=shell.__doc__, args_schema=SandboxShellInput
                 ),
+                StructuredTool.from_function(coroutine=checkout, name="git_checkout", description=checkout.__doc__, args_schema=GitCheckoutInput),
+                StructuredTool.from_function(coroutine=tests, name="run_tests", description=tests.__doc__, args_schema=RunTestsInput),
+                StructuredTool.from_function(coroutine=diff, name="git_diff", description=diff.__doc__, args_schema=GitDiffInput),
+                StructuredTool.from_function(coroutine=commit, name="git_commit", description=commit.__doc__, args_schema=GitCommitInput),
+                StructuredTool.from_function(coroutine=push, name="push_branch", description=push.__doc__, args_schema=PushBranchInput),
             ]
         )
     if ctx.group is not None and ctx.teammate_depth == 0 and ctx.teammates:
@@ -2064,6 +2133,19 @@ async def run_deep_agent(
             extra.append(
                 HumanMessage(
                     content=f"The user confirmed {tool} in Checkme. Result: {clip(dumps(result, 2000), 2000)}. Tell the user what happened."
+                )
+            )
+            continue
+        from app.agent.coding import CODING_SLUG
+
+        if slug == CODING_SLUG:
+            from app.agent import git_tools
+
+            result = await git_tools.run_confirmed(ctx, tool, payload.get("args") or {})
+            ctx.used_tools.append(tool)
+            extra.append(
+                HumanMessage(
+                    content=f"The user approved {tool}. Result: {clip(dumps(result, 4000), 4000)}. Tell the user what happened and share any PR link."
                 )
             )
             continue

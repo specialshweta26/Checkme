@@ -596,7 +596,9 @@ export default function ChatPage() {
                 <p className="muted" style={{ margin: "0 0 8px" }}>
                   {p.kind === "handoff" || p.preview?.kind === "handoff"
                     ? "Take control on the computer screen, finish the step, then continue."
-                    : "Review the recipient and preview, then confirm. Nothing sends until you do."}
+                    : p.kind === "git_push" || p.preview?.repo
+                      ? "Review the repo, branch and commits, then approve. Nothing is pushed, opened or merged until you do."
+                      : "Review the recipient and preview, then confirm. Nothing sends until you do."}
                 </p>
                 <pre className="approval-preview">{formatPreview(p.preview)}</pre>
                 <div className="approval-actions">
@@ -754,6 +756,19 @@ function sourceLabel(meta?: any): string | null {
 function formatPreview(preview: any): string {
   if (!preview) return "No preview.";
   if (typeof preview === "string") return preview;
+  if (preview.repo) {
+    const rows: string[] = [`Repo: ${preview.repo}`];
+    if (preview.number != null) rows.push(`Pull request: #${preview.number}${preview.method ? ` (${preview.method})` : ""}`);
+    if (preview.branch) rows.push(`Branch: ${preview.branch}${preview.base ? ` → ${preview.base}` : ""}`);
+    if (preview.head) rows.push(`Head: ${preview.head} → ${preview.base || "default branch"}`);
+    if (preview.title) rows.push(`Title: ${preview.title}`);
+    if (preview.message) rows.push(`Commit: ${preview.message}`);
+    if (preview.files != null) rows.push(`Files: ${preview.files}`);
+    if (preview.open_pr) rows.push("Also opens a pull request");
+    if (Array.isArray(preview.commits) && preview.commits.length) rows.push("Commits:", ...preview.commits.map((c: string) => `  ${c}`));
+    if (preview.diffstat) rows.push(preview.diffstat);
+    return rows.join("\n");
+  }
   const order = ["folder", "count", "to", "cc", "bcc", "reply_all", "recipient", "subject", "when", "schedule", "body", "preview", "text", "sample", "reason", "instruction"];
   const lines = order
     .filter((k) => preview[k] != null && preview[k] !== "")

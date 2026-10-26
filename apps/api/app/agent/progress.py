@@ -199,6 +199,16 @@ def describe_tool(name: str, args: dict | None, connector_names: dict[str, str] 
         return f"Setting my focus to {FOCUSES[f]['label'] if f in FOCUSES else f}"
     if n == "coding_workspace_status":
         return "Checking the computer, GitHub and deploy setup"
+    if n == "git_checkout":
+        return f"Checking out {_clip(a.get('repo'), 50)}" + (f" on {_clip(a.get('branch'), 40)}" if a.get("branch") else "")
+    if n == "run_tests":
+        return f"Running the tests in {_clip(a.get('repo'), 50)}"
+    if n == "git_diff":
+        return f"Reviewing the changes in {_clip(a.get('repo'), 50)}"
+    if n == "git_commit":
+        return f"Committing: {_clip(a.get('message'), 60)}"
+    if n == "push_branch":
+        return f"Asking to push {_clip(a.get('branch'), 40)} to {_clip(a.get('repo'), 40)}"
     if n == "sandbox_shell":
         return f"Running `{_clip(a.get('command'), 70)}` on the computer"
     # deepagents built-ins
