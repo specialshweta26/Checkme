@@ -4,7 +4,7 @@ ENV NEXT_TELEMETRY_DISABLED=1
 ENV HOSTNAME=0.0.0.0
 COPY apps/web/package.json /app/package.json
 COPY apps/web/package-lock.json /app/package-lock.json
-RUN npm ci
+RUN npm ci --include=dev
 COPY apps/web /app
 RUN npm run build
 EXPOSE 3000
