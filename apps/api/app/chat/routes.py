@@ -174,12 +174,10 @@ async def chat(
         )
     ).scalars().all()
     history = []
-    prior_source = (sess.state or {}).get("last_source") if isinstance(sess.state, dict) else None
     for m in reversed(history_rows):
         content = m.content
         src = (m.meta or {}).get("source") if isinstance(m.meta, dict) else None
         if m.role == "assistant" and src:
-            prior_source = src
             content = f"{content}\n\nTool evidence (cite source_tool if asked): {json.dumps(src, default=str)[:2000]}"
         history.append({"role": m.role, "content": content})
 
@@ -412,6 +410,7 @@ async def _continue_job(db, user, sess, agent, job, text, request_id):
     from app.jobs.worker import wake
 
     was = job.status
+    pasted_code = jobs.is_code_answer(job, text)
     try:
         events = jobs.followup(job, text)
     except jobs.JobError:
@@ -433,7 +432,9 @@ async def _continue_job(db, user, sess, agent, job, text, request_id):
         meta["job_after"] = await _last_event_id(db, job)
     else:
         meta["job_ref"] = info  # its live timeline is already on screen
-    await _store(db, sess, user.id, request_id, text, reply, meta)
+    if pasted_code:
+        reply = "Got it, finishing the sign-in with that code and continuing the job."
+    await _store(db, sess, user.id, request_id, "[authorization code sent]" if pasted_code else text, reply, meta)
     wake()
     return {
         "session_id": str(sess.id),

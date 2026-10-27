@@ -9,7 +9,6 @@ from mcp import ClientSession
 from mcp.client.streamable_http import create_mcp_http_client, streamable_http_client
 
 from app.connectors.urlsafety import validate_public_url
-from app.security import decrypt_json
 
 
 def _headers(creds: dict) -> dict[str, str]:

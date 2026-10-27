@@ -2234,4 +2234,6 @@ input.tasks-search { width: min(260px, 100%); }
 .job-todo.in_progress { font-weight: 600; }
 .job-todo-mark { width: 14px; flex: none; text-align: center; }
 .job-choices { flex-wrap: wrap; }
+.job-login { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 6px; }
+.job-login form { display: flex; gap: 6px; flex-wrap: wrap; }
 .btn.small { padding: 4px 10px; font-size: 12px; }

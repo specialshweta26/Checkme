@@ -143,7 +143,7 @@ def test_coding_focus_prompt_is_plan_then_build():
         "merge commit sha",
         "ask_user",
         "remember_coding",
-        "waiting_for='github'",
+        "awaiting_user_login",
         "Composio",
         "head_sha",
         "Explore remotely first",
@@ -152,11 +152,13 @@ def test_coding_focus_prompt_is_plan_then_build():
         "detect_deploy_targets",
         "deploy_rollback",
         "never see",
-        "waiting_for='deploy_<platform>'",
-        "exactly what is missing",
+        "generate_deploy_config",
+        "Never tell the user to configure",
+        "free-tier",
     ):
         assert needle in p, needle
     assert "Never merge" not in p
+    assert "Checkme → Connectors" not in p and "waiting_for='github'" not in p
 
 
 def test_research_focus_prompt_cites_sources():
@@ -267,12 +269,16 @@ def test_readiness_names_exactly_what_is_missing():
     out = coding.readiness({})
     joined = " ".join(out["missing"])
     assert out["computer"] == "missing"
-    assert "Daytona" in joined and "GitHub is not connected" in joined and "deploy connector" in joined
+    assert "Daytona" in joined
+    # GitHub and deploy access are never "missing": the CLI sign-in link covers them.
+    assert "GitHub" not in joined and "deploy" not in joined
+    assert any("GitHub CLI" in c for c in out["can"]) and any("deploy with the platform CLI" in c for c in out["can"])
 
 
-def test_readiness_with_composio_points_at_connect_app_github():
+def test_readiness_with_composio_never_blocks_on_github():
     out = coding.readiness({"composio": _conn("composio", "Composio", "composio")}, {"git": "git version 2"})
-    assert any("connect_app github" in m for m in out["missing"])
+    assert not any("GitHub" in m for m in out["missing"])
+    assert any("sign the GitHub CLI in" in c for c in out["can"])
 
 
 def test_readiness_uses_sandbox_git_credentials():
