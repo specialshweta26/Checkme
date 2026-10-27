@@ -225,6 +225,16 @@ class AgentConnector(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
+class AgentToolkit(Base):
+    """When rows exist for a Composio toolkit, only those agents may use it. No rows = every agent."""
+
+    __tablename__ = "agent_toolkits"
+    __table_args__ = (UniqueConstraint("agent_id", "toolkit"),)
+    agent_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("workspace_agents.id", ondelete="CASCADE"), primary_key=True)
+    toolkit: Mapped[str] = mapped_column(String(80), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
 class AgentGroup(Base):
     __tablename__ = "agent_groups"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)

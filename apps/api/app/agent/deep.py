@@ -719,17 +719,34 @@ async def _maybe_start_connect(ctx: RunContext, query: str) -> None:
     if not toolkit:
         return
     await call_user_tool(ctx, conn.slug, "connect_app", {"toolkit": toolkit})
+    await _grant_connect_agent(ctx, toolkit)
+
+
+async def _grant_connect_agent(ctx: RunContext, toolkit: str) -> None:
+    agent = ctx.agent
+    if ctx.db is None or ctx.user is None or agent is None or not getattr(agent, "id", None):
+        return
+    try:
+        from app.agents import service as agents_service
+
+        await agents_service.grant_toolkit_agent(ctx.db, ctx.user, toolkit, agent.id)
+    except Exception:  # noqa: BLE001
+        return
 
 
 def _connect_cards(ctx: RunContext) -> list[dict]:
     out: list[dict] = []
     seen: set[str] = set()
+    agent = ctx.agent
+    agent_id = str(getattr(agent, "id", "") or "")
+    agent_name = str(getattr(agent, "name", "") or "")
     for row in ctx.results:
         data = row.get("data") if isinstance(row.get("data"), dict) else {}
         url = str(data.get("redirect_url") or "").strip()
-        if not url or url in seen:
+        key = url or f"key:{data.get('toolkit') or ''}"
+        if (not url and not data.get("needs_credentials")) or key in seen:
             continue
-        seen.add(url)
+        seen.add(key)
         out.append(
             {
                 "toolkit": data.get("toolkit") or "",
@@ -737,6 +754,10 @@ def _connect_cards(ctx: RunContext) -> list[dict]:
                 "logo": data.get("logo") or "",
                 "description": data.get("description") or "",
                 "redirect_url": url,
+                "needs_credentials": bool(data.get("needs_credentials")),
+                "fields": data.get("fields") or [],
+                "agent_id": agent_id,
+                "agent_name": agent_name,
             }
         )
     return out

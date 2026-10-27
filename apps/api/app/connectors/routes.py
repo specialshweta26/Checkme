@@ -88,37 +88,85 @@ async def marketplace(query: str = "", user: User = Depends(current_user), db: A
     if not get_settings().composio_api_key:
         return {"apps": [], "connections": [], "configured": False}
     await ensure_platform_connectors(db, user)
-    apps = await list_toolkits(query, 48)
-    connections = await list_connections(str(user.id))
-    active = {
-        row.get("toolkit")
-        for row in connections
-        if str(row.get("status") or "").upper() in {"ACTIVE", "SUCCESS", "ENABLED", "CONNECTED"}
-    }
+    fetched = await asyncio.gather(list_toolkits(query, 2000), list_connections(str(user.id)), return_exceptions=True)
+    apps = fetched[0] if isinstance(fetched[0], list) else []
+    connections = fetched[1] if isinstance(fetched[1], list) else []
+    if isinstance(fetched[0], Exception):
+        log.warning("composio toolkit list failed: %s", fetched[0])
+        raise HTTPException(502, "Could not load the Composio catalog. Try again.")
+    if isinstance(fetched[1], Exception):
+        log.warning("composio connection list failed: %s", fetched[1])
+    active: dict[str, str] = {}
+    for row in connections:
+        slug = str(row.get("toolkit") or "")
+        status = str(row.get("status") or "").upper()
+        if slug and status in {"ACTIVE", "SUCCESS", "ENABLED", "CONNECTED"}:
+            active[slug] = str(row.get("id") or "")
     for app in apps:
         app["connected"] = app.get("slug") in active
+        app["connection_id"] = active.get(app.get("slug") or "") or None
     return {"apps": apps, "connections": connections, "configured": True}
 
 
 class ConnectAppBody(BaseModel):
     toolkit: str
+    agent_id: str | None = None
+    credentials: dict[str, str] | None = None
 
 
 @router.post("/marketplace/connect")
 async def marketplace_connect(body: ConnectAppBody, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
-    from app.connectors.composio_box import start_link
+    from app.connectors.composio_box import list_toolkits, start_connect
 
     if not get_settings().composio_api_key:
         raise HTTPException(400, "COMPOSIO_API_KEY is not configured")
     await ensure_platform_connectors(db, user)
+    toolkit = body.toolkit.strip().lower()
     callback = f"{get_settings().public_web_url.rstrip('/')}/connectors?composio=connected"
     try:
-        data = await start_link(str(user.id), body.toolkit.strip().lower(), callback)
+        data = await start_connect(str(user.id), toolkit, callback, body.credentials)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(400, str(exc)[:300])
-    if not data.get("redirect_url"):
+    if data.get("needs_credentials"):
+        return data
+    if data.get("connected"):
+        pass
+    elif not data.get("redirect_url"):
         raise HTTPException(400, "Composio did not return a sign-in URL. This app may need an API key instead of OAuth.")
-    return data
+    meta: dict = {}
+    try:
+        apps = await list_toolkits(toolkit, 8)
+        meta = next((row for row in apps if str(row.get("slug") or "").lower() == toolkit), {}) or {}
+        if not meta and apps:
+            meta = apps[0]
+    except Exception:  # noqa: BLE001
+        meta = {}
+    if body.agent_id:
+        from app.agents import service as agents_service
+
+        try:
+            await agents_service.grant_toolkit_agent(db, user, toolkit, body.agent_id)
+        except agents_service.AgentError:
+            pass
+    return {
+        **data,
+        "toolkit": toolkit,
+        "name": meta.get("name") or toolkit,
+        "logo": meta.get("logo"),
+        "description": (meta.get("description") or "")[:240],
+    }
+
+
+@router.delete("/marketplace/connections/{account_id}")
+async def marketplace_disconnect(account_id: str, user: User = Depends(current_user)):
+    from app.connectors.composio_box import disconnect_account
+
+    if not get_settings().composio_api_key:
+        raise HTTPException(400, "COMPOSIO_API_KEY is not configured")
+    try:
+        return await disconnect_account(account_id)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, str(exc)[:300]) from exc
 
 
 async def _computer_row(db: AsyncSession, user: User, provision: bool = True):
@@ -448,8 +496,12 @@ async def remove(connector_id: uuid.UUID, user: User = Depends(current_user), db
     row = await db.get(Connector, connector_id)
     if row is None or row.user_id != user.id:
         raise HTTPException(404, "Not found")
+    if row.slug == "computer":
+        raise HTTPException(400, "The computer cannot be removed.")
     if row.kind == "builtin":
-        raise HTTPException(400, "Sign-in mail connectors cannot be removed. Disable them instead.")
+        row.enabled = False
+        await db.commit()
+        return {"ok": True, "disabled": True}
     await invalidate(connector_id=row.id)
     await db.delete(row)
     await db.commit()

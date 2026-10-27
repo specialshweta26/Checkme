@@ -13,6 +13,7 @@ from app.models import (
     AgentConnector,
     AgentGroup,
     AgentGroupMember,
+    AgentToolkit,
     Automation,
     ChatMessage,
     ChatSession,
@@ -282,6 +283,7 @@ async def list_workspace(db: AsyncSession, user: User) -> dict:
         elif sess.agent_id:
             latest_agent.setdefault(str(sess.agent_id), sess)
     assignments = await connector_assignment_map(db, user)
+    toolkits = await toolkit_assignment_map(db, user)
     await db.commit()
     return {
         "agents": [_with_thread(serialize_agent(a), latest_agent.get(str(a.id))) for a in agents],
@@ -290,6 +292,7 @@ async def list_workspace(db: AsyncSession, user: User) -> dict:
         ],
         "default_agent_id": str(chief.id),
         "connector_assignments": assignments,
+        "toolkit_assignments": toolkits,
     }
 
 
@@ -493,7 +496,10 @@ async def duplicate_agent(db: AsyncSession, user: User, agent_id: uuid.UUID) -> 
     links = (await db.execute(select(AgentConnector).where(AgentConnector.agent_id == src.id))).scalars().all()
     for link in links:
         db.add(AgentConnector(agent_id=row.id, connector_id=link.connector_id))
-    if links:
+    toolkit_links = (await db.execute(select(AgentToolkit).where(AgentToolkit.agent_id == src.id))).scalars().all()
+    for link in toolkit_links:
+        db.add(AgentToolkit(agent_id=row.id, toolkit=link.toolkit))
+    if links or toolkit_links:
         await db.commit()
         await db.refresh(row)
     return row
@@ -588,6 +594,96 @@ async def set_connector_agents(db: AsyncSession, user: User, connector_id: uuid.
             db.add(AgentConnector(agent_id=uid, connector_id=conn.id))
     await db.commit()
     return {"connector_id": str(conn.id), "agent_ids": [str(i) for i in wanted] if wanted and len(wanted) < len(agents) else []}
+
+
+def _as_uuid(value, label: str) -> uuid.UUID:
+    if isinstance(value, uuid.UUID):
+        return value
+    try:
+        return uuid.UUID(str(value))
+    except (TypeError, ValueError) as exc:
+        raise AgentError(f"Unknown {label}") from exc
+
+
+async def grant_connector_agent(db: AsyncSession, user: User, connector_id, agent_id) -> dict:
+    cid = _as_uuid(connector_id, "connector")
+    aid = str(_as_uuid(agent_id, "agent"))
+    mapping = await connector_assignment_map(db, user)
+    current = list(mapping.get(str(cid)) or [])
+    if not current:
+        return {"connector_id": str(cid), "agent_ids": []}
+    if aid not in current:
+        current.append(aid)
+    return await set_connector_agents(db, user, cid, current)
+
+
+async def toolkit_assignment_map(db: AsyncSession, user: User) -> dict[str, list[str]]:
+    agents = (await db.execute(select(WorkspaceAgent.id).where(WorkspaceAgent.user_id == user.id))).scalars().all()
+    agent_ids = {str(i) for i in agents}
+    if not agent_ids:
+        return {}
+    links = (await db.execute(select(AgentToolkit).where(AgentToolkit.agent_id.in_(list(agents))))).scalars().all()
+    out: dict[str, list[str]] = {}
+    for link in links:
+        out.setdefault(str(link.toolkit), []).append(str(link.agent_id))
+    return {key: [aid for aid in ids if aid in agent_ids] for key, ids in out.items()}
+
+
+async def set_toolkit_agents(db: AsyncSession, user: User, toolkit: str, agent_ids: list) -> dict:
+    slug = str(toolkit or "").strip().lower()
+    if not slug:
+        raise AgentError("Unknown connector")
+    agents = (await db.execute(select(WorkspaceAgent).where(WorkspaceAgent.user_id == user.id))).scalars().all()
+    wanted: list[uuid.UUID] = []
+    seen: set[str] = set()
+    for raw in agent_ids or []:
+        uid = _as_uuid(raw, "agent")
+        if str(uid) in seen:
+            continue
+        seen.add(str(uid))
+        if not any(a.id == uid for a in agents):
+            raise AgentError("Every assignee must be one of your agents.")
+        wanted.append(uid)
+    if agents:
+        await db.execute(
+            sql_delete(AgentToolkit).where(
+                AgentToolkit.toolkit == slug,
+                AgentToolkit.agent_id.in_([a.id for a in agents]),
+            )
+        )
+    if wanted and len(wanted) < len(agents):
+        for uid in wanted:
+            db.add(AgentToolkit(agent_id=uid, toolkit=slug))
+    await db.commit()
+    return {
+        "toolkit": slug,
+        "agent_ids": [str(i) for i in wanted] if wanted and len(wanted) < len(agents) else [],
+    }
+
+
+async def grant_toolkit_agent(db: AsyncSession, user: User, toolkit: str, agent_id) -> dict:
+    slug = str(toolkit or "").strip().lower()
+    if not slug:
+        raise AgentError("Unknown connector")
+    aid = str(_as_uuid(agent_id, "agent"))
+    mapping = await toolkit_assignment_map(db, user)
+    current = list(mapping.get(slug) or [])
+    if current and aid not in current:
+        current.append(aid)
+        assigned = await set_toolkit_agents(db, user, slug, current)
+    elif current:
+        assigned = {"toolkit": slug, "agent_ids": current}
+    else:
+        assigned = await set_toolkit_agents(db, user, slug, [])
+    composio = (
+        await db.execute(select(Connector).where(Connector.user_id == user.id, Connector.slug == "composio"))
+    ).scalar_one_or_none()
+    if composio is not None:
+        try:
+            await grant_connector_agent(db, user, composio.id, aid)
+        except AgentError:
+            pass
+    return assigned
 
 
 def filter_connectors(connectors: list, agent_id=None, teammate_ids: list | None = None, assignments: dict | None = None):

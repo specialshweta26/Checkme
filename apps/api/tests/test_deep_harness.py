@@ -208,7 +208,7 @@ def test_computer_session_uses_screen_attachment():
 
 
 def test_connect_cards_come_from_redirect_url():
-    ctx = _ctx([_conn()])
+    ctx = _ctx([_conn()], agent=SimpleNamespace(id="aa", name="tony"))
     ctx.results.append(
         {
             "tool_name": "connect_app",
@@ -222,6 +222,26 @@ def test_connect_cards_come_from_redirect_url():
     cards = _connect_cards(ctx)
     assert cards[0]["toolkit"] == "gmail"
     assert cards[0]["redirect_url"].startswith("https://connect.composio.dev")
+    assert cards[0]["agent_id"] == "aa"
+    assert cards[0]["agent_name"] == "tony"
+
+
+def test_connect_cards_include_api_key_apps():
+    ctx = _ctx([_conn()], agent=SimpleNamespace(id="aa", name="tony"))
+    ctx.results.append(
+        {
+            "tool_name": "connect_app",
+            "data": {
+                "toolkit": "serpapi",
+                "name": "SerpApi",
+                "needs_credentials": True,
+                "fields": [{"name": "generic_api_key", "label": "API Key"}],
+            },
+        }
+    )
+    cards = _connect_cards(ctx)
+    assert cards[0]["toolkit"] == "serpapi"
+    assert cards[0]["needs_credentials"] is True
 
 
 async def test_connect_query_does_not_expand_marketplace_execute_tools():

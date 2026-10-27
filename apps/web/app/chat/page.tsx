@@ -639,7 +639,11 @@ export default function ChatPage() {
                   ) : (
                     <Markdown text={m.content} />
                   )}
-                  <ConnectCards meta={m.meta} />
+                  <ConnectCards
+                    meta={m.meta}
+                    agentId={m.meta?.agent_id || agentId}
+                    agentName={m.meta?.agent_name}
+                  />
                   {m.meta?.job?.id && !m.meta?.job_result ? (
                     <JobTimeline
                       jobId={String(m.meta.job.id)}
