@@ -318,6 +318,10 @@ export default function ConnectorsPage() {
     if (next) setSelected(next.key);
   }, [filteredRail, selected]);
 
+  useEffect(() => {
+    document.querySelector(".conn-icon.on")?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [selected]);
+
   const current = filteredRail.find((item) => item.key === selected) || filteredRail[0];
 
   return (
@@ -363,6 +367,7 @@ export default function ConnectorsPage() {
                   aria-pressed={item.key === selected}
                   className={`conn-icon${item.key === selected ? " on" : ""}${item.connected ? " live" : ""}`}
                   title={item.title}
+                  aria-label={item.title}
                   onClick={() => setSelected(item.key)}
                 >
                   <RailMark item={item} />
@@ -641,7 +646,7 @@ function AppDetail({
         </div>
         <span className={`badge ${app.connected ? "ok" : "down"}`}>{app.connected ? "connected" : "available"}</span>
       </header>
-      <p>{app.description || "Composio marketplace app. Connect it, then choose which agents can use it from chat."}</p>
+      <p className="conn-detail-copy">{app.description || "Composio marketplace app. Connect it, then choose which agents can use it from chat."}</p>
       {needsKey ? (
         <label className="conn-key-field">
           API key
