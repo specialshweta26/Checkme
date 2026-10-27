@@ -910,7 +910,9 @@ input.tasks-search { width: min(260px, 100%); }
   border: 1px solid var(--line);
   border-radius: 16px;
   background: var(--panel);
+  min-width: 0;
   min-height: 96px;
+  box-sizing: border-box;
   color: var(--text);
   transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
 }
@@ -2069,35 +2071,54 @@ input.tasks-search { width: min(260px, 100%); }
   }
   .conn-hero p { display: none; }
   .conn-board {
-    grid-template-columns: 64px minmax(0, 1fr);
-    gap: 10px;
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
+    gap: 12px;
+  }
+  .conn-catalog {
+    flex: none;
+    min-height: 0;
   }
   .conn-catalog-head { display: none; }
   .conn-icons {
-    grid-template-columns: 1fr;
+    display: flex;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    flex: none;
+    grid-template-columns: none;
     max-height: none;
-    gap: 6px;
-    padding: 0;
+    gap: 8px;
+    padding: 2px 2px 8px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+    scroll-snap-type: x proximity;
   }
   .conn-icon {
-    min-height: 0;
-    padding: 8px 4px;
-    aspect-ratio: 1;
+    flex: none;
+    width: 56px;
+    height: 56px;
+    min-width: 56px;
+    min-height: 56px;
+    padding: 8px;
+    gap: 0;
+    aspect-ratio: auto;
     border-radius: 14px;
+    scroll-snap-align: start;
   }
   .conn-icon img, .conn-icon-mark, .conn-icon svg {
-    width: 28px;
-    height: 28px;
+    width: 32px;
+    height: 32px;
   }
   .conn-icon-name { display: none; }
   .conn-icon.live::after {
     top: 6px;
     right: 6px;
-    width: 7px;
-    height: 7px;
+    width: 8px;
+    height: 8px;
   }
   .conn-inspector {
-    padding: 14px;
+    padding: 16px;
     border-radius: 16px;
     box-shadow: none;
   }
