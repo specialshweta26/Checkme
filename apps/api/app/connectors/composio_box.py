@@ -253,6 +253,11 @@ async def list_connections(user_id: str) -> list[dict]:
 
 
 async def ensure_auth_config(toolkit: str) -> str:
+    from app.config import get_settings
+
+    pinned = get_settings().composio_github_auth_config_id
+    if toolkit == "github" and pinned:
+        return pinned
     data = await composio_request("GET", f"/auth_configs?{urlencode({'toolkit_slug': toolkit, 'limit': 10})}")
     for item in _items(data):
         if str(item.get("status") or "").upper() in {"", "ENABLED", "ACTIVE"}:

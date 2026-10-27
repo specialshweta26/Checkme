@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shlex
 import time
 from contextvars import ContextVar
 from typing import Any
@@ -843,6 +844,22 @@ async def _invoke_daytona(row, name: str, args: dict[str, Any]) -> Any:
                 "stdout": _clip(getattr(response, "result", None) or getattr(response, "stdout", "") or ""),
             }
         path = args.get("path") or "."
+        if name == "read_bytes":
+            # Internal (not in DAYTONA_TOOLS): unclipped base64 of one sandbox file, e.g. a git push bundle.
+            limit = int(args.get("max_bytes") or 64 * 1024 * 1024)
+            if fs is not None and hasattr(fs, "download_file"):
+                data = await fs.download_file(path)
+                raw = data if isinstance(data, bytes) else str(data).encode()
+            else:
+                import base64 as _b64
+
+                response = await proc.exec(f"base64 -w0 {shlex.quote(path)}", timeout=120)
+                raw = _b64.b64decode(getattr(response, "result", "") or "")
+            if len(raw) > limit:
+                raise ToolError(f"{path} is larger than {limit} bytes")
+            import base64 as _b64
+
+            return {"path": path, "size": len(raw), "base64": _b64.b64encode(raw).decode()}
         if name == "read_file":
             if fs is not None and hasattr(fs, "download_file"):
                 data = await fs.download_file(path)

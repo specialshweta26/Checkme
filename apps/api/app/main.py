@@ -13,7 +13,7 @@ from app.chat.routes import router as chat_router
 from app.config import get_settings
 from app.connectors.routes import router as connectors_router
 from app.connectors.deploy_routes import router as deploy_router
-from app.connectors.github_routes import router as github_router
+from app.connectors.github_status import router as github_router
 from app.files import router as files_router
 from app.db import init_db
 from app.inbox.routes import router as inbox_router

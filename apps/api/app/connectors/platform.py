@@ -11,9 +11,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.connectors.composio_box import COMPOSIO_TOOLS
 from app.connectors.daytona_box import DAYTONA_TOOLS
-from app.connectors.github_app import GITHUB_TOOLS
-from app.connectors.github_app import SLUG as GITHUB_SLUG
-from app.connectors.github_app import is_configured as github_app_configured
+from app.connectors.github import GITHUB_TOOLS, LEGACY_SLUG
+from app.connectors.github import PROVIDER as GITHUB_PROVIDER
+from app.connectors.github import SLUG as GITHUB_SLUG
 from app.connectors.registry import mark_synced, server_key_for, upsert_tool_index
 from app.models import Connector, User
 
@@ -34,32 +34,20 @@ PLATFORM = {
         "description": "Composio app marketplace. Search and run tools from connected apps, or connect a new app.",
         "tools": COMPOSIO_TOOLS,
     },
-    "github_app": {
+    GITHUB_PROVIDER: {
         "name": "GitHub",
         "slug": GITHUB_SLUG,
         "tags": ["github", "code", "pull requests", "issues"],
         "description": (
-            "Checkme GitHub App: explore repos (branches, tree, files, code search, history, diffs, blame), PRs and issues; "
-            "comment, review and request reviewers; open, update, push and merge only with approval."
+            "GitHub through the user's Composio GitHub connection: explore any repo they can reach (branches, tree, "
+            "files, code search, history, diffs, blame), PRs and issues; comment, review and request reviewers; open, "
+            "update, push and merge only with approval."
         ),
         "tools": GITHUB_TOOLS,
     },
 }
-
-
-async def has_github_installation(db: AsyncSession, user: User) -> bool:
-    from app.models import GitHubInstallation
-
-    try:
-        row = (
-            await db.execute(
-                select(GitHubInstallation.id).where(GitHubInstallation.user_id == user.id).limit(1)
-            )
-        ).first()
-    except Exception as vis_exc:  # noqa: BLE001
-        log.warning("github installation lookup failed: %s", vis_exc)
-        return False
-    return row is not None
+# Rows the removed GitHub App created keep working (runtime routes them to Composio) until replaced.
+PLATFORM["github_app"] = PLATFORM[GITHUB_PROVIDER]
 
 
 def platform_specs(provider: str):
@@ -81,8 +69,10 @@ async def ensure_platform_connectors(db: AsyncSession, user: User) -> list[Conne
     wanted: list[tuple[str, bool]] = [
         ("daytona", bool(s.daytona_api_key)),
         ("composio", bool(s.composio_api_key)),
-        ("github_app", github_app_configured() and await has_github_installation(db, user)),
+        # Always offered with Composio; each call checks the user's ACTIVE GitHub connection and says how to connect.
+        (GITHUB_PROVIDER, bool(s.composio_api_key)),
     ]
+    await _retire_github_app(db, user)
     out: list[Connector] = []
     for provider, enabled in wanted:
         if not enabled:
@@ -125,6 +115,24 @@ async def ensure_platform_connectors(db: AsyncSession, user: User) -> list[Conne
                 await db.commit()
         out.append(row)
     return out
+
+
+async def _retire_github_app(db: AsyncSession, user: User) -> None:
+    """Turn off the old GitHub App connector row. Nothing is deleted (github_installations stays as history)."""
+    try:
+        old = (
+            await db.execute(
+                select(Connector).where(
+                    Connector.user_id == user.id, Connector.slug == LEGACY_SLUG, Connector.kind == "builtin"
+                )
+            )
+        ).scalar_one_or_none()
+        if old is not None and old.enabled:
+            old.enabled = False
+            old.health_detail = "Replaced by GitHub through Composio (Connectors → GitHub)."
+            await db.flush()
+    except Exception as vis_exc:  # noqa: BLE001
+        log.warning("retiring the GitHub App connector failed: %s", vis_exc)
 
 
 async def sync_platform(db: AsyncSession, connector: Connector) -> None:

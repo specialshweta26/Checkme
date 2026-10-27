@@ -1,23 +1,28 @@
-"""Checkme GitHub App connector.
+"""GitHub through the user's Composio GitHub connection.
 
-The App authenticates as itself with a short-lived RS256 JWT, then mints an
-installation access token for every call. Tokens are scoped to the one repo the
-call touches and to the permissions that call needs (read or write), cached in
-memory until five minutes before expiry, and never stored in the database,
-returned to the model, or logged. See docs/GITHUB_APP.md for App setup.
+Every REST and GraphQL call goes through Composio's Proxy Execute endpoint
+(``POST /api/v3.1/tools/execute/proxy``) with the user's ACTIVE GitHub
+connected account. Composio attaches the OAuth credential server-side, so
+Checkme never holds a GitHub token for these calls.
+
+Sandbox git (clone / push) may use a raw token only when Composio returns an
+unmasked one (a customer-owned GitHub OAuth auth config with "Mask Connected
+Account Secrets" turned off). That token is fetched per command, kept in
+memory, passed to git through an environment variable credential helper, and
+never written to .git/config, the database, logs or model-visible output.
+Otherwise git_tools pushes the branch through the GitHub git data API via the
+proxy. See docs/GITHUB.md.
 """
 
 from __future__ import annotations
 
 import base64
-import hashlib
-import hmac
 import logging
 import re
 import time
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import quote, urlencode
+from urllib.parse import quote
 
 import httpx
 from connector_core import ToolError, ToolSpec
@@ -27,104 +32,45 @@ from app.config import get_settings
 log = logging.getLogger(__name__)
 
 API = "https://api.github.com"
-OAUTH_TOKEN_URL = "https://github.com/login/oauth/access_token"
-PROVIDER = "github_app"
-SLUG = "github-app"
+COMPOSIO_API = "https://backend.composio.dev/api/v3.1"
+TOOLKIT = "github"
+PROVIDER = "composio_github"
+LEGACY_PROVIDER = "github_app"  # rows created by the removed GitHub App; routed here
+PROVIDERS = frozenset({PROVIDER, LEGACY_PROVIDER})
+SLUG = "composio-github"
+LEGACY_SLUG = "github-app"
 AGENT_BRANCH = re.compile(r"^agent/[A-Za-z0-9._/-]{1,120}$")
 REPO_RE = re.compile(r"^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$")
-REQUIRED_ENV = ("GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY", "GITHUB_APP_SLUG")
-VERIFY_ENV = ("GITHUB_APP_CLIENT_ID", "GITHUB_APP_CLIENT_SECRET")
-# Tools that change a repository. They are destructive (confirm card) and are
-# also caught by the git-write gate that ignores auto_confirm (scheduled runs).
+SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_clip_max = 60000
+
 WRITE_TOOLS = frozenset({"create_pull_request", "update_pull_request", "push_files", "merge_pull_request"})
-# Writes that only add discussion (comments, reviews, reviewer requests). They change no code.
+# Non-destructive writes that post as the user; no card, but never on someone else's say-so.
 DISCUSSION_TOOLS = frozenset({"comment_pull_request", "create_review", "request_reviewers"})
 MERGE_METHODS = ("merge", "squash", "rebase")
-# Optional permissions for reading CI. Asked for when the App has them; skipped otherwise.
-CHECK_PERMS = {"checks": "read", "statuses": "read"}
-READ_PERMS = {"contents": "read", "metadata": "read", "pull_requests": "read"}
-_clip_max = 60_000
 
-# ---------------------------------------------------------------------------
-# configuration
-
-
-def _env_value(name: str) -> str:
-    s = get_settings()
-    return str(getattr(s, name.lower(), "") or "").strip()
-
-
-def missing_env() -> list[str]:
-    return [n for n in (*REQUIRED_ENV, *VERIFY_ENV) if not _env_value(n)]
-
-
-def is_configured() -> bool:
-    """True when the App can mint tokens. Client id/secret are only needed to verify installers."""
-    return all(_env_value(n) for n in REQUIRED_ENV)
-
-
-def private_key() -> str:
-    raw = _env_value("GITHUB_APP_PRIVATE_KEY")
-    if not raw:
-        return ""
-    if "-----BEGIN" not in raw:
-        try:
-            raw = base64.b64decode(raw).decode()
-        except Exception:  # noqa: BLE001
-            return raw
-    return raw.replace("\\n", "\n")
-
-
-def app_install_url(state: str = "") -> str:
-    slug = _env_value("GITHUB_APP_SLUG")
-    if not slug:
-        return ""
-    base = f"https://github.com/apps/{quote(slug)}/installations/new"
-    return f"{base}?{urlencode({'state': state})}" if state else base
-
-
-def checkme_install_link() -> str:
-    """The link users click in Checkme; it stashes state then redirects to GitHub."""
-    return f"{get_settings().public_web_url.rstrip('/')}/api/connectors/github/install"
-
-
-def app_jwt(now: float | None = None) -> str:
-    import jwt
-
-    if not is_configured():
-        raise ToolError("The Checkme GitHub App is not configured on this server.")
-    t = int(now if now is not None else time.time())
-    payload = {"iat": t - 60, "exp": t + 540, "iss": _env_value("GITHUB_APP_ID")}
-    return jwt.encode(payload, private_key(), algorithm="RS256")
-
-
-def verify_webhook(body: bytes, signature: str) -> bool:
-    secret = _env_value("GITHUB_APP_WEBHOOK_SECRET")
-    if not secret or not signature.startswith("sha256="):
-        return False
-    want = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(want, signature)
+CONNECT_HINT = (
+    "GitHub is not connected. Open Checkme → Connectors → GitHub (Composio) and click Connect GitHub, or ask me to "
+    "run composio connect_app with toolkit github. Then I can continue."
+)
 
 
 # ---------------------------------------------------------------------------
-# HTTP + token cache
+# Composio transport
 
 _transport: httpx.AsyncBaseTransport | None = None  # tests swap in httpx.MockTransport
-_TOKENS: dict[tuple, tuple[str, float]] = {}
+_ACCOUNTS: dict[str, tuple[Account, float]] = {}
+_ACCOUNT_TTL = 60.0
 
 
 def set_transport(transport: httpx.AsyncBaseTransport | None) -> None:
     global _transport
     _transport = transport
-    _TOKENS.clear()
+    _ACCOUNTS.clear()
 
 
 def _client() -> httpx.AsyncClient:
-    return httpx.AsyncClient(
-        transport=_transport,
-        timeout=30,
-        headers={"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "checkme"},
-    )
+    return httpx.AsyncClient(transport=_transport, timeout=httpx.Timeout(60.0, connect=5.0))
 
 
 class GitHubError(ToolError):
@@ -133,131 +79,175 @@ class GitHubError(ToolError):
         self.status = status
 
 
+class NotConnected(ToolError):
+    pass
+
+
+_SECRETISH = re.compile(
+    r"(gh[usopr]_[A-Za-z0-9_]{10,}|github_pat_[A-Za-z0-9_]{20,}|v1\.[0-9a-f]{20,}|eyJ[A-Za-z0-9._-]{20,}"
+    r"|ak_[A-Za-z0-9_-]{10,})"
+)
+
+
 def _scrub(text: str) -> str:
-    return re.sub(r"(gh[usopr]_[A-Za-z0-9]{10,}|v1\.[0-9a-f]{20,}|eyJ[A-Za-z0-9._-]{20,})", "[redacted]", text or "")
+    return _SECRETISH.sub("[redacted]", text or "")
 
 
-async def _request(
-    method: str, url: str, *, auth: str, json: Any = None, params: dict | None = None, headers: dict | None = None
-) -> Any:
-    full = url if url.startswith("http") else API + url
+def is_configured() -> bool:
+    return bool(get_settings().composio_api_key)
+
+
+@dataclass(frozen=True)
+class Account:
+    """One ACTIVE Composio GitHub connected account. Holds ids only, never a token."""
+
+    id: str
+    user_id: str
+    auth_config_id: str = ""
+    managed: bool = True
+
+
+async def _composio(method: str, path: str, *, json: Any = None, params: dict | None = None) -> Any:
+    key = get_settings().composio_api_key
+    if not key:
+        raise ToolError("COMPOSIO_API_KEY is not set on this server, so GitHub through Composio is unavailable.")
     async with _client() as client:
-        res = await client.request(
-            method, full, json=json, params=params, headers={"Authorization": auth, **(headers or {})}
-        )
+        res = await client.request(method, COMPOSIO_API + path, json=json, params=params, headers={"x-api-key": key})
     if res.status_code >= 400:
         try:
-            msg = res.json().get("message") or res.text
+            body = res.json()
+            err = body.get("error") if isinstance(body, dict) else None
+            msg = (err.get("message") if isinstance(err, dict) else err) or (body.get("message") if isinstance(body, dict) else "")
         except Exception:  # noqa: BLE001
             msg = res.text
-        raise GitHubError(res.status_code, f"GitHub {res.status_code}: {_scrub(str(msg))[:300]}")
-    if res.status_code == 204 or not res.content:
+        raise ToolError(f"Composio {res.status_code}: {_scrub(str(msg or res.text))[:300]}")
+    if not res.content:
         return {}
     return res.json()
 
 
-async def app_get(path: str) -> Any:
-    return await _request("GET", path, auth=f"Bearer {app_jwt()}")
+def _items(data: Any) -> list[dict]:
+    if isinstance(data, dict):
+        for key in ("items", "data", "connected_accounts"):
+            if isinstance(data.get(key), list):
+                return [i for i in data[key] if isinstance(i, dict)]
+    return [i for i in data if isinstance(i, dict)] if isinstance(data, list) else []
 
 
-async def installation_token(
-    installation_id: int, repos: list[str] | None = None, permissions: dict[str, str] | None = None
-) -> str:
-    """Short-lived installation token, scoped to `repos` (names, no owner) and `permissions`."""
-    key = (int(installation_id), tuple(sorted(repos or [])), tuple(sorted((permissions or {}).items())))
-    hit = _TOKENS.get(key)
-    if hit and hit[1] - 300 > time.time():
+def _slug_of(item: dict) -> str:
+    tk = item.get("toolkit") if isinstance(item.get("toolkit"), dict) else {}
+    return str(tk.get("slug") or item.get("toolkit_slug") or item.get("appName") or "").lower()
+
+
+async def account_for(user_id, *, fresh: bool = False) -> Account:
+    """The user's ACTIVE Composio GitHub account (the pinned auth config first, then the newest)."""
+    uid = str(user_id)
+    hit = _ACCOUNTS.get(uid)
+    if hit and not fresh and time.monotonic() - hit[1] < _ACCOUNT_TTL:
         return hit[0]
-    body: dict[str, Any] = {}
-    if repos:
-        body["repositories"] = list(repos)
-    if permissions:
-        body["permissions"] = dict(permissions)
-    data = await _request(
-        "POST", f"/app/installations/{int(installation_id)}/access_tokens", auth=f"Bearer {app_jwt()}", json=body
+    data = await _composio(
+        "GET", "/connected_accounts", params={"user_ids": uid, "toolkit_slugs": TOOLKIT, "statuses": "ACTIVE", "limit": 50}
     )
-    token = data.get("token") or ""
-    if not token:
-        raise ToolError("GitHub did not return an installation token")
-    expires = _parse_ts(data.get("expires_at")) or time.time() + 3600
-    _TOKENS[key] = (token, expires)
-    return token
+    rows = [i for i in _items(data) if _slug_of(i) == TOOLKIT and str(i.get("status") or "").upper() == "ACTIVE"]
+    if not rows:
+        _ACCOUNTS.pop(uid, None)
+        raise NotConnected(CONNECT_HINT)
+    pinned = get_settings().composio_github_auth_config_id
+
+    def cfg(i: dict) -> dict:
+        return i.get("auth_config") if isinstance(i.get("auth_config"), dict) else {}
+
+    rows.sort(key=lambda i: str(i.get("created_at") or ""), reverse=True)
+    if pinned:
+        rows.sort(key=lambda i: str(cfg(i).get("id") or "") != pinned)
+    best = rows[0]
+    acct = Account(
+        id=str(best.get("id") or best.get("nano_id")),
+        user_id=uid,
+        auth_config_id=str(cfg(best).get("id") or ""),
+        managed=bool(cfg(best).get("is_composio_managed", True)),
+    )
+    _ACCOUNTS[uid] = (acct, time.monotonic())
+    return acct
 
 
-def _parse_ts(value: Any) -> float | None:
-    if not value:
-        return None
-    from datetime import datetime
-
-    try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
-    except ValueError:
-        return None
-
-
-async def exchange_code(code: str) -> str:
-    """OAuth code from the install callback -> user-to-server token (used once to verify the installer)."""
-    async with _client() as client:
-        res = await client.post(
-            OAUTH_TOKEN_URL,
-            data={
-                "client_id": _env_value("GITHUB_APP_CLIENT_ID"),
-                "client_secret": _env_value("GITHUB_APP_CLIENT_SECRET"),
-                "code": code,
-            },
-            headers={"Accept": "application/json"},
-        )
-    data = res.json() if res.content else {}
-    token = data.get("access_token") or ""
-    if not token:
-        raise ToolError(f"GitHub sign-in failed: {data.get('error_description') or data.get('error') or res.status_code}")
-    return token
-
-
-async def user_installation_ids(user_token: str) -> set[int]:
-    data = await _request("GET", "/user/installations", auth=f"Bearer {user_token}", params={"per_page": 100})
-    return {int(i["id"]) for i in data.get("installations") or []}
+async def _request(
+    method: str, url: str, *, auth: Account, json: Any = None, params: dict | None = None, headers: dict | None = None
+) -> Any:
+    """One GitHub API call through Composio Proxy Execute. Raises GitHubError with GitHub's status."""
+    endpoint = url if url.startswith("http") else API + url
+    hdrs = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", **(headers or {})}
+    parameters = [{"name": k, "value": str(v), "type": "header"} for k, v in hdrs.items()]
+    for k, v in (params or {}).items():
+        if v is not None:
+            parameters.append({"name": k, "value": str(v), "type": "query"})
+    payload: dict[str, Any] = {
+        "connected_account_id": auth.id,
+        "user_id": auth.user_id,
+        "endpoint": endpoint,
+        "method": method.upper(),
+        "parameters": parameters,
+    }
+    if json is not None:
+        payload["body"] = json
+    out = await _composio("POST", "/tools/execute/proxy", json=payload)
+    status = int(out.get("status") or 200) if isinstance(out, dict) else 200
+    data = out.get("data") if isinstance(out, dict) else out
+    if status >= 400:
+        msg = data.get("message") if isinstance(data, dict) else data
+        raise GitHubError(status, f"GitHub {status}: {_scrub(str(msg or ''))[:300]}")
+    if status in (301, 302, 303, 307, 308):
+        return {"redirect": ((out.get("headers") or {}).get("location") or (out.get("headers") or {}).get("Location"))}
+    if data is None:
+        if isinstance(out, dict) and out.get("binary_data"):
+            return {"binary_data": out["binary_data"]}
+        return {}
+    return data
 
 
 # ---------------------------------------------------------------------------
-# installations
+# optional raw token for sandbox git
 
 
-@dataclass
-class Installation:
-    installation_id: int
-    account_login: str
-    account_type: str = ""
-    repository_selection: str = ""
-    suspended: bool = False
+def usable_token(value: Any) -> str:
+    """A full GitHub token, or '' when Composio masked it (REDACTED, gho_abc..., ***)."""
+    tok = str(value or "").strip()
+    if not tok or tok.upper() == "REDACTED" or "..." in tok or "*" in tok or "…" in tok:
+        return ""
+    if not re.fullmatch(r"(gh[opusr]_[A-Za-z0-9_]{30,}|github_pat_[A-Za-z0-9_]{40,}|[0-9a-f]{40})", tok):
+        return ""
+    return tok
 
 
-def installation_fields(data: dict) -> dict:
-    account = data.get("account") or {}
-    return {
-        "installation_id": int(data["id"]),
-        "account_login": str(account.get("login") or "")[:100],
-        "account_type": str(account.get("type") or "")[:20],
-        "repository_selection": str(data.get("repository_selection") or "")[:20],
-        "permissions": dict(data.get("permissions") or {}),
-        "suspended": bool(data.get("suspended_at")),
-    }
+async def git_token(user_id) -> str:
+    """The connected account's OAuth token when Composio exposes it unmasked, else ''. Never log or return it to
+    the model; it only goes into one sandbox command's environment."""
+    try:
+        acct = await account_for(user_id)
+        data = await _composio("GET", f"/connected_accounts/{quote(acct.id, safe='')}")
+    except ToolError:
+        return ""
+    state = data.get("state") if isinstance(data, dict) else None
+    val = state.get("val") if isinstance(state, dict) else None
+    cands = []
+    for src in (val, data.get("data") if isinstance(data, dict) else None, data):
+        if isinstance(src, dict):
+            cands += [src.get("access_token"), src.get("token")]
+    for c in cands:
+        tok = usable_token(c)
+        if tok:
+            return tok
+    return ""
 
 
-async def load_installations(user_id) -> list[Installation]:
-    from sqlalchemy import select
-
-    from app.db import SessionLocal
-    from app.models import GitHubInstallation
-
-    async with SessionLocal() as db:
-        rows = (
-            await db.execute(select(GitHubInstallation).where(GitHubInstallation.user_id == user_id))
-        ).scalars().all()
-    return [
-        Installation(r.installation_id, r.account_login, r.account_type, r.repository_selection, r.suspended)
-        for r in rows
-    ]
+async def viewer(user_id) -> dict:
+    """The GitHub user behind the connection: login, id, name, noreply email."""
+    acct = await account_for(user_id)
+    me = await _request("GET", "/user", auth=acct)
+    login = str(me.get("login") or "")
+    uid = me.get("id")
+    email = f"{uid}+{login}@users.noreply.github.com" if uid and login else ""
+    return {"login": login, "id": uid, "name": me.get("name") or login, "email": email}
 
 
 def split_repo(repo: str) -> tuple[str, str]:
@@ -266,27 +256,6 @@ def split_repo(repo: str) -> tuple[str, str]:
         raise ToolError("Give the repository as owner/name, for example octocat/hello-world.")
     owner, name = repo.split("/", 1)
     return owner, name
-
-
-def pick_installation(installs: list[Installation], owner: str) -> Installation:
-    live = [i for i in installs if not i.suspended]
-    for inst in live:
-        if inst.account_login.lower() == owner.lower():
-            return inst
-    raise ToolError(
-        f"The Checkme GitHub App is not installed on {owner}. Install it here and pick that account: "
-        f"{checkme_install_link()}"
-    )
-
-
-async def repo_token(user_id, repo: str, *, write: bool, extra: dict[str, str] | None = None, installs=None) -> str:
-    """Installation token for exactly one repo. Used by the sandbox git tools too."""
-    owner, name = split_repo(repo)
-    installs = installs if installs is not None else await load_installations(user_id)
-    inst = pick_installation(installs, owner)
-    perms = {"contents": "write", "pull_requests": "write"} if write else dict(READ_PERMS)
-    perms.update(extra or {})
-    return await installation_token(inst.installation_id, [name], perms)
 
 
 # ---------------------------------------------------------------------------
@@ -301,7 +270,7 @@ REPO = {"type": "string", "description": "owner/name"}
 GITHUB_TOOLS = [
     ToolSpec(
         name="list_repos",
-        description="List repositories the Checkme GitHub App can reach for this user.",
+        description="List repositories the connected GitHub account (via Composio) can reach: own, collaborator and org repos.",
         input_schema=_s({}, []),
         group="github",
         tags=("github", "code", "repos"),
@@ -394,7 +363,13 @@ GITHUB_TOOLS = [
                 "files": {
                     "type": "array",
                     "items": _s(
-                        {"path": {"type": "string"}, "content": {"type": "string"}, "delete": {"type": "boolean"}},
+                        {
+                            "path": {"type": "string"},
+                            "content": {"type": "string", "description": "UTF-8 text"},
+                            "content_base64": {"type": "string", "description": "Binary-safe content instead of content"},
+                            "mode": {"type": "string", "enum": ["100644", "100755", "120000"]},
+                            "delete": {"type": "boolean"},
+                        },
                         ["path"],
                     ),
                 },
@@ -412,12 +387,18 @@ GITHUB_TOOLS = [
             "Merge a pull request (merge commit by default; squash or rebase on request). Always shows the user an "
             "approval card with mergeability and CI status first, and only merges after they approve. Refuses on "
             "conflicts, drafts and failing or pending checks (unless allow_failing_checks). Optionally deletes the "
-            "head branch afterwards. Call check_merge first to report blockers."
+            "head branch afterwards. Call check_merge first to report blockers and get head_sha; the merge is pinned "
+            "to that sha."
         ),
         input_schema=_s(
             {
                 "repo": REPO,
                 "number": {"type": "integer"},
+                "head_sha": {
+                    "type": "string",
+                    "description": "The 40-char head sha you reviewed (from check_merge). GitHub refuses the merge if the "
+                    "branch moved since.",
+                },
                 "method": {"type": "string", "enum": list(MERGE_METHODS), "description": "Default merge (a merge commit)."},
                 "delete_branch": {"type": "boolean", "description": "Delete the head branch after a successful merge."},
                 "commit_title": {"type": "string"},
@@ -427,7 +408,7 @@ GITHUB_TOOLS = [
                     "description": "Merge even if checks are failing or pending. Only when the user said so.",
                 },
             },
-            ["repo", "number"],
+            ["repo", "number", "head_sha"],
         ),
         group="github",
         read_only=False,
@@ -595,6 +576,7 @@ def preview(tool: str, args: dict) -> dict:
             number=args.get("number"),
             method=merge_method(args.get("method")),
             delete_branch=bool(args.get("delete_branch")),
+            head_sha=str(args.get("head_sha") or "")[:12],
         )
         if args.get("allow_failing_checks"):
             out["allow_failing_checks"] = True
@@ -606,13 +588,13 @@ def preview(tool: str, args: dict) -> dict:
     return out
 
 
-async def preview_live(row, tool: str, args: dict, *, installs: list | None = None) -> dict:
+async def preview_live(row, tool: str, args: dict) -> dict:
     """Card preview; for a merge it adds the live mergeability and CI state so the user approves with facts."""
     out = preview(tool, args)
     if tool != "merge_pull_request" or not is_configured():
         return out
     try:
-        status = await call_github_app(row, "check_merge", {"repo": args.get("repo"), "number": args.get("number")}, installs=installs)
+        status = await call_github(row, "check_merge", {"repo": args.get("repo"), "number": args.get("number")})
     except (GitHubError, ToolError) as exc:
         out["status_error"] = _scrub(str(exc))[:200]
         return out
@@ -629,6 +611,11 @@ async def preview_live(row, tool: str, args: dict, *, installs: list | None = No
         ready=status.get("ready"),
         blockers=status.get("blockers") or [],
     )
+    want = str(args.get("head_sha") or "").lower()
+    live = str(status.get("head_sha") or "").lower()
+    if want and live and want != live:
+        out["blockers"] = [*out["blockers"], "The branch moved since it was reviewed; this merge will be refused."]
+        out["ready"] = False
     return {k: v for k, v in out.items() if v not in (None, "")}
 
 
@@ -641,47 +628,39 @@ def _clip(text: str, limit: int = _clip_max) -> str:
     return text if len(text) <= limit else text[:limit] + f"\n… clipped {len(text) - limit} chars"
 
 
-async def call_github_app(row, name: str, args: dict[str, Any], *, installs: list[Installation] | None = None) -> Any:
-    if not is_configured():
-        raise ToolError(
-            "The Checkme GitHub App is not configured on this server yet. Use the GitHub connector or Composio GitHub "
-            "instead, or ask the admin to follow docs/GITHUB_APP.md."
-        )
-    if installs is None:
-        installs = await load_installations(row.user_id)
+async def call_github(row, name: str, args: dict[str, Any]) -> Any:
+    """Run one GitHub tool for this connector row's user through their Composio GitHub connection."""
+    acct = await account_for(row.user_id)
     if name == "list_repos":
-        out = []
-        for inst in installs:
-            if inst.suspended:
-                continue
-            tok = await installation_token(inst.installation_id, None, {"metadata": "read"})
-            data = await _request("GET", "/installation/repositories", auth=f"token {tok}", params={"per_page": 100})
-            for r in data.get("repositories") or []:
-                out.append(
-                    {
-                        "full_name": r.get("full_name"),
-                        "private": r.get("private"),
-                        "default_branch": r.get("default_branch"),
-                        "url": r.get("html_url"),
-                    }
-                )
-        if not installs:
-            return {"repos": [], "install_url": checkme_install_link(), "note": "The GitHub App is not installed yet."}
-        return {"repos": out}
+        limit = _limit(args, 100)
+        data = await _request(
+            "GET",
+            "/user/repos",
+            auth=acct,
+            params={"per_page": limit, "sort": "pushed", "affiliation": "owner,collaborator,organization_member"},
+        )
+        return {
+            "repos": [
+                {
+                    "full_name": r.get("full_name"),
+                    "private": r.get("private"),
+                    "default_branch": r.get("default_branch"),
+                    "url": r.get("html_url"),
+                    "push": bool((r.get("permissions") or {}).get("push")),
+                }
+                for r in data or []
+                if isinstance(r, dict)
+            ]
+        }
 
     repo = args.get("repo") or ""
     owner, rname = split_repo(repo)
-    full = f"{owner}/{rname}"
-    write = name in WRITE_TOOLS
-    extra = TOOL_PERMS.get(name)
     base = f"/repos/{owner}/{rname}"
-    if name in ("check_merge", "merge_pull_request"):
-        tok, ci = await _token_with_optional(row.user_id, full, write=write, installs=installs)
-        if name == "check_merge":
-            return await merge_status(base, f"token {tok}", int(args["number"]), ci_readable=ci)
-        return await _merge(base, f"token {tok}", args, ci_readable=ci)
-    tok = await repo_token(row.user_id, full, write=write, extra=extra, installs=installs)
-    auth = f"token {tok}"
+    if name == "check_merge":
+        return await merge_status(base, acct, int(args["number"]))
+    if name == "merge_pull_request":
+        return await _merge(base, acct, args)
+    auth = acct
     if name in HANDLERS:
         return await HANDLERS[name](base, auth, args, owner=owner, name=rname)
 
@@ -785,21 +764,12 @@ async def call_github_app(row, name: str, args: dict[str, Any], *, installs: lis
         return {"number": data.get("number"), "url": data.get("html_url"), "head": args["head"], "base": target}
     if name == "push_files":
         return await _push_files(base, auth, args)
-    raise ToolError(f"Unknown GitHub App tool {name}")
+    raise ToolError(f"Unknown GitHub tool {name}")
 
 
 # ---------------------------------------------------------------------------
 # repository exploration, PR discussion and merging
 
-TOOL_PERMS: dict[str, dict[str, str]] = {
-    "comment_pull_request": {"issues": "write"},
-    "list_issues": {"issues": "read"},
-    "get_issue": {"issues": "read"},
-    "get_pr_comments": {"issues": "read"},
-    "create_review": {"pull_requests": "write"},
-    "request_reviewers": {"pull_requests": "write"},
-    "update_pull_request": {"pull_requests": "write"},
-}
 _REF_OK = re.compile(r"^[A-Za-z0-9._/@{}~^-]{1,200}$")
 FAILING = {"failure", "timed_out", "cancelled", "action_required", "startup_failure", "error"}
 
@@ -864,7 +834,7 @@ def _comment(c: dict, limit: int = 3000) -> dict:
     return out
 
 
-async def _default_branch(base: str, auth: str) -> str:
+async def _default_branch(base: str, auth: Account) -> str:
     return (await _request("GET", base, auth=auth)).get("default_branch") or "main"
 
 
@@ -1116,17 +1086,7 @@ HANDLERS = {
 }
 
 
-async def _token_with_optional(user_id, repo: str, *, write: bool, installs) -> tuple[str, bool]:
-    """Token that can also read CI when the App has the Checks / Commit statuses permissions."""
-    try:
-        return await repo_token(user_id, repo, write=write, extra=dict(CHECK_PERMS), installs=installs), True
-    except GitHubError as exc:
-        if exc.status not in (403, 422):
-            raise
-    return await repo_token(user_id, repo, write=write, installs=installs), False
-
-
-async def ci_status(base: str, auth: str, sha: str) -> dict:
+async def ci_status(base: str, auth: Account, sha: str) -> dict:
     """Combined state of check runs and commit statuses for one commit."""
     failing, pending, passing = [], [], []
     seen = False
@@ -1163,7 +1123,7 @@ async def ci_status(base: str, auth: str, sha: str) -> dict:
     return {"state": state, "failing": failing, "pending": pending, "passing": len(passing)}
 
 
-async def merge_status(base: str, auth: str, num: int, *, ci_readable: bool = True) -> dict:
+async def merge_status(base: str, auth: Account, num: int, *, ci_readable: bool = True) -> dict:
     """Is this PR ready to merge? Plain-language blockers for conflicts, drafts, protection and CI."""
     import asyncio
 
@@ -1182,7 +1142,7 @@ async def merge_status(base: str, auth: str, num: int, *, ci_readable: bool = Tr
     else:
         checks = {
             "state": "unknown",
-            "note": "CI status is unknown: the Checkme GitHub App lacks the Checks / Commit statuses read permissions.",
+            "note": "CI status is unknown: the GitHub connection cannot read checks or commit statuses.",
         }
     conflicts = pr.get("mergeable") is False or mstate == "dirty"
     blockers: list[str] = []
@@ -1231,11 +1191,14 @@ async def merge_status(base: str, auth: str, num: int, *, ci_readable: bool = Tr
     }
 
 
-async def _merge(base: str, auth: str, args: dict, *, ci_readable: bool) -> dict:
-    """Runs only after the user approved the merge card."""
+async def _merge(base: str, auth: Account, args: dict) -> dict:
+    """Runs only after the user approved the merge card. Pinned to the head sha that was reviewed."""
     num = int(args["number"])
     method = merge_method(args.get("method"))
-    st = await merge_status(base, auth, num, ci_readable=ci_readable)
+    want = str(args.get("head_sha") or "").strip().lower()
+    if not SHA_RE.match(want):
+        raise ToolError("merge_pull_request needs head_sha: call check_merge, review that head, then pass its head_sha.")
+    st = await merge_status(base, auth, num)
     if st["state"] == "merged":
         return {"merged": False, "already_merged": True, "url": st["url"]}
     hard = [b for b in st["blockers"] if not b.startswith(("Checks are", "Branch protection"))]
@@ -1251,9 +1214,15 @@ async def _merge(base: str, auth: str, args: dict, *, ci_readable: bool) -> dict
             "note": "Nothing was merged. Report the blockers to the user"
             + (" and offer to fix the conflicts on the branch." if st["conflicts"] else "."),
         }
-    body: dict[str, Any] = {"merge_method": method}
-    if st.get("head_sha"):
-        body["sha"] = st["head_sha"]
+    if str(st.get("head_sha") or "").lower() != want:
+        return {
+            "merged": False,
+            "blocked": True,
+            "blockers": [f"The branch moved: it is at {str(st.get('head_sha') or '')[:12]}, you reviewed {want[:12]}."],
+            "url": st["url"],
+            "note": "Nothing was merged. Review the new commits, then ask for approval again with the new head_sha.",
+        }
+    body: dict[str, Any] = {"merge_method": method, "sha": want}
     for key in ("commit_title", "commit_message"):
         if args.get(key):
             body[key] = str(args[key])[:5000]
@@ -1286,51 +1255,134 @@ async def _merge(base: str, auth: str, args: dict, *, ci_readable: bool) -> dict
     return out
 
 
-async def _push_files(base: str, auth: str, args: dict) -> dict:
-    branch = str(args.get("branch") or "")
+_MODES = {"100644", "100755", "120000"}
+MAX_PUSH_FILES = 1000
+MAX_PUSH_BYTES = 50 * 1024 * 1024
+
+
+async def _push_files(base: str, auth: Account, args: dict) -> dict:
+    return await commit_files(
+        base,
+        auth,
+        branch=str(args.get("branch") or ""),
+        files=args.get("files") or [],
+        message=args.get("message") or "Update from Checkme",
+        start=args.get("base") or None,
+    )
+
+
+async def commit_files(
+    base: str,
+    auth: Account,
+    *,
+    branch: str,
+    files: list,
+    message: str,
+    start: str | None = None,
+    parent_sha: str | None = None,
+) -> dict:
+    """One commit on an agent/* branch through the git data API (blobs, tree, commit, ref). Never forces.
+
+    parent_sha pins the commit's parent: an existing branch must still point at it, a new branch starts from it."""
     if not AGENT_BRANCH.match(branch):
         raise ToolError("Agents may only push to branches named agent/<something>.")
-    files = args.get("files") or []
     if not files:
         raise ToolError("No files to push.")
-    head_sha = None
+    if len(files) > MAX_PUSH_FILES:
+        raise ToolError(f"Too many files for one API push ({len(files)} > {MAX_PUSH_FILES}).")
+    created = False
     try:
-        ref = await _request("GET", f"{base}/git/ref/heads/{quote(branch)}", auth=auth)
+        ref = await _request("GET", f"{base}/git/ref/heads/{quote(branch, safe='/')}", auth=auth)
         head_sha = ref["object"]["sha"]
-        created = False
+        if parent_sha and head_sha != parent_sha:
+            raise ToolError(
+                f"{branch} on GitHub moved to {head_sha[:12]} (expected {parent_sha[:12]}). Nothing was pushed; "
+                "git_checkout the branch again to pick up the new commits."
+            )
     except GitHubError as exc:
         if exc.status != 404:
             raise
-        start = args.get("base") or (await _request("GET", base, auth=auth)).get("default_branch") or "main"
-        ref = await _request("GET", f"{base}/git/ref/heads/{quote(start)}", auth=auth)
-        head_sha = ref["object"]["sha"]
+        if parent_sha:
+            head_sha = parent_sha
+        else:
+            start = start or await _default_branch(base, auth)
+            ref = await _request("GET", f"{base}/git/ref/heads/{quote(start, safe='/')}", auth=auth)
+            head_sha = ref["object"]["sha"]
         created = True
     commit = await _request("GET", f"{base}/git/commits/{head_sha}", auth=auth)
     tree_items = []
+    total = 0
     for f in files:
         path = str(f.get("path") or "").lstrip("/")
-        if not path or ".." in path.split("/"):
+        if not path or ".." in path.split("/") or path.startswith(".git/") or path == ".git":
             raise ToolError(f"Bad file path {path!r}")
+        mode = str(f.get("mode") or "100644")
+        if mode not in _MODES:
+            raise ToolError(f"Bad file mode {mode!r} for {path}")
         if f.get("delete"):
-            tree_items.append({"path": path, "mode": "100644", "type": "blob", "sha": None})
+            tree_items.append({"path": path, "mode": mode, "type": "blob", "sha": None})
+        elif f.get("content_base64") is not None:
+            raw = str(f.get("content_base64") or "")
+            total += len(raw) * 3 // 4
+            if total > MAX_PUSH_BYTES:
+                raise ToolError("The change is too large to push through the API (over 50 MB).")
+            blob = await _request("POST", f"{base}/git/blobs", auth=auth, json={"content": raw, "encoding": "base64"})
+            tree_items.append({"path": path, "mode": mode, "type": "blob", "sha": blob["sha"]})
         else:
-            tree_items.append({"path": path, "mode": "100644", "type": "blob", "content": str(f.get("content") or "")})
+            text = str(f.get("content") or "")
+            total += len(text.encode())
+            if total > MAX_PUSH_BYTES:
+                raise ToolError("The change is too large to push through the API (over 50 MB).")
+            tree_items.append({"path": path, "mode": mode, "type": "blob", "content": text})
     tree = await _request("POST", f"{base}/git/trees", auth=auth, json={"base_tree": commit["tree"]["sha"], "tree": tree_items})
     new = await _request(
         "POST",
         f"{base}/git/commits",
         auth=auth,
-        json={"message": args.get("message") or "Update from Checkme", "tree": tree["sha"], "parents": [head_sha]},
+        json={"message": message or "Update from Checkme", "tree": tree["sha"], "parents": [head_sha]},
     )
     if created:
         await _request("POST", f"{base}/git/refs", auth=auth, json={"ref": f"refs/heads/{branch}", "sha": new["sha"]})
     else:
-        await _request("PATCH", f"{base}/git/refs/heads/{quote(branch)}", auth=auth, json={"sha": new["sha"], "force": False})
-    return {"branch": branch, "commit": new["sha"], "files": len(files), "created_branch": created}
+        await _request(
+            "PATCH", f"{base}/git/refs/heads/{quote(branch, safe='/')}", auth=auth, json={"sha": new["sha"], "force": False}
+        )
+    return {"branch": branch, "commit": new["sha"], "parent": head_sha, "files": len(files), "created_branch": created}
+
+
+async def snapshot_source(user_id, repo: str, branch: str = "", base: str = "") -> dict:
+    """What to unpack for a tokenless private checkout: the branch if it exists on GitHub, else the base; its full
+    sha; and a short-lived tarball URL (secret: it embeds a temporary download token)."""
+    owner, name = split_repo(repo)
+    acct = await account_for(user_id)
+    path = f"/repos/{owner}/{name}"
+    base = _ref(base, "base branch") or await _default_branch(path, acct)
+    ref = base
+    sha = ""
+    if branch:
+        try:
+            got = await _request("GET", f"{path}/git/ref/heads/{quote(_ref(branch), safe='/')}", auth=acct)
+            ref, sha = branch, str((got.get("object") or {}).get("sha") or "")
+        except GitHubError as exc:
+            if exc.status != 404:
+                raise
+    if not sha:
+        got = await _request("GET", f"{path}/git/ref/heads/{quote(base, safe='/')}", auth=acct)
+        sha = str((got.get("object") or {}).get("sha") or "")
+    if not SHA_RE.match(sha):
+        raise ToolError(f"Could not resolve {ref} on {owner}/{name}.")
+    data = await _request("GET", f"{path}/tarball/{sha}", auth=acct)
+    url = ""
+    if isinstance(data, dict):
+        bd = data.get("binary_data")
+        url = str(data.get("redirect") or (bd.get("url") if isinstance(bd, dict) else "") or "")
+    if not url.startswith("https://"):
+        raise ToolError("Composio did not return a downloadable archive for this repository.")
+    return {"ref": ref, "sha": sha, "base": base, "url": url}
 
 
 # ---------------------------------------------------------------------------
-# git-write gate (covers this App and other GitHub connectors)
+# git-write gate (covers this connector and any other GitHub / GitLab / Bitbucket connector)
 
 _GIT_WRITE = re.compile(
     r"(merge|push|create[_ ]?(a[_ ])?pull|pull[_ ]?request[_ ]?create|open[_ ]?pull|commit|create[_ ]or[_ ]update[_ ]file"
@@ -1341,7 +1393,7 @@ _GIT_WRITE = re.compile(
 
 def is_git_write(provider: str, slug: str, tool: str, args: dict | None = None, connector_text: str = "") -> bool:
     """True for any action that writes to a git host. These always need a human approval."""
-    if provider == PROVIDER:
+    if provider in PROVIDERS:
         return tool in WRITE_TOOLS
     names = [tool]
     for key in ("tool_slug", "tool", "action", "name", "slug"):

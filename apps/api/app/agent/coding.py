@@ -3,7 +3,8 @@
 The Coder is a general-purpose software engineer: explore a repo, change code, test,
 commit, open/update/review PRs and merge (merge behind an approval card), and help with
 deploys. Everything runs through existing infrastructure: the `computer` connector
-(Daytona sandbox `exec`), the Checkme GitHub App or another GitHub connector, and any
+(Daytona sandbox `exec`), GitHub through the user's Composio connection (or another GitHub
+connector / gh on the computer), and any
 deploy connector (Render MCP, Vercel, ...).
 """
 
@@ -58,12 +59,12 @@ def parse_probe(stdout: str) -> dict:
 
 
 def readiness(
-    connectors: dict[str, Any], probe: dict | None = None, probe_error: str = "", github_app: dict | None = None
+    connectors: dict[str, Any], probe: dict | None = None, probe_error: str = "", github: dict | None = None
 ) -> dict:
     """What this coding agent can do right now, and exactly what is missing."""
-    app = github_app or {}
+    gh = github or {}
     found = classify_connectors(connectors)
-    found["github"] = [c for c in found["github"] if getattr(c, "provider", "") != "github_app"]
+    found["github"] = [c for c in found["github"] if getattr(c, "provider", "") not in ("composio_github", "github_app")]
     computer = found["computer"]
     missing: list[str] = []
     can: list[str] = ["plan the work (write_todos)"]
@@ -93,32 +94,27 @@ def readiness(
                 "cases (run_checks: lint, type-check, unit, integration, build)"
             )
     git_push = probe.get("gh_auth") == "ok" or probe.get("git_cred", "none") not in {"", "none"}
-    if app.get("installed"):
-        can.append(
-            "explore repos (tree, files, code search, history, blame, PRs, issues), clone private repos, push agent/* "
-            "branches, open/update/review pull requests and merge them through the Checkme GitHub App ("
-            + ", ".join(app.get("accounts") or [])
-            + "); every push, PR edit and merge waits for the user's approval"
+    if gh.get("connected"):
+        via = (
+            "real git clone/push with the connection's token"
+            if gh.get("git_transport") == "git"
+            else "clone (public repos with git, private ones as a snapshot) and push commits through the GitHub API"
         )
-    elif app.get("configured") and not found["github"] and not git_push:
-        missing.append(
-            "The Checkme GitHub App is not installed yet, so I cannot reach private repos, push or open pull requests. "
-            f"Install it on the repos I should work on: {app.get('install_url')}"
+        can.append(
+            "explore any repo the GitHub account can reach (tree, files, code search, history, blame, PRs, issues), "
+            f"{via}, push agent/* branches, open/update/review pull requests and merge them through Composio GitHub"
+            + (f" (@{gh['login']})" if gh.get("login") else "")
+            + "; every push, PR edit and merge waits for the user's approval"
         )
     elif found["github"]:
         can.append("push branches and open pull requests through " + ", ".join(sorted({c.name for c in found["github"]})))
     elif git_push:
         can.append("push and open pull requests with git/gh credentials already on the computer")
-    elif found["composio"] is not None:
-        missing.append(
-            "GitHub may not be connected. Check call_tool(composio, list_connections); if github is not listed, "
-            "connect it with connect_app github so I can push branches and open pull requests. "
-            "Public repos can still be cloned and worked on."
-        )
     else:
         missing.append(
-            "GitHub is not connected, so I cannot push or open pull requests. Connect a GitHub connector "
-            "(or connect_app github). Public repos can still be cloned and worked on."
+            "GitHub is not connected, so I cannot reach private repos, push or open pull requests. Connect it in "
+            "Checkme → Connectors → GitHub (Composio) → Connect GitHub (or composio connect_app github). "
+            "Public repos can still be cloned and worked on."
         )
     if found["deploy"]:
         can.append("trigger and check deploys through " + ", ".join(sorted({c.name for c in found["deploy"]})))
@@ -131,11 +127,12 @@ def readiness(
         "git_push_credentials": git_push,
         "github_connectors": [{"slug": c.slug, "name": c.name} for c in found["github"]],
         "deploy_connectors": [{"slug": c.slug, "name": c.name} for c in found["deploy"]],
-        "github_app": {
-            "configured": bool(app.get("configured")),
-            "installed": bool(app.get("installed")),
-            "accounts": list(app.get("accounts") or []),
-            "install_url": app.get("install_url") or "",
+        "github": {
+            "via": "composio",
+            "configured": bool(gh.get("configured")),
+            "connected": bool(gh.get("connected")),
+            "login": gh.get("login") or "",
+            "git_transport": gh.get("git_transport") or "",
         },
         "can": can,
         "missing": missing,
@@ -159,10 +156,12 @@ def is_coding_agent(agent) -> bool:
 # Safe git tools (git_checkout, run_tests, git_diff, git_commit, push_branch).
 #
 # They run through Daytona exec like sandbox_shell, with three differences:
-# * The GitHub token is minted per command (GitHub App installation token scoped to
-#   one repo) and passed as the CHECKME_GIT_TOKEN env var. A one-shot `-c
+# * When Composio exposes the GitHub connection's token unmasked, it is fetched per
+#   command and passed as the CHECKME_GIT_TOKEN env var. A one-shot `-c
 #   credential.helper` reads it, so the token never appears in the command string,
 #   the clone URL, .git/config, the credential store, logs or tool output.
+#   Otherwise private repos are fetched as a snapshot (tarball through the Composio
+#   proxy) and pushes go through the GitHub git data API via the proxy.
 # * Pushes only go to agent/* branches (or the verified head branch of a PR the user
 #   named), and always behind an approval card.
 # * Output is scrubbed of the token before anything sees it.
@@ -208,7 +207,7 @@ class GitToolError(ValueError):
 
 
 def split_repo(repo: str) -> tuple[str, str]:
-    from app.connectors.github_app import split_repo as _split
+    from app.connectors.github import split_repo as _split
 
     try:
         return _split(repo)
@@ -250,7 +249,7 @@ INSPECT_ACTIONS = ("status", "branches", "log", "show", "diff", "blame", "grep",
 
 def inspect_script(name: str, action: str, ref: str = "", ref2: str = "", path: str = "", query: str = "",
                    start: int = 0, end: int = 0, limit: int = 50, regex: bool = False) -> str:
-    """Read-only git and code exploration in the sandbox clone (fallback for the GitHub App reads)."""
+    """Read-only git and code exploration in the sandbox clone (fallback for the GitHub read tools)."""
     q = _shlex.quote
     action = (action or "").strip().lower()
     if action not in INSPECT_ACTIONS:
@@ -321,6 +320,7 @@ def checkout_script(owner: str, name: str, branch: str = "", base: str = "", aut
     lines = [
         ENSURE_GIT,
         'mkdir -p "$HOME/work" && cd "$HOME/work" || exit 1; ',
+        f'[ "$(git -C {q(name)} config --local checkme.snapshot 2>/dev/null)" = true ] && {{ echo snapshot_dir=1; exit 3; }}; ',
         f"if [ -d {q(name)}/.git ]; then cd {q(name)} && git remote set-url origin {q(url)} && git {auth}fetch --prune origin 2>&1 | tail -5; "
         f"else git {auth}clone --quiet {q(url)} {q(name)} 2>&1 | tail -5; cd {q(name)} || exit 1; fi; ",
         # Make sure nothing credential-shaped is stored for this repo.
@@ -429,6 +429,128 @@ def save_patch_script(name: str, branch: str, base: str, slug: str) -> str:
         f"cd {repo_dir(name)} || exit 1; mkdir -p {out} && "
         f"git format-patch --quiet -o {out} {base_ref}..{q(branch)} && "
         f"git diff HEAD > {out}/uncommitted.diff; ls {out} | head -20"
+    )
+
+
+ARCHIVE_ENV = "CHECKME_ARCHIVE_URL"
+PUSH_BUNDLE_DIR = "$HOME/work/_push"
+MAP_FILE = ".git/checkme-map"  # "<local sha> <github sha>" lines: snapshot and API-pushed commits
+
+
+def snapshot_script(name: str, ref: str, remote_sha: str, base: str, branch: str = "") -> str:
+    """Private repo without a git token: unpack the tarball (URL in $CHECKME_ARCHIVE_URL, never in the command)
+    into ~/work/<name> as commit origin/<ref>. Re-running stacks a new snapshot on top so merge-base keeps working."""
+    q = _shlex.quote
+    r = q(ref)
+    lines = [
+        ENSURE_GIT,
+        'mkdir -p "$HOME/work" && cd "$HOME/work" || exit 1; ',
+        f"if [ ! -d {q(name)}/.git ]; then mkdir -p {q(name)} && git -C {q(name)} init -q && "
+        f"git -C {q(name)} config --local checkme.snapshot true; fi; ",
+        f"cd {q(name)} || exit 1; ",
+        "[ \"$(git config --local checkme.snapshot)\" = true ] || { echo 'this folder is a git clone, not a snapshot'; exit 1; }; ",
+        'T=$(mktemp -d); trap \'rm -rf "$T"\' EXIT; ',
+        f'curl -fsSL "${ARCHIVE_ENV}" -o "$T/a.tgz" || {{ echo "could not download the repository archive"; exit 1; }}; ',
+        'mkdir "$T/x" && tar -xzf "$T/a.tgz" -C "$T/x" --strip-components=1 || { echo "bad archive"; exit 1; }; ',
+        'export GIT_INDEX_FILE="$T/idx"; git --work-tree="$T/x" add -A -f . >/dev/null && TREE=$(git --work-tree="$T/x" write-tree) || exit 1; ',
+        "unset GIT_INDEX_FILE; ",
+        f"OLD=$(git rev-parse --verify -q refs/remotes/origin/{r}); ",
+        'if [ -n "$OLD" ] && [ "$(git rev-parse "$OLD^{tree}")" = "$TREE" ]; then NEW=$OLD; else ',
+        "NEW=$(GIT_AUTHOR_NAME=Checkme GIT_AUTHOR_EMAIL=checkme@users.noreply.github.com "
+        "GIT_COMMITTER_NAME=Checkme GIT_COMMITTER_EMAIL=checkme@users.noreply.github.com "
+        f'git commit-tree "$TREE" ${{OLD:+-p "$OLD"}} -m {q(f"snapshot of {ref} at {remote_sha}")}) || exit 1; fi; ',
+        f'git update-ref refs/remotes/origin/{r} "$NEW"; echo "$NEW {remote_sha}" >> {MAP_FILE}; ',
+        f"git rev-parse --verify -q refs/remotes/origin/{q(base)} >/dev/null || git update-ref refs/remotes/origin/{q(base)} \"$NEW\"; ",
+        f"git symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/{q(base)}; BASE={q(base)}; ",
+    ]
+    if branch:
+        b = q(branch)
+        lines.append(
+            f"if git show-ref --verify --quiet refs/heads/{b}; then git checkout --quiet {b}; "
+            f"elif git rev-parse --verify --quiet origin/{b} >/dev/null; then git checkout --quiet -b {b} origin/{b}; "
+            f'else git checkout --quiet --no-track -b {b} "origin/$BASE"; fi || exit 1; '
+        )
+    else:
+        lines.append('git show-ref --verify --quiet "refs/heads/$BASE" && git checkout --quiet "$BASE" || git checkout --quiet -b "$BASE" "origin/$BASE"; ')
+    lines.append(
+        'echo "repo_dir=$(pwd)"; echo "base=$BASE"; echo "branch=$(git rev-parse --abbrev-ref HEAD)"; echo snapshot=1; '
+        "git status -sb | head -20"
+    )
+    return "".join(lines)
+
+
+_BUNDLE_PY = r"""
+import base64, json, os, subprocess, sys
+name, branch, base, out = sys.argv[1:5]
+def g(*a, raw=False):
+    r = subprocess.run(["git", *a], capture_output=True)
+    if r.returncode:
+        raise SystemExit("git " + a[0] + " failed: " + r.stderr.decode(errors="replace")[:300])
+    return r.stdout if raw else r.stdout.decode().strip()
+os.chdir(os.path.expanduser("~/work/" + name))
+head = g("rev-parse", "refs/heads/" + branch)
+ref = ""
+for cand in ["refs/remotes/origin/" + branch] + (["refs/remotes/origin/" + base] if base else []) + ["refs/remotes/origin/HEAD"]:
+    if subprocess.run(["git", "rev-parse", "--verify", "-q", cand], capture_output=True).returncode == 0:
+        ref = cand
+        break
+if not ref:
+    raise SystemExit("no origin ref to diff against; run git_checkout first")
+local = g("merge-base", head, ref)
+mapping = {}
+if os.path.exists(".git/checkme-map"):
+    for line in open(".git/checkme-map"):
+        parts = line.split()
+        if len(parts) == 2:
+            mapping[parts[0]] = parts[1]
+raw = g("diff", "--raw", "-z", "--no-renames", "--no-abbrev", local, head, raw=True).split(b"\0")
+files, size, i = [], 0, 0
+while i + 1 < len(raw) and raw[i]:
+    meta, path = raw[i].decode(), raw[i + 1].decode("utf-8", "surrogateescape")
+    i += 2
+    old_mode, new_mode, _old, new_sha, status = meta.lstrip(":").split()
+    if "160000" in (old_mode, new_mode):
+        raise SystemExit("submodule changes cannot be pushed through the API: " + path)
+    if status.startswith("D"):
+        files.append({"path": path, "delete": True, "mode": old_mode})
+        continue
+    data = g("cat-file", "blob", new_sha, raw=True)
+    size += len(data)
+    files.append({"path": path, "mode": new_mode, "content_base64": base64.b64encode(data).decode()})
+msg = g("log", "--format=%B", local + ".." + head) or ("Update " + branch)
+os.makedirs(os.path.dirname(out), exist_ok=True)
+json.dump({"head": head, "local_base": local, "parent": mapping.get(local, local), "message": msg, "files": files}, open(out, "w"))
+print("bundle=" + out); print("files=%d" % len(files)); print("bytes=%d" % size)
+print("head=" + head); print("parent=" + mapping.get(local, local))
+"""
+
+
+BUNDLE_RE = _re.compile(r"^/[A-Za-z0-9._/-]*/work/_push/[A-Za-z0-9._-]{1,120}\.json$")
+
+
+def bundle_name(name: str, branch: str) -> str:
+    return (_re.sub(r"[^A-Za-z0-9._-]+", "-", f"{name}-{branch}").strip("-")[:100] or "work") + ".json"
+
+
+def push_bundle_script(name: str, branch: str, base: str) -> str:
+    """Committed changes of the branch since its GitHub base, as JSON (paths, modes, base64 blobs) for an API push.
+    Prints bundle=<absolute path>."""
+    q = _shlex.quote
+    return (
+        f"cd {repo_dir(name)} || {{ echo 'run git_checkout first'; exit 1; }}; "
+        f"git rev-parse --verify --quiet refs/heads/{q(branch)} >/dev/null || {{ echo 'no local branch {branch}'; exit 1; }}; "
+        "command -v python3 >/dev/null || { echo 'python3 is needed for an API push'; exit 1; }; "
+        f'python3 - {q(name)} {q(branch)} {q(base)} "$HOME/work/_push/{bundle_name(name, branch)}" '
+        f"<<'CHECKME_PY'\n{_BUNDLE_PY}\nCHECKME_PY"
+    )
+
+
+def mark_pushed_script(name: str, branch: str, local_head: str, remote_sha: str) -> str:
+    """After an API push: origin/<branch> is the local head, mapped to the commit GitHub has."""
+    q = _shlex.quote
+    return (
+        f"cd {repo_dir(name)} || exit 1; git update-ref refs/remotes/origin/{q(branch)} {q(local_head)} && "
+        f"echo {q(local_head)} {q(remote_sha)} >> {MAP_FILE}; echo marked=1"
     )
 
 

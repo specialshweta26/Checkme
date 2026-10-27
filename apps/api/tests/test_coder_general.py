@@ -68,15 +68,15 @@ def test_no_is_final_and_child_jobs_never_ask():
     assert child.status == "done"
 
 
-def test_ask_user_question_and_github_app_resume():
+def test_ask_user_question_and_github_resume():
     job = _job(kind="chat")
     service.apply_outcome(
-        job, "q", {"text": "Blocked", "question": {"question": "Install the App?", "options": ["Done", "Later"], "waiting_for": "github_app"}}
+        job, "q", {"text": "Blocked", "question": {"question": "Connect GitHub?", "options": ["Done", "Later"], "waiting_for": "github"}}
     )
-    assert job.status == "waiting_input" and job.meta["question"]["waiting_for"] == "github_app"
+    assert job.status == "waiting_input" and job.meta["question"]["waiting_for"] == "github"
     assert service.resume_waiting_for(job, "other", "x") == []
-    ev = service.resume_waiting_for(job, "github_app", "The user installed the Checkme GitHub App. Continue.")
-    assert ev and job.status == "queued" and "installed" in job.meta["next_query"]
+    ev = service.resume_waiting_for(job, "github", "The user connected GitHub through Composio. Continue.")
+    assert ev and job.status == "queued" and "connected" in job.meta["next_query"]
     bad = _job()
     service.apply_outcome(bad, "q", {"text": "x", "question": {"question": "only one?", "options": ["a"]}})
     assert bad.status == "done"  # a question needs 2+ options
@@ -148,27 +148,23 @@ def test_push_branch_rules():
 
 
 async def test_push_to_named_pr_branch_is_verified(monkeypatch):
-    from app.connectors import github_app as gh
+    from app.connectors import github as gh
 
     pr = {"state": "open", "head": "feature/login", "head_repo": "a/b", "url": "https://github.com/a/b/pull/9", "title": "Login"}
 
-    async def fake_call(row, name, args, installs=None):
+    async def fake_call(row, name, args):
         assert name == "get_pull_request"
         return dict(pr)
 
-    async def no_installs(ctx):
-        return []
-
-    async def fake_exec(ctx, script, timeout=0, token=None):
+    async def fake_exec(ctx, script, timeout=0, token=None, env=None, secret_env=None):
         return {"exit_code": 0, "output": "creds=ok\nabc1 change\n--\n 1 file changed"}
 
-    async def tok(ctx, repo, write):
-        return "ghs_x"
+    async def connected(ctx, fresh=False):
+        return {"configured": True, "connected": True, "login": "octo", "git_transport": "api"}
 
-    monkeypatch.setattr(gh, "call_github_app", fake_call)
-    monkeypatch.setattr(git_tools, "installs_for", no_installs)
+    monkeypatch.setattr(gh, "call_github", fake_call)
     monkeypatch.setattr(git_tools, "sandbox_exec", fake_exec)
-    monkeypatch.setattr(git_tools, "app_token", tok)
+    monkeypatch.setattr(git_tools, "github_status", connected)
     ctx = _ctx()
     out = await git_tools.push_branch(ctx, "a/b", "feature/login", pr_number=9)
     assert out["status"] == "awaiting_user_confirmation" and out["preview"]["pr_number"] == 9 and out["preview"]["open_pr"] is False
@@ -182,28 +178,26 @@ async def test_push_to_named_pr_branch_is_verified(monkeypatch):
     assert "not open" in (await git_tools.push_branch(_ctx(), "a/b", "feature/login", pr_number=9))["error"]
 
 
-async def test_blocked_push_saves_patch_and_gives_install_link(monkeypatch):
+async def test_blocked_push_saves_patch_and_gives_connect_steps(monkeypatch):
     scripts = []
 
-    async def fake_exec(ctx, script, timeout=0, token=None):
+    async def fake_exec(ctx, script, timeout=0, token=None, env=None, secret_env=None):
         scripts.append(script)
         if "creds=" in script:
             return {"exit_code": 0, "output": "creds=none"}
         return {"exit_code": 0, "output": "0001-fix.patch"}
 
-    async def no_token(ctx, repo, write):
-        return None
+    async def status(ctx, fresh=False):
+        from app.connectors import github as gh
 
-    async def status(ctx):
-        return {"configured": True, "installed": False, "accounts": [], "install_url": "https://checkme/api/connectors/github/install"}
+        return {"configured": True, "connected": False, "connect_hint": gh.CONNECT_HINT}
 
     monkeypatch.setattr(git_tools, "sandbox_exec", fake_exec)
-    monkeypatch.setattr(git_tools, "app_token", no_token)
-    monkeypatch.setattr(git_tools, "github_app_status", status)
+    monkeypatch.setattr(git_tools, "github_status", status)
     ctx = _ctx()
     out = await git_tools.push_branch(ctx, "a/b", "agent/fix")
-    assert out["status"] == "blocked" and out["install_url"].endswith("/github/install")
-    assert out["patch_dir"] == "~/work/_patches/b-agent-fix" and "waiting_for='github_app'" in out["next"]
+    assert out["status"] == "blocked" and "Connectors" in out["connect"] and "Composio" in out["connect"]
+    assert out["patch_dir"] == "~/work/_patches/b-agent-fix" and "waiting_for='github'" in out["next"]
     assert any("format-patch" in s for s in scripts) and not ctx.pending
     assert ctx.progress.items[-1][0] == "status"
 
@@ -239,7 +233,7 @@ async def test_merge_through_app_is_tracked(monkeypatch):
 
     monkeypatch.setattr(coding_memory, "note", fake_note)
     ctx = deep.RunContext(db=None, user=SimpleNamespace(id=uuid.uuid4()), connectors={}, progress=Rec())
-    conn = SimpleNamespace(provider="github_app")
+    conn = SimpleNamespace(provider="composio_github")
     await deep._track_github_writes(ctx, conn, "merge_pull_request", {"repo": "a/b", "number": 5}, {"merged": True, "sha": "abc123", "method": "merge"})
     assert ctx.merged == [{"repo": "a/b", "number": 5, "sha": "abc123", "method": "merge", "url": None}]
     assert "Merged a/b#5" in ctx.progress.items[-1][1] and notes[-1]["pr"]["state"] == "merged"
@@ -252,12 +246,16 @@ async def test_merge_through_app_is_tracked(monkeypatch):
 def test_merge_approval_must_match_the_exact_pr():
     from app.agent import deep
 
-    conn = SimpleNamespace(provider="github_app")
-    ctx = SimpleNamespace(confirmations=[{"slug": "github-app", "tool": "merge_pull_request", "args": {"repo": "a/b", "number": 5}}])
-    assert deep._approved(ctx, conn, "github-app", "merge_pull_request", {"repo": "a/b", "number": 5, "method": "merge"})
-    assert not deep._approved(ctx, conn, "github-app", "merge_pull_request", {"repo": "a/b", "number": 6})
-    assert not deep._approved(ctx, conn, "github-app", "merge_pull_request", {"repo": "a/b", "number": 5, "method": "squash"})
-    assert not deep._approved(ctx, conn, "github-app", "merge_pull_request", {"repo": "a/b", "number": 5, "delete_branch": True})
+    sha = "a" * 40
+    conn = SimpleNamespace(provider="composio_github")
+    ctx = SimpleNamespace(confirmations=[{"slug": "composio-github", "tool": "merge_pull_request", "args": {"repo": "a/b", "number": 5, "head_sha": sha}}])
+    assert deep._approved(ctx, conn, "composio-github", "merge_pull_request", {"repo": "a/b", "number": 5, "method": "merge", "head_sha": sha})
+    assert not deep._approved(ctx, conn, "composio-github", "merge_pull_request", {"repo": "a/b", "number": 6, "head_sha": sha})
+    assert not deep._approved(ctx, conn, "composio-github", "merge_pull_request", {"repo": "a/b", "number": 5, "method": "squash", "head_sha": sha})
+    assert not deep._approved(ctx, conn, "composio-github", "merge_pull_request", {"repo": "a/b", "number": 5, "delete_branch": True, "head_sha": sha})
+    assert not deep._approved(ctx, conn, "composio-github", "merge_pull_request", {"repo": "a/b", "number": 5, "head_sha": "b" * 40})
+    legacy = SimpleNamespace(provider="github_app")
+    assert deep._approved(ctx, legacy, "composio-github", "merge_pull_request", {"repo": "a/b", "number": 5, "head_sha": sha})
 
 
 def test_coder_tools_are_registered():
@@ -278,10 +276,9 @@ def test_coder_tools_are_registered():
 
 
 def test_identity_prefers_the_users_github_account():
-    user = SimpleNamespace(account_login="octo", account_type="User", suspended=False)
-    org = SimpleNamespace(account_login="acme", account_type="Organization", suspended=False)
-    assert dev_tools.identity_for([org, user]) == ("octo", "octo@users.noreply.github.com")
-    assert dev_tools.identity_for([org]) == (coding.AUTHOR_NAME, coding.AUTHOR_EMAIL)
+    st = {"login": "octo", "name": "", "email": "7+octo@users.noreply.github.com"}
+    assert git_tools.identity(st) == ("octo", "7+octo@users.noreply.github.com")
+    assert git_tools.identity({"login": "octo"}) == (coding.AUTHOR_NAME, coding.AUTHOR_EMAIL)
 
 
 def _fake_bin(tmp_path, have=("bash", "sh", "git", "grep", "cat", "date", "sort", "rm", "mkdir", "id", "uname", "ln", "env", "jq", "python3")):
@@ -408,22 +405,18 @@ def test_review_comments_land_inline_only_inside_the_diff():
     assert "## Findings" in body and "`app.py:99`" in body and "**Verdict:** Changes requested" in body
 
 
-async def test_review_pull_request_posts_through_the_app(monkeypatch):
-    from app.connectors import github_app as gh
+async def test_review_pull_request_posts_through_composio_github(monkeypatch):
+    from app.connectors import github as gh
 
     posted = {}
 
-    async def fake_call(row, name, args, installs=None):
+    async def fake_call(row, name, args):
         if name == "get_pull_request":
             return {"url": "https://github.com/a/b/pull/3", "files": [{"file": "x.py", "patch": "@@ -1 +1,2 @@\n a\n+b"}]}
         posted.update(args)
         return {"ok": True, "url": "https://github.com/a/b/pull/3#r1"}
 
-    async def no_installs(ctx):
-        return []
-
-    monkeypatch.setattr(gh, "call_github_app", fake_call)
-    monkeypatch.setattr(git_tools, "installs_for", no_installs)
+    monkeypatch.setattr(gh, "call_github", fake_call)
     ctx = _ctx()
     out = await dev_tools.review_pull_request(
         ctx, "a/b", 3, "request changes", "Adds b.", [{"path": "x.py", "line": 2, "body": "b is unused", "severity": "minor"}]
@@ -435,21 +428,21 @@ async def test_review_pull_request_posts_through_the_app(monkeypatch):
 
 def test_readiness_mentions_toolchain_and_review():
     comp = SimpleNamespace(slug="computer", provider="daytona", name="Computer", alias="", description="")
-    r = coding.readiness({"computer": comp}, {"git": "git 2", "dev_toolchain": "none"}, "", {"installed": True, "configured": True, "accounts": ["octo"]})
+    r = coding.readiness({"computer": comp}, {"git": "git 2", "dev_toolchain": "none"}, "", {"connected": True, "configured": True, "login": "octo", "git_transport": "git"})
     assert any("ensure_dev_toolchain" in c for c in r["can"]) and r["dev_toolchain"] == "none"
-    assert any("merge them through the Checkme GitHub App" in c for c in r["can"])
+    assert any("merge them through Composio GitHub" in c for c in r["can"])
     r = coding.readiness({"computer": comp}, {"git": "git 2", "dev_toolchain": "ready"}, "", {})
     assert any("run_checks" in c for c in r["can"])
 
 
-async def test_installing_the_app_resumes_blocked_jobs(monkeypatch):
-    from app.connectors import github_routes
+async def test_connecting_github_resumes_blocked_jobs(monkeypatch):
+    from app.connectors import github_status
     from app.jobs import worker
 
     woke = []
     monkeypatch.setattr(worker, "wake", lambda: woke.append(1))
     blocked = _job(kind="chat")
-    service.apply_outcome(blocked, "q", {"text": "x", "question": {"question": "Install?", "options": ["Done", "Later"], "waiting_for": "github_app"}})
+    service.apply_outcome(blocked, "q", {"text": "x", "question": {"question": "Connect?", "options": ["Done", "Later"], "waiting_for": "github"}})
     merge_wait = _job(kind="chat")
     service.apply_outcome(merge_wait, "q", {"text": "PR", "prs": [{"url": "u", "repo": "a/b", "number": 1}]})
 
@@ -472,6 +465,6 @@ async def test_installing_the_app_resumes_blocked_jobs(monkeypatch):
         async def commit(self):
             return None
 
-    n = await github_routes.resume_blocked_jobs(DB(), SimpleNamespace(id=uuid.uuid4()), "octo")
-    assert n >= 1 and woke and blocked.status == "queued" and "on octo" in blocked.meta["next_query"]
+    n = await github_status.resume_blocked_jobs(DB(), SimpleNamespace(id=uuid.uuid4()), "octo")
+    assert n >= 1 and woke and blocked.status == "queued" and "@octo" in blocked.meta["next_query"]
     assert merge_wait.status == "waiting_input"  # the merge question is untouched
