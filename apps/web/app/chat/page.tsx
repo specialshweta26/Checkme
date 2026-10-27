@@ -7,8 +7,11 @@ import { chatAttachments, ComputerIcon, computerFromMeta, ScreenRail } from "../
 import { cardsFromMeta, ConnectCards } from "../components/ConnectCard";
 import { EmailThreadButton, mailRefsFromMeta } from "../components/EmailThread";
 import { Markdown } from "../components/Markdown";
+import { dismissFocusCard, focusCardDismissed, FocusOnboarding, type FocusOption } from "../components/FocusCard";
+import { JobTimeline } from "../components/JobTimeline";
+import { formatPreview } from "../components/preview";
 import { Thinking } from "../components/Thinking";
-import { chatHref, deleteSession, getMe, listSessions, loadSession, rememberScope, uploadFiles, type ChatSessionRow, type Me, type UploadedFile, type WorkspaceRoster } from "../lib";
+import { announceWorkspaceChanged, chatHref, updateAgent, deleteSession, getMe, listSessions, loadSession, rememberScope, uploadFiles, type ChatSessionRow, type Me, type UploadedFile, type WorkspaceRoster } from "../lib";
 
 const STORE = "assistant.session";
 
@@ -21,6 +24,41 @@ function scopeKey(agentId?: string | null, groupId?: string | null) {
 function scopeStore(agentId?: string | null, groupId?: string | null) {
   const key = scopeKey(agentId, groupId);
   return key ? `${STORE}.${key}` : STORE;
+}
+
+function newProgressId() {
+  const rand = Math.random().toString(36).slice(2, 12);
+  return `turn_${Date.now().toString(36)}${rand}`;
+}
+
+/** Poll the API for live status lines of one in-flight chat turn. Returns a stop function. */
+function pollProgress(progressId: string, onSteps: (steps: string[]) => void, everyMs = 1200) {
+  let stopped = false;
+  let last = 0;
+  let timer: number | undefined;
+  const tick = async () => {
+    if (stopped) return;
+    try {
+      const res = await fetch(`/api/chat/progress/${progressId}`, { credentials: "include", cache: "no-store" });
+      if (res.ok) {
+        const data = await res.json();
+        const steps: string[] = (data.steps || []).map((s: any) => String(s?.text || "")).filter(Boolean);
+        if (!stopped && steps.length !== last) {
+          last = steps.length;
+          onSteps(steps);
+        }
+        if (data.done) return;
+      }
+    } catch {
+      // Status is best effort; the chat reply still arrives on the POST.
+    }
+    if (!stopped) timer = window.setTimeout(tick, everyMs);
+  };
+  timer = window.setTimeout(tick, 600);
+  return () => {
+    stopped = true;
+    if (timer) window.clearTimeout(timer);
+  };
 }
 
 function sessionInScopeRow(row: ChatSessionRow | undefined, agentId?: string | null, groupId?: string | null) {
@@ -41,6 +79,7 @@ export default function ChatPage() {
   const [sessions, setSessions] = useState<ChatSessionRow[]>([]);
   const [pending, setPending] = useState<Confirm[]>([]);
   const [busyScopes, setBusyScopes] = useState<string[]>([]);
+  const [progress, setProgress] = useState<Record<string, { steps: string[]; hint: string }>>({});
   const viewsRef = useRef<Record<string, AgentView>>({});
   const scopeRef = useRef("");
   const inflightRef = useRef<Set<string>>(new Set());
@@ -57,6 +96,7 @@ export default function ChatPage() {
   const [groupId, setGroupId] = useState<string | null>(null);
   const [roster, setRoster] = useState<WorkspaceRoster>({ agents: [], groups: [] });
   const [hello, setHello] = useState("Hello");
+  const [focusHidden, setFocusHidden] = useState<Record<string, boolean>>({});
 
   async function refreshSessions() {
     setSessions(await listSessions());
@@ -184,6 +224,11 @@ export default function ChatPage() {
     setText("");
     setUploads([]);
     setUploadError("");
+    const progressId = newProgressId();
+    setProgress((all) => ({ ...all, [key]: { steps: [], hint: message || "your files" } }));
+    const stopProgress = pollProgress(progressId, (steps) =>
+      setProgress((all) => (all[key] ? { ...all, [key]: { ...all[key], steps } } : all)),
+    );
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
@@ -196,6 +241,7 @@ export default function ChatPage() {
           attachments: pendingFiles,
           agent_id: sendGroup ? null : sendAgent,
           group_id: sendGroup,
+          progress_id: progressId,
         }),
       });
       const raw = await res.text();
@@ -209,6 +255,7 @@ export default function ChatPage() {
         const detail = typeof data.detail === "string" ? data.detail : data.detail?.[0]?.msg;
         throw new Error(detail || raw.slice(0, 280) || "Chat failed");
       }
+      if (data.workspace_changed) announceWorkspaceChanged();
       const loaded = data.session_id ? await loadSession(data.session_id) : null;
       const doneMessages: Msg[] = loaded?.messages?.length
         ? loaded.messages
@@ -239,10 +286,28 @@ export default function ChatPage() {
       viewsRef.current[key] = failView;
       if (scopeRef.current === key) showView(failView);
     } finally {
+      stopProgress();
+      setProgress((all) => {
+        const next = { ...all };
+        delete next[key];
+        return next;
+      });
       inflightRef.current.delete(key);
       setBusyScopes((keys) => keys.filter((k) => k !== key));
       if (scopeRef.current === key) setWatching(false);
     }
+  }
+
+  async function reloadSession(id: string | null) {
+    // A background job finished: pull its final reply into the open chat.
+    if (!id) return;
+    const loaded = await loadSession(id).catch(() => null);
+    if (!loaded?.messages || scopeRef.current !== scopeKey(agentId, groupId)) return;
+    const next: Msg[] = loaded.messages
+      .filter((m: Msg) => m.role === "user" || m.role === "assistant")
+      .map((m: Msg) => ({ role: m.role, content: m.content || "", meta: m.meta }));
+    setMessages(next);
+    persistView(scopeKey(agentId, groupId), { messages: next, pending });
   }
 
   async function removeChat(id: string) {
@@ -272,6 +337,33 @@ export default function ChatPage() {
         .filter(Boolean)
         .join(" · ")
     : activeAgent?.title || "";
+  const showFocusCard = Boolean(
+    !activeGroup &&
+      activeAgent &&
+      (activeAgent.kind || "custom") !== "default" &&
+      !activeAgent.focus &&
+      !focusHidden[activeAgent.id] &&
+      !focusCardDismissed(activeAgent.id),
+  );
+
+  function hideFocusCard(id: string) {
+    dismissFocusCard(id);
+    setFocusHidden((all) => ({ ...all, [id]: true }));
+  }
+
+  async function pickFocus(option: FocusOption) {
+    if (!activeAgent) return;
+    const id = activeAgent.id;
+    try {
+      await updateAgent(id, { focus: option.key });
+      setRoster((r) => ({ ...r, agents: r.agents.map((a) => (a.id === id ? { ...a, focus: option.key, focus_label: option.label } : a)) }));
+      announceWorkspaceChanged();
+    } catch {
+      // The agent can still set its own focus from the answer (set_my_focus).
+    }
+    hideFocusCard(id);
+    void send(option.answer);
+  }
   const scopedSessions = sessions.filter((s) => sessionInScopeRow(s, agentId, groupId));
   const computer = [...messages].reverse().map((m) => computerFromMeta(m.meta)).find(Boolean) || null;
 
@@ -441,14 +533,28 @@ export default function ChatPage() {
         <div className="transcript">
           <div className="thread">
             {notice ? <p className="notice">{notice}</p> : null}
+            {messages.length === 0 && !busyHere && showFocusCard && activeAgent ? (
+              <FocusOnboarding
+                userName={firstName(me)}
+                agentName={activeAgent.name}
+                agentColor={activeAgent.color}
+                disabled={busyHere}
+                onPick={(opt) => void pickFocus(opt)}
+                onDismiss={() => hideFocusCard(activeAgent.id)}
+              />
+            ) : null}
             {messages.length === 0 && !busyHere ? (
-              <div className="welcome">
-                <h1>{hello}</h1>
-                <p>
-                  {activeGroup
-                    ? "Write normally and the bots decide who responds. @ one bot to hand a request, or @everyone for updates. They hand work to each other in this thread."
-                    : "Here's what's happening today — brief the inbox, ask a connected system, or schedule a send."}
-                </p>
+              <div className={showFocusCard ? "welcome welcome-after-onboard" : "welcome"}>
+                {showFocusCard ? null : (
+                  <>
+                    <h1>{hello}</h1>
+                    <p>
+                      {activeGroup
+                        ? "Write normally and the bots decide who responds. @ one bot to hand a request, or @everyone for updates. They hand work to each other in this thread."
+                        : "Here's what's happening today — brief the inbox, ask a connected system, or schedule a send."}
+                    </p>
+                  </>
+                )}
                 <div className="hero-cards">
                   <button className="hero-card" onClick={() => send("What matters today? Give me my chief of staff briefing.")}>
                     <span className="mark" />
@@ -486,6 +592,40 @@ export default function ChatPage() {
                   ) : null}
                   <Markdown text={m.content} />
                   <ConnectCards meta={m.meta} />
+                  {m.meta?.job?.id && !m.meta?.job_result ? (
+                    <JobTimeline
+                      jobId={String(m.meta.job.id)}
+                      after={Number(m.meta.job_after) || 0}
+                      onSettled={() => reloadSession(sessionId)}
+                    />
+                  ) : null}
+                  {m.meta?.choices?.options?.length && i === messages.length - 1 ? (
+                    <div className="chips choices" style={{ marginTop: 8 }}>
+                      {m.meta.choices.options.map((opt: string) => (
+                        <button
+                          key={opt}
+                          className="chip"
+                          disabled={busyHere}
+                          onClick={async () => {
+                            if (m.meta.choices.job_id) {
+                              // A background job asked: answer it directly, then show its timeline again.
+                              await fetch(`/api/jobs/${m.meta.choices.job_id}/answer`, {
+                                method: "POST",
+                                credentials: "include",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({ text: opt }),
+                              }).catch(() => null);
+                              reloadSession(sessionId);
+                            } else {
+                              send(opt);
+                            }
+                          }}
+                        >
+                          {opt}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
                   {sourceLabel(m.meta) ? <div className="source-chip">{sourceLabel(m.meta)}</div> : null}
                   <EmailThreadButton refs={mailRefsFromMeta(m.meta)} />
                   {chatAttachments(m.meta?.attachments).length ? <AttachmentWidget items={chatAttachments(m.meta.attachments)} /> : null}
@@ -501,7 +641,7 @@ export default function ChatPage() {
                 </div>
               ),
             )}
-            {busyHere ? <Thinking /> : null}
+            {busyHere ? <Thinking steps={progress[currentKey]?.steps} hint={progress[currentKey]?.hint} /> : null}
             <div ref={end} />
           </div>
         </div>
@@ -514,7 +654,9 @@ export default function ChatPage() {
                 <p className="muted" style={{ margin: "0 0 8px" }}>
                   {p.kind === "handoff" || p.preview?.kind === "handoff"
                     ? "Take control on the computer screen, finish the step, then continue."
-                    : "Review the recipient and preview, then confirm. Nothing sends until you do."}
+                    : p.kind === "git_push" || p.preview?.repo
+                      ? "Review the repo, branch and commits, then approve. Nothing is pushed, opened or merged until you do."
+                      : "Review the recipient and preview, then confirm. Nothing sends until you do."}
                 </p>
                 <pre className="approval-preview">{formatPreview(p.preview)}</pre>
                 <div className="approval-actions">
@@ -650,9 +792,13 @@ export default function ChatPage() {
   );
 }
 
-function greeting(me: Me | null) {
+function firstName(me: Me | null) {
   const raw = (me?.name || me?.email || "there").trim().split(/[\s@]+/)[0];
-  const first = raw ? raw[0].toUpperCase() + raw.slice(1) : "there";
+  return raw ? raw[0].toUpperCase() + raw.slice(1) : "there";
+}
+
+function greeting(me: Me | null) {
+  const first = firstName(me);
   const hour = Number(
     new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Kolkata", hour: "numeric", hour12: false }).format(new Date()),
   );
@@ -681,16 +827,3 @@ function sourceLabel(meta?: any): string | null {
   return unique.length ? unique.slice(0, 2).join(" · ") : null;
 }
 
-function formatPreview(preview: any): string {
-  if (!preview) return "No preview.";
-  if (typeof preview === "string") return preview;
-  const order = ["folder", "count", "to", "cc", "bcc", "reply_all", "recipient", "subject", "when", "schedule", "body", "preview", "text", "sample", "reason", "instruction"];
-  const lines = order
-    .filter((k) => preview[k] != null && preview[k] !== "")
-    .map((k) => {
-      const label = k[0].toUpperCase() + k.slice(1);
-      const value = typeof preview[k] === "string" ? preview[k] : JSON.stringify(preview[k]);
-      return `${label}: ${value}`;
-    });
-  return lines.length ? lines.join("\n") : JSON.stringify(preview, null, 2);
-}

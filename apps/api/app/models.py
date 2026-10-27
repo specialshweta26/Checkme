@@ -42,6 +42,7 @@ class User(Base):
     primary_provider: Mapped[str] = mapped_column(String(20))
     timezone: Mapped[str] = mapped_column(String(64), default="Asia/Kolkata")
     letta_agent_id: Mapped[str | None] = mapped_column(String(100))
+    coder_seeded: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
@@ -170,11 +171,46 @@ class WorkspaceAgent(Base):
     name: Mapped[str] = mapped_column(String(80))
     title: Mapped[str] = mapped_column(String(160), default="")
     instructions: Mapped[str] = mapped_column(Text, default="")
+    # Focus picked on the agent's first screen: email_calendar | coding | research | errands | "" (see agents/focus.py)
+    focus: Mapped[str] = mapped_column(String(40), default="")
     color: Mapped[str] = mapped_column(String(16), default="#f97316")
     kind: Mapped[str] = mapped_column(String(20), default="custom")  # default | custom
     pinned: Mapped[bool] = mapped_column(Boolean, default=False)
     archived: Mapped[bool] = mapped_column(Boolean, default=False)
     unread: Mapped[bool] = mapped_column(Boolean, default=False)
+    letta_agent_id: Mapped[str | None] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class GitHubInstallation(Base):
+    """A Checkme GitHub App installation this user installed (or verified they can access)."""
+
+    __tablename__ = "github_installations"
+    __table_args__ = (UniqueConstraint("user_id", "installation_id"),)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    installation_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    account_login: Mapped[str] = mapped_column(String(100), default="")
+    account_type: Mapped[str] = mapped_column(String(20), default="")  # User | Organization
+    repository_selection: Mapped[str] = mapped_column(String(20), default="")  # all | selected
+    permissions: Mapped[dict] = mapped_column(JSONB, default=dict)
+    suspended: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class DeployCredential(Base):
+    """A user's CLI credential for one deploy platform (Render, Vercel, Fly, …), Fernet-encrypted.
+
+    Entered on the Connectors page only; the agent gets env names, never values (app/agent/deploy.py)."""
+
+    __tablename__ = "deploy_credentials"
+    __table_args__ = (UniqueConstraint("user_id", "platform"),)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    platform: Mapped[str] = mapped_column(String(20))
+    credentials_enc: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
@@ -258,10 +294,13 @@ class RouteLog(Base):
 
 
 class MemoryBlock(Base):
-    """Fallback core memory when Letta is not configured."""
+    """Fallback core memory when Letta is not configured. One row per agent and label."""
 
     __tablename__ = "memory_blocks"
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    agent_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workspace_agents.id", ondelete="CASCADE"), primary_key=True
+    )
     label: Mapped[str] = mapped_column(String(50), primary_key=True)
     value: Mapped[str] = mapped_column(Text, default="")
 
@@ -297,6 +336,9 @@ class Automation(Base):
     __tablename__ = "automations"
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
+    agent_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workspace_agents.id", ondelete="CASCADE"), index=True
+    )
     name: Mapped[str] = mapped_column(String(200))
     trigger: Mapped[str] = mapped_column(Text)
     condition: Mapped[str] = mapped_column(Text, default="")
@@ -311,6 +353,9 @@ class ScheduledTask(Base):
     __table_args__ = (Index("ix_scheduled_tasks_due", "status", "next_run_at"),)
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    agent_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workspace_agents.id", ondelete="CASCADE"), index=True
+    )
     title: Mapped[str] = mapped_column(String(200))
     instruction: Mapped[str] = mapped_column(Text)
     prompt: Mapped[str] = mapped_column(Text, default="")
@@ -327,13 +372,69 @@ class ScheduledTask(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
 
+class AgentJob(Base):
+    """A background agent run (coding work, delegated sub-tasks, scheduled runs). See app/jobs."""
+
+    __tablename__ = "agent_jobs"
+    __table_args__ = (Index("ix_agent_jobs_status_created", "status", "created_at"),)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    agent_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workspace_agents.id", ondelete="SET NULL"), index=True
+    )
+    session_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("chat_sessions.id", ondelete="SET NULL"), index=True
+    )
+    parent_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("agent_jobs.id", ondelete="CASCADE"), index=True
+    )
+    root_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    depth: Mapped[int] = mapped_column(Integer, default=1)
+    role: Mapped[str] = mapped_column(String(20), default="coder")  # planner | coder | reviewer
+    kind: Mapped[str] = mapped_column(String(20), default="chat")  # chat | delegate | scheduled
+    title: Mapped[str] = mapped_column(String(200), default="")
+    prompt: Mapped[str] = mapped_column(Text, default="")
+    # queued | running | waiting_approval | waiting_children | done | failed | cancelled
+    status: Mapped[str] = mapped_column(String(20), default="queued")
+    result: Mapped[str] = mapped_column(Text, default="")
+    error: Mapped[str] = mapped_column(Text, default="")
+    meta: Mapped[dict] = mapped_column(JSONB, default=dict)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    scheduled_task_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("scheduled_tasks.id", ondelete="SET NULL")
+    )
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class JobEvent(Base):
+    """Timeline entries for a job tree: steps, plans, diffs, test output, PR links, approvals, results."""
+
+    __tablename__ = "job_events"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    job_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("agent_jobs.id", ondelete="CASCADE"), index=True)
+    root_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
+    agent_name: Mapped[str] = mapped_column(String(80), default="")
+    # step | plan | diff | test | pr | message | approval | result | error | status
+    kind: Mapped[str] = mapped_column(String(20), default="step")
+    text: Mapped[str] = mapped_column(Text, default="")
+    data: Mapped[dict] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
 class MemoryPassage(Base):
     """Fallback archival + episodic memory when Letta is not configured."""
 
     __tablename__ = "memory_passages"
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
-    agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    agent_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workspace_agents.id", ondelete="CASCADE"), index=True
+    )
     kind: Mapped[str] = mapped_column(String(20))  # archival | episodic
     text: Mapped[str] = mapped_column(Text)
     embedding = mapped_column(Vector(DIMS), nullable=True)

@@ -82,6 +82,14 @@ class Settings(BaseSettings):
     daytona_target: str = "us"
     composio_api_key: str = ""
 
+    # GitHub App (docs/GITHUB_APP.md). Installation tokens are minted per call, scoped to one repo.
+    github_app_id: str = ""
+    github_app_private_key: str = ""
+    github_app_slug: str = ""
+    github_app_client_id: str = ""
+    github_app_client_secret: str = ""
+    github_app_webhook_secret: str = ""
+
     # Routing knobs, tuned by the routing eval.
     route_margin: float = 0.08
     max_tool_schemas: int = 12

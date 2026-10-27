@@ -615,7 +615,10 @@ textarea.field { min-height: 110px; resize: vertical; }
   box-shadow: 0 0 0 4px var(--highlight-soft);
   animation: pulse 1.4s ease-in-out infinite;
 }
-.think-copy { font-size: 13.5px; }
+.think-copy { font-size: 13.5px; animation: think-in 0.25s ease-out; }
+.think-trail { list-style: none; margin: 0 0 8px; padding: 0; display: grid; gap: 4px; font-size: 12.5px; color: var(--muted); opacity: 0.75; }
+.think-trail li::before { content: "✓"; margin-right: 8px; color: var(--highlight); }
+@keyframes think-in { from { opacity: 0; transform: translateY(2px); } }
 .think-bars { display: grid; gap: 8px; margin-top: 14px; }
 .bar { height: 10px; border-radius: 6px; background: linear-gradient(90deg, var(--lift), #e2e8f0, var(--lift)); background-size: 200% 100%; animation: shimmer 1.6s linear infinite; }
 .bar.w1 { width: 92%; }
@@ -733,6 +736,25 @@ textarea.field { min-height: 110px; resize: vertical; }
 
 .tasks-toolbar { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
 .tasks-tabs { display: flex; gap: 6px; }
+.tasks-filters { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+select.tasks-agent { width: auto; min-width: 9.5rem; max-width: 16rem; padding: 6px 10px; }
+input.tasks-search { width: min(260px, 100%); }
+.agent-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: 99px;
+  background: var(--lift);
+  color: var(--muted);
+  font-size: 12px;
+}
+.agent-chip i {
+  width: 8px;
+  height: 8px;
+  border-radius: 99px;
+  display: inline-block;
+}
 .pill {
   padding: 6px 12px;
   border-radius: 99px;
@@ -742,7 +764,6 @@ textarea.field { min-height: 110px; resize: vertical; }
   font-size: 13px;
 }
 .pill.on { background: var(--accent-soft); color: var(--text); border-color: transparent; }
-.tasks-search { width: min(260px, 100%); }
 
 .task-list { display: grid; gap: 10px; }
 .task-card {
@@ -1836,3 +1857,71 @@ textarea.field { min-height: 110px; resize: vertical; }
   .task-card { grid-template-columns: 1fr; }
   .task-actions { justify-content: flex-end; }
 }
+
+/* New agent onboarding: greeting + focus card */
+.onboard { padding: 32px 0 8px; }
+.onboard-hello { display: inline-block; max-width: 46ch; padding: 12px 16px; border-radius: var(--radius-lg); background: var(--lift); font-size: 15.5px; line-height: 1.5; }
+.focus-card { max-width: 420px; margin: -8px 0 0; padding: 18px 18px 10px; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--panel); box-shadow: var(--shadow); }
+.focus-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+.focus-card-head strong { font-size: 16.5px; line-height: 1.35; }
+.focus-card-close { border: 0; background: none; color: var(--faint); font-size: 22px; line-height: 1; cursor: pointer; padding: 0 2px; }
+.focus-card ul { list-style: none; margin: 0; padding: 0; }
+.focus-option { display: flex; align-items: center; gap: 12px; width: 100%; padding: 9px 4px; border: 0; border-radius: var(--radius-sm); background: none; color: var(--text); font: inherit; font-size: 15.5px; text-align: left; cursor: pointer; }
+.focus-option:hover:not(:disabled) { background: var(--lift); }
+.focus-option:disabled { opacity: 0.55; cursor: default; }
+.focus-letter { display: inline-grid; place-items: center; width: 26px; height: 26px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--lift); color: var(--muted); font-size: 12.5px; }
+.focus-hint { margin: 10px 0 0 18px; color: var(--faint); font-size: 13px; }
+.welcome-after-onboard { padding-top: 20px; }
+
+/* Background job timeline (components/JobTimeline.tsx) */
+.job-timeline {
+  margin-top: 10px;
+  padding: 12px 14px;
+  border-radius: var(--radius);
+  border: 1px solid rgba(47, 107, 255, 0.18);
+  background: var(--panel);
+  display: grid;
+  gap: 8px;
+}
+.job-head { display: flex; align-items: center; gap: 10px; }
+.job-title { flex: 1; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.job-badge, .job-chip {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--lift);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.job-badge.running, .job-chip.running { background: rgba(47, 107, 255, 0.12); color: #2f6bff; }
+.job-badge.waiting_approval, .job-chip.waiting_approval { background: rgba(249, 115, 22, 0.14); color: #c2410c; }
+.job-badge.done, .job-chip.done { background: rgba(22, 163, 74, 0.12); color: #15803d; }
+.job-badge.failed, .job-chip.failed { background: rgba(220, 38, 38, 0.12); color: #b91c1c; }
+.job-tree { display: flex; flex-wrap: wrap; gap: 6px; }
+.job-events { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; max-height: 420px; overflow-y: auto; }
+.job-ev { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; line-height: 1.45; }
+.job-ev.status .job-text { color: var(--muted); }
+.job-ev.error .job-text { color: #b91c1c; }
+.job-ev.result .job-text { font-weight: 600; white-space: pre-wrap; }
+.job-ico { width: 16px; flex: none; text-align: center; color: var(--muted); }
+.job-body { display: grid; gap: 4px; min-width: 0; flex: 1; }
+.job-who { font-size: 11px; color: var(--muted); }
+.job-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.job-pre {
+  margin: 4px 0 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--lift);
+  font-size: 12px;
+  max-height: 280px;
+  overflow: auto;
+  white-space: pre;
+}
+.job-approval { display: grid; gap: 8px; }
+.job-plan { list-style: none; margin: 0 0 8px; padding: 8px 10px; border-radius: 8px; background: var(--lift); display: grid; gap: 3px; font-size: 13px; }
+.job-todo { display: flex; gap: 8px; align-items: baseline; }
+.job-todo.completed { color: var(--muted); text-decoration: line-through; }
+.job-todo.in_progress { font-weight: 600; }
+.job-todo-mark { width: 14px; flex: none; text-align: center; }
+.job-choices { flex-wrap: wrap; }
+.btn.small { padding: 4px 10px; font-size: 12px; }

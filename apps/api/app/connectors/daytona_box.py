@@ -748,9 +748,12 @@ async def _invoke_daytona(row, name: str, args: dict[str, Any]) -> Any:
                 "cwd": getattr(sandbox, "user_cwd", None) or "/home/daytona",
             }
         if name == "exec":
+            env = args.get("env")
+            env = {str(k): str(v) for k, v in env.items()} if isinstance(env, dict) and env else None
             response = await proc.exec(
                 args["command"],
                 cwd=args.get("cwd") or None,
+                env=env,
                 timeout=int(args.get("timeout") or 60),
             )
             return {

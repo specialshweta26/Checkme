@@ -7,13 +7,19 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.collab import GROUP_MEMBER_MAX, GROUP_MEMBER_MIN
+from app.agents.focus import FOCUSES, focus_label, normalize_focus
+
 from app.models import (
     AgentConnector,
     AgentGroup,
     AgentGroupMember,
+    Automation,
     ChatMessage,
     ChatSession,
     Connector,
+    MemoryBlock,
+    MemoryPassage,
+    ScheduledTask,
     User,
     WorkspaceAgent,
 )
@@ -31,6 +37,13 @@ class AgentError(ValueError):
     pass
 
 
+def _clean_focus(value) -> str:
+    try:
+        return normalize_focus(value)
+    except ValueError as exc:
+        raise AgentError(str(exc)) from exc
+
+
 def pick_color(index: int) -> str:
     return AGENT_COLORS[index % len(AGENT_COLORS)]
 
@@ -41,6 +54,8 @@ def serialize_agent(row: WorkspaceAgent) -> dict:
         "name": row.name,
         "title": row.title or "",
         "instructions": row.instructions or "",
+        "focus": getattr(row, "focus", "") or "",
+        "focus_label": focus_label(getattr(row, "focus", "") or ""),
         "color": row.color or DEFAULT_AGENT_COLOR,
         "kind": row.kind or "custom",
         "pinned": bool(getattr(row, "pinned", False)),
@@ -167,8 +182,47 @@ async def ensure_default_agent(db: AsyncSession, user: User) -> WorkspaceAgent:
     return row
 
 
+CODER_AGENT_NAME = "Coder"
+CODER_AGENT_COLOR = "#2f6bff"
+
+
+async def ensure_coder_agent(db: AsyncSession, user: User) -> WorkspaceAgent | None:
+    """Seed one "Coder" (focus coding) per user, once. Deleting it later is respected."""
+    if getattr(user, "coder_seeded", False):
+        return None
+    rows = (await db.execute(select(WorkspaceAgent).where(WorkspaceAgent.user_id == user.id))).scalars().all()
+    existing = next((a for a in rows if (a.focus or "") == "coding" or a.name.lower() == CODER_AGENT_NAME.lower()), None)
+    if existing is None:
+        existing = WorkspaceAgent(
+            user_id=user.id,
+            name=CODER_AGENT_NAME,
+            title=FOCUSES["coding"]["title"],
+            instructions="",
+            focus="coding",
+            color=CODER_AGENT_COLOR,
+            kind="custom",
+        )
+        db.add(existing)
+    elif not (existing.focus or ""):
+        existing.focus = "coding"
+    user.coder_seeded = True
+    await db.flush()
+    return existing
+
+
+async def find_agent_by_name(db: AsyncSession, user: User, name: str) -> WorkspaceAgent | None:
+    """Case-insensitive lookup of one of the user's (non-archived) agents by name."""
+    want = (name or "").strip().lstrip("@").lower()
+    if not want:
+        return None
+    rows = (await db.execute(select(WorkspaceAgent).where(WorkspaceAgent.user_id == user.id))).scalars().all()
+    live = [a for a in rows if not getattr(a, "archived", False)]
+    return next((a for a in live if (a.name or "").lower() == want), None)
+
+
 async def list_workspace(db: AsyncSession, user: User) -> dict:
     chief = await ensure_default_agent(db, user)
+    await ensure_coder_agent(db, user)
     agents = (
         (
             await db.execute(
@@ -282,6 +336,7 @@ async def create_agent(db: AsyncSession, user: User, body: dict) -> WorkspaceAge
         name=name,
         title=_clean_name(body.get("title") or "specialist") if (body.get("title") or "").strip() else "",
         instructions=_clean_instructions(body.get("instructions") or ""),
+        focus=_clean_focus(body.get("focus")),
         color=str(body.get("color") or pick_color(count)),
         kind="custom",
     )
@@ -316,6 +371,10 @@ async def update_agent(db: AsyncSession, user: User, agent_id: uuid.UUID, body: 
         row.title = _clean_name(title) if title else ""
     if "instructions" in body and body["instructions"] is not None:
         row.instructions = _clean_instructions(body["instructions"])
+    if "focus" in body and body["focus"] is not None:
+        row.focus = _clean_focus(body["focus"])
+        if row.focus and not (row.title or "").strip():
+            row.title = FOCUSES[row.focus]["title"]
     if body.get("color"):
         row.color = str(body["color"])[:16]
     if "pinned" in body and body["pinned"] is not None:
@@ -332,9 +391,23 @@ async def update_agent(db: AsyncSession, user: User, agent_id: uuid.UUID, body: 
 
 
 async def delete_agent(db: AsyncSession, user: User, agent_id: uuid.UUID) -> None:
+    """Remove a custom agent and the memory and routines that belong to it.
+
+    Chat sessions stay, with their original ``agent_id``, so transcripts are not
+    copied onto Chief. The default agent cannot be deleted. The remote Letta
+    agent is deleted when it is not Chief's shared id; a Letta outage does not
+    block the local delete. Database foreign keys cascade the same rows.
+    """
     row = await get_agent(db, user, agent_id)
     if row.kind == "default":
         raise AgentError("The default agent cannot be deleted.")
+    from app.agent.memory import forget_letta_agent
+
+    await forget_letta_agent(row, user)
+    await db.execute(sql_delete(MemoryBlock).where(MemoryBlock.agent_id == row.id))
+    await db.execute(sql_delete(MemoryPassage).where(MemoryPassage.agent_id == row.id))
+    await db.execute(sql_delete(ScheduledTask).where(ScheduledTask.agent_id == row.id))
+    await db.execute(sql_delete(Automation).where(Automation.agent_id == row.id))
     await db.delete(row)
     await db.commit()
 
@@ -415,7 +488,7 @@ async def duplicate_agent(db: AsyncSession, user: User, agent_id: uuid.UUID) -> 
     row = await create_agent(
         db,
         user,
-        {"name": name, "title": src.title or "", "instructions": src.instructions or "", "color": src.color},
+        {"name": name, "title": src.title or "", "instructions": src.instructions or "", "focus": getattr(src, "focus", "") or "", "color": src.color},
     )
     links = (await db.execute(select(AgentConnector).where(AgentConnector.agent_id == src.id))).scalars().all()
     for link in links:

@@ -18,6 +18,7 @@ class AgentIn(BaseModel):
     name: str
     title: str = ""
     instructions: str = ""
+    focus: str | None = None
     color: str | None = None
 
 
@@ -25,6 +26,7 @@ class AgentPatch(BaseModel):
     name: str | None = None
     title: str | None = None
     instructions: str | None = None
+    focus: str | None = None
     color: str | None = None
     pinned: bool | None = None
     archived: bool | None = None

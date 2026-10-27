@@ -20,6 +20,7 @@ import {
   startTeaching,
   stopTeaching,
   updateAgent,
+  WORKSPACE_CHANGED_EVENT,
   type AgentSkill,
   type ChatSessionRow,
   type WorkspaceAgent,
@@ -81,6 +82,14 @@ export function AgentsNav({
       .then((res) => res.json())
       .then((data) => setConnectors(data.connectors || []))
       .catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    const onChanged = () => {
+      refresh().catch(() => undefined);
+    };
+    window.addEventListener(WORKSPACE_CHANGED_EVENT, onChanged);
+    return () => window.removeEventListener(WORKSPACE_CHANGED_EVENT, onChanged);
   }, []);
 
   useEffect(() => {

@@ -30,6 +30,10 @@ class RuntimeConnector:
                 from app.connectors.daytona_box import call_daytona
 
                 return await call_daytona(self.row, name, args)
+            if self.provider == "github_app":
+                from app.connectors.github_app import call_github_app
+
+                return await call_github_app(self.row, name, args)
             if self.provider == "composio":
                 from app.connectors.composio_box import call_composio
 

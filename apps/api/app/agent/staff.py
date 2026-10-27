@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.llm import chat_complete
-from app.models import AdminItem, Automation, Commitment, MemoryBlock, ScheduledTask
+from app.models import AdminItem, Automation, Commitment, ScheduledTask
 from connector_core.text import clip
 
 log = logging.getLogger(__name__)
@@ -37,9 +37,9 @@ def _now(tz: str) -> datetime:
         return datetime.now(ZoneInfo("Asia/Kolkata"))
 
 
-async def dispatch(db: AsyncSession, user, runtime, tool: str, args: dict) -> dict:
+async def dispatch(db: AsyncSession, user, runtime, tool: str, args: dict, agent=None) -> dict:
     if tool == "today_briefing":
-        return await today_briefing(db, user, runtime)
+        return await today_briefing(db, user, runtime, agent=agent)
     if tool == "ask_inbox":
         return await ask_inbox(runtime, args.get("question") or "")
     if tool == "scan_commitments":
@@ -49,21 +49,21 @@ async def dispatch(db: AsyncSession, user, runtime, tool: str, args: dict) -> di
     if tool == "scan_admin":
         return await scan_admin(db, user, runtime)
     if tool == "schedule_task":
-        return await schedule_task(db, user, args)
+        return await schedule_task(db, user, args, agent=agent)
     if tool == "list_scheduled_tasks":
-        return await list_scheduled_tasks(db, user)
+        return await list_scheduled_tasks(db, user, agent=agent)
     if tool == "update_scheduled_task":
         return await update_scheduled_task(db, user, args)
     if tool == "create_automation":
-        return await create_automation(db, user, args)
+        return await create_automation(db, user, args, agent=agent)
     if tool == "list_automations":
-        return await list_automations(db, user.id)
+        return await list_automations(db, user.id, agent_id=getattr(agent, "id", None) if agent is not None else None)
     if tool == "learn_voice":
-        return await learn_voice(db, user, runtime)
+        return await learn_voice(db, user, runtime, agent=agent)
     return {"error": f"unknown staff tool {tool}"}
 
 
-async def today_briefing(db, user, runtime) -> dict:
+async def today_briefing(db, user, runtime, agent=None) -> dict:
     tz = user.timezone or "Asia/Kolkata"
     now = _now(tz)
     start = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -86,17 +86,19 @@ async def today_briefing(db, user, runtime) -> dict:
         )
     ).scalars().all()
     admin = (await db.execute(select(AdminItem).where(AdminItem.user_id == user.id).order_by(AdminItem.id.desc()).limit(8))).scalars().all()
-    autos = (
-        await db.execute(select(Automation).where(Automation.user_id == user.id, Automation.enabled.is_(True)))
-    ).scalars().all()
-    scheduled = (
-        await db.execute(
-            select(ScheduledTask)
-            .where(ScheduledTask.user_id == user.id, ScheduledTask.status.in_(("active", "running")))
-            .order_by(ScheduledTask.next_run_at.asc())
-            .limit(8)
-        )
-    ).scalars().all()
+    auto_stmt = select(Automation).where(Automation.user_id == user.id, Automation.enabled.is_(True))
+    task_stmt = (
+        select(ScheduledTask)
+        .where(ScheduledTask.user_id == user.id, ScheduledTask.status.in_(("active", "running")))
+        .order_by(ScheduledTask.next_run_at.asc())
+        .limit(8)
+    )
+    owner_id = getattr(agent, "id", None) if agent is not None else None
+    if owner_id is not None:
+        auto_stmt = auto_stmt.where(Automation.agent_id == owner_id)
+        task_stmt = task_stmt.where(ScheduledTask.agent_id == owner_id)
+    autos = (await db.execute(auto_stmt)).scalars().all()
+    scheduled = (await db.execute(task_stmt)).scalars().all()
     payload = {
         "timezone": tz,
         "now": now.isoformat(),
@@ -240,23 +242,32 @@ async def scan_admin(db, user, runtime) -> dict:
     return {"added": len(saved), "items": saved}
 
 
-async def schedule_task(db, user, args: dict) -> dict:
+async def schedule_task(db, user, args: dict, agent=None) -> dict:
     from app.tasks.service import create_from_prompt
 
     prompt = (args.get("prompt") or "").strip()
     if not prompt:
         return {"error": "prompt is required"}
+    name = (args.get("agent_name") or "").strip()
+    if name:
+        from app.agents.service import find_agent_by_name
+
+        named = await find_agent_by_name(db, user, name)
+        if named is None:
+            return {"error": f"No agent named {name}. Leave agent_name empty to schedule it on yourself."}
+        agent = named
     try:
-        task = await create_from_prompt(db, user, prompt)
+        task = await create_from_prompt(db, user, prompt, agent_id=getattr(agent, "id", None) if agent is not None else None)
     except ValueError as exc:
         return {"error": str(exc)}
     return {"created": True, "task": task}
 
 
-async def list_scheduled_tasks(db, user) -> dict:
+async def list_scheduled_tasks(db, user, agent=None) -> dict:
     from app.tasks.service import list_tasks
 
-    return {"tasks": await list_tasks(db, user)}
+    agent_id = getattr(agent, "id", None) if agent is not None else None
+    return {"tasks": await list_tasks(db, user, agent_id=agent_id)}
 
 
 async def update_scheduled_task(db, user, args: dict) -> dict:
@@ -271,9 +282,19 @@ async def update_scheduled_task(db, user, args: dict) -> dict:
         return {"error": str(exc)[:200]}
 
 
-async def create_automation(db, user, args: dict) -> dict:
+async def _routine_owner(db, user, agent):
+    if agent is not None and getattr(agent, "id", None):
+        return agent
+    from app.agents.service import ensure_default_agent
+
+    return await ensure_default_agent(db, user)
+
+
+async def create_automation(db, user, args: dict, agent=None) -> dict:
+    owner = await _routine_owner(db, user, agent)
     row = Automation(
         user_id=user.id,
+        agent_id=owner.id,
         name=(args.get("name") or "Untitled")[:200],
         trigger=args.get("trigger") or "",
         condition=args.get("condition") or "",
@@ -283,13 +304,20 @@ async def create_automation(db, user, args: dict) -> dict:
     )
     db.add(row)
     await db.commit()
-    out = {"id": row.id, "name": row.name, "trigger": row.trigger, "action": row.action, "requires_approval": row.requires_approval}
+    out = {
+        "id": row.id,
+        "name": row.name,
+        "trigger": row.trigger,
+        "action": row.action,
+        "requires_approval": row.requires_approval,
+        "agent_id": str(owner.id),
+    }
     text = " ".join(part for part in (row.name, row.trigger, row.action) if part).strip()
     if text:
         try:
             from app.tasks.service import create_from_prompt
 
-            scheduled = await create_from_prompt(db, user, text, require_time=True)
+            scheduled = await create_from_prompt(db, user, text, require_time=True, agent_id=owner.id)
             if scheduled:
                 out["scheduled_task"] = scheduled
         except Exception as exc:  # noqa: BLE001
@@ -297,17 +325,29 @@ async def create_automation(db, user, args: dict) -> dict:
     return out
 
 
-async def list_automations(db, user_id) -> dict:
-    rows = (await db.execute(select(Automation).where(Automation.user_id == user_id).order_by(Automation.id.desc()))).scalars().all()
+async def list_automations(db, user_id, agent_id=None) -> dict:
+    stmt = select(Automation).where(Automation.user_id == user_id).order_by(Automation.id.desc())
+    if agent_id is not None:
+        stmt = stmt.where(Automation.agent_id == agent_id)
+    rows = (await db.execute(stmt)).scalars().all()
     return {
         "automations": [
-            {"id": r.id, "name": r.name, "trigger": r.trigger, "condition": r.condition, "action": r.action, "requires_approval": r.requires_approval, "enabled": r.enabled}
+            {
+                "id": r.id,
+                "name": r.name,
+                "trigger": r.trigger,
+                "condition": r.condition,
+                "action": r.action,
+                "requires_approval": r.requires_approval,
+                "enabled": r.enabled,
+                "agent_id": str(r.agent_id) if r.agent_id else None,
+            }
             for r in rows
         ]
     }
 
 
-async def learn_voice(db, user, runtime) -> dict:
+async def learn_voice(db, user, runtime, agent=None) -> dict:
     sent = (await runtime.call("search_messages", {"query": "in:sent", "limit": 12})).get("messages") or []
     if not sent:
         sent = (await runtime.call("list_messages", {"folder": "sent", "limit": 12})).get("messages") or []
@@ -317,15 +357,10 @@ async def learn_voice(db, user, runtime) -> dict:
         + clip(json.dumps(sent, default=str), 8000)
     )
     voice = await _llm(prompt, 400)
-    row = (
-        await db.execute(select(MemoryBlock).where(MemoryBlock.user_id == user.id, MemoryBlock.label == "voice"))
-    ).scalar_one_or_none()
-    if row is None:
-        row = MemoryBlock(user_id=user.id, label="voice", value=voice)
-        db.add(row)
-    else:
-        row.value = voice
-    await db.commit()
+    from app.agent.memory import upsert_core
+
+    owner = await _routine_owner(db, user, agent)
+    await upsert_core(db, user.id, "voice", voice, owner.id)
     return {"voice": voice}
 
 

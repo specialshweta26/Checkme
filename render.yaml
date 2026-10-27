@@ -85,6 +85,18 @@ services:
         value: us
       - key: COMPOSIO_API_KEY
         sync: false
+      - key: GITHUB_APP_ID
+        sync: false
+      - key: GITHUB_APP_PRIVATE_KEY
+        sync: false
+      - key: GITHUB_APP_SLUG
+        sync: false
+      - key: GITHUB_APP_CLIENT_ID
+        sync: false
+      - key: GITHUB_APP_CLIENT_SECRET
+        sync: false
+      - key: GITHUB_APP_WEBHOOK_SECRET
+        sync: false
       - fromGroup: checkme-secrets
 
   - type: pserv

@@ -12,12 +12,15 @@ from app.auth.routes import me_router, router as auth_router
 from app.chat.routes import router as chat_router
 from app.config import get_settings
 from app.connectors.routes import router as connectors_router
+from app.connectors.deploy_routes import router as deploy_router
+from app.connectors.github_routes import router as github_router
 from app.files import router as files_router
 from app.db import init_db
 from app.inbox.routes import router as inbox_router
 from app.storage import ensure_bucket
 from app.skills.routes import router as skills_router
 from app.tasks.routes import router as tasks_router
+from app.jobs.routes import router as jobs_router
 
 log = logging.getLogger("assistant")
 logging.basicConfig(level=logging.INFO)
@@ -52,11 +55,13 @@ async def lifespan(_app: FastAPI):
     except Exception as vis_exc:  # noqa: BLE001
         log.warning("object storage not ready: %s", vis_exc)
     from app.inbox.worker import start_inbox_worker
+    from app.jobs.worker import start_job_worker
     from app.tasks.scheduler import start_scheduler
 
     workers = [
         asyncio.create_task(_sync_builtins_later(), name="startup-sync"),
         await start_scheduler(),
+        await start_job_worker(),
         await start_inbox_worker(),
     ]
     cfg = get_settings()
@@ -92,8 +97,11 @@ app.include_router(auth_router, prefix="/api")
 app.include_router(me_router, prefix="/api")
 app.include_router(chat_router, prefix="/api")
 app.include_router(agents_router, prefix="/api")
+app.include_router(github_router, prefix="/api")
+app.include_router(deploy_router, prefix="/api")
 app.include_router(connectors_router, prefix="/api")
 app.include_router(tasks_router, prefix="/api")
+app.include_router(jobs_router, prefix="/api")
 app.include_router(skills_router, prefix="/api")
 app.include_router(inbox_router, prefix="/api")
 app.include_router(files_router, prefix="/api")

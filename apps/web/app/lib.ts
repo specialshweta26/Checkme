@@ -21,6 +21,8 @@ export type WorkspaceAgent = {
   name: string;
   title?: string;
   instructions?: string;
+  focus?: string;
+  focus_label?: string;
   color: string;
   kind?: string;
   pinned?: boolean;
@@ -58,6 +60,13 @@ export type WorkspaceRoster = {
   default_agent_id?: string;
   connector_assignments?: Record<string, string[]>;
 };
+
+/** Fired on window when a chat turn created, changed, or deleted agents or groups. */
+export const WORKSPACE_CHANGED_EVENT = "checkme:workspace-changed";
+
+export function announceWorkspaceChanged() {
+  if (typeof window !== "undefined") window.dispatchEvent(new Event(WORKSPACE_CHANGED_EVENT));
+}
 
 export async function loadWorkspace(): Promise<WorkspaceRoster> {
   const res = await fetch("/api/agents", { credentials: "include" });
@@ -114,6 +123,7 @@ export async function updateAgent(
     name?: string;
     title?: string;
     instructions?: string;
+    focus?: string;
     color?: string;
     pinned?: boolean;
     archived?: boolean;
@@ -383,6 +393,12 @@ export function errorFromQuery(search: string) {
     signin_required: "Sign in first, then connect the other account.",
     account_linked_elsewhere: "That mailbox is already linked to another user.",
     missing_connector: "That MCP connection was not found.",
+    github_app_not_configured: "The Checkme GitHub App is not set up on this server yet. See docs/GITHUB_APP.md.",
+    github_needs_user_authorization:
+      "GitHub did not send an authorization code. Turn on “Request user authorization (OAuth) during installation” in the App settings.",
+    github_installation_not_yours: "That GitHub installation is not visible to your GitHub account.",
+    github_install_failed: "GitHub install could not be verified. Try again.",
+    github_missing_installation: "GitHub did not say which installation to use. Try installing again.",
   };
   return map[err] || err.replaceAll("_", " ");
 }

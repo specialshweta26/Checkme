@@ -255,8 +255,9 @@ If a tool 401s, the connector is marked `auth_expired` and the user reconnects f
 | `server_cards`, `tool_index` | Shared catalog (embeddings reused across users of the same server) |
 | `chat_sessions`, `chat_messages` | Transcript + meta (attachments, mail_threads, confirms) |
 | `inbox_items` | Triage cards (`to_header`, `cc_header`, `recipient_role`) |
-| `scheduled_tasks`, `automations` | Later work |
-| `memory_blocks`, `memory_passages` | Voice + episodic fallback if Letta is off |
+| `workspace_agents` | Named agents. Chief is `kind=default`. Each has its own Letta id when Letta is on |
+| `scheduled_tasks`, `automations` | Later work, owned by the agent that created them |
+| `memory_blocks`, `memory_passages` | Per-agent voice + episodic fallback if Letta is off |
 | `commitments`, `admin_items` | Staff extractions |
 | Redis | Session + rate limit |
 | Object storage | Attachment bytes |
@@ -265,7 +266,7 @@ If a tool 401s, the connector is marked `auth_expired` and the user reconnects f
 
 | Attribute | Approach |
 | --- | --- |
-| Isolation | Tools and memory are per `user_id`. Catalog search is filtered to that user’s connectors |
+| Isolation | Tools are per `user_id`, then limited by agent connector assignments. Memory, scheduled tasks, and automations are per workspace agent. Catalog search is filtered to that user’s connectors |
 | Latency | Inbox list does not classify on every GET; worker classifies in background. Badge poll is the SSE fallback |
 | Scale (personal) | One/few users. Inbox capped at 40 live cards. Agent recursion limit ~160 with retries |
 | Observability | Structured logs; optional NDJSON debug in agent/chat (remove after flows are confirmed) |

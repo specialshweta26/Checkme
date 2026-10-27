@@ -14,7 +14,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents.service import connector_assignment_map, filter_connectors
+from app.agents import chat_tools as workspace_tools
+from app.agents.service import GROUP_MEMBER_MAX, GROUP_MEMBER_MIN, connector_assignment_map, filter_connectors
 from app.agent.confirm import sign_confirm
 from app.agent.invoke import bump_usage, confirmed, invoke_named, preview
 from app.agent.memory import load_memory, remember
@@ -64,6 +65,9 @@ CATALOG_TOOLS = {
 }
 
 
+JOB_CONFIRM_TTL = 3 * 24 * 3600
+
+
 @dataclass
 class RunContext:
     db: AsyncSession | None
@@ -85,6 +89,17 @@ class RunContext:
     teammate_depth: int = 0
     session_id: uuid.UUID | None = None
     request_id: str = ""
+    workspace_changed: bool = False
+    progress: Any = None
+    job: Any = None  # AgentJob when running in the background worker
+    jobs_started: list = field(default_factory=list)  # jobs this turn queued (start_coding_job / delegate)
+    question: dict | None = None  # ask_user: {question, options, waiting_for?} -> job waits / chat buttons
+    prs: list = field(default_factory=list)  # PRs opened or updated this turn
+    merged: list = field(default_factory=list)  # PRs merged this turn
+    repo: str = ""  # repo this turn worked on
+    overviews: dict = field(default_factory=dict)  # repo_overview cache per repo
+    check_results: dict = field(default_factory=dict)  # last run_checks per repo (for the PR body)
+    check_attempts: dict = field(default_factory=dict)
 
 
 def _json_size(value: Any) -> int:
@@ -1108,6 +1123,71 @@ async def get_user_tool_schema(ctx: RunContext, connector_slug: str, tool_name: 
     }
 
 
+def git_write_gate(conn, slug: str, tool: str, args: dict | None) -> bool:
+    from app.connectors.github_app import is_git_write
+
+    from app.agent.deploy import is_deploy_write
+
+    text = f"{getattr(conn, 'name', '') or ''} {getattr(conn, 'alias', '') or ''} {getattr(conn, 'server_url', '') or ''}"
+    if is_git_write(str(getattr(conn, "provider", "") or ""), slug, tool, args, text):
+        return True
+    # Deploy writes through a Render / Vercel / … connector are just as destructive: always a card.
+    return is_deploy_write(conn, slug, tool, args)
+
+
+_APPROVAL_KEYS = ("repo", "number", "head", "branch", "method", "base", "state", "delete_branch")
+
+
+def _approved(ctx: RunContext, conn, slug: str, tool: str, args: dict) -> bool:
+    """Was this exact action approved? GitHub App writes (merge, push, PR edits) must match repo, PR and options,
+    so approving one merge never lets a different PR through."""
+    if not confirmed(ctx.confirmations, slug, tool):
+        return False
+    from app.connectors.github_app import WRITE_TOOLS
+
+    if str(getattr(conn, "provider", "") or "") != "github_app" or tool not in WRITE_TOOLS:
+        return True
+
+    def key(a: dict) -> tuple:
+        a = dict(a or {})
+        if tool == "merge_pull_request":
+            from app.connectors.github_app import merge_method
+
+            a["method"] = merge_method(a.get("method"))
+        return tuple("" if a.get(k) in (None, False, "") else str(a.get(k)).lower() for k in _APPROVAL_KEYS)
+
+    want = key(args)
+    return any(c.get("slug") == slug and c.get("tool") == tool and key(c.get("args") or {}) == want for c in ctx.confirmations)
+
+
+async def _track_github_writes(ctx: RunContext, conn, tool: str, args: dict, result: Any) -> None:
+    """PRs opened and merged through the GitHub App go on the job (Merge it? question, merge sha) and in coding memory."""
+    if str(getattr(conn, "provider", "") or "") != "github_app" or not isinstance(result, dict) or result.get("error"):
+        return
+    if tool not in ("create_pull_request", "merge_pull_request"):
+        return
+    from app.agent import coding_memory
+
+    repo = str(args.get("repo") or "")
+    rec = getattr(ctx.progress, "record", None) if ctx.progress is not None else None
+    if tool == "create_pull_request" and result.get("url"):
+        pr = {"url": result["url"], "repo": repo, "number": result.get("number"), "branch": args.get("head"), "title": args.get("title")}
+        if not any(p.get("url") == pr["url"] for p in ctx.prs):
+            ctx.prs.append(pr)
+        ctx.repo = ctx.repo or repo
+        if rec is not None:
+            await rec("pr", f"Pull request: {pr['url']}", pr)
+        await coding_memory.note(ctx, repo=repo, pr=pr)
+    elif tool == "merge_pull_request" and result.get("merged"):
+        m = {"repo": repo, "number": int(args.get("number") or 0), "sha": result.get("sha"), "method": result.get("method"), "url": result.get("url")}
+        ctx.merged.append(m)
+        ctx.repo = ctx.repo or repo
+        if rec is not None:
+            await rec("pr", f"Merged {repo}#{m['number']} ({m.get('method') or 'merge'}): {str(m.get('sha') or '')[:12]}", m)
+        url = m.get("url") or f"https://github.com/{repo}/pull/{m['number']}"
+        await coding_memory.note(ctx, repo=repo, pr={"url": url, "repo": repo, "number": m["number"], "branch": "", "state": "merged"})
+
+
 async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, args: dict | None = None) -> Any:
     args = as_dict(args)
     orig_tool = tool_name
@@ -1158,8 +1238,14 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
         tool_name, args = wrap_through_execute(tool_name, args, execute)
     args = _rewrite_catalog_search_args(tool_name, args, ctx.query)
     destructive = bool(hit.destructive if hit is not None else (spec.destructive if spec else False))
-    if destructive and not ctx.auto_confirm and not confirmed(ctx.confirmations, connector_slug, tool_name):
-        token = sign_confirm("tool", {"slug": connector_slug, "tool": tool_name, "args": args})
+    # Git writes (push, open PR, merge, commit) always need a human, even in auto_confirm runs (schedules, jobs).
+    git_write = git_write_gate(conn, connector_slug, tool_name, args)
+    if (destructive or git_write) and (git_write or not ctx.auto_confirm) and not _approved(
+        ctx, conn, connector_slug, tool_name, args
+    ):
+        # Background jobs wait for the user, so their approval cards live longer than chat ones.
+        ttl = JOB_CONFIRM_TTL if (ctx.job is not None or ctx.auto_confirm) else 600
+        token = sign_confirm("tool", {"slug": connector_slug, "tool": tool_name, "args": args}, ttl=ttl)
         pending = {
             "needs_confirm": True,
             "token": token,
@@ -1215,6 +1301,7 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
         )
         # #endregion
         result = await _hydrate_opened_mail(ctx, connector_slug, tool_name, result)
+        await _track_github_writes(ctx, conn, tool_name, args, result)
         # #region agent log
         if tool_name in {"search_messages", "list_messages"}:
             from app.debug_ndjson import dbg
@@ -1311,7 +1398,7 @@ async def run_staff(ctx: RunContext, name: str, args: dict | None = None) -> Any
     }:
         return {"error": "No mail connector is enabled for this user."}
     try:
-        result = await staff_dispatch(ctx.db, ctx.user, runtime, name, as_dict(args))
+        result = await staff_dispatch(ctx.db, ctx.user, runtime, name, as_dict(args), agent=ctx.agent)
         ctx.sources.append({"source_tool": name, "args": as_dict(args), "snippet": compact_payload(result, 2000)})
         return compact_payload(result)
     except Exception as exc:  # noqa: BLE001
@@ -1356,6 +1443,10 @@ class ScheduleTaskInput(BaseModel):
     prompt: str = Field(
         description="The user's full request, including what to do and when (in N minutes, tonight, every day, a clock time)."
     )
+    agent_name: str = Field(
+        default="",
+        description="Optional: the name of another of the user's agents that should own and run it (e.g. Coder). Empty means you.",
+    )
 
 
 class InspectInput(BaseModel):
@@ -1364,6 +1455,40 @@ class InspectInput(BaseModel):
     search: str | None = Field(default=None, description="Find keys whose names match the user's asked slice (style, sku, region, ...).")
     offset: int = Field(default=0, description="Skip this many list items or object keys.")
     limit: int = Field(default=80, description="How many list items or keys to return.")
+
+
+class CreateAgentInput(BaseModel):
+    name: str = Field(description="Short display name for the new agent, e.g. 'Dev' or 'Ori'.")
+    title: str = Field(default="", description="Role or area, e.g. 'tech work: GitHub and Render'.")
+    instructions: str = Field(default="", description="Standing instructions for this agent's focus, tone and limits.")
+
+
+class UpdateAgentInput(BaseModel):
+    agent: str = Field(description="Agent id or name from list_agents_and_groups.")
+    name: str | None = Field(default=None, description="New name, to rename it.")
+    title: str | None = Field(default=None, description="New role or area.")
+    instructions: str | None = Field(default=None, description="Replacement instructions.")
+    archived: bool | None = Field(default=None, description="True to archive, false to restore.")
+
+
+class CreateGroupInput(BaseModel):
+    name: str = Field(description="Group name the user gave, e.g. 'Software developers'.")
+    members: list[str] = Field(default_factory=list, description="Agent names or ids to add. Leave empty when all_agents is true.")
+    all_agents: bool = Field(default=False, description="True when the user said all, every, or all existing agents.")
+
+
+class GroupMembersInput(BaseModel):
+    group: str = Field(description="Group id or name.")
+    members: list[str] = Field(description="Agent names or ids.")
+
+
+class RenameGroupInput(BaseModel):
+    group: str = Field(description="Group id or name.")
+    name: str = Field(description="New group name.")
+
+
+class DeleteWorkspaceInput(BaseModel):
+    target: str = Field(description="Id or name of the agent or group to delete.")
 
 
 class AskTeammateInput(BaseModel):
@@ -1378,6 +1503,297 @@ class SaveSkillInput(BaseModel):
 
 class StopTeachingInput(BaseModel):
     name: str = Field(default="", description="Name for the taught skill.")
+
+
+class SetFocusInput(BaseModel):
+    focus: str = Field(description="One of: email_calendar, coding, research, errands.")
+
+
+class SandboxShellInput(BaseModel):
+    command: str = Field(description="Shell command to run on the computer (bash). Chain steps with &&.")
+    cwd: str | None = Field(default=None, description="Working directory, e.g. ~/work/<repo>.")
+    timeout: int = Field(default=300, description="Seconds to wait (10-900). Use more for installs and test suites.")
+
+
+class GitCheckoutInput(BaseModel):
+    repo: str = Field(description="owner/name, e.g. octocat/hello-world")
+    branch: str = Field(default="", description="Work branch to create or reuse. Use agent/<short-name> for changes you will push.")
+    base: str = Field(default="", description="Branch to start from. Defaults to the repo default branch.")
+
+
+class RunTestsInput(BaseModel):
+    repo: str = Field(description="owner/name (already checked out)")
+    command: str = Field(default="", description="Test command. Empty = auto-detect (npm test, pytest, go test, cargo test).")
+    timeout: int = Field(default=600, description="Seconds (10-900).")
+
+
+class GitDiffInput(BaseModel):
+    repo: str = Field(description="owner/name (already checked out)")
+    base: str = Field(default="", description="Compare against origin/<base>. Defaults to the remote default branch.")
+
+
+class GitCommitInput(BaseModel):
+    repo: str = Field(description="owner/name (already checked out, on an agent/* branch)")
+    message: str = Field(description="Commit message: a short summary line, then details if useful.")
+    paths: list[str] | None = Field(default=None, description="Only these paths. Empty = all changes.")
+
+
+class StartJobInput(BaseModel):
+    task: str = Field(description="Self-contained task: the repo (owner/name), what to change or check, and acceptance criteria.")
+    title: str = Field(default="", description="Short title for the timeline.")
+
+
+async def start_coding_job(ctx: "RunContext", task: str, title: str = "", role: str = "planner") -> dict:
+    """Queue a background job for this agent in the current chat (chat turns only)."""
+    from app.jobs import service as jobs
+    from app.jobs.worker import wake
+
+    if ctx.db is None or ctx.agent is None:
+        return {"error": "Background jobs need a saved agent."}
+    try:
+        job = await jobs.create_job(
+            ctx.db, ctx.user, agent=ctx.agent, prompt=task, title=title, role=role, kind="chat", session_id=ctx.session_id
+        )
+    except jobs.JobError as exc:
+        return {"error": str(exc)}
+    await ctx.db.commit()
+    wake()
+    info = jobs.serialize_job(job)
+    ctx.jobs_started.append(info)
+    return {
+        "started": True,
+        "job_id": info["id"],
+        "title": info["title"],
+        "note": "The job is running in the background; the user sees its live timeline under this reply. "
+        "Reply in one or two lines that it started; do not do the work yourself in this turn.",
+    }
+
+
+class DelegateInput(BaseModel):
+    role: str = Field(description="coder, reviewer or planner")
+    task: str = Field(description="Self-contained instructions for the child job.")
+    agent_name: str = Field(default="", description="Optional: which of the user's agents runs it. Defaults to you.")
+    title: str = Field(default="", description="Short title for the timeline.")
+
+
+async def delegate_job(ctx: "RunContext", role: str, task: str, agent_name: str = "", title: str = "") -> dict:
+    """Create a child job under the current background job (depth capped, fan-out capped per turn)."""
+    from app.agents.service import find_agent_by_name
+    from app.jobs import service as jobs
+
+    parent = ctx.job
+    if parent is None or ctx.db is None:
+        return {"error": "delegate only works inside a background job."}
+    role = (role or "").strip().lower()
+    if role not in jobs.ROLES:
+        return {"error": f"role must be one of {', '.join(jobs.ROLES)}"}
+    if len(ctx.jobs_started) >= jobs.MAX_CHILDREN:
+        return {"error": f"At most {jobs.MAX_CHILDREN} delegated jobs per step. Wait for these to finish."}
+    agent = ctx.agent
+    if agent_name.strip():
+        agent = await find_agent_by_name(ctx.db, ctx.user, agent_name)
+        if agent is None:
+            return {"error": f"No agent named {agent_name}."}
+    try:
+        child = await jobs.create_job(
+            ctx.db, ctx.user, agent=agent, prompt=task, title=title, role=role, kind="delegate", parent=parent
+        )
+    except jobs.JobError as exc:
+        return {"error": str(exc)}
+    await ctx.db.flush()
+    info = jobs.serialize_job(child)
+    ctx.jobs_started.append(info)
+    if ctx.progress is not None and hasattr(ctx.progress, "record"):
+        await ctx.progress.record("status", f"Delegated to {info['agent_name'] or role} ({role}): {info['title']}", {"child_id": info["id"]})
+    return {
+        "delegated": True,
+        "job_id": info["id"],
+        "role": role,
+        "note": "The child job runs after this turn. End your turn now with one line saying what you handed off; "
+        "you will be resumed with its result.",
+    }
+
+
+class PushBranchInput(BaseModel):
+    repo: str = Field(description="owner/name")
+    branch: str = Field(description="The agent/* branch to push. Other branches are refused.")
+    open_pr: bool = Field(default=True, description="Also open a pull request after pushing.")
+    title: str = Field(default="", description="Pull request title.")
+    body: str = Field(default="", description="Pull request description: what changed, why, and how it was tested.")
+    base: str = Field(default="", description="PR target branch. Defaults to the repo default branch.")
+    draft: bool = Field(default=False, description="Open the PR as a draft.")
+    pr_number: int = Field(
+        default=0,
+        description="Only when the user asked you to update an existing PR: its number. Then branch must be that PR's head "
+        "branch (verified), and no new PR is opened.",
+    )
+
+
+class GitInspectInput(BaseModel):
+    repo: str = Field(description="owner/name (already checked out with git_checkout)")
+    action: str = Field(description="status | branches | log | show | diff | blame | grep | tree | read")
+    ref: str = Field(default="", description="Commit, branch or tag (log/show/diff/blame/tree/read).")
+    ref2: str = Field(default="", description="Second ref for diff (ref..ref2).")
+    path: str = Field(default="", description="File or directory path.")
+    query: str = Field(default="", description="Text to search for (grep).")
+    start: int = Field(default=0, description="First line (read/blame).")
+    end: int = Field(default=0, description="Last line (read/blame).")
+    limit: int = Field(default=50, description="Max commits/results.")
+    regex: bool = Field(default=False, description="grep: treat query as a regex instead of plain text.")
+
+
+class ToolchainInput(BaseModel):
+    extras: list[str] = Field(default_factory=list, description="Extra toolchains only when the repo needs them: go, java, rust.")
+    force: bool = Field(default=False, description="Re-check everything even if the toolchain marker exists.")
+
+
+class RepoOnlyInput(BaseModel):
+    repo: str = Field(description="owner/name (already checked out)")
+
+
+class SymbolInput(BaseModel):
+    repo: str = Field(description="owner/name (already checked out)")
+    symbol: str = Field(description="Function, class, type or variable name, e.g. parse_config or UserService.")
+    limit: int = Field(default=40, description="Max results.")
+
+
+class ReferencesInput(BaseModel):
+    repo: str = Field(description="owner/name (already checked out)")
+    symbol: str = Field(description="Identifier to find usages of (whole word).")
+    path: str = Field(default="", description="Only under this directory or file.")
+    limit: int = Field(default=80, description="Max lines.")
+
+
+class ReadRangeInput(BaseModel):
+    repo: str = Field(description="owner/name (already checked out)")
+    path: str = Field(description="File path in the repo.")
+    start: int = Field(default=1, description="First line.")
+    end: int = Field(default=200, description="Last line.")
+    ref: str = Field(default="", description="Read the file at this commit/branch instead of the working tree.")
+
+
+class CheckCommand(BaseModel):
+    kind: str = Field(default="unit", description="lint | typecheck | unit | integration | build | setup")
+    command: str
+    cwd: str = Field(default=".", description="Directory inside the repo.")
+
+
+class RunChecksInput(BaseModel):
+    repo: str = Field(description="owner/name (already checked out)")
+    kinds: list[str] = Field(default_factory=list, description="Subset of lint, typecheck, unit, integration, build. Empty = all found.")
+    commands: list[CheckCommand] = Field(default_factory=list, description="Override: exact commands to run instead of the detected ones.")
+    timeout_each: int = Field(default=600, description="Seconds per command (10-900).")
+
+
+class Finding(BaseModel):
+    path: str = Field(default="", description="File path (as in the PR diff).")
+    line: int = Field(default=0, description="Line number in the new version of the file; inline only when it is inside the diff.")
+    severity: str = Field(default="minor", description="blocker | major | minor | nit")
+    body: str = Field(description="What is wrong and how to fix it.")
+
+
+class ReviewInput(BaseModel):
+    repo: str = Field(description="owner/name")
+    number: int = Field(description="Pull request number")
+    verdict: str = Field(default="COMMENT", description="COMMENT, REQUEST_CHANGES, or APPROVE (APPROVE only when nothing blocks).")
+    summary: str = Field(default="", description="2-5 sentences: what the PR does and the overall assessment.")
+    findings: list[Finding] = Field(default_factory=list, description="Concrete issues, each with path/line when possible.")
+    include_checks: bool = Field(default=True, description="Add the latest run_checks table to the review.")
+
+
+class DeployParams(BaseModel):
+    service: str = Field(default="", description="Render srv-… id, Cloud Run / App Engine service, Railway service")
+    app: str = Field(default="", description="Fly app, Vercel project, Azure Container App")
+    stack: str = Field(default="", description="AWS CloudFormation stack")
+    stage: str = Field(default="", description="Serverless stage")
+    region: str = Field(default="", description="Cloud region when the platform needs one")
+    group: str = Field(default="", description="Azure resource group")
+    ref: str = Field(default="", description="Commit sha to deploy (Render)")
+    deployment: str = Field(default="", description="Deploy id / URL (status, logs, rollback target)")
+    version: str = Field(default="", description="Version / revision for rollback (App Engine, Cloud Run, Azure)")
+    image: str = Field(default="", description="Image to roll back to (Fly)")
+    flavor: str = Field(default="", description="aws: serverless|sam|cdk; gcloud: appengine|run")
+    production: bool = Field(default=True, description="Vercel / Netlify: production (true) or preview (false)")
+
+
+class DetectDeployInput(BaseModel):
+    repo: str = Field(description="owner/name, already checked out with git_checkout")
+
+
+class DeployInput(BaseModel):
+    repo: str = Field(description="owner/name, checked out on the computer")
+    platform: str = Field(description="render, vercel, fly, netlify, railway, aws, gcloud or azure")
+    params: DeployParams = Field(default_factory=DeployParams)
+    cwd: str = Field(default=".", description="Directory inside the repo with the deploy config (from detect_deploy_targets)")
+    use_cli: bool = Field(default=False, description="Use the CLI even though a connector for this platform exists")
+
+
+class DeployReadInput(BaseModel):
+    repo: str = Field(default="", description="owner/name (optional for status)")
+    platform: str = Field(description="render, vercel, fly, netlify, railway, aws, gcloud or azure")
+    params: DeployParams = Field(default_factory=DeployParams)
+    cwd: str = Field(default=".", description="Directory inside the repo")
+
+
+class AskUserInput(BaseModel):
+    question: str = Field(description="One short question.")
+    options: list[str] = Field(description="2-5 short answer options shown as buttons, e.g. repo names or Yes / No.")
+    waiting_for: str = Field(default="", description="Set to github_app (GitHub App install) or deploy_<platform> (e.g. deploy_render) when blocked on a connection, so the job resumes after the user connects.")
+
+
+class RememberCodingInput(BaseModel):
+    default_repo: str = Field(default="", description="owner/name the user works in by default.")
+    branch_convention: str = Field(default="", description="e.g. agent/<ticket>-<slug>, or feat/<name>.")
+    base_branch: str = Field(default="", description="Branch PRs usually target, e.g. main or develop.")
+    notes: str = Field(default="", description="Other lasting preferences (test command, reviewers, merge method).")
+
+
+async def set_agent_focus(ctx: RunContext, focus: str) -> dict:
+    from app.agents import service as agents_service
+    from app.agents.focus import FOCUSES
+
+    if ctx.agent is None or ctx.db is None:
+        return {"error": "No agent to update"}
+    try:
+        row = await agents_service.update_agent(ctx.db, ctx.user, ctx.agent.id, {"focus": focus})
+    except agents_service.AgentError as exc:
+        return {"error": str(exc), "options": list(FOCUSES)}
+    ctx.agent = row
+    ctx.workspace_changed = True
+    return {"ok": True, "agent": row.name, "focus": row.focus, "label": FOCUSES[row.focus]["label"] if row.focus else ""}
+
+
+async def coding_workspace_status(ctx: RunContext) -> dict:
+    from app.agent import coding
+
+    probe: dict = {}
+    probe_error = ""
+    if coding.COMPUTER_SLUG in ctx.connectors:
+        result = await call_user_tool(ctx, coding.COMPUTER_SLUG, "exec", {"command": coding.bash(coding.PROBE_COMMAND), "timeout": 60})
+        data = as_dict(result)
+        inner = as_dict(data.get("data")) if isinstance(data.get("data"), dict) else data
+        if data.get("error"):
+            probe_error = str(data["error"])
+        else:
+            probe = coding.parse_probe(str(inner.get("stdout") or inner.get("result") or ""))
+    from app.agent import deploy
+    from app.agent.git_tools import github_app_status
+
+    out = coding.readiness(ctx.connectors, probe, probe_error, await github_app_status(ctx))
+    return deploy.add_readiness(out, ctx.connectors, await deploy.saved_env_names(ctx))
+
+
+async def sandbox_shell(ctx: RunContext, command: str, cwd: str | None = None, timeout: int = 300) -> Any:
+    from app.agent import coding
+
+    if coding.COMPUTER_SLUG not in ctx.connectors:
+        return {"error": coding.readiness(ctx.connectors)["missing"][0]}
+    if not (command or "").strip():
+        return {"error": "command is required"}
+    args: dict[str, Any] = {"command": command, "timeout": coding.clamp_timeout(timeout)}
+    if cwd:
+        args["cwd"] = cwd
+    return await call_user_tool(ctx, coding.COMPUTER_SLUG, "exec", args)
 
 
 def harness_tools(ctx: RunContext) -> list[StructuredTool]:
@@ -1397,9 +1813,9 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
         """Run a tool on one of this user's connectors now. Do not use this to send or fetch if the user named a future time — call schedule_task instead. Catalog/search/resolve/list tools are not answers. Large results are stored; use inspect_result for the slice the user asked for."""
         return dumps(await call_user_tool(ctx, connector_slug, tool_name, args), 60000)
 
-    async def schedule_task(prompt: str) -> str:
-        """Queue work for a future time. Required when the user says in N minutes, later, tonight, tomorrow, every day, or any clock. Pass their full request. Do not fetch data or send mail in this turn."""
-        return dumps(await run_staff(ctx, "schedule_task", {"prompt": prompt}))
+    async def schedule_task(prompt: str, agent_name: str = "") -> str:
+        """Queue work for a future time on this agent's own routines (or on a named agent with agent_name). Required when the user says in N minutes, later, tonight, tomorrow, every day, or any clock. Pass their full request. Do not fetch data or send mail in this turn. Scheduled git pushes, PRs and merges still wait for the user's approval."""
+        return dumps(await run_staff(ctx, "schedule_task", {"prompt": prompt, "agent_name": agent_name}))
 
     async def inspect_result(
         result_id: str | None = None,
@@ -1449,6 +1865,57 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
             return dumps({"error": "Cannot save a taught skill without a workspace."})
         return dumps(await _stop(ctx.db, ctx.user, name))
 
+    async def list_agents_and_groups() -> str:
+        """List this user's own Checkme agents and agent groups (the sidebar under Personal), with ids, titles and members. Use for any question about their Checkme agents or groups. Not a connector."""
+        ctx.used_tools.append("list_agents_and_groups")
+        return dumps(await workspace_tools.list_agents_and_groups(ctx), 16000)
+
+    async def create_agent(name: str, title: str = "", instructions: str = "") -> str:
+        """Create a new Checkme agent for this user (shows in the sidebar under Personal). Use when the user asks to create, add, or set up an agent. Never use a connector for this."""
+        ctx.used_tools.append("create_agent")
+        return dumps(await workspace_tools.create_agent(ctx, name, title, instructions))
+
+    async def update_agent(
+        agent: str,
+        name: str | None = None,
+        title: str | None = None,
+        instructions: str | None = None,
+        archived: bool | None = None,
+    ) -> str:
+        """Rename a Checkme agent or change its title, instructions or archived state."""
+        ctx.used_tools.append("update_agent")
+        return dumps(await workspace_tools.update_agent(ctx, agent, name, title, instructions, archived))
+
+    async def create_agent_group(name: str, members: list[str] | None = None, all_agents: bool = False) -> str:
+        """Create a Checkme agent group (a shared chat room of 2 to 10 of this user's agents). Set all_agents=true for 'all my agents'. Use this, never a connector, for any request to group the user's agents."""
+        ctx.used_tools.append("create_agent_group")
+        return dumps(await workspace_tools.create_group(ctx, name, members or [], all_agents))
+
+    async def add_group_members(group: str, members: list[str]) -> str:
+        """Add agents to an existing Checkme agent group (max 10 members)."""
+        ctx.used_tools.append("add_group_members")
+        return dumps(await workspace_tools.add_group_members(ctx, group, members))
+
+    async def remove_group_members(group: str, members: list[str]) -> str:
+        """Remove agents from a Checkme agent group (a group keeps at least 2 members)."""
+        ctx.used_tools.append("remove_group_members")
+        return dumps(await workspace_tools.remove_group_members(ctx, group, members))
+
+    async def rename_agent_group(group: str, name: str) -> str:
+        """Rename a Checkme agent group."""
+        ctx.used_tools.append("rename_agent_group")
+        return dumps(await workspace_tools.rename_group(ctx, group, name))
+
+    async def delete_agent(target: str) -> str:
+        """Ask to delete a Checkme agent. This only shows the user a confirmation card; it is deleted after they confirm. Chief cannot be deleted."""
+        ctx.used_tools.append("delete_agent")
+        return dumps(await workspace_tools.request_delete(ctx, "agent", target))
+
+    async def delete_agent_group(target: str) -> str:
+        """Ask to delete a Checkme agent group. This only shows the user a confirmation card; it is deleted after they confirm. Member agents are kept."""
+        ctx.used_tools.append("delete_agent_group")
+        return dumps(await workspace_tools.request_delete(ctx, "group", target))
+
     tools = [
         StructuredTool.from_function(coroutine=list_connectors, name="list_connectors", description=list_connectors.__doc__),
         StructuredTool.from_function(
@@ -1487,7 +1954,280 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
             description=run_staff_tool.__doc__,
             args_schema=StaffInput,
         ),
+        StructuredTool.from_function(
+            coroutine=list_agents_and_groups,
+            name="list_agents_and_groups",
+            description=list_agents_and_groups.__doc__,
+        ),
+        StructuredTool.from_function(
+            coroutine=create_agent, name="create_agent", description=create_agent.__doc__, args_schema=CreateAgentInput
+        ),
+        StructuredTool.from_function(
+            coroutine=update_agent, name="update_agent", description=update_agent.__doc__, args_schema=UpdateAgentInput
+        ),
+        StructuredTool.from_function(
+            coroutine=create_agent_group,
+            name="create_agent_group",
+            description=create_agent_group.__doc__,
+            args_schema=CreateGroupInput,
+        ),
+        StructuredTool.from_function(
+            coroutine=add_group_members,
+            name="add_group_members",
+            description=add_group_members.__doc__,
+            args_schema=GroupMembersInput,
+        ),
+        StructuredTool.from_function(
+            coroutine=remove_group_members,
+            name="remove_group_members",
+            description=remove_group_members.__doc__,
+            args_schema=GroupMembersInput,
+        ),
+        StructuredTool.from_function(
+            coroutine=rename_agent_group,
+            name="rename_agent_group",
+            description=rename_agent_group.__doc__,
+            args_schema=RenameGroupInput,
+        ),
+        StructuredTool.from_function(
+            coroutine=delete_agent, name="delete_agent", description=delete_agent.__doc__, args_schema=DeleteWorkspaceInput
+        ),
+        StructuredTool.from_function(
+            coroutine=delete_agent_group,
+            name="delete_agent_group",
+            description=delete_agent_group.__doc__,
+            args_schema=DeleteWorkspaceInput,
+        ),
     ]
+    if ctx.agent is not None and (getattr(ctx.agent, "kind", "custom") or "custom") != "default":
+
+        async def set_my_focus(focus: str) -> str:
+            """Set your own focus area when the user says what they want a hand with: email_calendar, coding, research or errands."""
+            ctx.used_tools.append("set_my_focus")
+            return dumps(await set_agent_focus(ctx, focus))
+
+        tools.append(
+            StructuredTool.from_function(
+                coroutine=set_my_focus, name="set_my_focus", description=set_my_focus.__doc__, args_schema=SetFocusInput
+            )
+        )
+    from app.agent.coding import is_coding_agent
+
+    if is_coding_agent(ctx.agent):
+
+        async def coding_status() -> str:
+            """Check what you can do for coding work right now: computer (sandbox) and dev toolchain, git push credentials, the GitHub App, deploy connectors, and exactly what is missing. Call once per coding task, before building."""
+            ctx.used_tools.append("coding_workspace_status")
+            return dumps(await coding_workspace_status(ctx), 8000)
+
+        async def shell(command: str, cwd: str | None = None, timeout: int = 300) -> str:
+            """Run a bash command on the user's computer (Daytona sandbox): read and edit files (rg, sed, cat, heredocs, python patches), install packages, run builds. For git use git_checkout, git_diff, git_commit and push_branch instead: they handle GitHub auth safely. Never put tokens or credentials in a command. Returns exit_code and output."""
+            ctx.used_tools.append("sandbox_shell")
+            return dumps(await sandbox_shell(ctx, command, cwd, timeout), 40000)
+
+        from app.agent import coding as coding_mod
+        from app.agent import git_tools
+
+        async def checkout(repo: str, branch: str = "", base: str = "") -> str:
+            """Clone (or update) a GitHub repo into ~/work/<name> on the computer and check out a branch. Private repos work through the Checkme GitHub App. Start every code change here with branch=agent/<short-name>."""
+            ctx.used_tools.append("git_checkout")
+            return dumps(await git_tools.git_checkout(ctx, repo, branch, base), 20000)
+
+        async def tests(repo: str, command: str = "", timeout: int = 600) -> str:
+            """Run the repo's tests on the computer (auto-detects npm test / pytest / go test / cargo test, or pass command). Returns exit_code, passed and the output tail."""
+            ctx.used_tools.append("run_tests")
+            return dumps(await git_tools.run_tests(ctx, repo, command, timeout), 20000)
+
+        async def diff(repo: str, base: str = "") -> str:
+            """Show status, commits and the diff of the checked-out repo against the base branch. Use before committing and before push_branch."""
+            ctx.used_tools.append("git_diff")
+            return dumps(await git_tools.git_diff(ctx, repo, base), 20000)
+
+        async def commit(repo: str, message: str, paths: list[str] | None = None) -> str:
+            """Commit changes in the checked-out repo on your work branch (refuses the default branch, main/master and detached HEAD)."""
+            ctx.used_tools.append("git_commit")
+            return dumps(await git_tools.git_commit(ctx, repo, message, paths), 8000)
+
+        async def push(
+            repo: str,
+            branch: str,
+            open_pr: bool = True,
+            title: str = "",
+            body: str = "",
+            base: str = "",
+            draft: bool = False,
+            pr_number: int = 0,
+        ) -> str:
+            """Push an agent/* branch to GitHub and (by default) open a pull request with a clear body (## Summary, ## Changes, ## Tests, ## Caveats; the latest run_checks table is added if the body has no Tests section). To update an existing PR the user named, pass pr_number and its head branch. Always shows the user an approval card first; tell them it is waiting for approval. Opening a PR never merges it. If GitHub access is missing it saves a patch and returns status=blocked with the install link."""
+            ctx.used_tools.append("push_branch")
+            return dumps(await git_tools.push_branch(ctx, repo, branch, open_pr, title, body, base, draft, pr_number), 8000)
+
+        from app.agent import dev_tools
+
+        async def inspect(
+            repo: str, action: str, ref: str = "", ref2: str = "", path: str = "", query: str = "",
+            start: int = 0, end: int = 0, limit: int = 50, regex: bool = False,
+        ) -> str:
+            """Read-only git and code exploration in the local clone: status, branches, log, show, diff (ref..ref2), blame, grep, tree, read (line ranges). Prefer the GitHub App read tools (get_tree, get_file, search_code, list_commits, compare_refs, blame_file) before cloning; use this once the repo is checked out."""
+            ctx.used_tools.append("git_inspect")
+            try:
+                _, name = coding_mod.split_repo(repo)
+                script = coding_mod.inspect_script(name, action, ref, ref2, path, query, start, end, limit, regex)
+            except Exception as exc:  # noqa: BLE001
+                return dumps({"error": str(exc)[:300]}, 1000)
+            return dumps(await git_tools.sandbox_exec(ctx, script, 120), 20000)
+
+        async def toolchain(extras: list[str] | None = None, force: bool = False) -> str:
+            """Set up the headless IDE on the computer once: git, gh, ripgrep, fd, jq, tree, universal-ctags, node + npm/pnpm/yarn (corepack), python + uv + pytest, and git identity. Pass extras (go, java, rust) only when the repo needs them. Cached with a marker file, so calling it again is cheap. Returns what was installed and what failed."""
+            ctx.used_tools.append("ensure_dev_toolchain")
+            return dumps(await dev_tools.ensure_dev_toolchain(ctx, extras or [], force), 4000)
+
+        async def overview(repo: str) -> str:
+            """Understand a checked-out repo before editing: languages, frameworks, entry points, manifests, CI workflows, and the setup / lint / typecheck / unit / integration / build commands (from CI first, manifests second). Run this before your first edit."""
+            ctx.used_tools.append("repo_overview")
+            return dumps(await dev_tools.repo_overview(ctx, repo), 12000)
+
+        async def symbol(repo: str, symbol: str, limit: int = 40) -> str:
+            """Find where a function, class, type or variable is defined (universal-ctags, with a ripgrep fallback)."""
+            ctx.used_tools.append("find_symbol")
+            return dumps(await dev_tools.find_symbol(ctx, repo, symbol, limit), 12000)
+
+        async def references(repo: str, symbol: str, path: str = "", limit: int = 80) -> str:
+            """Find every usage of an identifier (whole word) with file:line, to judge the impact of a change."""
+            ctx.used_tools.append("find_references")
+            return dumps(await dev_tools.find_references(ctx, repo, symbol, path, limit), 16000)
+
+        async def read_range(repo: str, path: str, start: int = 1, end: int = 200, ref: str = "") -> str:
+            """Read lines start..end of a file with line numbers (optionally at a ref)."""
+            ctx.used_tools.append("read_file_range")
+            return dumps(await dev_tools.read_file_range(ctx, repo, path, start, end, ref), 32000)
+
+        async def checks(repo: str, kinds: list[str] | None = None, commands: list | None = None, timeout_each: int = 600) -> str:
+            """Test all cases: install deps, then run lint, type-check, unit tests, integration tests and the build (detected from CI workflows first, manifests second). On failure fix the code and run again, up to 3 attempts. The results go to the timeline and into the PR body."""
+            ctx.used_tools.append("run_checks")
+            cmds = [c.model_dump() if hasattr(c, "model_dump") else dict(c) for c in (commands or [])]
+            return dumps(await dev_tools.run_checks(ctx, repo, kinds or [], cmds, timeout_each), 20000)
+
+        async def review(
+            repo: str, number: int, verdict: str = "COMMENT", summary: str = "", findings: list | None = None, include_checks: bool = True
+        ) -> str:
+            """Post a structured PR review through the Checkme GitHub App: summary, findings by severity (inline comments where the line is in the diff, the rest in the body), the latest checks, and a verdict (COMMENT, REQUEST_CHANGES or APPROVE). Read the PR first (get_pull_request / compare_refs) and run checks on its branch when you can."""
+            ctx.used_tools.append("review_pull_request")
+            items = [f.model_dump() if hasattr(f, "model_dump") else dict(f) for f in (findings or [])]
+            return dumps(await dev_tools.review_pull_request(ctx, repo, number, verdict, summary, items, include_checks), 4000)
+
+        async def ask(question: str, options: list[str], waiting_for: str = "") -> str:
+            """Ask the user one short question with 2-5 option buttons, only when something is genuinely ambiguous (which repo or branch, a destructive step) or you are blocked (waiting_for='github_app'). Otherwise decide and proceed. End your turn after asking."""
+            ctx.used_tools.append("ask_user")
+            opts = [str(o).strip() for o in options or [] if str(o).strip()][:5]
+            if not question.strip() or len(opts) < 2:
+                return dumps({"error": "Give a question and 2-5 options."}, 500)
+            ctx.question = {"question": question.strip()[:400], "options": opts}
+            if waiting_for.strip():
+                ctx.question["waiting_for"] = waiting_for.strip()[:40]
+            return dumps({"asked": True, "note": "The user sees the options as buttons. End your turn now with the question in one line."}, 500)
+
+        async def remember_coding(default_repo: str = "", branch_convention: str = "", base_branch: str = "", notes: str = "") -> str:
+            """Save lasting coding preferences in your own memory: default repo, branch naming convention, usual base branch, notes. Repos you work in and PRs you open are remembered automatically."""
+            from app.agent import coding_memory
+
+            ctx.used_tools.append("remember_coding")
+            prefs = {"default_repo": default_repo, "branch_convention": branch_convention, "base_branch": base_branch, "notes": notes}
+            merged = await coding_memory.note(ctx, prefs={k: v for k, v in prefs.items() if v})
+            return dumps({"saved": merged is not None, "memory": coding_memory.render(merged or {})}, 1500)
+
+        from app.agent import deploy as deploy_mod
+
+        def _params(params) -> dict:
+            raw = params.model_dump() if hasattr(params, "model_dump") else dict(params or {})
+            return {k: v for k, v in raw.items() if v not in ("", None) and not (k == "production" and v is True)}
+
+        async def detect_targets(repo: str) -> str:
+            """Find how this repo deploys: render.yaml, vercel.json, fly.toml, netlify.toml, railway.json/toml, serverless.yml, SAM, CDK, app.yaml, azure.yaml, Dockerfile. For each platform it says the route: a connected connector (preferred), a saved CLI credential, or the link the user opens to connect one. Call before any deploy."""
+            ctx.used_tools.append("detect_deploy_targets")
+            return dumps(await deploy_mod.detect_deploy_targets(ctx, repo), 8000)
+
+        async def deploy_tool(repo: str, platform: str, params=None, cwd: str = ".", use_cli: bool = False) -> str:
+            """Deploy the checked-out repo to a platform. Never runs directly: it always shows the user an approval card with the exact command and target (also in scheduled runs). Prefers a connected connector for that platform; otherwise installs the CLI on the computer and uses the user's saved credential, which you never see. If not connected, returns the connect link: tell the user exactly what is missing. Deploy only what is merged or what the user asked for."""
+            ctx.used_tools.append("deploy")
+            return dumps(await deploy_mod.request_action(ctx, "deploy", repo, platform, _params(params or DeployParams()), cwd, use_cli), 8000)
+
+        async def rollback_tool(repo: str, platform: str, params=None, cwd: str = ".", use_cli: bool = False) -> str:
+            """Roll a deployment back to an earlier deploy / version / image. Always shows an approval card first. Find the target with deploy_status."""
+            ctx.used_tools.append("deploy_rollback")
+            return dumps(await deploy_mod.request_action(ctx, "rollback", repo, platform, _params(params or DeployParams()), cwd, use_cli), 8000)
+
+        async def deploy_status_tool(platform: str, repo: str = "", params=None, cwd: str = ".") -> str:
+            """Read-only: recent deploys / revisions / services on a platform (no approval needed). Use to find service ids, deploy ids for rollback, and whether a deploy is live."""
+            ctx.used_tools.append("deploy_status")
+            return dumps(await deploy_mod.read_action(ctx, "status", repo, platform, _params(params or DeployParams()), cwd), 12000)
+
+        async def deploy_logs_tool(platform: str, repo: str = "", params=None, cwd: str = ".") -> str:
+            """Read-only: recent logs for a service / deploy on a platform (no approval needed). Use after a failed deploy to find the cause."""
+            ctx.used_tools.append("deploy_logs")
+            return dumps(await deploy_mod.read_action(ctx, "logs", repo, platform, _params(params or DeployParams()), cwd), 12000)
+
+        tools.extend(
+            [
+                StructuredTool.from_function(coroutine=detect_targets, name="detect_deploy_targets", description=detect_targets.__doc__, args_schema=DetectDeployInput),
+                StructuredTool.from_function(coroutine=deploy_tool, name="deploy", description=deploy_tool.__doc__, args_schema=DeployInput),
+                StructuredTool.from_function(coroutine=rollback_tool, name="deploy_rollback", description=rollback_tool.__doc__, args_schema=DeployInput),
+                StructuredTool.from_function(coroutine=deploy_status_tool, name="deploy_status", description=deploy_status_tool.__doc__, args_schema=DeployReadInput),
+                StructuredTool.from_function(coroutine=deploy_logs_tool, name="deploy_logs", description=deploy_logs_tool.__doc__, args_schema=DeployReadInput),
+            ]
+        )
+        tools.extend(
+            [
+                StructuredTool.from_function(coroutine=coding_status, name="coding_workspace_status", description=coding_status.__doc__),
+                StructuredTool.from_function(
+                    coroutine=shell, name="sandbox_shell", description=shell.__doc__, args_schema=SandboxShellInput
+                ),
+                StructuredTool.from_function(coroutine=checkout, name="git_checkout", description=checkout.__doc__, args_schema=GitCheckoutInput),
+                StructuredTool.from_function(coroutine=tests, name="run_tests", description=tests.__doc__, args_schema=RunTestsInput),
+                StructuredTool.from_function(coroutine=diff, name="git_diff", description=diff.__doc__, args_schema=GitDiffInput),
+                StructuredTool.from_function(coroutine=commit, name="git_commit", description=commit.__doc__, args_schema=GitCommitInput),
+                StructuredTool.from_function(coroutine=push, name="push_branch", description=push.__doc__, args_schema=PushBranchInput),
+                StructuredTool.from_function(coroutine=inspect, name="git_inspect", description=inspect.__doc__, args_schema=GitInspectInput),
+                StructuredTool.from_function(coroutine=toolchain, name="ensure_dev_toolchain", description=toolchain.__doc__, args_schema=ToolchainInput),
+                StructuredTool.from_function(coroutine=overview, name="repo_overview", description=overview.__doc__, args_schema=RepoOnlyInput),
+                StructuredTool.from_function(coroutine=symbol, name="find_symbol", description=symbol.__doc__, args_schema=SymbolInput),
+                StructuredTool.from_function(coroutine=references, name="find_references", description=references.__doc__, args_schema=ReferencesInput),
+                StructuredTool.from_function(coroutine=read_range, name="read_file_range", description=read_range.__doc__, args_schema=ReadRangeInput),
+                StructuredTool.from_function(coroutine=checks, name="run_checks", description=checks.__doc__, args_schema=RunChecksInput),
+                StructuredTool.from_function(coroutine=review, name="review_pull_request", description=review.__doc__, args_schema=ReviewInput),
+                StructuredTool.from_function(coroutine=remember_coding, name="remember_coding", description=remember_coding.__doc__, args_schema=RememberCodingInput),
+            ]
+        )
+        if ctx.job is None or (getattr(ctx.job, "depth", 1) or 1) <= 1:
+            # Only the user-facing level asks questions: chat turns and root jobs (children report to their parent).
+            tools.append(StructuredTool.from_function(coroutine=ask, name="ask_user", description=ask.__doc__, args_schema=AskUserInput))
+        if ctx.job is None and ctx.teammate_depth == 0 and ctx.db is not None:
+
+            async def start_job(task: str, title: str = "") -> str:
+                """Start a background coding job for multi-step work (code changes, fixes, features, reviews, merges, deploys). It runs on the computer without the chat timeout and shows a live timeline (todo list, steps, tests, PR links) with approval and answer buttons in this chat. Give a self-contained task: repo (owner/name), goal and acceptance criteria. Follow-ups in this chat continue the same job."""
+                ctx.used_tools.append("start_coding_job")
+                return dumps(await start_coding_job(ctx, task, title), 4000)
+
+            tools.append(
+                StructuredTool.from_function(
+                    coroutine=start_job, name="start_coding_job", description=start_job.__doc__, args_schema=StartJobInput
+                )
+            )
+    if ctx.job is not None and ctx.teammate_depth == 0 and ctx.db is not None:
+        from app.jobs.service import MAX_DEPTH
+
+        if (getattr(ctx.job, "depth", 1) or 1) < MAX_DEPTH:
+
+            async def delegate_tool(role: str, task: str, agent_name: str = "", title: str = "") -> str:
+                """Hand a step of this background job to a child job: role 'coder' builds and opens the PR, 'reviewer' reviews a PR and comments, 'planner' splits a large piece further. The child runs after this turn; you resume with its result. Give a self-contained task (repo, branch, PR number, acceptance criteria). End your turn after delegating."""
+                ctx.used_tools.append("delegate")
+                return dumps(await delegate_job(ctx, role, task, agent_name, title), 4000)
+
+            tools.append(
+                StructuredTool.from_function(
+                    coroutine=delegate_tool, name="delegate", description=delegate_tool.__doc__, args_schema=DelegateInput
+                )
+            )
     if ctx.group is not None and ctx.teammate_depth == 0 and ctx.teammates:
         tools.append(
             StructuredTool.from_function(
@@ -1539,15 +2279,31 @@ def system_prompt(
     identity = f"You are {name}, this user's {title}. You have mail, calendar, and connected MCP servers.\n"
     if extra:
         identity += extra + "\n"
+    from app.agents.focus import focus_prompt
+
+    identity += focus_prompt(agent)
+    identity += "Your memory and scheduled routines belong only to you, not to other agents.\n"
     group_bit = ""
     peers = [p for p in (teammates or []) if str(getattr(p, "id", "")) != str(getattr(agent, "id", ""))]
     if group is not None and peers:
         from app.agents.collab import routing_prompt
 
         group_bit = routing_prompt(group, agent, teammates or [], mentions)
+    workspace_bit = (
+        "Checkme agents and groups: this user's own agents (you, Chief, and the others in the sidebar under Personal) and their groups "
+        "are built into this app, not a connector. To list, create, rename or edit agents, or to create, rename, or change members of a group of agents, "
+        "use list_agents_and_groups, create_agent, update_agent, create_agent_group, add_group_members, remove_group_members, rename_agent_group. "
+        "Never search_tools, list_connectors, or call_tool for these, and never offer a third-party app's 'group' (LiveChat, Slack, Teams, CRM) for them. "
+        f"A group has {GROUP_MEMBER_MIN} to {GROUP_MEMBER_MAX} agents; for 'all my agents' pass all_agents=true. "
+        "One owner per stage is the kickoff rule; hand the next step with ask_teammate. "
+        "If a tool returns an error about the size, explain it and ask which agents to use. "
+        "delete_agent and delete_agent_group only show a confirmation card; say it is waiting for their confirmation. "
+        "After creating or changing one, tell the user its name and that it is in the left sidebar under Personal, where they can open it.\n"
+    )
     return (
         identity
         + group_bit
+        + workspace_bit
         + f"Current date and time: {now.strftime('%Y-%m-%d %H:%M')} ({tz}). Interpret and display times in that timezone.\n"
         "Only use connectors listed below. Other users have different connectors.\n"
         "Discover first: list_connectors, then search_tools with a short capability phrase (what the tool must return), not the full user sentence. "
@@ -1616,7 +2372,7 @@ def system_prompt(
         "Cite source_tool (connector slug and tool name, plus the downstream name if a gateway executed one).\n"
         "If asked how a number was produced, cite tool evidence from this thread or fetch again. Do not invent figures.\n"
         "If you cannot tell which connector fits, ask the user.\n"
-        "Destructive actions still need call_tool; the app asks the user to confirm.\n"
+        "Destructive connector actions still need call_tool; the app asks the user to confirm.\n"
         "If the user wants work done later (email a report in N minutes, tonight, every day), schedule_task and do not fetch now. "
         "If they want a calendar invite or meeting at a clock time, that time is the event start: call create_event now. "
         "Tell them the scheduled time only when you actually called schedule_task.\n"
@@ -1769,12 +2525,17 @@ async def _ask_teammate(ctx: RunContext, agent_id: str, prompt: str) -> dict:
         group=ctx.group,
         teammates=ctx.teammates,
         teammate_depth=ctx.teammate_depth + 1,
+        progress=ctx.progress.child(member.name) if ctx.progress is not None else None,
     )
     ctx.used_tools.append(f"ask_teammate:{member.name}")
     for item in nested.get("attachments") or []:
         ctx.attachments.append(item)
     for name in nested.get("used_tools") or []:
         ctx.used_tools.append(str(name))
+    if nested.get("workspace_changed"):
+        ctx.workspace_changed = True
+    for item in nested.get("pending_confirms") or []:
+        ctx.pending.append(item)
     for view in nested.get("browser") or []:
         ctx.results.append(
             {
@@ -1810,6 +2571,16 @@ async def _ask_teammate(ctx: RunContext, agent_id: str, prompt: str) -> dict:
     return {"from": member.name, "agent_id": str(member.id), "reply": nested.get("text") or ""}
 
 
+def _progress_callbacks(ctx: RunContext, conns: list, query: str) -> list:
+    if ctx.progress is None:
+        return []
+    from app.agent.progress import ProgressCallback
+
+    names = {str(c.slug): str(getattr(c, "alias", "") or getattr(c, "name", "") or c.slug) for c in conns}
+    agents = {str(getattr(p, "id", "")): str(getattr(p, "name", "")) for p in ctx.teammates}
+    return [ProgressCallback(ctx.progress, query=query, connector_names=names, agent_names=agents)]
+
+
 async def run_deep_agent(
     db: AsyncSession,
     user,
@@ -1824,6 +2595,8 @@ async def run_deep_agent(
     teammates: list | None = None,
     teammate_depth: int = 0,
     mentions: dict | None = None,
+    progress: Any = None,
+    job: Any = None,
 ) -> dict[str, Any]:
     from app.connectors.platform import ensure_platform_connectors
     from app.debug_ndjson import dbg as _dbg_start
@@ -1854,14 +2627,51 @@ async def run_deep_agent(
         teammate_depth=teammate_depth,
         session_id=session_id,
         request_id=request_id,
+        progress=progress,
+        job=job,
     )
-    memory = await load_memory(db, user, query, getattr(workspace_agent, "id", None))
+    callbacks = _progress_callbacks(ctx, conns, query)
+    if progress is not None:
+        await progress.emit("Recalling what I know about this" if not teammate_depth else "Picking up the task", kind="memory")
+    memory = await load_memory(db, user, query, workspace_agent)
+    from app.agent.coding import is_coding_agent as _is_coder
+
+    if _is_coder(workspace_agent):
+        from app.agent import coding_memory
+
+        block = await coding_memory.read(db, user, workspace_agent)
+        if block and block not in (memory or ""):
+            memory = ((memory or "").rstrip() + "\n\nYour coding memory (repos, conventions, past PRs):\n" + block).strip()
     extra = []
     from langchain_core.messages import HumanMessage
 
     for payload in ctx.confirmations:
         slug, tool = payload.get("slug"), payload.get("tool")
         if not slug or not tool:
+            continue
+        if progress is not None:
+            await progress.emit(f"Running what you confirmed: {tool.replace('_', ' ')}", kind="confirm", tool=tool)
+        if slug == workspace_tools.WORKSPACE_SLUG:
+            result = await workspace_tools.run_confirmed(ctx, tool, payload.get("args") or {})
+            ctx.used_tools.append(tool)
+            extra.append(
+                HumanMessage(
+                    content=f"The user confirmed {tool} in Checkme. Result: {clip(dumps(result, 2000), 2000)}. Tell the user what happened."
+                )
+            )
+            continue
+        from app.agent.coding import CODING_SLUG
+
+        if slug == CODING_SLUG:
+            from app.agent import git_tools
+
+            result = await git_tools.run_confirmed(ctx, tool, payload.get("args") or {})
+            ctx.used_tools.append(tool)
+            extra.append(
+                HumanMessage(
+                    content=f"The user approved {tool}. Result: {clip(dumps(result, 4000), 4000)}. Tell the user what happened and share any PR or deploy link."
+                )
+            )
             continue
         result = await call_user_tool(ctx, slug, tool, payload.get("args") or {})
         extra.append(
@@ -1877,8 +2687,14 @@ async def run_deep_agent(
     )
     payload = {"messages": _lc_messages(history, query, extra)}
     limit = max(80, get_settings().max_agent_steps * 8)
+    from app.agent.coding import is_coding_agent
+
+    coding = is_coding_agent(workspace_agent)
+    if coding:
+        # Plan-and-build turns clone, edit, test and push: give them more steps.
+        limit = max(limit, 200)
     if teammate_depth:
-        limit = min(max(24, get_settings().max_agent_steps * 3), 48)
+        limit = min(max(24, get_settings().max_agent_steps * 3), 120 if coding else 48)
     text = ""
     peer = f":peer:{getattr(workspace_agent, 'id', 'x')}" if teammate_depth else ""
     for attempt in range(3):
@@ -1888,13 +2704,16 @@ async def run_deep_agent(
                 config={
                     "recursion_limit": limit,
                     "configurable": {"thread_id": f"{session_id}{peer}:r{attempt}"},
+                    **({"callbacks": callbacks} if callbacks else {}),
                 },
             )
             text = last_text(result.get("messages") if isinstance(result, dict) else [])
             break
         except Exception as exc:  # noqa: BLE001
             if _is_recursion_limit(exc) and attempt < 2:
-                limit = min(limit + 40, 200)
+                limit = min(limit + 40, 280 if coding else 200)
+                if progress is not None:
+                    await progress.emit("That took many steps; giving it one more pass", kind="retry")
                 log.warning("recursion limit reached; retry %s/2 with limit=%s", attempt + 1, limit)
                 continue
             log.exception("deep agent failed")
@@ -1923,7 +2742,13 @@ async def run_deep_agent(
     if cards and not had_card:
         names = ", ".join(str(c.get("name") or c.get("toolkit") or "this app") for c in cards)
         text = f"Connect {names} using the card below. That opens Composio's authorization page."
-    await remember(db, user.id, "episodic", clip(f"Q: {query}\nA: {text}", 400), getattr(workspace_agent, "id", None))
+    await remember(
+        db,
+        user.id,
+        "episodic",
+        clip(f"Q: {query}\nA: {text}", 400),
+        getattr(workspace_agent, "id", None),
+    )
     speaker = None
     if workspace_agent is not None:
         speaker = {
@@ -1945,4 +2770,10 @@ async def run_deep_agent(
         "connect_cards": cards,
         "speaker": speaker,
         "group_id": str(group.id) if group is not None else None,
+        "workspace_changed": ctx.workspace_changed,
+        "jobs_started": ctx.jobs_started,
+        "question": ctx.question,
+        "prs": ctx.prs,
+        "merged": ctx.merged,
+        "repo": ctx.repo,
     }

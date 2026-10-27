@@ -16,6 +16,7 @@ router = APIRouter(prefix="/tasks", tags=["tasks"])
 
 class CreateTaskIn(BaseModel):
     prompt: str
+    agent_id: uuid.UUID | None = None
 
 
 class PatchTaskIn(BaseModel):
@@ -23,14 +24,22 @@ class PatchTaskIn(BaseModel):
 
 
 @router.get("")
-async def list_scheduled(status: str | None = None, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
-    return {"tasks": await list_tasks(db, user, status=status)}
+async def list_scheduled(
+    status: str | None = None,
+    agent_id: uuid.UUID | None = None,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        return {"tasks": await list_tasks(db, user, status=status, agent_id=agent_id)}
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @router.post("")
 async def create_scheduled(body: CreateTaskIn, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     try:
-        task = await create_from_prompt(db, user, body.prompt)
+        task = await create_from_prompt(db, user, body.prompt, agent_id=body.agent_id)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     return task

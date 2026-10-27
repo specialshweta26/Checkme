@@ -72,6 +72,161 @@ async def _migrate() -> None:
         await conn.execute(text("ALTER TABLE workspace_agents ADD COLUMN IF NOT EXISTS pinned BOOLEAN DEFAULT false"))
         await conn.execute(text("ALTER TABLE workspace_agents ADD COLUMN IF NOT EXISTS archived BOOLEAN DEFAULT false"))
         await conn.execute(text("ALTER TABLE workspace_agents ADD COLUMN IF NOT EXISTS unread BOOLEAN DEFAULT false"))
+        await conn.execute(text("ALTER TABLE workspace_agents ADD COLUMN IF NOT EXISTS focus VARCHAR(40) DEFAULT ''"))
         await conn.execute(text("ALTER TABLE agent_groups ADD COLUMN IF NOT EXISTS outcome TEXT DEFAULT ''"))
         await conn.execute(text("ALTER TABLE agent_groups ADD COLUMN IF NOT EXISTS owner_id UUID"))
-        await conn.execute(text("ALTER TABLE memory_passages ADD COLUMN IF NOT EXISTS agent_id UUID"))
+        await _migrate_github(conn)
+        await _migrate_jobs(conn)
+        await _migrate_agent_scope(conn)
+
+
+async def _migrate_jobs(conn) -> None:
+    """agent_jobs / job_events come from create_all; keep later columns and indexes in step."""
+    for stmt in (
+        "ALTER TABLE agent_jobs ADD COLUMN IF NOT EXISTS scheduled_task_id UUID",
+        "ALTER TABLE agent_jobs ADD COLUMN IF NOT EXISTS attempts INTEGER DEFAULT 0",
+        "ALTER TABLE agent_jobs ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMPTZ",
+        "CREATE INDEX IF NOT EXISTS ix_job_events_root_id_id ON job_events (root_id, id)",
+        "CREATE INDEX IF NOT EXISTS ix_agent_jobs_user_status ON agent_jobs (user_id, status)",
+    ):
+        await conn.execute(text(stmt))
+
+
+async def _migrate_github(conn) -> None:
+    """GitHub App installations (create_all makes the table; these keep older databases in step)."""
+    await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS coder_seeded BOOLEAN DEFAULT false"))
+    await conn.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS github_installations (
+                id UUID PRIMARY KEY,
+                user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                installation_id BIGINT NOT NULL,
+                account_login VARCHAR(100) DEFAULT '',
+                account_type VARCHAR(20) DEFAULT '',
+                repository_selection VARCHAR(20) DEFAULT '',
+                permissions JSONB DEFAULT '{}'::jsonb,
+                suspended BOOLEAN DEFAULT false,
+                created_at TIMESTAMPTZ DEFAULT now(),
+                updated_at TIMESTAMPTZ DEFAULT now()
+            )
+            """
+        )
+    )
+    await conn.execute(text("ALTER TABLE github_installations ADD COLUMN IF NOT EXISTS suspended BOOLEAN DEFAULT false"))
+    await conn.execute(
+        text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_github_installations_user_inst "
+            "ON github_installations (user_id, installation_id)"
+        )
+    )
+    await conn.execute(
+        text("CREATE INDEX IF NOT EXISTS ix_github_installations_installation_id ON github_installations (installation_id)")
+    )
+
+
+async def _pk_columns(conn, table: str) -> list[str]:
+    if table not in {"memory_blocks"}:
+        raise ValueError(table)
+    result = await conn.execute(
+        text(
+            f"""
+            SELECT a.attname
+            FROM pg_index i
+            JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY (i.indkey)
+            WHERE i.indrelid = '{table}'::regclass AND i.indisprimary
+            ORDER BY a.attnum
+            """
+        )
+    )
+    return [row[0] for row in result]
+
+
+async def _constraint_exists(conn, name: str) -> bool:
+    result = await conn.execute(text("SELECT 1 FROM pg_constraint WHERE conname = :name"), {"name": name})
+    return result.first() is not None
+
+
+async def _add_agent_fk(conn, table: str, name: str) -> None:
+    if table not in {"memory_blocks", "memory_passages", "scheduled_tasks", "automations"}:
+        raise ValueError(table)
+    if await _constraint_exists(conn, name):
+        return
+    existing = await conn.execute(
+        text(
+            """
+            SELECT 1
+            FROM pg_constraint c
+            JOIN pg_class t ON t.oid = c.conrelid
+            JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY (c.conkey)
+            WHERE t.relname = :table AND c.contype = 'f' AND a.attname = 'agent_id'
+            """
+        ),
+        {"table": table},
+    )
+    if existing.first():
+        return
+    await conn.execute(
+        text(
+            f"ALTER TABLE {table} ADD CONSTRAINT {name} "
+            f"FOREIGN KEY (agent_id) REFERENCES workspace_agents(id) ON DELETE CASCADE"
+        )
+    )
+
+
+async def _migrate_agent_scope(conn) -> None:
+    """Add per-agent columns and assign existing rows to each user's Chief."""
+    from app.agents.scope import (
+        COPY_CHIEF_LETTA_SQL,
+        INSERT_MISSING_CHIEF_SQL,
+        PROMOTE_NAMED_CHIEF_SQL,
+        backfill_statements,
+        owner_by_user,
+    )
+
+    await conn.execute(text("ALTER TABLE workspace_agents ADD COLUMN IF NOT EXISTS letta_agent_id VARCHAR(100)"))
+    await conn.execute(text("ALTER TABLE memory_blocks ADD COLUMN IF NOT EXISTS agent_id UUID"))
+    await conn.execute(text("ALTER TABLE memory_passages ADD COLUMN IF NOT EXISTS agent_id UUID"))
+    await conn.execute(text("ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS agent_id UUID"))
+    await conn.execute(text("ALTER TABLE automations ADD COLUMN IF NOT EXISTS agent_id UUID"))
+    await conn.execute(text(PROMOTE_NAMED_CHIEF_SQL))
+    await conn.execute(text(INSERT_MISSING_CHIEF_SQL))
+    agent_rows = (
+        await conn.execute(text("SELECT id::text AS id, user_id::text AS user_id, name, kind FROM workspace_agents"))
+    ).mappings().all()
+    owners = owner_by_user([dict(row) for row in agent_rows])
+    for statement, params in backfill_statements(owners):
+        await conn.execute(text(statement), params)
+    await conn.execute(text(COPY_CHIEF_LETTA_SQL))
+
+    for table in ("memory_passages", "memory_blocks"):
+        leftover = (
+            await conn.execute(text(f"SELECT count(*) FROM {table} WHERE agent_id IS NULL"))
+        ).scalar() or 0
+        if leftover:
+            log.warning("dropping %s %s rows with no default agent to assign", leftover, table)
+            await conn.execute(text(f"DELETE FROM {table} WHERE agent_id IS NULL"))
+
+    pk_cols = await _pk_columns(conn, "memory_blocks")
+    if "agent_id" not in pk_cols:
+        await conn.execute(text("ALTER TABLE memory_blocks DROP CONSTRAINT IF EXISTS memory_blocks_pkey"))
+        await conn.execute(text("ALTER TABLE memory_blocks ALTER COLUMN agent_id SET NOT NULL"))
+        await conn.execute(text("ALTER TABLE memory_blocks ADD PRIMARY KEY (user_id, agent_id, label)"))
+
+    await conn.execute(text("ALTER TABLE memory_passages ALTER COLUMN agent_id SET NOT NULL"))
+    for table in ("scheduled_tasks", "automations"):
+        remaining = (await conn.execute(text(f"SELECT count(*) FROM {table} WHERE agent_id IS NULL"))).scalar() or 0
+        if remaining:
+            log.warning("%s rows still missing agent_id: %s", table, remaining)
+            continue
+        await conn.execute(text(f"ALTER TABLE {table} ALTER COLUMN agent_id SET NOT NULL"))
+
+    await conn.execute(
+        text("CREATE INDEX IF NOT EXISTS ix_memory_passages_user_agent ON memory_passages (user_id, agent_id)")
+    )
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_scheduled_tasks_agent_id ON scheduled_tasks (agent_id)"))
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_automations_agent_id ON automations (agent_id)"))
+    await _add_agent_fk(conn, "memory_blocks", "memory_blocks_agent_id_fkey")
+    await _add_agent_fk(conn, "memory_passages", "memory_passages_agent_id_fkey")
+    await _add_agent_fk(conn, "scheduled_tasks", "scheduled_tasks_agent_id_fkey")
+    await _add_agent_fk(conn, "automations", "automations_agent_id_fkey")

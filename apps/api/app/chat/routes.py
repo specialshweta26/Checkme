@@ -17,6 +17,7 @@ from app.agent.attachments import summarize_one
 from app.agent.confirm import read_confirm
 from app.agent.deep import run_deep_agent
 from app.agent.memory import seed_letta
+from app.agent.progress import ProgressReporter, read_progress, valid_progress_id
 from app.agents import service as agents_service
 from app.cache import rate_limited
 from app.config import get_settings
@@ -36,6 +37,16 @@ class ChatIn(BaseModel):
     attachments: list[dict] = []
     agent_id: uuid.UUID | None = None
     group_id: uuid.UUID | None = None
+    progress_id: str | None = None
+
+
+@router.get("/progress/{progress_id}")
+async def chat_progress(progress_id: str, user: User = Depends(current_user)):
+    """Live status lines for an in-flight chat turn (polled by the web app)."""
+    if not valid_progress_id(progress_id):
+        raise HTTPException(400, "Bad progress id")
+    steps = await read_progress(user.id, progress_id)
+    return {"steps": steps, "done": bool(steps and steps[-1].get("kind") == "done")}
 
 
 @router.get("/sessions")
@@ -199,6 +210,10 @@ async def chat(
     dbg("B", "chat/routes.py:chat", "chat request", {"query": text[:80], "has_session": bool(body.session_id)})
     # #endregion
     t0 = time.time()
+    routed = await _maybe_start_job(db, user, sess, workspace_agent, group, confirms, text, agent_text, history, request_id)
+    if routed is not None:
+        return routed
+    progress = ProgressReporter(user.id, body.progress_id) if valid_progress_id(body.progress_id) else None
     try:
         result = await run_deep_agent(
             db,
@@ -212,6 +227,7 @@ async def chat(
             group=group,
             teammates=teammates,
             mentions=mentions,
+            progress=progress,
         )
         # #region agent log
         dbg(
@@ -231,6 +247,9 @@ async def chat(
         dbg("C", "chat/routes.py:chat", "agent exception", {"error": str(exc)[:200], "ms": int((time.time() - t0) * 1000)})
         # #endregion
         raise HTTPException(502, str(exc)[:400]) from exc
+    finally:
+        if progress is not None:
+            await progress.finish()
     try:
         if result.get("source"):
             working["last_source"] = result["source"]
@@ -253,7 +272,13 @@ async def chat(
             "agent_id": (result.get("speaker") or {}).get("id") if result.get("speaker") else (str(workspace_agent.id) if workspace_agent else None),
             "agent_name": (result.get("speaker") or {}).get("name"),
             "group_id": result.get("group_id"),
+            "steps": [s.get("text") for s in (progress.steps if progress else []) if s.get("kind") != "done"][:40],
+            "jobs": result.get("jobs_started") or [],
+            "job": (result.get("jobs_started") or [None])[0],
         }
+        if isinstance(result.get("question"), dict) and result["question"].get("options"):
+            # ask_user in a chat turn: the web shows the options as buttons that send the option text.
+            meta["choices"] = {"question": result["question"].get("question"), "options": result["question"]["options"][:5]}
         public_uploads = [
             {k: item.get(k) for k in ("key", "filename", "content_type", "kind", "download_url", "preview_url", "previewable", "size") if item.get(k) is not None}
             for item in uploads
@@ -320,6 +345,103 @@ async def _resolve_roster(db, user, agent_id, group_id):
     if agent_id:
         return await agents_service.get_agent(db, user, agent_id), None, []
     return chief, None, []
+
+
+async def _maybe_start_job(db, user, sess, agent, group, confirms, text, agent_text, history, request_id):
+    """Coding agents: a code-change request becomes a background job with a live timeline.
+
+    That keeps long plan/build/test/push work off the chat request (and its ~5 minute proxy timeout)."""
+    from app.agent.coding import continues_job, first_step, is_coding_agent, looks_like_coding_task
+    from app.jobs import service as jobs
+    from app.jobs.worker import wake
+
+    if group is not None or confirms or not is_coding_agent(agent):
+        return None
+    latest = await jobs.latest_chat_job(db, user.id, sess.id, agent.id)
+    if latest is not None and continues_job(text, latest.status, str((latest.meta or {}).get("repo") or "")):
+        return await _continue_job(db, user, sess, agent, latest, text, request_id)
+    if not looks_like_coding_task(text):
+        return None
+    context = "\n".join(f"{m['role']}: {str(m['content'])[:600]}" for m in history[-6:])
+    prompt = agent_text + (f"\n\nRecent conversation for context:\n{context}" if context else "")
+    try:
+        job = await jobs.create_job(db, user, agent=agent, prompt=prompt, title=text, role="planner", kind="chat", session_id=sess.id)
+    except jobs.JobError:
+        return None
+    info = jobs.serialize_job(job)
+    reply = (
+        f"On it: {first_step(text)}. Follow the live timeline below; pushes, merges and deploys wait for your approval there."
+    )
+    speaker = {"id": str(agent.id), "name": agent.name, "color": getattr(agent, "color", "") or "", "title": getattr(agent, "title", "") or ""}
+    meta = {"request_id": request_id, "route": "job", "job": info, "jobs": [info], "speaker": speaker, "agent_id": str(agent.id), "agent_name": agent.name}
+    await _store(db, sess, user.id, request_id, text, reply, meta)
+    wake()
+    return {
+        "session_id": str(sess.id),
+        "text": reply,
+        "route": "job",
+        "job": info,
+        "jobs_started": [info],
+        "pending_confirms": [],
+        "used_tools": [],
+        "speaker": speaker,
+        "request_id": request_id,
+        "uploads": [],
+    }
+
+
+async def _continue_job(db, user, sess, agent, job, text, request_id):
+    """Follow-ups ("also fix X", "merge it", an answer to its question) continue the same job and branch."""
+    from app.jobs import service as jobs
+    from app.jobs.worker import wake
+
+    was = job.status
+    try:
+        events = jobs.followup(job, text)
+    except jobs.JobError:
+        return None
+    for ev in events:
+        db.add(ev)
+    info = jobs.serialize_job(job)
+    if was == "waiting_input":
+        reply = "Got it, continuing the job with your answer."
+    elif was in {"done", "failed"}:
+        reply = "On it: continuing the same job, repo and branch. Follow the timeline below."
+    else:
+        reply = "Noted. I'll pick that up in the running job as soon as the current step finishes."
+    speaker = {"id": str(agent.id), "name": agent.name, "color": getattr(agent, "color", "") or "", "title": getattr(agent, "title", "") or ""}
+    meta = {"request_id": request_id, "route": "job", "jobs": [info], "speaker": speaker, "agent_id": str(agent.id), "agent_name": agent.name, "followup": True}
+    if was in {"done", "failed"}:
+        # The earlier timeline stopped polling; show a fresh one that starts after what was already shown.
+        meta["job"] = info
+        meta["job_after"] = await _last_event_id(db, job)
+    else:
+        meta["job_ref"] = info  # its live timeline is already on screen
+    await _store(db, sess, user.id, request_id, text, reply, meta)
+    wake()
+    return {
+        "session_id": str(sess.id),
+        "text": reply,
+        "route": "job",
+        "job": info,
+        "jobs_started": [info],
+        "pending_confirms": [],
+        "used_tools": [],
+        "speaker": speaker,
+        "request_id": request_id,
+        "uploads": [],
+    }
+
+
+async def _last_event_id(db, job) -> int:
+    try:
+        from sqlalchemy import func, select
+
+        from app.models import JobEvent
+
+        return int((await db.execute(select(func.max(JobEvent.id)).where(JobEvent.root_id == (job.root_id or job.id)))).scalar() or 0)
+    except Exception:  # noqa: BLE001
+        return 0
 
 
 async def _store(db, sess, user_id, request_id, user_text, assistant_text, meta, user_meta=None) -> None:

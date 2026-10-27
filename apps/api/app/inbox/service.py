@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.connectors.runtime import RuntimeConnector
 from app.llm import chat_complete
-from app.models import Connector, InboxItem, MemoryBlock, User
+from app.models import Connector, InboxItem, User
 from connector_core.text import clip
 
 log = logging.getLogger(__name__)
@@ -686,10 +686,10 @@ async def _classify_one(item: InboxItem, runtime: RuntimeConnector, voice: str) 
 
 
 async def _voice(db: AsyncSession, user: User) -> str:
-    row = (
-        await db.execute(select(MemoryBlock).where(MemoryBlock.user_id == user.id, MemoryBlock.label == "voice"))
-    ).scalar_one_or_none()
-    return (row.value if row else "") or ""
+    """Inbox drafts use Chief's voice. Other agents keep their own blocks."""
+    from app.agent.memory import read_core
+
+    return await read_core(db, user, "voice")
 
 
 def _thread_as_messages(data: dict[str, Any]) -> dict[str, Any]:

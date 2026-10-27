@@ -8,7 +8,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.deep import run_deep_agent
-from app.models import ChatMessage, ChatSession, ScheduledTask, User
+from app.agents.service import AgentError, ensure_default_agent, get_agent
+from app.models import ChatMessage, ChatSession, ScheduledTask, User, WorkspaceAgent
 from app.routing.describe import mentioned_connectors
 from app.routing.select import user_connectors
 from app.security import random_token
@@ -19,9 +20,12 @@ from connector_core.text import clip
 log = logging.getLogger(__name__)
 
 
-def serialize(task: ScheduledTask, tz: str) -> dict:
+def serialize(task: ScheduledTask, tz: str, *, agent_name: str = "", agent_color: str = "") -> dict:
     return {
         "id": str(task.id),
+        "agent_id": str(task.agent_id) if task.agent_id else None,
+        "agent_name": agent_name or "",
+        "agent_color": agent_color or "",
         "title": task.title,
         "instruction": task.instruction,
         "prompt": task.prompt,
@@ -40,7 +44,32 @@ def serialize(task: ScheduledTask, tz: str) -> dict:
     }
 
 
-async def create_from_prompt(db: AsyncSession, user: User, prompt: str, *, require_time: bool = False) -> dict | None:
+async def resolve_task_agent(db: AsyncSession, user: User, agent_id):
+    if agent_id:
+        try:
+            uid = agent_id if isinstance(agent_id, uuid.UUID) else uuid.UUID(str(agent_id))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Unknown agent") from exc
+        try:
+            return await get_agent(db, user, uid)
+        except AgentError as exc:
+            raise ValueError(str(exc)) from exc
+    return await ensure_default_agent(db, user)
+
+
+async def agent_for_task(db: AsyncSession, user: User, task: ScheduledTask):
+    if task.agent_id:
+        row = await db.get(WorkspaceAgent, task.agent_id)
+        if row is not None and row.user_id == user.id:
+            return row
+    chief = await ensure_default_agent(db, user)
+    task.agent_id = chief.id
+    return chief
+
+
+async def create_from_prompt(
+    db: AsyncSession, user: User, prompt: str, *, require_time: bool = False, agent_id=None
+) -> dict | None:
     text = (prompt or "").strip()
     if not text:
         raise ValueError("Write what you want done and when.")
@@ -52,8 +81,10 @@ async def create_from_prompt(db: AsyncSession, user: User, prompt: str, *, requi
         parsed = fallback_once(text, tz)
     if not parsed.get("next_run_at"):
         parsed = fallback_once(text, tz)
+    agent = await resolve_task_agent(db, user, agent_id)
     task = ScheduledTask(
         user_id=user.id,
+        agent_id=agent.id,
         title=parsed["title"],
         instruction=parsed["instruction"],
         prompt=text,
@@ -66,16 +97,27 @@ async def create_from_prompt(db: AsyncSession, user: User, prompt: str, *, requi
     db.add(task)
     await db.commit()
     await db.refresh(task)
-    return serialize(task, tz)
+    return serialize(task, tz, agent_name=agent.name or "", agent_color=getattr(agent, "color", "") or "")
 
 
-async def list_tasks(db: AsyncSession, user: User, status: str | None = None) -> list[dict]:
+async def list_tasks(
+    db: AsyncSession, user: User, status: str | None = None, agent_id: uuid.UUID | None = None
+) -> list[dict]:
     tz = user.timezone or "Asia/Kolkata"
-    stmt = select(ScheduledTask).where(ScheduledTask.user_id == user.id).order_by(ScheduledTask.created_at.desc())
+    if agent_id is not None:
+        await resolve_task_agent(db, user, agent_id)
+    stmt = (
+        select(ScheduledTask, WorkspaceAgent.name, WorkspaceAgent.color)
+        .outerjoin(WorkspaceAgent, WorkspaceAgent.id == ScheduledTask.agent_id)
+        .where(ScheduledTask.user_id == user.id)
+        .order_by(ScheduledTask.created_at.desc())
+    )
     if status:
         stmt = stmt.where(ScheduledTask.status == status)
-    rows = (await db.execute(stmt)).scalars().all()
-    return [serialize(r, tz) for r in rows]
+    if agent_id is not None:
+        stmt = stmt.where(ScheduledTask.agent_id == agent_id)
+    rows = (await db.execute(stmt)).all()
+    return [serialize(task, tz, agent_name=name or "", agent_color=color or "") for task, name, color in rows]
 
 
 async def get_owned(db: AsyncSession, user: User, task_id: uuid.UUID) -> ScheduledTask:
@@ -95,7 +137,17 @@ async def set_status(db: AsyncSession, user: User, task_id: uuid.UUID, status: s
         raise ValueError("This one-time task already completed.")
     task.status = status
     await db.commit()
-    return serialize(task, user.timezone or "Asia/Kolkata")
+    name, color = await _agent_labels(db, task)
+    return serialize(task, user.timezone or "Asia/Kolkata", agent_name=name, agent_color=color)
+
+
+async def _agent_labels(db: AsyncSession, task: ScheduledTask) -> tuple[str, str]:
+    if not task.agent_id:
+        return "", ""
+    row = await db.get(WorkspaceAgent, task.agent_id)
+    if row is None:
+        return "", ""
+    return row.name or "", row.color or ""
 
 
 async def delete_task(db: AsyncSession, user: User, task_id: uuid.UUID) -> None:
@@ -154,6 +206,34 @@ def advance(task: ScheduledTask) -> None:
     task.status = "active"
 
 
+async def hold_for_approval(db, user, task, agent, sess, instruction: str, text: str, pending: list) -> dict | None:
+    """A scheduled run that hit an approval card (git push / PR / merge are never auto-confirmed)
+    becomes a background job parked in waiting_approval, so the user approves it on the job timeline
+    in the task's chat and the run continues from there. Returns None when nothing is pending."""
+    from app.jobs import service as jobs
+
+    cards = [p for p in pending if isinstance(p, dict) and p.get("token")]
+    if not cards:
+        return None
+    job = jobs.new_job(
+        user.id,
+        agent=agent,
+        prompt=task.instruction or task.prompt or task.title,
+        title=f"Scheduled · {task.title}",
+        role="coder",
+        kind="scheduled",
+        session_id=sess.id,
+        scheduled_task_id=task.id,
+        history=[],
+    )
+    job.status = "running"
+    db.add(job)
+    for ev in jobs.apply_outcome(job, instruction, {"text": text, "pending_confirms": cards}):
+        db.add(ev)
+    agent.unread = True
+    return {"job": jobs.serialize_job(job), "pending_titles": ", ".join(str(c.get("title") or "an action") for c in cards)}
+
+
 async def execute_task(db: AsyncSession, user: User, task: ScheduledTask, *, from_scheduler: bool) -> dict:
     prev_status = task.status
     if prev_status == "running" and not from_scheduler:
@@ -166,14 +246,25 @@ async def execute_task(db: AsyncSession, user: User, task: ScheduledTask, *, fro
         "Do not create another scheduled task.\n\n"
         + (task.instruction or task.prompt)
     )
-    sess = ChatSession(user_id=user.id, title=f"Task · {task.title}"[:200], state={"scheduled_task_id": str(task.id)})
+    agent = await agent_for_task(db, user, task)
+    sess = ChatSession(
+        user_id=user.id,
+        title=f"Task · {task.title}"[:200],
+        state={"scheduled_task_id": str(task.id)},
+        agent_id=agent.id,
+    )
     db.add(sess)
     await db.flush()
     request_id = random_token(12)
     try:
-        result = await run_deep_agent(db, user, sess.id, request_id, [], instruction, auto_confirm=True)
+        result = await run_deep_agent(
+            db, user, sess.id, request_id, [], instruction, auto_confirm=True, workspace_agent=agent
+        )
         text = result.get("text") or "Done."
         used = result.get("used_tools") or []
+        held = await hold_for_approval(db, user, task, agent, sess, instruction, text, result.get("pending_confirms") or [])
+        if held is not None:
+            text = f"{text}\n\nWaiting for your approval: {held['pending_titles']}. Approve it in the task's chat."
         task.last_result = clip(text, 8000)
         task.last_error = ""
         task.last_run_at = datetime.now(timezone.utc)
@@ -188,7 +279,7 @@ async def execute_task(db: AsyncSession, user: User, task: ScheduledTask, *, fro
                 user_id=user.id,
                 role="assistant",
                 content=text,
-                meta={"used_tools": used, "scheduled": True},
+                meta={"used_tools": used, "scheduled": True, **({"job": held["job"]} if held else {})},
                 request_id=request_id,
             )
         )
@@ -202,7 +293,12 @@ async def execute_task(db: AsyncSession, user: User, task: ScheduledTask, *, fro
         else:
             task.status = "active"
         await db.commit()
-        return serialize(task, user.timezone or "Asia/Kolkata")
+        return serialize(
+            task,
+            user.timezone or "Asia/Kolkata",
+            agent_name=getattr(agent, "name", "") or "",
+            agent_color=getattr(agent, "color", "") or "",
+        )
     except Exception as exc:  # noqa: BLE001
         log.exception("scheduled task %s failed", task.id)
         task.last_error = str(exc)[:800]
