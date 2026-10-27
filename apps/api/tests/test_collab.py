@@ -4,8 +4,13 @@ from app.agents.collab import (
     GROUP_MEMBER_MAX,
     GROUP_MEMBER_MIN,
     TEACH_MAX_SECONDS,
+    creator_name,
+    is_group_hello,
+    is_kickoff,
+    is_roll_call,
     parse_mentions,
     pick_owner,
+    role_line,
     routing_prompt,
 )
 from app.skills.service import start_teaching
@@ -53,7 +58,74 @@ def test_routing_prompt_covers_handoff_memory_and_computer():
     assert "own screen" in lowered
     assert "one computer-use task" in lowered
     assert "weekly pack" in lowered
-    assert "@everyone" in lowered
+    assert "each bot" in lowered
+    assert "do not combine their replies" in lowered
+    assert "then combine" not in lowered
+
+
+def test_roll_call_and_kickoff_detection():
+    assert is_roll_call("please each reply with a one-line hello and what you're best at")
+    assert is_roll_call("introduce yourselves")
+    assert not is_roll_call("pull the weekly pack")
+    assert is_group_hello("Hi team")
+    assert is_group_hello("hello")
+    assert not is_group_hello("pull the weekly pack")
+    assert is_kickoff([])
+    assert is_kickoff([{"role": "user", "content": "hi"}])
+    assert not is_kickoff([{"role": "assistant", "content": "hello"}])
+
+
+def test_kickoff_prompt_names_creator_and_roles():
+    exp = SimpleNamespace(
+        id="e1",
+        name="Experimental",
+        title="home and money",
+        instructions="Reminders, shopping, local services in Bengaluru.",
+        focus="errands",
+    )
+    ori = SimpleNamespace(
+        id="o1",
+        name="Ori",
+        title="dev work",
+        instructions="Self-hosting, Render, GitHub, code.",
+        focus="coding",
+    )
+    tester = SimpleNamespace(
+        id="t1",
+        name="Test",
+        title="research and testing",
+        instructions="Business data from connected dashboards.",
+        focus="research",
+    )
+    group = SimpleNamespace(name="Master Group", outcome="Work together", owner_id="e1")
+    user = SimpleNamespace(display_name="Shweta", email="s@x.com")
+    text = routing_prompt(group, exp, [exp, ori, tester], {"kickoff": True, "roll_call": True}, user=user)
+    lowered = text.lower()
+    assert "shweta" in lowered
+    assert "set this group up" in lowered
+    assert "experimental" in lowered
+    assert "ori" in lowered
+    assert "proposed roles" in lowered
+    assert "ask_teammate" in lowered
+    assert "own bubble" in lowered or "only your intro" in lowered
+    assert "one8" not in lowered
+    assert "lotto" not in lowered
+    assert "combine" not in lowered
+    assert "bengaluru" in role_line(exp).lower()
+    assert creator_name(user) == "Shweta"
+
+
+def test_handoff_prompt_is_first_person():
+    ori = SimpleNamespace(id="o1", name="Ori", title="dev work", instructions="", focus="coding")
+    exp = SimpleNamespace(id="e1", name="Experimental", title="home", instructions="", focus="errands")
+    group = SimpleNamespace(name="Master Group", outcome="", owner_id="e1")
+    user = SimpleNamespace(display_name="Shweta")
+    text = routing_prompt(group, ori, [exp, ori], {"handoff": True}, user=user)
+    lowered = text.lower()
+    assert "first person" in lowered
+    assert "shweta" in lowered
+    assert "ask_teammate" not in lowered
+    assert "one8" not in lowered
 
 
 def test_teaching_is_ten_minutes_and_silent():

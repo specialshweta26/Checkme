@@ -89,6 +89,31 @@ def test_system_prompt_uses_agent_and_group():
     assert "researcher" in lowered
     assert "one8" not in lowered
     assert "lotto" not in lowered
+    assert "combine teammate" not in lowered
+
+
+def test_kickoff_system_prompt_skips_tools_and_names_creator():
+    analyst = SimpleNamespace(id="aa", name="Analyst", title="data analyst", instructions="Prefer tables.")
+    researcher = SimpleNamespace(id="bb", name="Researcher", title="web researcher", instructions="")
+    group = SimpleNamespace(id="gg", name="Insights", outcome="Ship the brief", owner_id="aa")
+    user = SimpleNamespace(timezone="Asia/Kolkata", display_name="Shweta", email="s@x.com")
+    prompt = system_prompt(
+        user,
+        [],
+        "",
+        agent=analyst,
+        group=group,
+        teammates=[analyst, researcher],
+        mentions={"kickoff": True, "roll_call": True},
+    )
+    lowered = prompt.lower()
+    assert "shweta" in lowered
+    assert "set this group up" in lowered
+    assert "list_connectors" in lowered
+    assert "do not call list_connectors" in lowered
+    assert "search_tools" in lowered
+    assert "one8" not in lowered
+    assert "lotto" not in lowered
 
 
 def test_connector_assignments_restrict_specific_agents():

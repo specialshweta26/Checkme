@@ -1,7 +1,7 @@
 "use client";
 
 import { usePathname } from "next/navigation";
-import { FormEvent, useEffect, useMemo, useState, type MouseEvent } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState, type MouseEvent, type PointerEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import {
   assignConnectorAgents,
@@ -28,6 +28,102 @@ import {
 } from "../lib";
 
 type Ctx = { kind: "agent" | "group"; id: string; x: number; y: number };
+
+const HOLD_MS = 500;
+const HOLD_MOVE_PX = 12;
+
+function menuPoint(x: number, y: number) {
+  const width = Math.min(260, window.innerWidth - 16);
+  const height = Math.min(440, window.innerHeight - 24);
+  return {
+    x: Math.max(8, Math.min(x, window.innerWidth - width - 8)),
+    y: Math.max(8, Math.min(y, window.innerHeight - height - 8)),
+  };
+}
+
+function useHoldMenu(onOpen: (x: number, y: number) => void) {
+  const timer = useRef(0);
+  const origin = useRef({ x: 0, y: 0 });
+  const holding = useRef(false);
+  const opened = useRef(false);
+  const pointerId = useRef<number | null>(null);
+  const target = useRef<HTMLElement | null>(null);
+
+  function clear(keepOpened = false) {
+    if (timer.current) window.clearTimeout(timer.current);
+    timer.current = 0;
+    holding.current = false;
+    pointerId.current = null;
+    target.current?.classList.remove("pressing");
+    target.current = null;
+    if (!keepOpened) opened.current = false;
+  }
+
+  useEffect(() => () => clear(), []);
+
+  function openAt(x: number, y: number) {
+    opened.current = true;
+    onOpen(x, y);
+    window.setTimeout(() => {
+      opened.current = false;
+    }, 1000);
+  }
+
+  return {
+    onPointerDown(e: PointerEvent<HTMLElement>) {
+      if (e.button !== 0) return;
+      const node = e.currentTarget;
+      target.current = node;
+      origin.current = { x: e.clientX, y: e.clientY };
+      holding.current = true;
+      pointerId.current = e.pointerId;
+      opened.current = false;
+      node.classList.add("pressing");
+      timer.current = window.setTimeout(() => {
+        timer.current = 0;
+        if (!holding.current) return;
+        holding.current = false;
+        node.classList.remove("pressing");
+        try {
+          navigator.vibrate?.(12);
+        } catch {
+          /* ignore */
+        }
+        openAt(origin.current.x, origin.current.y);
+      }, HOLD_MS);
+    },
+    onPointerMove(e: PointerEvent<HTMLElement>) {
+      if (!holding.current || !timer.current) return;
+      if (pointerId.current !== null && e.pointerId !== pointerId.current) return;
+      if (Math.hypot(e.clientX - origin.current.x, e.clientY - origin.current.y) > HOLD_MOVE_PX) {
+        clear();
+      }
+    },
+    onPointerUp(e: PointerEvent<HTMLElement>) {
+      if (pointerId.current !== null && e.pointerId !== pointerId.current) return;
+      clear(true);
+    },
+    onPointerCancel(e: PointerEvent<HTMLElement>) {
+      if (pointerId.current !== null && e.pointerId !== pointerId.current) return;
+      clear();
+    },
+    onLostPointerCapture(e: PointerEvent<HTMLElement>) {
+      if (pointerId.current !== null && e.pointerId !== pointerId.current) return;
+      if (timer.current) clear();
+    },
+    onContextMenu(e: MouseEvent<HTMLElement>) {
+      e.preventDefault();
+      e.stopPropagation();
+      clear();
+      openAt(e.clientX, e.clientY);
+    },
+    onClickCapture(e: MouseEvent<HTMLElement>) {
+      if (!opened.current) return;
+      e.preventDefault();
+      e.stopPropagation();
+    },
+  };
+}
 
 export function AgentsNav({
   activeAgentId,
@@ -111,10 +207,13 @@ export function AgentsNav({
       setCtx(null);
       setMoveOpen(false);
     };
-    window.addEventListener("click", close);
-    window.addEventListener("scroll", close, true);
+    const t = window.setTimeout(() => {
+      window.addEventListener("pointerdown", close);
+      window.addEventListener("scroll", close, true);
+    }, 400);
     return () => {
-      window.removeEventListener("click", close);
+      window.clearTimeout(t);
+      window.removeEventListener("pointerdown", close);
       window.removeEventListener("scroll", close, true);
     };
   }, [ctx]);
@@ -216,14 +315,11 @@ export function AgentsNav({
     await refresh();
   }
 
-  function onContext(e: MouseEvent, kind: "agent" | "group", id: string) {
-    e.preventDefault();
-    e.stopPropagation();
+  function onContext(kind: "agent" | "group", id: string, x: number, y: number) {
     setMenu(false);
     setMoveOpen(false);
-    const x = Math.min(e.clientX, window.innerWidth - 240);
-    const y = Math.min(e.clientY, window.innerHeight - 320);
-    setCtx({ kind, id, x, y });
+    const at = menuPoint(x, y);
+    setCtx({ kind, id, x: at.x, y: at.y });
   }
 
   const formOpen = form !== null;
@@ -270,18 +366,20 @@ export function AgentsNav({
               if (agent.unread) void patchAgent(agent.id, { unread: false });
               onSelectAgent?.(agent.id);
             }}
-            onContext={(e) => onContext(e, "agent", agent.id)}
+            onOpenMenu={(x, y) => onContext("agent", agent.id, x, y)}
           />
         ))}
         {groups.map((group) => (
-          <div
+          <HoldRow
             key={group.id}
             className={`agent-row${activeGroupId === group.id ? " on" : ""}`}
-            onContextMenu={(e) => onContext(e, "group", group.id)}
+            label={group.name}
+            onOpenMenu={(x, y) => onContext("group", group.id, x, y)}
           >
             <a
               className="agent-open"
               href={chatHref({ group: group.id })}
+              draggable={false}
               onClick={(e) => {
                 e.preventDefault();
                 if (pathname === "/chat") {
@@ -297,7 +395,7 @@ export function AgentsNav({
                 <small>{busyScopes.includes(`g.${group.id}`) ? "Working…" : previewFor(threads, null, group.id) || group.outcome || group.preview || group.members.map((m) => m.name).join(", ") || "Group"}</small>
               </span>
             </a>
-          </div>
+          </HoldRow>
         ))}
         {archivedAgents.length ? (
           <button className="agent-archived-toggle" type="button" onClick={() => setShowArchived((v) => !v)}>
@@ -314,14 +412,20 @@ export function AgentsNav({
                 preview="Archived"
                 stay={pathname === "/chat"}
                 onOpen={() => onSelectAgent?.(agent.id)}
-                onContext={(e) => onContext(e, "agent", agent.id)}
+                onOpenMenu={(x, y) => onContext("agent", agent.id, x, y)}
               />
             ))
           : null}
       </div>
       {ctx && ctxAgent
         ? createPortal(
-        <div className="agent-ctx" style={{ left: ctx.x, top: ctx.y }} onClick={(e) => e.stopPropagation()} onContextMenu={(e) => e.preventDefault()}>
+        <div
+          className="agent-ctx"
+          style={{ left: ctx.x, top: ctx.y }}
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => e.stopPropagation()}
+          onContextMenu={(e) => e.preventDefault()}
+        >
           <button type="button" onClick={() => { void patchAgent(ctxAgent.id, { pinned: !ctxAgent.pinned }); setCtx(null); }}>
             <CtxIcon d="M12 3l2.2 4.6 5 .7-3.6 3.5.9 5.1L12 14.8 7.5 17.9l.9-5.1L4.8 9.3l5-.7z" />
             {ctxAgent.pinned ? "Unpin" : "Pin"}
@@ -422,7 +526,13 @@ export function AgentsNav({
         : null}
       {ctx?.kind === "group"
         ? createPortal(
-        <div className="agent-ctx" style={{ left: ctx.x, top: ctx.y }} onClick={(e) => e.stopPropagation()} onContextMenu={(e) => e.preventDefault()}>
+        <div
+          className="agent-ctx"
+          style={{ left: ctx.x, top: ctx.y }}
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => e.stopPropagation()}
+          onContextMenu={(e) => e.preventDefault()}
+        >
           <button
             type="button"
             className="danger"
@@ -568,6 +678,39 @@ export function AgentsNav({
   );
 }
 
+function HoldRow({
+  className,
+  label,
+  onOpenMenu,
+  children,
+}: {
+  className: string;
+  label: string;
+  onOpenMenu: (x: number, y: number) => void;
+  children: ReactNode;
+}) {
+  const hold = useHoldMenu(onOpenMenu);
+  return (
+    <div className={className} {...hold}>
+      {children}
+      <button
+        type="button"
+        className="agent-more"
+        aria-label={`More actions for ${label}`}
+        onPointerDown={(e) => e.stopPropagation()}
+        onClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          const box = e.currentTarget.getBoundingClientRect();
+          onOpenMenu(box.right - 8, box.bottom + 4);
+        }}
+      >
+        ···
+      </button>
+    </div>
+  );
+}
+
 function AgentRow({
   agent,
   href,
@@ -575,7 +718,7 @@ function AgentRow({
   preview,
   stay,
   onOpen,
-  onContext,
+  onOpenMenu,
 }: {
   agent: WorkspaceAgent;
   href: string;
@@ -583,13 +726,18 @@ function AgentRow({
   preview: string;
   stay?: boolean;
   onOpen: () => void;
-  onContext: (e: MouseEvent) => void;
+  onOpenMenu: (x: number, y: number) => void;
 }) {
   return (
-    <div className={`agent-row${active ? " on" : ""}${agent.unread ? " unread" : ""}`} onContextMenu={onContext}>
+    <HoldRow
+      className={`agent-row${active ? " on" : ""}${agent.unread ? " unread" : ""}`}
+      label={agent.name}
+      onOpenMenu={onOpenMenu}
+    >
       <a
         className="agent-open"
         href={href}
+        draggable={false}
         onClick={(e) => {
           e.preventDefault();
           if (stay) {
@@ -611,7 +759,7 @@ function AgentRow({
         </span>
         {agent.unread ? <span className="agent-unread" aria-label="Unread" /> : null}
       </a>
-    </div>
+    </HoldRow>
   );
 }
 

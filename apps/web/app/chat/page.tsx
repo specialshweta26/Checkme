@@ -257,14 +257,31 @@ export default function ChatPage() {
       }
       if (data.workspace_changed) announceWorkspaceChanged();
       const loaded = data.session_id ? await loadSession(data.session_id) : null;
+      const peerTurns: Msg[] = (data.thread || [])
+        .filter((item: any) => (item?.text || "").trim())
+        .map((item: any) => ({
+          role: "assistant" as const,
+          content: item.text || "",
+          meta: {
+            agent_id: item.agent_id,
+            agent_name: item.agent_name,
+            agent_color: item.agent_color,
+            peer: true,
+            used_tools: item.used_tools,
+            computer: item.computer,
+            attachments: item.attachments,
+          },
+        }));
+      const ownerTurn: Msg = {
+        role: "assistant",
+        content: data.text || "",
+        meta: { ...data, connect_cards: cardsFromMeta(data) },
+      };
       const doneMessages: Msg[] = loaded?.messages?.length
         ? loaded.messages
             .filter((m: Msg) => m.role === "user" || m.role === "assistant")
             .map((m: Msg) => ({ role: m.role, content: m.content || "", meta: m.meta }))
-        : [
-            ...nextMessages,
-            { role: "assistant", content: data.text || "", meta: { ...data, connect_cards: cardsFromMeta(data) } },
-          ];
+        : [...nextMessages, ownerTurn, ...peerTurns];
       const nextPending: Confirm[] = data.pending_confirms || [];
       const doneView: AgentView = { sessionId: data.session_id || sessionId, messages: doneMessages, pending: nextPending };
       viewsRef.current[key] = doneView;
@@ -550,27 +567,52 @@ export default function ChatPage() {
                     <h1>{hello}</h1>
                     <p>
                       {activeGroup
-                        ? "Write normally and the bots decide who responds. @ one bot to hand a request, or @everyone for updates. They hand work to each other in this thread."
+                        ? `${firstName(me)} set this group up. The kickoff owner introduces proposed roles, then each bot replies as itself. @ one bot, or @everyone, and they talk to each other in this thread.`
                         : "Here's what's happening today — brief the inbox, ask a connected system, or schedule a send."}
                     </p>
                   </>
                 )}
                 <div className="hero-cards">
-                  <button className="hero-card" onClick={() => send("What matters today? Give me my chief of staff briefing.")}>
-                    <span className="mark" />
-                    <strong>Summarize emails</strong>
-                    <span>Inbox, calendar, and the decisions that cannot wait.</span>
-                  </button>
-                  <button className="hero-card" onClick={() => send("What am I waiting for, and what did I promise?")}>
-                    <span className="mark" />
-                    <strong>Check connected systems</strong>
-                    <span>Promises, waits, or any tool already linked to this workspace.</span>
-                  </button>
-                  <a className="hero-card" href="/tasks">
-                    <span className="mark" />
-                    <strong>Schedule a send</strong>
-                    <span>Work that should run at a time you choose, then go out.</span>
-                  </a>
+                  {activeGroup ? (
+                    <>
+                      <button
+                        className="hero-card"
+                        onClick={() =>
+                          send("Hi team — please each reply with a one-line hello and what you're best at, so we know the group works.")
+                        }
+                      >
+                        <span className="mark" />
+                        <strong>Introduce the team</strong>
+                        <span>Kickoff owner names who created the group and proposed roles. Each bot then says hello as itself.</span>
+                      </button>
+                      <button
+                        className="hero-card"
+                        onClick={() => send("@everyone Status from each of you — what you own and what's next.")}
+                      >
+                        <span className="mark" />
+                        <strong>Ask everyone</strong>
+                        <span>Each responsible bot replies in its own bubble. They can hand work to each other.</span>
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <button className="hero-card" onClick={() => send("What matters today? Give me my chief of staff briefing.")}>
+                        <span className="mark" />
+                        <strong>Summarize emails</strong>
+                        <span>Inbox, calendar, and the decisions that cannot wait.</span>
+                      </button>
+                      <button className="hero-card" onClick={() => send("What am I waiting for, and what did I promise?")}>
+                        <span className="mark" />
+                        <strong>Check connected systems</strong>
+                        <span>Promises, waits, or any tool already linked to this workspace.</span>
+                      </button>
+                      <a className="hero-card" href="/tasks">
+                        <span className="mark" />
+                        <strong>Schedule a send</strong>
+                        <span>Work that should run at a time you choose, then go out.</span>
+                      </a>
+                    </>
+                  )}
                 </div>
               </div>
             ) : null}
@@ -581,7 +623,7 @@ export default function ChatPage() {
                   {m.meta?.uploads?.length ? <AttachmentWidget items={m.meta.uploads} /> : null}
                 </div>
               ) : (
-                <div key={i} className="turn assistant">
+                <div key={i} className={`turn assistant${m.meta?.agent_name ? " speaker" : ""}`}>
                   {m.meta?.agent_name ? (
                     <div className="agent-chip">
                       <span className="agent-avatar tiny" style={{ background: m.meta.agent_color || "#f97316" }}>
@@ -590,7 +632,13 @@ export default function ChatPage() {
                       {m.meta.agent_name}
                     </div>
                   ) : null}
-                  <Markdown text={m.content} />
+                  {m.meta?.agent_name ? (
+                    <div className="group-bubble">
+                      <Markdown text={m.content} />
+                    </div>
+                  ) : (
+                    <Markdown text={m.content} />
+                  )}
                   <ConnectCards meta={m.meta} />
                   {m.meta?.job?.id && !m.meta?.job_result ? (
                     <JobTimeline

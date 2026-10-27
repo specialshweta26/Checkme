@@ -196,9 +196,14 @@ async def chat(
     if confirms:
         working["confirm_tools"] = confirms
     if group is not None and teammates:
-        from app.agents.collab import parse_mentions, pick_owner
+        from app.agents.collab import is_group_hello, is_kickoff, is_roll_call, parse_mentions, pick_owner
 
         mentions = parse_mentions(text, teammates)
+        if is_kickoff(history) and (is_group_hello(text) or mentions.get("everyone")):
+            mentions["kickoff"] = True
+            mentions["roll_call"] = True
+        elif mentions.get("everyone") or is_roll_call(text):
+            mentions["roll_call"] = True
         owner = pick_owner(teammates, group, working, mentions)
         if owner is not None:
             workspace_agent = owner
@@ -271,6 +276,7 @@ async def chat(
             "speaker": result.get("speaker"),
             "agent_id": (result.get("speaker") or {}).get("id") if result.get("speaker") else (str(workspace_agent.id) if workspace_agent else None),
             "agent_name": (result.get("speaker") or {}).get("name"),
+            "agent_color": (result.get("speaker") or {}).get("color"),
             "group_id": result.get("group_id"),
             "steps": [s.get("text") for s in (progress.steps if progress else []) if s.get("kind") != "done"][:40],
             "jobs": result.get("jobs_started") or [],
@@ -283,7 +289,17 @@ async def chat(
             {k: item.get(k) for k in ("key", "filename", "content_type", "kind", "download_url", "preview_url", "previewable", "size") if item.get(k) is not None}
             for item in uploads
         ]
-        await _store(db, sess, user.id, request_id, text, result["text"], meta, user_meta={"uploads": public_uploads} if public_uploads else None)
+        await _store(
+            db,
+            sess,
+            user.id,
+            request_id,
+            text,
+            result["text"],
+            meta,
+            user_meta={"uploads": public_uploads} if public_uploads else None,
+            thread=result.get("thread"),
+        )
         return {"session_id": str(sess.id), **result, "request_id": request_id, "uploads": public_uploads}
     except Exception as exc:  # noqa: BLE001
         log.exception("chat store failed")
@@ -444,9 +460,34 @@ async def _last_event_id(db, job) -> int:
         return 0
 
 
-async def _store(db, sess, user_id, request_id, user_text, assistant_text, meta, user_meta=None) -> None:
+async def _store(db, sess, user_id, request_id, user_text, assistant_text, meta, user_meta=None, thread=None) -> None:
     db.add(ChatMessage(session_id=sess.id, user_id=user_id, role="user", content=user_text, meta=user_meta or {}, request_id=request_id))
     db.add(ChatMessage(session_id=sess.id, user_id=user_id, role="assistant", content=assistant_text, meta=meta, request_id=request_id))
+    for item in thread or []:
+        if not isinstance(item, dict):
+            continue
+        text = (item.get("text") or "").strip()
+        if not text:
+            continue
+        db.add(
+            ChatMessage(
+                session_id=sess.id,
+                user_id=user_id,
+                role="assistant",
+                content=text,
+                meta={
+                    "agent_id": item.get("agent_id"),
+                    "agent_name": item.get("agent_name"),
+                    "agent_color": item.get("agent_color") or "",
+                    "peer": True,
+                    "used_tools": item.get("used_tools") or [],
+                    "computer": item.get("computer") or {},
+                    "attachments": item.get("attachments") or [],
+                    "request_id": request_id,
+                },
+                request_id=request_id,
+            )
+        )
     if not sess.title or sess.title == "New chat":
         sess.title = user_text[:80]
     sess.updated_at = datetime.now(timezone.utc)

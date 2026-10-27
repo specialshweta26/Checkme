@@ -87,6 +87,7 @@ class RunContext:
     group: Any = None
     teammates: list = field(default_factory=list)
     teammate_depth: int = 0
+    thread: list = field(default_factory=list)
     session_id: uuid.UUID | None = None
     request_id: str = ""
     workspace_changed: bool = False
@@ -1493,7 +1494,9 @@ class DeleteWorkspaceInput(BaseModel):
 
 class AskTeammateInput(BaseModel):
     agent_id: str = Field(description="Id of a teammate in this group.")
-    prompt: str = Field(description="Focused task for that teammate. Include only what they need.")
+    prompt: str = Field(
+        description="In-thread message for that teammate. Address them by name and include what they need. Their reply posts as their own bubble."
+    )
 
 
 class SaveSkillInput(BaseModel):
@@ -1832,7 +1835,7 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
         return dumps(await run_staff(ctx, name, args))
 
     async def ask_teammate(agent_id: str, prompt: str) -> str:
-        """Direct handoff: message a teammate in this thread and share context. Their memory stays separate. Do not ask yourself."""
+        """Post a message to a teammate in this group thread. They reply as themselves in their own bubble. Their memory stays separate. Do not ask yourself or paste their reply into yours."""
         return dumps(await _ask_teammate(ctx, agent_id, prompt), 12000)
 
     async def save_skill(name: str, instruction: str = "") -> str:
@@ -2288,7 +2291,14 @@ def system_prompt(
     if group is not None and peers:
         from app.agents.collab import routing_prompt
 
-        group_bit = routing_prompt(group, agent, teammates or [], mentions)
+        group_bit = routing_prompt(group, agent, teammates or [], mentions, user=user)
+    if mentions and mentions.get("kickoff"):
+        return (
+            identity
+            + group_bit
+            + f"Current date and time: {now.strftime('%Y-%m-%d %H:%M')} ({tz}). Interpret and display times in that timezone.\n"
+            "This turn is a group introduction. Do not call list_connectors, search_tools, mail, or computer.\n"
+        )
     workspace_bit = (
         "Checkme agents and groups: this user's own agents (you, Chief, and the others in the sidebar under Personal) and their groups "
         "are built into this app, not a connector. To list, create, rename or edit agents, or to create, rename, or change members of a group of agents, "
@@ -2513,18 +2523,26 @@ async def _ask_teammate(ctx: RunContext, agent_id: str, prompt: str) -> dict:
         return {"error": "Do not ask yourself. Pick a teammate."}
     if ctx.db is None or ctx.session_id is None:
         return {"error": "No group thread"}
+    from_name = getattr(ctx.agent, "name", None) or "a teammate"
+    group_name = getattr(ctx.group, "name", None) or "group"
+    nested_query = (
+        f"You are posting in the group '{group_name}' as yourself. "
+        f"The user said: {clip(ctx.query, 500)}\n"
+        f"{from_name} asked you: {task}"
+    )
     nested = await run_deep_agent(
         ctx.db,
         ctx.user,
         ctx.session_id,
         ctx.request_id or "peer",
         [],
-        task,
+        nested_query,
         auto_confirm=ctx.auto_confirm,
         workspace_agent=member,
         group=ctx.group,
         teammates=ctx.teammates,
         teammate_depth=ctx.teammate_depth + 1,
+        mentions={"handoff": True},
         progress=ctx.progress.child(member.name) if ctx.progress is not None else None,
     )
     ctx.used_tools.append(f"ask_teammate:{member.name}")
@@ -2544,31 +2562,18 @@ async def _ask_teammate(ctx: RunContext, agent_id: str, prompt: str) -> dict:
                 "data": view if isinstance(view, dict) else {},
             }
         )
-    from app.models import ChatMessage
-
-    ctx.db.add(
-        ChatMessage(
-            session_id=ctx.session_id,
-            user_id=ctx.user.id,
-            role="assistant",
-            content=nested.get("text") or "",
-            meta={
-                "agent_id": str(member.id),
-                "agent_name": member.name,
-                "agent_color": getattr(member, "color", "") or "",
-                "peer": True,
-                "used_tools": nested.get("used_tools"),
-                "computer": nested.get("computer") or {},
-                "attachments": nested.get("attachments") or [],
-            },
-            request_id=ctx.request_id or "",
-        )
-    )
-    try:
-        await ctx.db.flush()
-    except Exception:  # noqa: BLE001
-        log.warning("could not store teammate reply")
-    return {"from": member.name, "agent_id": str(member.id), "reply": nested.get("text") or ""}
+    item = {
+        "text": nested.get("text") or "",
+        "agent_id": str(member.id),
+        "agent_name": member.name,
+        "agent_color": getattr(member, "color", "") or "",
+        "peer": True,
+        "used_tools": nested.get("used_tools") or [],
+        "computer": nested.get("computer") or {},
+        "attachments": nested.get("attachments") or [],
+    }
+    ctx.thread.append(item)
+    return {"from": member.name, "agent_id": str(member.id), "reply": item["text"]}
 
 
 def _progress_callbacks(ctx: RunContext, conns: list, query: str) -> list:
@@ -2614,6 +2619,12 @@ async def run_deep_agent(
         teammate_ids,
         assignments,
     )
+    mentions = dict(mentions or {})
+    if teammate_depth:
+        mentions["handoff"] = True
+        mentions.pop("kickoff", None)
+        mentions.pop("roll_call", None)
+        mentions.pop("everyone", None)
     ctx = RunContext(
         db=db,
         user=user,
@@ -2776,4 +2787,5 @@ async def run_deep_agent(
         "prs": ctx.prs,
         "merged": ctx.merged,
         "repo": ctx.repo,
+        "thread": list(ctx.thread),
     }
