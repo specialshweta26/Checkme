@@ -15,7 +15,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents import chat_tools as workspace_tools
-from app.agents.service import GROUP_MEMBER_MAX, GROUP_MEMBER_MIN, connector_assignment_map, filter_connectors
+from app.agents.service import (
+    GROUP_MEMBER_MAX,
+    GROUP_MEMBER_MIN,
+    agent_may_use_toolkit,
+    connector_assignment_map,
+    filter_connectors,
+    toolkit_assignment_map,
+)
 from app.agent.confirm import sign_confirm
 from app.agent.invoke import bump_usage, confirmed, invoke_named, preview
 from app.agent.memory import load_memory, remember
@@ -101,6 +108,7 @@ class RunContext:
     overviews: dict = field(default_factory=dict)  # repo_overview cache per repo
     check_results: dict = field(default_factory=dict)  # last run_checks per repo (for the PR body)
     check_attempts: dict = field(default_factory=dict)
+    toolkit_assignments: dict = field(default_factory=dict)
 
 
 def _json_size(value: Any) -> int:
@@ -443,7 +451,12 @@ async def _expand_gateway_catalog(ctx: RunContext, conn, query: str) -> list[dic
         try:
             linked = await _silent_call(ctx, conn, "list_connections", {})
             conns = linked.get("connections") if isinstance(linked, dict) else []
-            toolkit = matching_toolkit(conns if isinstance(conns, list) else [], extra_capability_terms(query))
+            allowed = [
+                row
+                for row in (conns if isinstance(conns, list) else [])
+                if _active_toolkit(row) and agent_may_use_toolkit(getattr(ctx.agent, "id", None), _active_toolkit(row), ctx.toolkit_assignments)
+            ]
+            toolkit = matching_toolkit(allowed, extra_capability_terms(query))
         except Exception:  # noqa: BLE001
             log.warning("composio list_connections failed on expand", exc_info=True)
     parsed: list[dict] = []
@@ -669,11 +682,19 @@ _CONNECT_HINTS = ("connect", "authorize", "sign in", "sign-in", "oauth", "link a
 _CONNECT_STOP = frozenset(
     {"connect", "connecting", "authorize", "authorization", "oauth", "sign", "signin", "link", "account", "app", "apps"}
 )
+_ACTIVE_CONNECTION = frozenset({"ACTIVE", "SUCCESS", "ENABLED", "CONNECTED"})
 
 
 def _is_connect_query(query: str) -> bool:
-    q = (query or "").lower()
+    q = (query or "").lower().replace("connected", " ")
     return any(k in q for k in _CONNECT_HINTS)
+
+
+def _active_toolkit(row: dict) -> str:
+    status = str(row.get("status") or "").upper()
+    if status and status not in _ACTIVE_CONNECTION:
+        return ""
+    return str(row.get("toolkit") or row.get("slug") or "").strip().lower()
 
 
 def _pick_connect_toolkit(apps: list, query: str) -> dict | None:
@@ -717,6 +738,12 @@ async def _maybe_start_connect(ctx: RunContext, query: str) -> None:
     picked = _pick_connect_toolkit(apps if isinstance(apps, list) else [], query)
     toolkit = str((picked or {}).get("slug") or "").strip()
     if not toolkit:
+        return
+    linked = await call_user_tool(ctx, conn.slug, "list_connections", {})
+    rows = linked.get("connections") if isinstance(linked, dict) else []
+    already = any(_active_toolkit(row) == toolkit for row in (rows if isinstance(rows, list) else []))
+    await _grant_connect_agent(ctx, toolkit)
+    if already:
         return
     await call_user_tool(ctx, conn.slug, "connect_app", {"toolkit": toolkit})
     await _grant_connect_agent(ctx, toolkit)
@@ -847,6 +874,7 @@ async def list_user_connectors(ctx: RunContext) -> list[dict]:
                 "tool_count": card.tool_count if card else None,
             }
         )
+    out.extend(await _connected_marketplace_apps(ctx))
     # #region agent log
     from app.debug_ndjson import dbg
 
@@ -861,6 +889,51 @@ async def list_user_connectors(ctx: RunContext) -> list[dict]:
         },
     )
     # #endregion
+    return out
+
+
+async def _connected_marketplace_apps(ctx: RunContext) -> list[dict]:
+    conn = next((c for c in ctx.connectors.values() if getattr(c, "provider", None) == "composio"), None)
+    if conn is None:
+        return []
+    try:
+        linked = await _silent_call(ctx, conn, "list_connections", {})
+    except Exception:  # noqa: BLE001
+        return []
+    rows = linked.get("connections") if isinstance(linked, dict) else []
+    if not isinstance(rows, list):
+        return []
+    names: dict[str, str] = {}
+    if ctx.db is not None:
+        try:
+            from app.connectors.composio_box import list_toolkits
+
+            for app in await list_toolkits("", 2000):
+                slug = str(app.get("slug") or "").strip().lower()
+                if slug:
+                    names[slug] = str(app.get("name") or slug)
+        except Exception:  # noqa: BLE001
+            names = {}
+    out = []
+    seen: set[str] = set()
+    agent_id = getattr(ctx.agent, "id", None)
+    for row in rows:
+        slug = _active_toolkit(row)
+        if not slug or slug in seen:
+            continue
+        if not agent_may_use_toolkit(agent_id, slug, ctx.toolkit_assignments):
+            continue
+        seen.add(slug)
+        out.append(
+            {
+                "slug": slug,
+                "name": names.get(slug) or slug,
+                "kind": "marketplace",
+                "connected": True,
+                "description": f"Connected {names.get(slug) or slug} account. search_tools then call_tool on composio.",
+                "via": "composio",
+            }
+        )
     return out
 
 
@@ -2364,9 +2437,11 @@ def system_prompt(
         "Pick the tool whose name and description match the capability — do not assume mail owns every 'message'. "
         "Mail and analytics are different connectors — do not treat a missing mail tool as a missing MCP connector. "
         "The computer connector is this user's cloud sandbox. The composio connector is an app marketplace of many apps: "
-        "search_tools expands its tools; list_connections shows which apps are authorized. "
-        "To connect an app the user named, call connect_app with that toolkit slug (gmail, github, slack) — never a different vendor such as a Gmail tool on another app. "
-        "connect_app returns redirect_url; the chat shows the Composio connect card. Do not only paste the URL.\n"
+        "list_connectors includes each connected marketplace app (Figma, Slack, …) plus composio. "
+        "search_tools expands those tools; list_connections also shows which apps are authorized. "
+        "If the user names a connected app, search_tools then call_tool on composio. Do not say it is unavailable. "
+        "To connect an app the user named, call connect_app with that toolkit slug (gmail, github, figma, slack) — never a different vendor. "
+        "connect_app returns redirect_url; the chat always shows the Composio connect card. Do not only paste the URL, and do not refuse to connect when composio is listed.\n"
         "When the user asks for a chart, plot, HTML report, or downloadable file: fetch the data first, then computer "
         "write_analytics_report with tables and charts, or write_file / run_code plus publish_file. "
         "Cite the download_url (and preview_url). Never cite sandbox: or /tmp paths — those are not downloadable.\n"
@@ -2657,6 +2732,7 @@ async def run_deep_agent(
     await ensure_platform_connectors(db, user)
     conns = await user_connectors(db, user.id)
     assignments = await connector_assignment_map(db, user)
+    toolkits = await toolkit_assignment_map(db, user)
     teammate_ids = [getattr(peer, "id", None) for peer in (teammates or [])]
     conns = filter_connectors(
         conns,
@@ -2685,7 +2761,9 @@ async def run_deep_agent(
         request_id=request_id,
         progress=progress,
         job=job,
+        toolkit_assignments=toolkits,
     )
+    await _maybe_start_connect(ctx, query)
     callbacks = _progress_callbacks(ctx, conns, query)
     if progress is not None:
         await progress.emit("Recalling what I know about this" if not teammate_depth else "Picking up the task", kind="memory")

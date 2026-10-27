@@ -546,6 +546,15 @@ def agent_may_use_connector(agent_id, connector_id, assignments: dict) -> bool:
     return str(agent_id) in allowed
 
 
+def agent_may_use_toolkit(agent_id, toolkit: str, assignments: dict | None) -> bool:
+    if not agent_id:
+        return True
+    allowed = (assignments or {}).get(str(toolkit or "").strip().lower()) or []
+    if not allowed:
+        return True
+    return str(agent_id) in allowed
+
+
 async def connector_assignment_map(db: AsyncSession, user: User) -> dict[str, list[str]]:
     agents = (await db.execute(select(WorkspaceAgent.id).where(WorkspaceAgent.user_id == user.id))).scalars().all()
     agent_ids = {str(i) for i in agents}
@@ -696,6 +705,9 @@ def filter_connectors(connectors: list, agent_id=None, teammate_ids: list | None
         return list(connectors)
     kept = []
     for conn in connectors:
+        if getattr(conn, "provider", "") == "composio":
+            kept.append(conn)
+            continue
         cid = str(getattr(conn, "id", "") or "")
         allowed = mapping.get(cid) or []
         if not allowed or any(aid in allowed for aid in ids):

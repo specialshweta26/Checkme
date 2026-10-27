@@ -6,6 +6,7 @@ from app.agent.deep import (
     RunContext,
     _computer_session,
     _connect_cards,
+    _is_connect_query,
     _maybe_start_connect,
     _pick_connect_toolkit,
     call_user_tool,
@@ -156,6 +157,8 @@ async def test_connect_query_starts_composio_card():
         calls.append((tool, dict(args)))
         if tool == "list_apps":
             return {"apps": [{"slug": "gmail", "name": "Gmail", "logo": "https://example.com/g.png"}]}
+        if tool == "list_connections":
+            return {"connections": []}
         if tool == "connect_app":
             return {
                 "toolkit": args.get("toolkit"),
@@ -178,6 +181,51 @@ async def test_connect_query_starts_composio_card():
     assert any(tool == "connect_app" and args.get("toolkit") == "gmail" for tool, args in calls)
     assert cards[0]["redirect_url"] == "https://connect.composio.dev/link/gmail"
     assert not any(tool == "execute" for tool, _ in calls)
+
+
+def test_connected_is_not_a_connect_request():
+    assert _is_connect_query("connect to figma")
+    assert _is_connect_query("please authorize slack")
+    assert not _is_connect_query("just check it is connected")
+    assert not _is_connect_query("it is connected now")
+    assert not _is_connect_query("Figma is connected")
+
+
+async def test_already_connected_app_does_not_open_another_oauth_card():
+    calls = []
+
+    async def fake_call(slug, tool, args):
+        calls.append((tool, dict(args)))
+        if tool == "list_apps":
+            return {"apps": [{"slug": "figma", "name": "Figma"}]}
+        if tool == "list_connections":
+            return {"connections": [{"toolkit": "figma", "status": "ACTIVE"}]}
+        if tool == "connect_app":
+            return {"toolkit": "figma", "redirect_url": "https://connect.composio.dev/link/figma"}
+        return {}
+
+    market = _conn(slug="composio", provider="composio", kind="builtin", name="Composio", alias="composio")
+    ctx = _ctx([market], call_impl=fake_call)
+    await _maybe_start_connect(ctx, "connect to figma")
+    assert any(tool == "list_connections" for tool, _ in calls)
+    assert not any(tool == "connect_app" for tool, _ in calls)
+    assert _connect_cards(ctx) == []
+
+
+async def test_list_connectors_includes_connected_marketplace_apps():
+    async def fake_call(slug, tool, args):
+        if tool == "list_connections":
+            return {"connections": [{"toolkit": "figma", "status": "ACTIVE"}]}
+        return {}
+
+    market = _conn(slug="composio", provider="composio", kind="builtin", name="Composio", alias="composio")
+    computer = _conn(slug="computer", provider="daytona", kind="builtin", name="Computer", alias="computer")
+    ctx = _ctx([computer, market], call_impl=fake_call)
+    listed = await list_user_connectors(ctx)
+    slugs = [item["slug"] for item in listed]
+    assert "computer" in slugs
+    assert "composio" in slugs
+    assert "figma" in slugs
 
 
 def test_computer_session_marks_live_browser():
