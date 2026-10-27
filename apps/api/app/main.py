@@ -18,6 +18,7 @@ from app.files import router as files_router
 from app.db import init_db
 from app.inbox.routes import router as inbox_router
 from app.storage import ensure_bucket
+from app.skills.routes import router as skills_router
 from app.tasks.routes import router as tasks_router
 from app.jobs.routes import router as jobs_router
 
@@ -101,6 +102,7 @@ app.include_router(deploy_router, prefix="/api")
 app.include_router(connectors_router, prefix="/api")
 app.include_router(tasks_router, prefix="/api")
 app.include_router(jobs_router, prefix="/api")
+app.include_router(skills_router, prefix="/api")
 app.include_router(inbox_router, prefix="/api")
 app.include_router(files_router, prefix="/api")
 

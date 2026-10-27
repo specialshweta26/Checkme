@@ -170,20 +170,21 @@ async def computer_status(user: User = Depends(current_user), db: AsyncSession =
     try:
         row = await _computer_row(db, user, provision=False)
     except HTTPException:
-        return {"state": "stopped", "screenAvailable": False, "url": "", "title": ""}
+        return {"state": "stopped", "screenAvailable": False, "url": "", "title": "", "screen_agent": ""}
     from app.connectors.daytona_box import call_daytona
 
     try:
         data = await call_daytona(row, "status", {})
     except Exception:  # noqa: BLE001
-        return {"state": "stopped", "screenAvailable": False, "url": "", "title": ""}
+        return {"state": "stopped", "screenAvailable": False, "url": "", "title": "", "screen_agent": ""}
     if not isinstance(data, dict):
-        return {"state": "stopped", "screenAvailable": False, "url": "", "title": ""}
+        return {"state": "stopped", "screenAvailable": False, "url": "", "title": "", "screen_agent": ""}
     return {
         "state": data.get("state") or "stopped",
         "screenAvailable": bool(data.get("screenAvailable")),
         "url": data.get("url") or "",
         "title": data.get("title") or "",
+        "screen_agent": data.get("screen_agent") or "",
     }
 
 

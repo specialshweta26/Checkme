@@ -44,11 +44,15 @@ class ConnectorAgentsIn(BaseModel):
 class GroupIn(BaseModel):
     name: str
     member_ids: list[uuid.UUID]
+    outcome: str = ""
+    owner_id: uuid.UUID | None = None
 
 
 class GroupPatch(BaseModel):
     name: str | None = None
     member_ids: list[uuid.UUID] | None = None
+    outcome: str | None = None
+    owner_id: uuid.UUID | None = None
 
 
 def _err(exc: Exception) -> HTTPException:
@@ -143,7 +147,14 @@ async def remove_agent(agent_id: uuid.UUID, user: User = Depends(current_user), 
 async def create_group(body: GroupIn, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     try:
         row, members = await service.create_group(
-            db, user, {"name": body.name, "member_ids": [str(i) for i in body.member_ids]}
+            db,
+            user,
+            {
+                "name": body.name,
+                "member_ids": [str(i) for i in body.member_ids],
+                "outcome": body.outcome,
+                "owner_id": str(body.owner_id) if body.owner_id else None,
+            },
         )
     except service.AgentError as exc:
         raise _err(exc) from exc

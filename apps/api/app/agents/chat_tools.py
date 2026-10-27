@@ -132,7 +132,7 @@ async def list_agents_and_groups(ctx) -> dict:
         "groups": [_brief_group(g) for g in roster.get("groups") or []],
         "limits": _limits(),
         "where": WHERE_AGENTS,
-        "note": "Groups have no separate lead setting; the first member answers and can ask teammates.",
+        "note": "One owner per stage is the kickoff rule; @ a bot or use ask_teammate to hand the next step.",
     }
 
 

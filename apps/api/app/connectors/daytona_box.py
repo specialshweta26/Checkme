@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from contextvars import ContextVar
 from typing import Any
 from urllib.parse import urlparse
 
@@ -15,6 +16,26 @@ from app.security import decrypt_json, encrypt
 log = logging.getLogger(__name__)
 _LIVE_PNG = b""
 _LIVE_AT = 0.0
+_LIVE_AGENT = ""
+_COMPUTER_BUSY: dict[str, str] = {}
+_COMPUTER_AGENT: ContextVar[tuple[str, str]] = ContextVar("computer_agent", default=("", ""))
+_COMPUTER_USE = {
+    "exec",
+    "boot",
+    "browse_open",
+    "browser_navigate",
+    "web_fetch",
+    "browser_snapshot",
+    "browser_act",
+    "computer_observe",
+    "computer_act",
+    "computer_control",
+    "browse_act",
+}
+
+
+def set_computer_agent(agent_id: str, agent_name: str = "") -> None:
+    _COMPUTER_AGENT.set((agent_id or "", agent_name or ""))
 
 
 def remember_screen(raw: bytes) -> None:
@@ -551,7 +572,7 @@ async def _computer_status(proc) -> dict:
     ping = await _exec(proc, "curl -sf http://127.0.0.1:18765/health || echo DOWN", 8)
     raw = _out(ping).strip()
     if "DOWN" in raw or '"version"' not in raw:
-        return {"state": "suspended", "screenAvailable": False, "url": "", "title": ""}
+        return {"state": "suspended", "screenAvailable": False, "url": "", "title": "", "screen_agent": _LIVE_AGENT}
     try:
         health = json.loads(raw.splitlines()[-1])
     except Exception:  # noqa: BLE001
@@ -562,6 +583,7 @@ async def _computer_status(proc) -> dict:
         "url": health.get("url") or "",
         "title": health.get("title") or "",
         "version": health.get("version") or "",
+        "screen_agent": _LIVE_AGENT,
     }
 
 
@@ -662,6 +684,31 @@ async def _existing_sandbox(row):
 
 
 async def call_daytona(row, name: str, args: dict[str, Any]) -> Any:
+    agent_id, agent_name = _COMPUTER_AGENT.get()
+    user_key = str(getattr(row, "user_id", "") or "")
+    acquired = False
+    if name in _COMPUTER_USE:
+        from app.skills.service import record_computer_step
+
+        record_computer_step(getattr(row, "user_id", None), name, args)
+        global _LIVE_AGENT
+        if agent_id:
+            _LIVE_AGENT = agent_name or agent_id
+        if user_key:
+            holder = _COMPUTER_BUSY.get(user_key)
+            if holder and holder != (agent_id or "shared"):
+                raise ToolError("The shared computer is already in use. One computer-use task at a time.")
+            if not holder:
+                _COMPUTER_BUSY[user_key] = agent_id or "shared"
+                acquired = True
+    try:
+        return await _invoke_daytona(row, name, args)
+    finally:
+        if acquired and user_key:
+            _COMPUTER_BUSY.pop(user_key, None)
+
+
+async def _invoke_daytona(row, name: str, args: dict[str, Any]) -> Any:
     if name == "write_analytics_report":
         from app.connectors.analytics_report import render_report
 
@@ -670,15 +717,17 @@ async def call_daytona(row, name: str, args: dict[str, Any]) -> Any:
         _client_obj, sandbox = await _existing_sandbox(row)
         if sandbox is None:
             if name == "status":
-                return {"state": "stopped", "screenAvailable": False, "url": "", "title": ""}
+                return {"state": "stopped", "screenAvailable": False, "url": "", "title": "", "screen_agent": _LIVE_AGENT}
             raise ToolError("No live computer screen yet. Wake the computer first.")
         try:
             if name == "status":
-                return await _computer_status(sandbox.process)
+                data = await _computer_status(sandbox.process)
+                data["screen_agent"] = _LIVE_AGENT
+                return data
             return await _pull_screen(sandbox.process, getattr(sandbox, "fs", None))
         except Exception as vis_exc:  # noqa: BLE001
             if name == "status":
-                return {"state": "suspended", "screenAvailable": False, "url": "", "title": ""}
+                return {"state": "suspended", "screenAvailable": False, "url": "", "title": "", "screen_agent": _LIVE_AGENT}
             raise ToolError("No live computer screen yet. Wake the computer first.") from vis_exc
         finally:
             close = getattr(_client_obj, "close", None)

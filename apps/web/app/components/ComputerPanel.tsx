@@ -180,6 +180,7 @@ export function ScreenRail({
   const [machine, setMachine] = useState<"stopped" | "booting" | "running" | "suspended">("stopped");
   const [pageUrl, setPageUrl] = useState(session?.url || "");
   const [pageTitle, setPageTitle] = useState(session?.title || "");
+  const [screenAgent, setScreenAgent] = useState("");
   const liveFrame = useLiveScreen(Boolean(watching || controlling || machine === "running"));
   const frame = liveFrame || still;
   const href = session?.url || pageUrl || "";
@@ -198,16 +199,25 @@ export function ScreenRail({
   }, [session?.url, session?.title]);
   useEffect(() => {
     const ac = new AbortController();
-    fetch("/api/connectors/computer/status", { credentials: "include", signal: ac.signal })
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (!data?.state) return;
-        setMachine(data.state);
-        if (data.url) setPageUrl(data.url);
-        if (data.title) setPageTitle(data.title);
-      })
-      .catch(() => undefined);
-    return () => ac.abort();
+    const apply = (data: any) => {
+      if (!data?.state) return;
+      setMachine(data.state);
+      if (data.url) setPageUrl(data.url);
+      if (data.title) setPageTitle(data.title);
+      if (typeof data.screen_agent === "string") setScreenAgent(data.screen_agent);
+    };
+    const tick = () => {
+      fetch("/api/connectors/computer/status", { credentials: "include", signal: ac.signal })
+        .then((res) => (res.ok ? res.json() : null))
+        .then(apply)
+        .catch(() => undefined);
+    };
+    tick();
+    const timer = window.setInterval(tick, 2500);
+    return () => {
+      ac.abort();
+      window.clearInterval(timer);
+    };
   }, []);
   let host = "";
   try {
@@ -269,9 +279,12 @@ export function ScreenRail({
   }
 
   return (
-    <aside className="screen-rail overlay" aria-label={`${agentName}'s screen`}>
+    <aside className="screen-rail overlay" aria-label={`${screenAgent || agentName}'s screen`}>
       <div className="screen-rail-head">
-        <span className={`screen-state${controlling ? " control" : watching ? " live" : asleep ? " asleep" : ""}`}>{label}</span>
+        <div className="screen-rail-copy">
+          <span className="screen-bot">{`${screenAgent || agentName}'s screen`}</span>
+          <span className={`screen-state${controlling ? " control" : watching ? " live" : asleep ? " asleep" : ""}`}>{label}</span>
+        </div>
         <div className="screen-rail-actions">
         {!controlling && !frame && machine !== "booting" ? (
           <button type="button" className="screen-control-btn primary" onClick={() => void wake()}>

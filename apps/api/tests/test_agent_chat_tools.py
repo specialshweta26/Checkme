@@ -10,7 +10,7 @@ from app.agent import deep
 from app.agent.confirm import read_confirm
 from app.agent.deep import RunContext, harness_tools, system_prompt
 from app.agents import chat_tools, service
-from app.agents.service import GROUP_MEMBER_MAX, AgentError
+from app.agents.service import GROUP_MEMBER_MAX, GROUP_MEMBER_MIN, AgentError
 
 
 class FakeWorkspace:
@@ -191,7 +191,7 @@ async def test_create_group_too_few(monkeypatch):
     FakeWorkspace(names=("Chief",)).install(monkeypatch)
     ctx = _ctx()
     data = await chat_tools.create_group(ctx, "Solo", None, all_agents=True)
-    assert "needs 2 to 10" in data["error"]
+    assert f"needs {GROUP_MEMBER_MIN} to {GROUP_MEMBER_MAX}" in data["error"]
     assert "Create another agent" in data["error"]
     assert ctx.workspace_changed is False
 
@@ -199,8 +199,8 @@ async def test_create_group_too_few(monkeypatch):
 async def test_create_group_too_many(monkeypatch):
     FakeWorkspace(names=["Chief"] + [f"A{i}" for i in range(GROUP_MEMBER_MAX)]).install(monkeypatch)
     data = await chat_tools.create_group(_ctx(), "Huge", None, all_agents=True)
-    assert "at most 10" in data["error"]
-    assert "11" in data["error"]
+    assert f"at most {GROUP_MEMBER_MAX}" in data["error"]
+    assert str(GROUP_MEMBER_MAX + 1) in data["error"]
 
 
 async def test_create_group_unknown_member(ws):
@@ -217,7 +217,7 @@ async def test_add_and_remove_members(ws):
     removed = await chat_tools.remove_group_members(ctx, made["group"]["id"], ["Ori"])
     assert sorted(m["name"] for m in removed["group"]["members"]) == ["Dev", "Test"]
     too_small = await chat_tools.remove_group_members(ctx, "Team", ["Dev"])
-    assert "needs 2 to 10" in too_small["error"]
+    assert f"needs {GROUP_MEMBER_MIN} to {GROUP_MEMBER_MAX}" in too_small["error"]
 
 
 async def test_rename_group(ws):
