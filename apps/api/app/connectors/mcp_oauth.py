@@ -57,7 +57,7 @@ async def register_client(registration_endpoint: str) -> dict:
     await validate_public_url(registration_endpoint)
     redirect = redirect_uri()
     body = {
-        "client_name": "Personal Assistant",
+        "client_name": "Lumio",
         "redirect_uris": [redirect],
         "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],

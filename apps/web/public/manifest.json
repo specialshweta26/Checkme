@@ -1,6 +1,6 @@
 {
-  "name": "Assistant",
-  "short_name": "Assistant",
+  "name": "Lumio",
+  "short_name": "Lumio",
   "start_url": "/chat",
   "display": "standalone",
   "background_color": "#0b0d12",

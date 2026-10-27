@@ -351,7 +351,7 @@ export function AppShell({
           <a className="side-brand" href={chatUrl()} onClick={(e) => { e.preventDefault(); visit(chatUrl()); }}>
             <BrandMark size={28} />
             <div>
-              <strong>Assistant</strong>
+              <strong>Lumio</strong>
               <small>Workspace</small>
             </div>
           </a>

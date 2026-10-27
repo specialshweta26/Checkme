@@ -15,7 +15,7 @@ export function Thinking({ steps = [], hint = "" }: { steps?: string[]; hint?: s
   const current = clean.length ? clean[clean.length - 1] : start;
   const trail = clean.slice(-4, -1);
   return (
-    <div className="turn assistant" aria-live="polite" aria-label={`Assistant is working: ${current}`}>
+    <div className="turn assistant" aria-live="polite" aria-label={`Lumio is working: ${current}`}>
       {trail.length ? (
         <ul className="think-trail">
           {trail.map((s, i) => (

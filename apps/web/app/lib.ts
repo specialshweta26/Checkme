@@ -288,11 +288,12 @@ let meInflight: Promise<Me | null> | null = null;
 
 export async function getMe(): Promise<Me | null> {
   if (!meInflight) {
-    meInflight = fetch("/api/me", { credentials: "include" })
+    meInflight = fetch("/api/me", { credentials: "include", signal: AbortSignal.timeout(8000) })
       .then((res) => {
         if (res.status === 401 || !res.ok) return null;
         return res.json();
       })
+      .catch(() => null)
       .finally(() => {
         meInflight = null;
       });

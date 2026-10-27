@@ -16,30 +16,35 @@ export default function Home() {
 
   return (
     <div className="auth">
-      <section className="auth-value" aria-label="Assistant Workspace">
-        <img
-          className="auth-hero"
-          src="/login/workspace-hero.jpg"
-          alt="Assistant Workspace: mail, calendar, connected systems, and custom MCP in one desk."
-        />
-      </section>
-      <section className="auth-action">
-        <div className="auth-action-inner">
-          <img
-            className="auth-hub"
-            src="/login/integration-hub.jpg"
-            alt="Assistant at the center of Gmail, Calendar, Outlook, and MCP."
-          />
-          <div className="brand">
-            <BrandMark size={28} />
-            <div className="brand-copy">
-              <strong>Assistant Workspace</strong>
-            </div>
+      <main className="auth-shell">
+        <section className="auth-visual" aria-label="Lumio">
+          <div className="auth-brand">
+            <span className="auth-mark">
+              <BrandMark size={22} />
+            </span>
+            lumio
           </div>
-          <h2>Welcome back</h2>
-          <p className="muted">Sign in to your account to continue</p>
-          {error ? <p className="err">{error}</p> : null}
-          <div className="auth-box">
+          <div className="auth-hero-copy">
+            <h1>Your personal assistant, ready when you are.</h1>
+            <p>Bring your day into focus. Lumio helps you think, plan, and get things done—one conversation at a time.</p>
+          </div>
+          <div className="auth-quote">
+            <div className="auth-quote-top">
+              <span className="auth-quote-avatar">✦</span>
+              <span>Lumio assistant</span>
+              <span className="auth-online" aria-hidden />
+            </div>
+            <p>“Good to see you. What would you like to work on today?”</p>
+          </div>
+          <p className="auth-foot">A little more clarity, every day.</p>
+          <div className="auth-orbit" aria-hidden />
+        </section>
+        <section className="auth-action">
+          <div className="auth-form">
+            <div className="auth-eyebrow">Welcome back</div>
+            <h2>Sign in to Lumio</h2>
+            <p className="auth-intro">Your personal assistant is just a sign-in away.</p>
+            {error ? <p className="err">{error}</p> : null}
             <div className="providers">
               <a className="provider" href="/api/auth/google/login">
                 <GoogleMark />
@@ -61,8 +66,8 @@ export default function Home() {
             </details>
             <p className="trust">By signing in, you agree this is a private workspace for your accounts.</p>
           </div>
-        </div>
-      </section>
+        </section>
+      </main>
     </div>
   );
 }
