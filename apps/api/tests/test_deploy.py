@@ -180,12 +180,14 @@ def test_urls_in_skips_api_hosts():
 
 
 RENDER_MCP = SimpleNamespace(slug="render", provider="mcp", name="Render", alias="", description="", server_url="https://mcp.render.com/mcp", tags=[])
-GITHUB_APP = SimpleNamespace(slug="github-app", provider="github_app", name="GitHub (render forks)", alias="", description="", server_url="", tags=[])
+GITHUB = SimpleNamespace(slug="composio-github", provider="composio_github", name="GitHub (render forks)", alias="", description="", server_url="", tags=[])
+LEGACY_GITHUB = SimpleNamespace(slug="github-app", provider="github_app", name="GitHub (render forks)", alias="", description="", server_url="", tags=[])
 
 
-def test_connector_for_prefers_mcp_and_skips_github_app():
+def test_connector_for_prefers_mcp_and_skips_github():
     assert deploy.connector_for({"render": RENDER_MCP}, deploy.PLATFORMS["render"]) is RENDER_MCP
-    assert deploy.connector_for({"g": GITHUB_APP}, deploy.PLATFORMS["render"]) is None
+    assert deploy.connector_for({"g": GITHUB}, deploy.PLATFORMS["render"]) is None
+    assert deploy.connector_for({"g": LEGACY_GITHUB}, deploy.PLATFORMS["render"]) is None
     assert deploy.connector_for({"render": RENDER_MCP}, deploy.PLATFORMS["vercel"]) is None
 
 

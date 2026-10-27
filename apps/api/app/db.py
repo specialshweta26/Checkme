@@ -93,7 +93,7 @@ async def _migrate_jobs(conn) -> None:
 
 
 async def _migrate_github(conn) -> None:
-    """GitHub App installations (create_all makes the table; these keep older databases in step)."""
+    """Legacy GitHub App installations table (unused since GitHub moved to Composio; kept, never dropped)."""
     await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS coder_seeded BOOLEAN DEFAULT false"))
     await conn.execute(
         text(

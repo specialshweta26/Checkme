@@ -342,7 +342,7 @@ def followup(job: AgentJob, text: str) -> list[JobEvent]:
 
 
 def resume_waiting_for(job: AgentJob, what: str, note: str) -> list[JobEvent]:
-    """Requeue a job that asked the user to connect something (e.g. the GitHub App) once it is connected."""
+    """Requeue a job that asked the user to connect something (e.g. GitHub through Composio) once it is connected."""
     q = (job.meta or {}).get("question") or {}
     if job.status != "waiting_input" or q.get("waiting_for") != what:
         return []

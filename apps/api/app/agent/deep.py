@@ -1146,7 +1146,7 @@ async def get_user_tool_schema(ctx: RunContext, connector_slug: str, tool_name: 
 
 
 def git_write_gate(conn, slug: str, tool: str, args: dict | None) -> bool:
-    from app.connectors.github_app import is_git_write
+    from app.connectors.github import is_git_write
 
     from app.agent.deploy import is_deploy_write
 
@@ -1157,23 +1157,23 @@ def git_write_gate(conn, slug: str, tool: str, args: dict | None) -> bool:
     return is_deploy_write(conn, slug, tool, args)
 
 
-_APPROVAL_KEYS = ("repo", "number", "head", "branch", "method", "base", "state", "delete_branch")
+_APPROVAL_KEYS = ("repo", "number", "head", "head_sha", "branch", "method", "base", "state", "delete_branch")
 
 
 def _approved(ctx: RunContext, conn, slug: str, tool: str, args: dict) -> bool:
-    """Was this exact action approved? GitHub App writes (merge, push, PR edits) must match repo, PR and options,
-    so approving one merge never lets a different PR through."""
+    """Was this exact action approved? GitHub writes (merge, push, PR edits) must match repo, PR, head sha and
+    options, so approving one merge never lets a different PR (or a moved branch) through."""
     if not confirmed(ctx.confirmations, slug, tool):
         return False
-    from app.connectors.github_app import WRITE_TOOLS
+    from app.connectors.github import PROVIDERS, WRITE_TOOLS
 
-    if str(getattr(conn, "provider", "") or "") != "github_app" or tool not in WRITE_TOOLS:
+    if str(getattr(conn, "provider", "") or "") not in PROVIDERS or tool not in WRITE_TOOLS:
         return True
 
     def key(a: dict) -> tuple:
         a = dict(a or {})
         if tool == "merge_pull_request":
-            from app.connectors.github_app import merge_method
+            from app.connectors.github import merge_method
 
             a["method"] = merge_method(a.get("method"))
         return tuple("" if a.get(k) in (None, False, "") else str(a.get(k)).lower() for k in _APPROVAL_KEYS)
@@ -1183,8 +1183,10 @@ def _approved(ctx: RunContext, conn, slug: str, tool: str, args: dict) -> bool:
 
 
 async def _track_github_writes(ctx: RunContext, conn, tool: str, args: dict, result: Any) -> None:
-    """PRs opened and merged through the GitHub App go on the job (Merge it? question, merge sha) and in coding memory."""
-    if str(getattr(conn, "provider", "") or "") != "github_app" or not isinstance(result, dict) or result.get("error"):
+    """PRs opened and merged through Composio GitHub go on the job (Merge it? question, merge sha) and in coding memory."""
+    from app.connectors.github import PROVIDERS
+
+    if str(getattr(conn, "provider", "") or "") not in PROVIDERS or not isinstance(result, dict) or result.get("error"):
         return
     if tool not in ("create_pull_request", "merge_pull_request"):
         return
@@ -1762,7 +1764,7 @@ class DeployReadInput(BaseModel):
 class AskUserInput(BaseModel):
     question: str = Field(description="One short question.")
     options: list[str] = Field(description="2-5 short answer options shown as buttons, e.g. repo names or Yes / No.")
-    waiting_for: str = Field(default="", description="Set to github_app (GitHub App install) or deploy_<platform> (e.g. deploy_render) when blocked on a connection, so the job resumes after the user connects.")
+    waiting_for: str = Field(default="", description="Set to github (GitHub not connected through Composio) or deploy_<platform> (e.g. deploy_render) when blocked on a connection, so the job resumes after the user connects.")
 
 
 class RememberCodingInput(BaseModel):
@@ -1801,9 +1803,9 @@ async def coding_workspace_status(ctx: RunContext) -> dict:
         else:
             probe = coding.parse_probe(str(inner.get("stdout") or inner.get("result") or ""))
     from app.agent import deploy
-    from app.agent.git_tools import github_app_status
+    from app.agent.git_tools import github_status
 
-    out = coding.readiness(ctx.connectors, probe, probe_error, await github_app_status(ctx))
+    out = coding.readiness(ctx.connectors, probe, probe_error, await github_status(ctx))
     return deploy.add_readiness(out, ctx.connectors, await deploy.saved_env_names(ctx))
 
 
@@ -2040,7 +2042,7 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
     if is_coding_agent(ctx.agent):
 
         async def coding_status() -> str:
-            """Check what you can do for coding work right now: computer (sandbox) and dev toolchain, git push credentials, the GitHub App, deploy connectors, and exactly what is missing. Call once per coding task, before building."""
+            """Check what you can do for coding work right now: computer (sandbox) and dev toolchain, git push credentials, the Composio GitHub connection, deploy connectors, and exactly what is missing. Call once per coding task, before building."""
             ctx.used_tools.append("coding_workspace_status")
             return dumps(await coding_workspace_status(ctx), 8000)
 
@@ -2053,7 +2055,7 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
         from app.agent import git_tools
 
         async def checkout(repo: str, branch: str = "", base: str = "") -> str:
-            """Clone (or update) a GitHub repo into ~/work/<name> on the computer and check out a branch. Private repos work through the Checkme GitHub App. Start every code change here with branch=agent/<short-name>."""
+            """Clone (or update) a GitHub repo into ~/work/<name> on the computer and check out a branch. Private repos work through the Composio GitHub connection (a real clone when its token is available, else a snapshot). Start every code change here with branch=agent/<short-name>."""
             ctx.used_tools.append("git_checkout")
             return dumps(await git_tools.git_checkout(ctx, repo, branch, base), 20000)
 
@@ -2092,7 +2094,7 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
             repo: str, action: str, ref: str = "", ref2: str = "", path: str = "", query: str = "",
             start: int = 0, end: int = 0, limit: int = 50, regex: bool = False,
         ) -> str:
-            """Read-only git and code exploration in the local clone: status, branches, log, show, diff (ref..ref2), blame, grep, tree, read (line ranges). Prefer the GitHub App read tools (get_tree, get_file, search_code, list_commits, compare_refs, blame_file) before cloning; use this once the repo is checked out."""
+            """Read-only git and code exploration in the local clone: status, branches, log, show, diff (ref..ref2), blame, grep, tree, read (line ranges). Prefer the composio-github read tools (get_tree, get_file, search_code, list_commits, compare_refs, blame_file) before cloning; use this once the repo is checked out."""
             ctx.used_tools.append("git_inspect")
             try:
                 _, name = coding_mod.split_repo(repo)
@@ -2135,13 +2137,13 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
         async def review(
             repo: str, number: int, verdict: str = "COMMENT", summary: str = "", findings: list | None = None, include_checks: bool = True
         ) -> str:
-            """Post a structured PR review through the Checkme GitHub App: summary, findings by severity (inline comments where the line is in the diff, the rest in the body), the latest checks, and a verdict (COMMENT, REQUEST_CHANGES or APPROVE). Read the PR first (get_pull_request / compare_refs) and run checks on its branch when you can."""
+            """Post a structured PR review through Composio GitHub: summary, findings by severity (inline comments where the line is in the diff, the rest in the body), the latest checks, and a verdict (COMMENT, REQUEST_CHANGES or APPROVE). Read the PR first (get_pull_request / compare_refs) and run checks on its branch when you can."""
             ctx.used_tools.append("review_pull_request")
             items = [f.model_dump() if hasattr(f, "model_dump") else dict(f) for f in (findings or [])]
             return dumps(await dev_tools.review_pull_request(ctx, repo, number, verdict, summary, items, include_checks), 4000)
 
         async def ask(question: str, options: list[str], waiting_for: str = "") -> str:
-            """Ask the user one short question with 2-5 option buttons, only when something is genuinely ambiguous (which repo or branch, a destructive step) or you are blocked (waiting_for='github_app'). Otherwise decide and proceed. End your turn after asking."""
+            """Ask the user one short question with 2-5 option buttons, only when something is genuinely ambiguous (which repo or branch, a destructive step) or you are blocked (waiting_for='github'). Otherwise decide and proceed. End your turn after asking."""
             ctx.used_tools.append("ask_user")
             opts = [str(o).strip() for o in options or [] if str(o).strip()][:5]
             if not question.strip() or len(opts) < 2:

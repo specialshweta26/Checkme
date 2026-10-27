@@ -184,7 +184,7 @@ class WorkspaceAgent(Base):
 
 
 class GitHubInstallation(Base):
-    """A Checkme GitHub App installation this user installed (or verified they can access)."""
+    """Legacy: a GitHub App installation from the removed GitHub App path. Kept as history; no longer read or written."""
 
     __tablename__ = "github_installations"
     __table_args__ = (UniqueConstraint("user_id", "installation_id"),)

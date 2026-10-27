@@ -369,6 +369,9 @@ def _initiation(item: dict) -> tuple[str, list[dict]]:
 
 
 async def ensure_auth_config(toolkit: str, scheme: str | None = None) -> str:
+    pinned = get_settings().composio_github_auth_config_id
+    if toolkit == "github" and pinned:
+        return pinned
     data = await composio_request("GET", f"/auth_configs?{urlencode({'toolkit_slug': toolkit, 'limit': 10})}")
     want = (scheme or "").upper()
     for item in _items(data):

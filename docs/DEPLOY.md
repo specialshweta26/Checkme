@@ -23,6 +23,10 @@ Code: `apps/api/app/agent/deploy.py` (tools and commands), `apps/api/app/connect
   The agent says exactly what is missing, then calls `ask_user(waiting_for='deploy_<platform>')`. When the user saves
   the credential, jobs waiting on `deploy_<platform>` are resumed (`resume_waiting_for`) and the worker is woken.
 - `deploy_status` and `deploy_logs` are read-only, so they have no card.
+- **Source code comes from GitHub through Composio** ([GITHUB.md](GITHUB.md)). The GitHub connection never deploys and
+  its credentials are not deploy credentials; deploys use a platform connector or the platform CLI as above. A Composio
+  GitHub connection is not needed for platforms that build from a connected repo (Render, Vercel), but the Coder needs
+  it to push the branch it deploys.
 
 ## Flow
 

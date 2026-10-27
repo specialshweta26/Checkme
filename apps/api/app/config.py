@@ -82,13 +82,9 @@ class Settings(BaseSettings):
     daytona_target: str = "us"
     composio_api_key: str = ""
 
-    # GitHub App (docs/GITHUB_APP.md). Installation tokens are minted per call, scoped to one repo.
-    github_app_id: str = ""
-    github_app_private_key: str = ""
-    github_app_slug: str = ""
-    github_app_client_id: str = ""
-    github_app_client_secret: str = ""
-    github_app_webhook_secret: str = ""
+    # Optional: pin the Composio GitHub auth config used for Connect GitHub (docs/GITHUB.md). Leave empty to use the
+    # first enabled GitHub auth config (Composio creates a managed one if none exists).
+    composio_github_auth_config_id: str = ""
 
     # Routing knobs, tuned by the routing eval.
     route_margin: float = 0.08
