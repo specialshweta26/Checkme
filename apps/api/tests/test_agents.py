@@ -59,8 +59,10 @@ def test_serialize_agent_and_group():
     assert row["pinned"] is False
     assert row["archived"] is False
     assert row["unread"] is False
-    group = serialize_group(SimpleNamespace(id="g1", name="Ops"), [agent])
+    group = serialize_group(SimpleNamespace(id="g1", name="Ops", outcome="Close the brief", owner_id="a1"), [agent])
     assert group["name"] == "Ops"
+    assert group["outcome"] == "Close the brief"
+    assert group["owner_id"] == "a1"
     assert group["members"][0]["id"] == "a1"
     assert pick_color(0).startswith("#")
 
@@ -82,6 +84,8 @@ def test_system_prompt_uses_agent_and_group():
     assert "prefer tables" in lowered
     assert "insights" in lowered
     assert "ask_teammate" in lowered
+    assert "one owner per stage" in lowered
+    assert "separate per bot" in lowered
     assert "researcher" in lowered
     assert "one8" not in lowered
     assert "lotto" not in lowered

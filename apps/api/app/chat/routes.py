@@ -129,6 +129,7 @@ async def chat(
     except agents_service.AgentError as exc:
         raise HTTPException(400, str(exc)) from exc
 
+    mentions: dict = {}
     want_agent = None if group is not None else workspace_agent.id
     want_group = group.id if group is not None else None
     sess = None
@@ -183,6 +184,14 @@ async def chat(
     working = dict(sess.state or {})
     if confirms:
         working["confirm_tools"] = confirms
+    if group is not None and teammates:
+        from app.agents.collab import parse_mentions, pick_owner
+
+        mentions = parse_mentions(text, teammates)
+        owner = pick_owner(teammates, group, working, mentions)
+        if owner is not None:
+            workspace_agent = owner
+            working["owner_id"] = str(owner.id)
 
     # #region agent log
     from app.debug_ndjson import dbg
@@ -202,6 +211,7 @@ async def chat(
             workspace_agent=workspace_agent,
             group=group,
             teammates=teammates,
+            mentions=mentions,
         )
         # #region agent log
         dbg(
@@ -303,7 +313,9 @@ async def _resolve_roster(db, user, agent_id, group_id):
     chief = await agents_service.ensure_default_agent(db, user)
     if group_id:
         group, teammates = await agents_service.get_group(db, user, group_id)
-        lead = teammates[0] if teammates else chief
+        from app.agents.collab import pick_owner
+
+        lead = pick_owner(teammates, group) or (teammates[0] if teammates else chief)
         return lead, group, teammates
     if agent_id:
         return await agents_service.get_agent(db, user, agent_id), None, []

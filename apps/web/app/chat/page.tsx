@@ -264,7 +264,14 @@ export default function ChatPage() {
   const activeGroup = roster.groups.find((g) => g.id === groupId) || null;
   const screenName = activeGroup?.name || activeAgent?.name || "Chief";
   const screenColor = activeGroup?.members[0]?.color || activeAgent?.color || "#f97316";
-  const screenMeta = activeGroup ? activeGroup.members.map((m) => m.name).join(" · ") : activeAgent?.title || "";
+  const ownerName = activeGroup?.owner_id
+    ? activeGroup.members.find((m) => m.id === activeGroup.owner_id)?.name
+    : activeGroup?.members[0]?.name;
+  const screenMeta = activeGroup
+    ? [activeGroup.outcome, activeGroup.members.map((m) => m.name).join(" · "), ownerName ? `Owner: ${ownerName}` : ""]
+        .filter(Boolean)
+        .join(" · ")
+    : activeAgent?.title || "";
   const scopedSessions = sessions.filter((s) => sessionInScopeRow(s, agentId, groupId));
   const computer = [...messages].reverse().map((m) => computerFromMeta(m.meta)).find(Boolean) || null;
 
@@ -437,7 +444,11 @@ export default function ChatPage() {
             {messages.length === 0 && !busyHere ? (
               <div className="welcome">
                 <h1>{hello}</h1>
-                <p>Here&apos;s what&apos;s happening today — brief the inbox, ask a connected system, or schedule a send.</p>
+                <p>
+                  {activeGroup
+                    ? "Write normally and the bots decide who responds. @ one bot to hand a request, or @everyone for updates. They hand work to each other in this thread."
+                    : "Here's what's happening today — brief the inbox, ask a connected system, or schedule a send."}
+                </p>
                 <div className="hero-cards">
                   <button className="hero-card" onClick={() => send("What matters today? Give me my chief of staff briefing.")}>
                     <span className="mark" />
@@ -538,6 +549,18 @@ export default function ChatPage() {
         ) : null}
         <div className="composer-wrap">
           {uploadError ? <p className="err">{uploadError}</p> : null}
+          {activeGroup ? (
+            <div className="composer-hint">
+              <button type="button" onClick={() => setText((v) => (v ? `${v} @everyone` : "@everyone "))}>
+                @everyone
+              </button>
+              {activeGroup.members.map((m) => (
+                <button key={m.id} type="button" onClick={() => setText((v) => (v ? `${v} @${m.name}` : `@${m.name} `))}>
+                  @{m.name}
+                </button>
+              ))}
+            </div>
+          ) : null}
           {uploads.length ? (
             <div className="attach-chips composer-chips">
               {uploads.map((file) => (
@@ -578,7 +601,11 @@ export default function ChatPage() {
               ref={box}
               value={text}
               onChange={(e) => setText(e.target.value)}
-              placeholder="Ask about sales, mail, or schedule work…"
+              placeholder={
+                activeGroup
+                  ? "Write normally, @ a bot, or @everyone…"
+                  : "Ask about sales, mail, or schedule work…"
+              }
               rows={1}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {

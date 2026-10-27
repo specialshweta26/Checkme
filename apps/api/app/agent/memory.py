@@ -75,7 +75,7 @@ async def seed_letta(user_id: uuid.UUID) -> None:
             await db.commit()
 
 
-async def load_memory(db: AsyncSession, user: User, query: str) -> str:
+async def load_memory(db: AsyncSession, user: User, query: str, agent_id: uuid.UUID | None = None) -> str:
     s = get_settings()
     if s.letta_base_url and user.letta_agent_id and not _letta_down():
         try:
@@ -111,34 +111,34 @@ async def load_memory(db: AsyncSession, user: User, query: str) -> str:
                     """
                     SELECT text FROM memory_passages
                     WHERE user_id = :uid AND embedding IS NOT NULL
+                      AND ((agent_id IS NULL AND CAST(:aid AS uuid) IS NULL)
+                           OR agent_id = CAST(:aid AS uuid))
                     ORDER BY embedding <=> CAST(:vec AS vector)
                     LIMIT 4
                     """
                 ),
-                {"uid": user.id, "vec": vec_lit},
+                {"uid": user.id, "vec": vec_lit, "aid": str(agent_id) if agent_id else None},
             )
         ).all()
         parts.extend(f"memory: {r[0]}" for r in rows)
     except Exception:  # noqa: BLE001
-        recent = (
-            await db.execute(
-                select(MemoryPassage)
-                .where(MemoryPassage.user_id == user.id)
-                .order_by(MemoryPassage.id.desc())
-                .limit(3)
-            )
-        ).scalars().all()
+        q = select(MemoryPassage).where(MemoryPassage.user_id == user.id)
+        if agent_id:
+            q = q.where(MemoryPassage.agent_id == agent_id)
+        else:
+            q = q.where(MemoryPassage.agent_id.is_(None))
+        recent = (await db.execute(q.order_by(MemoryPassage.id.desc()).limit(3))).scalars().all()
         parts.extend(f"{p.kind}: {p.text}" for p in recent)
     return "\n".join(parts)[:1800]
 
 
-async def remember(db: AsyncSession, user_id: uuid.UUID, kind: str, text: str) -> None:
+async def remember(db: AsyncSession, user_id: uuid.UUID, kind: str, text: str, agent_id: uuid.UUID | None = None) -> None:
     vec = None
     try:
         vec = await embed_one(text)
     except Exception:  # noqa: BLE001
         pass
-    db.add(MemoryPassage(user_id=user_id, kind=kind, text=text[:800], embedding=vec))
+    db.add(MemoryPassage(user_id=user_id, agent_id=agent_id, kind=kind, text=text[:800], embedding=vec))
     await db.commit()
 
 

@@ -1172,6 +1172,10 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
         args = _complete_thread_args(ctx, args)
     try:
         t_invoke = __import__("time").time()
+        if connector_slug == "computer":
+            from app.connectors.daytona_box import set_computer_agent
+
+            set_computer_agent(str(getattr(ctx.agent, "id", "") or ""), getattr(ctx.agent, "name", "") or "")
         if ctx.call_impl is not None:
             result = await ctx.call_impl(connector_slug, tool_name, args)
         else:
@@ -1367,6 +1371,15 @@ class AskTeammateInput(BaseModel):
     prompt: str = Field(description="Focused task for that teammate. Include only what they need.")
 
 
+class SaveSkillInput(BaseModel):
+    name: str = Field(description="Short name for this workflow.")
+    instruction: str = Field(default="", description="What to do when this skill runs.")
+
+
+class StopTeachingInput(BaseModel):
+    name: str = Field(default="", description="Name for the taught skill.")
+
+
 def harness_tools(ctx: RunContext) -> list[StructuredTool]:
     async def list_connectors() -> str:
         """List this user's enabled connectors. Start here when you are unsure which source to use. Other users have different connectors."""
@@ -1403,8 +1416,38 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
         return dumps(await run_staff(ctx, name, args))
 
     async def ask_teammate(agent_id: str, prompt: str) -> str:
-        """Ask another agent in this group to do a slice of the work. They reply in the shared thread. Do not ask yourself."""
+        """Direct handoff: message a teammate in this thread and share context. Their memory stays separate. Do not ask yourself."""
         return dumps(await _ask_teammate(ctx, agent_id, prompt), 12000)
+
+    async def save_skill(name: str, instruction: str = "") -> str:
+        """Save a workflow this bot should reuse later."""
+        from app.skills.service import save_skill as _save
+
+        if ctx.db is None:
+            return dumps({"error": "Cannot save a skill without a workspace."})
+        row = await _save(
+            ctx.db,
+            ctx.user,
+            name=name,
+            agent_id=getattr(ctx.agent, "id", None),
+            instruction=instruction,
+            kind="saved",
+        )
+        return dumps({"ok": True, "id": str(row.id), "name": row.name})
+
+    async def start_teaching() -> str:
+        """Watch the computer screen while the user demonstrates a workflow. Max ten minutes. Does not record microphone audio."""
+        from app.skills.service import start_teaching as _start
+
+        return dumps(_start(ctx.user, getattr(ctx.agent, "id", None)))
+
+    async def stop_teaching(name: str = "") -> str:
+        """Stop watching the screen and save the taught skill. No audio was recorded."""
+        from app.skills.service import stop_teaching as _stop
+
+        if ctx.db is None:
+            return dumps({"error": "Cannot save a taught skill without a workspace."})
+        return dumps(await _stop(ctx.db, ctx.user, name))
 
     tools = [
         StructuredTool.from_function(coroutine=list_connectors, name="list_connectors", description=list_connectors.__doc__),
@@ -1454,10 +1497,39 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
                 args_schema=AskTeammateInput,
             )
         )
+    tools.extend(
+        [
+            StructuredTool.from_function(
+                coroutine=save_skill,
+                name="save_skill",
+                description=save_skill.__doc__,
+                args_schema=SaveSkillInput,
+            ),
+            StructuredTool.from_function(
+                coroutine=start_teaching,
+                name="start_teaching",
+                description=start_teaching.__doc__,
+            ),
+            StructuredTool.from_function(
+                coroutine=stop_teaching,
+                name="stop_teaching",
+                description=stop_teaching.__doc__,
+                args_schema=StopTeachingInput,
+            ),
+        ]
+    )
     return tools
 
 
-def system_prompt(user, connectors: list, memory: str, agent=None, group=None, teammates: list | None = None) -> str:
+def system_prompt(
+    user,
+    connectors: list,
+    memory: str,
+    agent=None,
+    group=None,
+    teammates: list | None = None,
+    mentions: dict | None = None,
+) -> str:
     tz = getattr(user, "timezone", None) or "Asia/Kolkata"
     now = _now(tz)
     catalog = catalog_lines(connectors)
@@ -1470,12 +1542,9 @@ def system_prompt(user, connectors: list, memory: str, agent=None, group=None, t
     group_bit = ""
     peers = [p for p in (teammates or []) if str(getattr(p, "id", "")) != str(getattr(agent, "id", ""))]
     if group is not None and peers:
-        roster = ", ".join(f"{getattr(p, 'name', 'agent')} (id={p.id})" for p in peers)
-        group_bit = (
-            f"You are working in the group '{getattr(group, 'name', 'group')}' with teammates: {roster}. "
-            "Split independent work with ask_teammate(agent_id, prompt). They reply in this thread. "
-            "Do not ask yourself. Combine their replies into the user's answer.\n"
-        )
+        from app.agents.collab import routing_prompt
+
+        group_bit = routing_prompt(group, agent, teammates or [], mentions)
     return (
         identity
         + group_bit
@@ -1510,7 +1579,8 @@ def system_prompt(user, connectors: list, memory: str, agent=None, group=None, t
         "Do not search_tools for Instagram/Twitter/Facebook unless list_connections already shows that app.\n"
         "3) A named website or URL, or a page you must click or fill: the computer browser. "
         "Use a connected data tool first only when list_connections shows that app is authorized.\n"
-        "This user's computer is one live machine: shell/files and a persistent Chromium tab the right-hand computer screen shows. "
+        "This user's computer is one shared live machine: shell/files, browser sessions, and logins. "
+        "Each bot has its own screen on that machine. Only one computer-use task may run at a time. "
         "Live news or 'what is going on' questions: browser_navigate a Google search URL with the user's words "
         "(https://www.google.com/search?q=...) then open at least two result links. Search the acronym; do not ask what it means first. "
         "If navigate returns chrome-error, chromewebdata, or connection reset, web_fetch the same URL (or another source) and keep going. "
@@ -1521,6 +1591,8 @@ def system_prompt(user, connectors: list, memory: str, agent=None, group=None, t
         "If a page tool returns fallback computer_act, call computer_observe then computer_act (click x,y / type / key / scroll). "
         "Login, 2FA, captcha, payment, or anything you cannot complete: browser_handoff with a short instruction so the user takes control of that same screen. After they finish, snapshot and continue. "
         "Never attach page.png in chat; the computer screen already shows the tab. "
+        "Skills: save a repeatable workflow with save_skill, or start_teaching so the user demonstrates on the visible screen "
+        "(up to ten minutes, no microphone audio), then stop_teaching with a name.\n"
         "Do not replay a completed or uncertain action. That is the computer browser, not Outlook or mail.\n"
         "search_tools already expands gateway catalogs into callable data tools. Prefer those names. "
         "Do not call gateway catalog tools from core_tools unless search_tools returned no data tool.\n"
@@ -1751,6 +1823,7 @@ async def run_deep_agent(
     group=None,
     teammates: list | None = None,
     teammate_depth: int = 0,
+    mentions: dict | None = None,
 ) -> dict[str, Any]:
     from app.connectors.platform import ensure_platform_connectors
     from app.debug_ndjson import dbg as _dbg_start
@@ -1782,7 +1855,7 @@ async def run_deep_agent(
         session_id=session_id,
         request_id=request_id,
     )
-    memory = await load_memory(db, user, query)
+    memory = await load_memory(db, user, query, getattr(workspace_agent, "id", None))
     extra = []
     from langchain_core.messages import HumanMessage
 
@@ -1798,7 +1871,9 @@ async def run_deep_agent(
         )
     graph = build_agent(
         ctx,
-        system_prompt(user, conns, memory, agent=workspace_agent, group=group, teammates=teammates),
+        system_prompt(
+            user, conns, memory, agent=workspace_agent, group=group, teammates=teammates, mentions=mentions
+        ),
     )
     payload = {"messages": _lc_messages(history, query, extra)}
     limit = max(80, get_settings().max_agent_steps * 8)
@@ -1848,7 +1923,7 @@ async def run_deep_agent(
     if cards and not had_card:
         names = ", ".join(str(c.get("name") or c.get("toolkit") or "this app") for c in cards)
         text = f"Connect {names} using the card below. That opens Composio's authorization page."
-    await remember(db, user.id, "episodic", clip(f"Q: {query}\nA: {text}", 400))
+    await remember(db, user.id, "episodic", clip(f"Q: {query}\nA: {text}", 400), getattr(workspace_agent, "id", None))
     speaker = None
     if workspace_agent is not None:
         speaker = {

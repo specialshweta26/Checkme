@@ -416,7 +416,7 @@ def test_system_prompt_has_no_product_recipes():
     assert "browse_open" in lowered or "browser_navigate" in lowered
     assert "browser_snapshot" in lowered
     assert "computer_act" in lowered
-    assert "live computer" in lowered or "persistent chromium" in lowered
+    assert "live computer" in lowered or "persistent chromium" in lowered or "shared live machine" in lowered
     assert "do not open the browser" in lowered
     assert "not in list_connections" in lowered
     assert "google flights" in lowered or "public lookup" in lowered
@@ -440,6 +440,12 @@ def test_system_prompt_has_no_product_recipes():
     assert "download_url" in lowered
     assert "data analyst" in lowered
     assert "write_analytics_report" in lowered
+    assert "save_skill" in lowered
+    assert "start_teaching" in lowered
+    assert "ten minutes" in lowered
+    assert "microphone" in lowered
+    assert "one computer-use task" in lowered
+    assert "own screen" in lowered
     assert "line for a time series" in lowered
     assert "keep answers short" not in lowered
     assert "schedule_task and do not fetch now" in lowered

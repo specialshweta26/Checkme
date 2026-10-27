@@ -12,10 +12,15 @@ import {
   deleteAgent,
   deleteGroup,
   duplicateAgent,
+  listSkills,
   loadWorkspace,
   moveAgentToGroup,
   nextAssignedAgents,
+  saveSkill,
+  startTeaching,
+  stopTeaching,
   updateAgent,
+  type AgentSkill,
   type ChatSessionRow,
   type WorkspaceAgent,
   type WorkspaceRoster,
@@ -50,6 +55,12 @@ export function AgentsNav({
   const [title, setTitle] = useState("");
   const [instructions, setInstructions] = useState("");
   const [picked, setPicked] = useState<string[]>([]);
+  const [outcome, setOutcome] = useState("");
+  const [ownerId, setOwnerId] = useState("");
+  const [skills, setSkills] = useState<AgentSkill[]>([]);
+  const [skillName, setSkillName] = useState("");
+  const [skillHint, setSkillHint] = useState("");
+  const [teaching, setTeaching] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [ctx, setCtx] = useState<Ctx | null>(null);
   const [moveOpen, setMoveOpen] = useState(false);
@@ -111,6 +122,12 @@ export function AgentsNav({
     setTitle("");
     setInstructions("");
     setPicked([]);
+    setOutcome("");
+    setOwnerId("");
+    setSkills([]);
+    setSkillName("");
+    setSkillHint("");
+    setTeaching(false);
     setEditingId(null);
     setError("");
     setMenu(false);
@@ -124,6 +141,9 @@ export function AgentsNav({
     setInstructions(agent.instructions || "");
     setForm("edit");
     setCtx(null);
+    listSkills(agent.id)
+      .then((data) => setSkills(data.skills || []))
+      .catch(() => setSkills([]));
   }
 
   function openConnectors(agent: WorkspaceAgent) {
@@ -172,7 +192,7 @@ export function AgentsNav({
     setSaving(true);
     setError("");
     try {
-      const row = await createGroup({ name, member_ids: picked });
+      const row = await createGroup({ name, member_ids: picked, outcome, owner_id: ownerId || picked[0] || null });
       resetForm();
       await refresh();
       onSelectGroup?.(row.id);
@@ -221,7 +241,7 @@ export function AgentsNav({
               <button type="button" onClick={() => { setMenu(false); setForm("agent"); }}>
                 New agent
               </button>
-              <button type="button" onClick={() => { setMenu(false); setForm("group"); setPicked(agents.slice(0, 2).map((a) => a.id)); }}>
+              <button type="button" onClick={() => { setMenu(false); setForm("group"); setPicked(liveAgents.slice(0, 2).map((a) => a.id)); setOwnerId(liveAgents[0]?.id || ""); }}>
                 New group
               </button>
             </div>
@@ -265,7 +285,7 @@ export function AgentsNav({
               <GroupStack members={group.members} />
               <span className="agent-copy">
                 <strong>{group.name}</strong>
-                <small>{busyScopes.includes(`g.${group.id}`) ? "Working…" : previewFor(threads, null, group.id) || group.preview || group.members.map((m) => m.name).join(", ") || "Group"}</small>
+                <small>{busyScopes.includes(`g.${group.id}`) ? "Working…" : previewFor(threads, null, group.id) || group.outcome || group.preview || group.members.map((m) => m.name).join(", ") || "Group"}</small>
               </span>
             </a>
           </div>
@@ -437,21 +457,57 @@ export function AgentsNav({
                   <input value={name} onChange={(e) => setName(e.target.value)} required maxLength={80} placeholder={form === "group" ? "Ops team" : "Researcher"} />
                 </label>
                 {form === "group" ? (
-                  <fieldset>
-                    <legend>Members (2–10)</legend>
-                    {agents.map((agent) => (
-                      <label key={agent.id} className="agent-check">
-                        <input
-                          type="checkbox"
-                          checked={picked.includes(agent.id)}
-                          onChange={() =>
-                            setPicked((ids) => (ids.includes(agent.id) ? ids.filter((id) => id !== agent.id) : [...ids, agent.id]))
-                          }
-                        />
-                        {agent.name}
-                      </label>
-                    ))}
-                  </fieldset>
+                  <>
+                    <label>
+                      Outcome
+                      <textarea
+                        value={outcome}
+                        onChange={(e) => setOutcome(e.target.value)}
+                        rows={3}
+                        maxLength={400}
+                        placeholder="What should this group finish, and who owns the next step?"
+                      />
+                    </label>
+                    <fieldset>
+                      <legend>Bots (2–6)</legend>
+                      {liveAgents.length ? liveAgents.map((agent) => {
+                        const on = picked.includes(agent.id);
+                        return (
+                          <label key={agent.id} className="agent-check">
+                            <input
+                              type="checkbox"
+                              checked={on}
+                              disabled={!on && picked.length >= 6}
+                              onChange={() => {
+                                const next = picked.includes(agent.id)
+                                  ? picked.filter((id) => id !== agent.id)
+                                  : [...picked, agent.id];
+                                setPicked(next);
+                                if (ownerId && !next.includes(ownerId)) setOwnerId(next[0] || "");
+                              }}
+                            />
+                            {agent.name}
+                          </label>
+                        );
+                      }) : (
+                        <p className="muted">Create at least two agents first.</p>
+                      )}
+                    </fieldset>
+                    <label>
+                      Kickoff owner
+                      <select value={ownerId || picked[0] || ""} onChange={(e) => setOwnerId(e.target.value)}>
+                        {picked.map((id) => {
+                          const agent = agents.find((a) => a.id === id);
+                          return (
+                            <option key={id} value={id}>
+                              {agent?.name || id}
+                            </option>
+                          );
+                        })}
+                      </select>
+                    </label>
+                    <p className="muted">One owner per stage. Write normally, @ a bot to hand a request, or @everyone for updates.</p>
+                  </>
                 ) : (
                   <>
                     <label>
@@ -462,6 +518,20 @@ export function AgentsNav({
                       Instructions
                       <textarea value={instructions} onChange={(e) => setInstructions(e.target.value)} rows={5} placeholder="How this agent should work…" />
                     </label>
+                    {form === "edit" && editingId ? (
+                      <SkillEditor
+                        agentId={editingId}
+                        skills={skills}
+                        skillName={skillName}
+                        skillHint={skillHint}
+                        teaching={teaching}
+                        onSkillName={setSkillName}
+                        onSkillHint={setSkillHint}
+                        onSkills={setSkills}
+                        onTeaching={setTeaching}
+                        onError={setError}
+                      />
+                    ) : null}
                   </>
                 )}
               </>
@@ -471,7 +541,11 @@ export function AgentsNav({
                 {form === "connectors" ? "Done" : "Cancel"}
               </button>
               {form !== "connectors" ? (
-                <button className="btn" type="submit" disabled={saving}>
+                <button
+                  className="btn"
+                  type="submit"
+                  disabled={saving || (form === "group" && (picked.length < 2 || picked.length > 6))}
+                >
                   {saving ? "Saving…" : form === "edit" ? "Save" : "Create"}
                 </button>
               ) : null}
@@ -529,6 +603,116 @@ function AgentRow({
         {agent.unread ? <span className="agent-unread" aria-label="Unread" /> : null}
       </a>
     </div>
+  );
+}
+
+function SkillEditor({
+  agentId,
+  skills,
+  skillName,
+  skillHint,
+  teaching,
+  onSkillName,
+  onSkillHint,
+  onSkills,
+  onTeaching,
+  onError,
+}: {
+  agentId: string;
+  skills: AgentSkill[];
+  skillName: string;
+  skillHint: string;
+  teaching: boolean;
+  onSkillName: (v: string) => void;
+  onSkillHint: (v: string) => void;
+  onSkills: (rows: AgentSkill[]) => void;
+  onTeaching: (v: boolean) => void;
+  onError: (v: string) => void;
+}) {
+  async function refresh() {
+    const data = await listSkills(agentId);
+    onSkills(data.skills || []);
+  }
+  return (
+    <fieldset>
+      <legend>Skills</legend>
+      <p className="muted">Save a workflow, or teach one by demonstration while the bot watches the screen. Teaching records up to ten minutes of visible screen activity and no microphone audio.</p>
+      {skills.length ? (
+        <ul className="skill-list">
+          {skills.map((skill) => (
+            <li key={skill.id}>
+              <strong>{skill.name}</strong>
+              <span className="muted"> {skill.kind === "taught" ? "taught" : "saved"}</span>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="muted">No skills yet.</p>
+      )}
+      <label>
+        Skill name
+        <input value={skillName} onChange={(e) => onSkillName(e.target.value)} maxLength={160} placeholder="Weekly KPI pull" />
+      </label>
+      <label>
+        How to run it
+        <textarea value={skillHint} onChange={(e) => onSkillHint(e.target.value)} rows={3} placeholder="Steps this bot should repeat…" />
+      </label>
+      <div className="agent-form-actions">
+        <button
+          className="btn secondary"
+          type="button"
+          onClick={async () => {
+            onError("");
+            try {
+              await saveSkill({ name: skillName, agent_id: agentId, instruction: skillHint });
+              onSkillName("");
+              onSkillHint("");
+              await refresh();
+            } catch (err: any) {
+              onError(err.message || "Could not save skill");
+            }
+          }}
+        >
+          Save workflow
+        </button>
+        {teaching ? (
+          <button
+            className="btn"
+            type="button"
+            onClick={async () => {
+              onError("");
+              try {
+                await stopTeaching(skillName);
+                onTeaching(false);
+                onSkillName("");
+                await refresh();
+              } catch (err: any) {
+                onError(err.message || "Could not stop teaching");
+              }
+            }}
+          >
+            Stop teaching
+          </button>
+        ) : (
+          <button
+            className="btn secondary"
+            type="button"
+            onClick={async () => {
+              onError("");
+              try {
+                await startTeaching(agentId);
+                onTeaching(true);
+              } catch (err: any) {
+                onError(err.message || "Could not start teaching");
+              }
+            }}
+          >
+            Teach from screen
+          </button>
+        )}
+      </div>
+      {teaching ? <p className="muted">Watching the computer screen (max 10 minutes). Microphone is off.</p> : null}
+    </fieldset>
   );
 }
 

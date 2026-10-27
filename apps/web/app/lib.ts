@@ -34,10 +34,22 @@ export type WorkspaceAgent = {
 export type AgentGroup = {
   id: string;
   name: string;
+  outcome?: string;
+  owner_id?: string | null;
   members: WorkspaceAgent[];
   session_id?: string;
   preview?: string;
   updated_at?: string;
+};
+
+export type AgentSkill = {
+  id: string;
+  agent_id?: string | null;
+  name: string;
+  kind: string;
+  instruction?: string;
+  steps?: unknown[];
+  duration_ms?: number;
 };
 
 export type WorkspaceRoster = {
@@ -134,7 +146,7 @@ export function nextAssignedAgents(assigned: string[] | undefined, agentId: stri
   return checked ? current.filter((id) => id !== agentId) : [...current.filter((id) => id !== agentId), agentId];
 }
 
-export async function createGroup(body: { name: string; member_ids: string[] }) {
+export async function createGroup(body: { name: string; member_ids: string[]; outcome?: string; owner_id?: string | null }) {
   const res = await fetch("/api/agents/groups", {
     method: "POST",
     credentials: "include",
@@ -144,6 +156,25 @@ export async function createGroup(body: { name: string; member_ids: string[] }) 
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : "Could not create group");
   return data as AgentGroup;
+}
+
+export async function listSkills(agentId?: string) {
+  const q = agentId ? `?agent_id=${encodeURIComponent(agentId)}` : "";
+  const res = await fetch(`/api/skills${q}`, { credentials: "include" });
+  if (!res.ok) return { skills: [] as AgentSkill[] };
+  return res.json() as Promise<{ skills: AgentSkill[] }>;
+}
+
+export async function saveSkill(body: { name: string; agent_id?: string; instruction?: string }) {
+  return agentAction("/api/skills", "POST", body) as Promise<AgentSkill>;
+}
+
+export async function startTeaching(agentId?: string) {
+  return agentAction("/api/skills/teach/start", "POST", { agent_id: agentId });
+}
+
+export async function stopTeaching(name?: string) {
+  return agentAction("/api/skills/teach/stop", "POST", { name: name || "" }) as Promise<AgentSkill>;
 }
 
 export async function deleteGroup(id: string) {

@@ -6,6 +6,7 @@ from sqlalchemy import delete as sql_delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.collab import GROUP_MEMBER_MAX, GROUP_MEMBER_MIN
 from app.models import (
     AgentConnector,
     AgentGroup,
@@ -21,10 +22,9 @@ DEFAULT_AGENT_NAME = "Chief"
 DEFAULT_AGENT_TITLE = "chief of staff"
 DEFAULT_AGENT_COLOR = "#f97316"
 AGENT_COLORS = ("#f97316", "#2f6bff", "#10b981", "#8b5cf6", "#ec4899", "#eab308")
-GROUP_MEMBER_MIN = 2
-GROUP_MEMBER_MAX = 10
 NAME_MAX = 80
 INSTRUCTIONS_MAX = 8000
+OUTCOME_MAX = 400
 
 
 class AgentError(ValueError):
@@ -50,9 +50,12 @@ def serialize_agent(row: WorkspaceAgent) -> dict:
 
 
 def serialize_group(row: AgentGroup, members: list[WorkspaceAgent]) -> dict:
+    owner_id = str(row.owner_id) if getattr(row, "owner_id", None) else None
     return {
         "id": str(row.id),
         "name": row.name,
+        "outcome": getattr(row, "outcome", "") or "",
+        "owner_id": owner_id,
         "members": [serialize_agent(m) for m in members],
     }
 
@@ -112,6 +115,26 @@ def _clean_instructions(text: str) -> str:
     if len(value) > INSTRUCTIONS_MAX:
         raise AgentError(f"Instructions must be {INSTRUCTIONS_MAX} characters or fewer.")
     return value
+
+
+def _clean_outcome(text: str) -> str:
+    value = " ".join((text or "").split())
+    if len(value) > OUTCOME_MAX:
+        raise AgentError(f"Outcome must be {OUTCOME_MAX} characters or fewer.")
+    return value
+
+
+def _owner_from_body(body: dict, members: list[WorkspaceAgent]) -> uuid.UUID | None:
+    raw = body.get("owner_id")
+    if not raw:
+        return members[0].id if members else None
+    try:
+        uid = uuid.UUID(str(raw))
+    except (TypeError, ValueError) as exc:
+        raise AgentError("Kickoff owner must be a group member.") from exc
+    if not any(m.id == uid for m in members):
+        raise AgentError("Kickoff owner must be a group member.")
+    return uid
 
 
 async def ensure_default_agent(db: AsyncSession, user: User) -> WorkspaceAgent:
@@ -326,7 +349,12 @@ async def create_group(db: AsyncSession, user: User, body: dict) -> tuple[AgentG
         if agent is None or agent.user_id != user.id:
             raise AgentError("Every member must be one of your agents.")
         agents.append(agent)
-    row = AgentGroup(user_id=user.id, name=name)
+    row = AgentGroup(
+        user_id=user.id,
+        name=name,
+        outcome=_clean_outcome(body.get("outcome") or ""),
+        owner_id=_owner_from_body(body, agents),
+    )
     db.add(row)
     await db.flush()
     for agent in agents:
@@ -340,6 +368,8 @@ async def update_group(db: AsyncSession, user: User, group_id: uuid.UUID, body: 
     row, _ = await get_group(db, user, group_id)
     if "name" in body and body["name"] is not None:
         row.name = _clean_name(body["name"])
+    if "outcome" in body and body["outcome"] is not None:
+        row.outcome = _clean_outcome(body["outcome"])
     members = None
     if "member_ids" in body and body["member_ids"] is not None:
         ids = validate_group_members(body["member_ids"])
@@ -357,6 +387,9 @@ async def update_group(db: AsyncSession, user: User, group_id: uuid.UUID, body: 
         await db.flush()
         for agent in members:
             db.add(AgentGroupMember(group_id=row.id, agent_id=agent.id))
+    if "owner_id" in body:
+        current = members if members is not None else (await get_group(db, user, row.id))[1]
+        row.owner_id = _owner_from_body(body, current)
     await db.commit()
     return await get_group(db, user, row.id)
 
