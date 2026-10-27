@@ -249,7 +249,7 @@ def connector_for(connectors: dict[str, Any], p: Platform) -> Any | None:
     """A connected MCP / Composio connector for this platform (preferred over the CLI)."""
     words = (p.key, *p.hints)
     for c in (connectors or {}).values():
-        if getattr(c, "slug", "") in (coding.COMPUTER_SLUG, coding.CODING_SLUG) or getattr(c, "provider", "") in ("daytona", "github_app"):
+        if getattr(c, "slug", "") in (coding.COMPUTER_SLUG, coding.CODING_SLUG) or getattr(c, "provider", "") in ("daytona", "composio_github", "github_app"):
             continue
         text = _conn_text(c)
         if any(re.search(rf"(?<![a-z]){re.escape(w)}(?![a-z])", text) for w in words):

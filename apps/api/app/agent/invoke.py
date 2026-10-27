@@ -23,8 +23,8 @@ def confirmed(confirmations: list[dict], slug: str, tool: str) -> bool:
 
 
 async def preview(user, conn, tool: str, args: dict) -> dict:
-    if getattr(conn, "provider", "") == "github_app":
-        from app.connectors.github_app import preview_live as github_preview
+    if getattr(conn, "provider", "") in ("composio_github", "github_app"):
+        from app.connectors.github import preview_live as github_preview
 
         return await github_preview(conn, tool, args)
     if tool in {"bulk_delete", "empty_folder"}:

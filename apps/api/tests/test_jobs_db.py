@@ -177,7 +177,7 @@ async def test_planner_coder_reviewer_then_user_approves_merge(factory):
         await db.commit()
     from app.agent.confirm import sign_confirm
 
-    merge_token = sign_confirm("tool", {"slug": "github-app", "tool": "merge_pull_request", "args": {"repo": "a/b", "number": 7}}, ttl=3600)
+    merge_token = sign_confirm("tool", {"slug": "composio-github", "tool": "merge_pull_request", "args": {"repo": "a/b", "number": 7, "head_sha": "a" * 40}}, ttl=3600)
     log = []
 
     async def agent_impl(db, user_, session_id, request_id, history, query, confirmations, **kw):

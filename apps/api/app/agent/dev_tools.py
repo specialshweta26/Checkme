@@ -9,7 +9,7 @@ There is no GUI IDE on the computer. Instead the Coder gets the pieces an IDE gi
   * find_symbol / find_references / read_file_range: ctags + ripgrep navigation.
   * run_checks: runs the detected checks in order and keeps the results for the PR body.
   * review_pull_request: reads the PR diff and posts a structured review with inline
-    comments through the Checkme GitHub App.
+    comments through Composio GitHub.
 Everything runs through git_tools.sandbox_exec, so tokens never reach the model.
 """
 
@@ -42,19 +42,6 @@ _SYMBOL = re.compile(r"^[A-Za-z_$][\w$.:]{0,120}$")
 
 # ---------------------------------------------------------------------------
 # Toolchain bootstrap
-
-
-def identity_for(installs: list | None) -> tuple[str, str]:
-    """The user's GitHub name + noreply email when the App is installed on their personal account."""
-    for i in installs or []:
-        if getattr(i, "suspended", False):
-            continue
-        if (getattr(i, "account_type", "") or "").lower() == "user" and getattr(i, "account_login", ""):
-            login = i.account_login
-            aid = getattr(i, "account_id", None)
-            email = f"{aid}+{login}@users.noreply.github.com" if aid else f"{login}@users.noreply.github.com"
-            return login, email
-    return coding.AUTHOR_NAME, coding.AUTHOR_EMAIL
 
 
 def toolchain_script(extras: list[str] | None = None, name: str = "", email: str = "", force: bool = False) -> str:
@@ -343,8 +330,7 @@ def _repo_name(repo: str) -> tuple[str, str]:
 async def ensure_dev_toolchain(ctx, extras: list[str] | None = None, force: bool = False) -> dict:
     from app.agent import git_tools
 
-    installs = await git_tools.installs_for(ctx)
-    name, email = identity_for(installs)
+    name, email = git_tools.identity(await git_tools.github_status(ctx))
     res = await _exec(ctx, toolchain_script(extras, name, email, force), 900)
     if res.get("error"):
         return res
@@ -507,19 +493,16 @@ async def review_pull_request(
 ) -> dict:
     """Post a structured review: summary, findings by severity (inline where the line is in the diff), verdict."""
     from app.agent import git_tools
-    from app.connectors import github_app as gh
 
     verdict = (verdict or "COMMENT").upper().replace("-", "_").replace(" ", "_")
     verdict = {"REQUEST_CHANGE": "REQUEST_CHANGES", "CHANGES": "REQUEST_CHANGES", "APPROVED": "APPROVE"}.get(verdict, verdict)
     if verdict not in ("COMMENT", "REQUEST_CHANGES", "APPROVE"):
         return {"error": "verdict must be COMMENT, REQUEST_CHANGES or APPROVE"}
-    installs = await git_tools.installs_for(ctx)
-    row = type("Row", (), {"user_id": ctx.user.id})()
     try:
-        pr = await gh.call_github_app(row, "get_pull_request", {"repo": repo, "number": int(number)}, installs=installs)
+        pr = await git_tools.gh_call(ctx, "get_pull_request", {"repo": repo, "number": int(number)})
     except Exception as exc:  # noqa: BLE001
-        status = await git_tools.github_app_status(ctx)
-        hint = f" Install the Checkme GitHub App: {status['install_url']}" if status.get("install_url") else ""
+        status = await git_tools.github_status(ctx)
+        hint = "" if status.get("connected") else " " + (status.get("connect_hint") or "")
         return {"error": coding.scrub(str(exc))[:400] + hint}
     findings = [f for f in (findings or []) if isinstance(f, dict)]
     inline, loose = split_comments(findings, pr.get("files") or [])
@@ -532,8 +515,8 @@ async def review_pull_request(
         body = review_body(summary, [], verdict, checks)
         body = body.replace("## Review summary", "## Review summary", 1) + f"\n\n_{len(inline)} inline comment(s)._"
     try:
-        res = await gh.call_github_app(
-            row, "create_review", {"repo": repo, "number": int(number), "event": verdict, "body": body, "comments": inline}, installs=installs
+        res = await git_tools.gh_call(
+            ctx, "create_review", {"repo": repo, "number": int(number), "event": verdict, "body": body, "comments": inline}
         )
     except Exception as exc:  # noqa: BLE001
         return {"error": coding.scrub(str(exc))[:400]}

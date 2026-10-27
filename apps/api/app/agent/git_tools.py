@@ -1,16 +1,25 @@
 """Safe git tools for coding agents: checkout, test, diff, commit and push_branch.
 
-All of them run through Daytona exec on the user's one sandbox. When the Checkme
-GitHub App is installed for the repo owner, each command gets a fresh installation
-token (scoped to that repo) in the CHECKME_GIT_TOKEN env var only. Otherwise they
-fall back to credentials already on the sandbox (gh auth / git credential helper),
-or anonymous https for public repos, and point at the install link or the other
-GitHub connectors for pushing.
+All of them run through Daytona exec on the user's one sandbox. GitHub access comes
+from the user's Composio GitHub connection:
+
+* If Composio exposes the connection's OAuth token unmasked (customer-owned auth
+  config, secret masking off), each git command gets it in the CHECKME_GIT_TOKEN env
+  var only and runs a real clone / fetch / push.
+* Otherwise public repos clone anonymously, private repos are unpacked from a tarball
+  fetched through the Composio proxy (a snapshot without history), and push_branch
+  sends the branch's committed changes through the GitHub git data API via the proxy
+  (blobs, tree, one commit, non-force ref update) to the same agent/* branch.
+
+Without a Composio connection they fall back to credentials already on the sandbox
+(gh auth / git credential helper) or anonymous https for public repos.
 """
 
 from __future__ import annotations
 
+import json
 import logging
+from types import SimpleNamespace
 from typing import Any
 
 from app.agent import coding
@@ -23,56 +32,67 @@ def _err(exc: Exception) -> dict:
     return {"error": coding.scrub(str(exc))[:600]}
 
 
-async def installs_for(ctx) -> list:
-    from app.connectors import github_app as gh
+def _row(ctx):
+    return SimpleNamespace(user_id=ctx.user.id)
 
-    cached = getattr(ctx, "_github_installs", None)
-    if cached is not None:
+
+async def github_status(ctx, *, fresh: bool = False) -> dict:
+    """Composio GitHub connection for this user: connected, login, identity, git transport. Never a token."""
+    from app.connectors import github as gh
+
+    cached = getattr(ctx, "_github_status", None)
+    if cached is not None and not fresh:
         return cached
-    if not gh.is_configured():
-        out: list = []
-    else:
+    out: dict[str, Any] = {"configured": gh.is_configured(), "connected": False, "login": "", "git_transport": ""}
+    if out["configured"]:
         try:
-            out = await gh.load_installations(ctx.user.id)
+            await gh.account_for(ctx.user.id)
+            out["connected"] = True
+            try:
+                me = await gh.viewer(ctx.user.id)
+                out.update(login=me.get("login") or "", name=me.get("name") or "", email=me.get("email") or "")
+            except Exception as exc:  # noqa: BLE001
+                log.warning("github viewer lookup failed: %s", coding.scrub(str(exc)))
+            out["git_transport"] = "git" if await gh.git_token(ctx.user.id) else "api"
+        except gh.NotConnected:
+            pass
         except Exception as exc:  # noqa: BLE001
-            log.warning("github installations lookup failed: %s", exc)
-            out = []
+            log.warning("composio github lookup failed: %s", coding.scrub(str(exc)))
+            out["error"] = coding.scrub(str(exc))[:200]
+    if not out["connected"]:
+        out["connect_hint"] = gh.CONNECT_HINT
     try:
-        ctx._github_installs = out
+        ctx._github_status = out
     except AttributeError:
         pass
     return out
 
 
-async def github_app_status(ctx) -> dict:
-    from app.connectors import github_app as gh
+async def git_token(ctx) -> str | None:
+    """The connection's raw token for one git command, or None (masked by Composio / not connected)."""
+    from app.connectors import github as gh
 
-    if not gh.is_configured():
-        return {"configured": False, "installed": False, "accounts": [], "install_url": ""}
-    installs = await installs_for(ctx)
-    live = [i for i in installs if not i.suspended]
-    return {
-        "configured": True,
-        "installed": bool(live),
-        "accounts": [i.account_login for i in live],
-        "install_url": gh.checkme_install_link(),
-    }
-
-
-async def app_token(ctx, repo: str, *, write: bool) -> str | None:
-    """Repo-scoped installation token, or None when the App does not cover this repo."""
-    from app.connectors import github_app as gh
-
-    if not gh.is_configured():
+    if not (await github_status(ctx)).get("connected"):
         return None
-    installs = await installs_for(ctx)
-    owner, _ = coding.split_repo(repo)
-    if not any(i.account_login.lower() == owner.lower() and not i.suspended for i in installs):
-        return None
-    return await gh.repo_token(ctx.user.id, repo, write=write, installs=installs)
+    return await gh.git_token(ctx.user.id) or None
 
 
-async def sandbox_exec(ctx, script: str, timeout: int = 300, token: str | None = None, env: dict | None = None) -> dict:
+async def gh_call(ctx, tool: str, args: dict) -> Any:
+    from app.connectors import github as gh
+
+    return await gh.call_github(_row(ctx), tool, args)
+
+
+def identity(status: dict) -> tuple[str, str]:
+    """Commit author: the connected GitHub user's name and noreply email, else the Checkme Coder identity."""
+    if status.get("login") and status.get("email"):
+        return status.get("name") or status["login"], status["email"]
+    return coding.AUTHOR_NAME, coding.AUTHOR_EMAIL
+
+
+async def sandbox_exec(
+    ctx, script: str, timeout: int = 300, token: str | None = None, env: dict | None = None, secret_env: dict | None = None
+) -> dict:
     """Run a bash script on the computer without going through call_user_tool's arg logging.
 
     ``token`` / ``env`` values only travel as exec env and are scrubbed from the output."""
@@ -88,6 +108,9 @@ async def sandbox_exec(ctx, script: str, timeout: int = 300, token: str | None =
 
         args["env"] = {str(k): str(v) for k, v in env.items()}
         hidden += secrets_of(env)
+    if secret_env:
+        args["env"] = {**(args.get("env") or {}), **{str(k): str(v) for k, v in secret_env.items()}}
+        hidden += [str(v) for v in secret_env.values()]
     if token:
         args["env"] = {**(args.get("env") or {}), coding.TOKEN_ENV: token}
     try:
@@ -108,30 +131,76 @@ def _kv(output: str) -> dict:
     return coding.parse_probe(output)
 
 
+async def sandbox_read_bytes(ctx, path: str) -> bytes:
+    import base64
+
+    from app.connectors.runtime import RuntimeConnector
+
+    conn = ctx.connectors.get(coding.COMPUTER_SLUG)
+    if conn is None:
+        raise coding.GitToolError(coding.readiness(ctx.connectors)["missing"][0])
+    args = {"path": path}
+    if getattr(ctx, "call_impl", None) is not None:
+        raw = await ctx.call_impl(coding.COMPUTER_SLUG, "read_bytes", args)
+    else:
+        raw = await RuntimeConnector(conn).call("read_bytes", args)
+    if not isinstance(raw, dict) or raw.get("error") or "base64" not in raw:
+        raise coding.GitToolError(f"Could not read {path} from the computer.")
+    return base64.b64decode(raw["base64"])
+
+
 async def git_checkout(ctx, repo: str, branch: str = "", base: str = "") -> dict:
     try:
         owner, name = coding.split_repo(repo)
         branch = coding.check_ref(branch)
         base = coding.check_ref(base, "base branch")
-        token = await app_token(ctx, f"{owner}/{name}", write=False)
+        token = await git_token(ctx)
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
+    full = f"{owner}/{name}"
     res = await sandbox_exec(ctx, coding.checkout_script(owner, name, branch, base, authed=bool(token)), 600, token)
     if res.get("error"):
         return res
-    info = _kv(res["output"])
+    auth = "composio_token" if token else "public_or_sandbox_credentials"
+    snapshot_dir = "snapshot_dir=1" in str(res.get("output") or "")
+    if res.get("exit_code") not in (0, None) and (not token or snapshot_dir):
+        status = await github_status(ctx)
+        if status.get("connected"):
+            snap = await _snapshot_checkout(ctx, full, name, branch, base)
+            if snap is not None:
+                res, auth = snap, "composio_snapshot"
+        elif status.get("connect_hint"):
+            res["hint"] = "Private repo? " + status["connect_hint"]
+    info = _kv(res.get("output") or "")
     res.update(
-        repo=f"{owner}/{name}",
+        repo=full,
         repo_dir=info.get("repo_dir", f"~/work/{name}"),
         branch=info.get("branch", branch),
         base=info.get("base", base),
-        auth="github_app" if token else "sandbox_or_public",
+        auth=auth,
     )
-    if res.get("exit_code") not in (0, None) and not token:
-        status = await github_app_status(ctx)
-        if status.get("install_url"):
-            res["hint"] = f"Private repo? Install the Checkme GitHub App on {owner}: {status['install_url']}"
+    if auth == "composio_snapshot" and res.get("exit_code") in (0, None):
+        res["note"] = (
+            "Private repo unpacked from a GitHub snapshot (no git history; git log shows snapshot commits). Edit, test "
+            "and git_commit as usual; push_branch sends the committed changes through the GitHub API."
+        )
     return res
+
+
+async def _snapshot_checkout(ctx, full: str, name: str, branch: str, base: str) -> dict | None:
+    """Unpack the repo from a tarball fetched through the Composio proxy. The URL travels as a hidden env var."""
+    from app.connectors import github as gh
+
+    try:
+        src = await gh.snapshot_source(ctx.user.id, full, branch, base)
+    except Exception as exc:  # noqa: BLE001
+        return {"exit_code": 1, "output": "", "error": f"Could not fetch {full} through Composio GitHub: {coding.scrub(str(exc))[:300]}"}
+    return await sandbox_exec(
+        ctx,
+        coding.snapshot_script(name, src["ref"], src["sha"], src["base"], branch),
+        600,
+        secret_env={coding.ARCHIVE_ENV: src["url"]},
+    )
 
 
 async def _record(ctx, kind: str, text: str, data: dict | None = None) -> None:
@@ -182,9 +251,7 @@ async def git_commit(ctx, repo: str, message: str, paths: list[str] | None = Non
     if not (message or "").strip():
         return {"error": "A commit message is required."}
     paths = [p for p in (paths or []) if isinstance(p, str) and p.strip() and not p.startswith("-")]
-    from app.agent.dev_tools import identity_for
-
-    author = identity_for(await installs_for(ctx))
+    author = identity(await github_status(ctx))
     res = await sandbox_exec(ctx, coding.commit_script(name, message.strip(), paths or None, author), 120)
     if not res.get("error"):
         res["committed"] = res.get("exit_code") == 0
@@ -207,11 +274,8 @@ def _push_args(repo, branch, open_pr, title, body, base, draft, pr_number: int =
 
 
 async def pr_head(ctx, repo: str, number: int) -> dict:
-    """The open PR's head branch, verified through the GitHub App (same repo, still open)."""
-    from app.connectors import github_app as gh
-
-    row = type("Row", (), {"user_id": ctx.user.id})()
-    pr = await gh.call_github_app(row, "get_pull_request", {"repo": repo, "number": int(number)}, installs=await installs_for(ctx))
+    """The open PR's head branch, verified through Composio GitHub (same repo, still open)."""
+    pr = await gh_call(ctx, "get_pull_request", {"repo": repo, "number": int(number)})
     if pr.get("state") != "open":
         raise coding.GitToolError(f"{repo}#{number} is not open, so I will not push to it.")
     if str(pr.get("head_repo") or "").lower() != repo.lower():
@@ -224,34 +288,30 @@ def _patch_slug(branch: str) -> str:
 
 
 async def blocked_push(ctx, owner: str, name: str, branch: str, base: str) -> dict | None:
-    """No GitHub App for this owner and no git credentials on the computer: save the work as a patch and say what is missing."""
-    try:
-        if await app_token(ctx, f"{owner}/{name}", write=False):
-            return None
-    except Exception:  # noqa: BLE001
-        pass
+    """No Composio GitHub connection and no git credentials on the computer: save the work as a patch and say what
+    is missing."""
+    status = await github_status(ctx)
+    if status.get("connected"):
+        return None
     probe = await sandbox_exec(ctx, coding.creds_script(), 30)
     if "creds=ok" in str(probe.get("output") or ""):
         return None
     slug = _patch_slug(branch)
     saved = await sandbox_exec(ctx, coding.save_patch_script(name, branch, base, slug), 60)
-    status = await github_app_status(ctx)
     patch_dir = f"~/work/_patches/{name}-{slug}"
-    missing = (
-        f"GitHub access to {owner}/{name}: the Checkme GitHub App is not installed on {owner}, and the computer has no git credentials."
-    )
+    missing = f"GitHub access to {owner}/{name}: GitHub is not connected through Composio, and the computer has no git credentials."
     out = {
         "status": "blocked",
         "missing": missing,
+        "connect": status.get("connect_hint") or "",
         "saved": "commits saved as patches in " + patch_dir if saved.get("exit_code") == 0 else "could not save a patch",
         "patch_dir": patch_dir,
         "branch": branch,
-        "next": "Tell the user exactly what is missing and give the install link. Call ask_user with "
-        "waiting_for='github_app' so the job resumes after they connect; then call push_branch again (the commits are still on the branch).",
+        "next": "Tell the user exactly what is missing: connect GitHub in Checkme → Connectors → GitHub (Composio). Call "
+        "ask_user with waiting_for='github' so the job resumes after they connect; then call push_branch again (the "
+        "commits are still on the branch).",
     }
-    if status.get("install_url"):
-        out["install_url"] = status["install_url"]
-    await _record(ctx, "status", f"Blocked: {missing}", {"install_url": status.get("install_url"), "patch_dir": patch_dir})
+    await _record(ctx, "status", f"Blocked: {missing}", {"patch_dir": patch_dir})
     return out
 
 
@@ -278,7 +338,7 @@ async def push_branch(
     """Always needs the user's approval (also in scheduled runs and background jobs).
 
     Pushes go to agent/* branches. With pr_number, the branch may instead be the head branch of
-    that open PR in the same repo (the user named it), verified through the GitHub App."""
+    that open PR in the same repo (the user named it), verified through Composio GitHub."""
     from app.agent import dev_tools
     from app.agent.confirm import sign_confirm
 
@@ -329,7 +389,7 @@ async def push_branch(
 
 async def run_push(ctx, args: dict) -> dict:
     """Runs only after the user approved this exact repo + branch."""
-    from app.connectors import github_app as gh
+    from app.connectors import github as gh
 
     try:
         owner, name = coding.split_repo(args.get("repo") or "")
@@ -337,26 +397,32 @@ async def run_push(ctx, args: dict) -> dict:
         if args.get("pr_number"):
             pr_branch = (await pr_head(ctx, f"{owner}/{name}", int(args["pr_number"])))["branch"]
         branch = coding.check_push_branch(args.get("branch") or "", pr_branch)
-        token = await app_token(ctx, f"{owner}/{name}", write=True)
+        status = await github_status(ctx)
+        token = await git_token(ctx)
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
     full = f"{owner}/{name}"
-    script = coding.push_script(name, branch) if token else coding.push_script(name, branch).replace(coding.GIT_AUTH + " ", "")
-    res = await sandbox_exec(ctx, script, 300, token)
-    if res.get("error"):
-        return res
-    out: dict[str, Any] = {"repo": full, "branch": branch, "pushed": res.get("exit_code") == 0, "output": res["output"]}
+    if token:
+        res = await sandbox_exec(ctx, coding.push_script(name, branch), 300, token)
+        via = "git"
+    elif status.get("connected"):
+        res = await api_push(ctx, full, name, branch, args.get("base") or "")
+        via = "github_api"
+    else:
+        res = await sandbox_exec(ctx, coding.push_script(name, branch).replace(coding.GIT_AUTH + " ", ""), 300)
+        via = "sandbox_credentials"
+    if res.get("error") and "pushed" not in res:
+        return {**res, "repo": full, "branch": branch, "pushed": False, "via": via}
+    pushed = bool(res.get("pushed")) if "pushed" in res else res.get("exit_code") == 0
+    out: dict[str, Any] = {"repo": full, "branch": branch, "pushed": pushed, "via": via, "output": res.get("output") or ""}
+    for k in ("commit", "files", "error"):
+        if res.get(k):
+            out[k] = res[k]
     if out["pushed"]:
-        await _record(ctx, "step", f"Pushed {branch} to {full}", {"repo": full, "branch": branch})
+        await _record(ctx, "step", f"Pushed {branch} to {full}", {"repo": full, "branch": branch, "via": via})
     if not out["pushed"]:
-        status = await github_app_status(ctx)
-        if not token:
-            out["hint"] = (
-                f"No push access from the computer. Install the Checkme GitHub App on {owner}: {status['install_url']}"
-                if status.get("install_url")
-                else "No push access from the computer. Use the connected GitHub tools (search_tools 'push files', "
-                "'create pull request') or connect GitHub with connect_app github."
-            )
+        if not status.get("connected"):
+            out["hint"] = "No push access from the computer. " + (status.get("connect_hint") or gh.CONNECT_HINT)
         return out
     if args.get("pr_number"):
         out["pr_number"] = int(args["pr_number"])
@@ -365,14 +431,12 @@ async def run_push(ctx, args: dict) -> dict:
         await _note_pr(ctx, full, branch, out, args)
         return out
     title = args.get("title") or branch.removeprefix("agent/").replace("-", " ")
-    if token:
-        row = type("Row", (), {"user_id": ctx.user.id})()
+    if status.get("connected"):
         try:
-            pr = await gh.call_github_app(
-                row,
+            pr = await gh_call(
+                ctx,
                 "create_pull_request",
                 {"repo": full, "head": branch, "base": args.get("base") or "", "title": title, "body": args.get("body") or "", "draft": args.get("draft")},
-                installs=await installs_for(ctx),
             )
             out["pull_request"] = pr
             out["pr_url"] = pr.get("url")
@@ -382,6 +446,8 @@ async def run_push(ctx, args: dict) -> dict:
                 out["pull_request_note"] = "A pull request for this branch already exists; the push updated it."
             else:
                 out["pull_request_error"] = coding.scrub(str(exc))
+        except Exception as exc:  # noqa: BLE001
+            out["pull_request_error"] = coding.scrub(str(exc))[:400]
         await _note_pr(ctx, full, branch, out, args)
         return out
     q = coding._shlex.quote
@@ -401,6 +467,47 @@ async def run_push(ctx, args: dict) -> dict:
         out["pull_request_note"] = "Pushed. Open the PR with the connected GitHub tools (create pull request)."
     await _note_pr(ctx, full, branch, out, args)
     return out
+
+
+async def api_push(ctx, full: str, name: str, branch: str, base: str) -> dict:
+    """Push without a git token: the sandbox bundles the branch's committed changes since its GitHub base, and the
+    server commits them through the Composio proxy (git data API, never forced). Only after approval."""
+    from app.connectors import github as gh
+
+    res = await sandbox_exec(ctx, coding.push_bundle_script(name, branch, base), 300)
+    if res.get("error"):
+        return {"pushed": False, "error": res["error"]}
+    info = _kv(res.get("output") or "")
+    if res.get("exit_code") not in (0, None) or not info.get("bundle"):
+        return {"pushed": False, "error": "Could not prepare the push: " + str(res.get("output") or "")[-400:]}
+    if info.get("files") == "0":
+        return {"pushed": False, "error": f"Nothing to push: {branch} has no committed changes since its base."}
+    path = info["bundle"]
+    if not coding.BUNDLE_RE.match(path):
+        return {"pushed": False, "error": "Unexpected bundle path from the computer."}
+    try:
+        bundle = json.loads(await sandbox_read_bytes(ctx, path))
+        owner, rname = coding.split_repo(full)
+        parent = str(bundle.get("parent") or "")
+        if not gh.SHA_RE.match(parent):
+            raise coding.GitToolError("The branch base is unknown; run git_checkout again.")
+        result = await gh.commit_files(
+            f"/repos/{owner}/{rname}",
+            await gh.account_for(ctx.user.id),
+            branch=branch,
+            files=bundle.get("files") or [],
+            message=str(bundle.get("message") or f"Update {branch}")[:20000],
+            parent_sha=parent,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {"pushed": False, "error": coding.scrub(str(exc))[:600]}
+    await sandbox_exec(ctx, coding.mark_pushed_script(name, branch, str(bundle.get("head") or ""), result["commit"]), 60)
+    return {
+        "pushed": True,
+        "commit": result["commit"],
+        "files": result.get("files"),
+        "output": f"Pushed {result.get('files')} file change(s) to {branch} as {result['commit'][:12]} through the GitHub API.",
+    }
 
 
 async def _note_pr(ctx, repo: str, branch: str, out: dict, args: dict) -> None:
