@@ -69,10 +69,17 @@ export function announceWorkspaceChanged() {
   if (typeof window !== "undefined") window.dispatchEvent(new Event(WORKSPACE_CHANGED_EVENT));
 }
 
+let workspaceInflight: Promise<WorkspaceRoster> | null = null;
+
 export async function loadWorkspace(): Promise<WorkspaceRoster> {
-  const res = await fetch("/api/agents", { credentials: "include" });
-  if (!res.ok) return { agents: [], groups: [] };
-  return res.json();
+  if (!workspaceInflight) {
+    workspaceInflight = fetch("/api/agents", { credentials: "include" })
+      .then((res) => (res.ok ? res.json() : { agents: [], groups: [] }))
+      .finally(() => {
+        workspaceInflight = null;
+      });
+  }
+  return workspaceInflight;
 }
 
 export function apiError(data: unknown, fallback: string) {
@@ -267,11 +274,20 @@ export function rememberedScope() {
   };
 }
 
+let meInflight: Promise<Me | null> | null = null;
+
 export async function getMe(): Promise<Me | null> {
-  const res = await fetch("/api/me", { credentials: "include" });
-  if (res.status === 401) return null;
-  if (!res.ok) return null;
-  return res.json();
+  if (!meInflight) {
+    meInflight = fetch("/api/me", { credentials: "include" })
+      .then((res) => {
+        if (res.status === 401 || !res.ok) return null;
+        return res.json();
+      })
+      .finally(() => {
+        meInflight = null;
+      });
+  }
+  return meInflight;
 }
 
 export async function listSessions(): Promise<ChatSessionRow[]> {

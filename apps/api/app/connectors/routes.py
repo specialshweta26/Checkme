@@ -116,7 +116,7 @@ class ConnectAppBody(BaseModel):
 
 @router.post("/marketplace/connect")
 async def marketplace_connect(body: ConnectAppBody, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
-    from app.connectors.composio_box import list_toolkits, start_connect
+    from app.connectors.composio_box import start_connect
 
     if not get_settings().composio_api_key:
         raise HTTPException(400, "COMPOSIO_API_KEY is not configured")
@@ -133,14 +133,6 @@ async def marketplace_connect(body: ConnectAppBody, user: User = Depends(current
         pass
     elif not data.get("redirect_url"):
         raise HTTPException(400, "Composio did not return a sign-in URL. This app may need an API key instead of OAuth.")
-    meta: dict = {}
-    try:
-        apps = await list_toolkits(toolkit, 8)
-        meta = next((row for row in apps if str(row.get("slug") or "").lower() == toolkit), {}) or {}
-        if not meta and apps:
-            meta = apps[0]
-    except Exception:  # noqa: BLE001
-        meta = {}
     if body.agent_id:
         from app.agents import service as agents_service
 
@@ -151,9 +143,9 @@ async def marketplace_connect(body: ConnectAppBody, user: User = Depends(current
     return {
         **data,
         "toolkit": toolkit,
-        "name": meta.get("name") or toolkit,
-        "logo": meta.get("logo"),
-        "description": (meta.get("description") or "")[:240],
+        "name": data.get("name") or toolkit,
+        "logo": data.get("logo"),
+        "description": (data.get("description") or "")[:240],
     }
 
 

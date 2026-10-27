@@ -913,6 +913,8 @@ input.tasks-search { width: min(260px, 100%); }
   min-width: 0;
   min-height: 96px;
   box-sizing: border-box;
+  content-visibility: auto;
+  contain-intrinsic-size: 96px 104px;
   color: var(--text);
   transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
 }
@@ -2116,6 +2118,7 @@ input.tasks-search { width: min(260px, 100%); }
     aspect-ratio: auto;
     border-radius: 16px;
     overflow: hidden;
+    contain-intrinsic-size: 64px 64px;
   }
   .conn-icon img, .conn-icon-mark, .conn-icon svg {
     width: 40px;
