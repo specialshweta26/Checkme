@@ -1,10 +1,12 @@
 "use client";
 
 import { DeployPlatforms } from "../components/DeployPlatforms";
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import { AppShell } from "../components/AppShell";
 import {
   assignConnectorAgents,
+  assignToolkitAgents,
+  connectMarketplace,
   errorFromQuery,
   getMe,
   loadWorkspace,
@@ -53,8 +55,18 @@ type MarketApp = {
   description?: string;
   logo?: string;
   connected?: boolean;
+  connection_id?: string | null;
   tools_count?: number;
+  auth_kind?: string;
+  auth_schemes?: string[];
 };
+
+type RailItem =
+  | { key: string; kind: "connector"; title: string; logo?: string; connected: boolean; connector: Connector }
+  | { key: string; kind: "app"; title: string; logo?: string; connected: boolean; app: MarketApp }
+  | { key: string; kind: "github"; title: string; connected: boolean }
+  | { key: string; kind: "deploy"; title: string; connected: boolean }
+  | { key: string; kind: "mcp"; title: string; connected: boolean };
 
 export default function ConnectorsPage() {
   const [me, setMe] = useState<Me | null>(null);
@@ -70,14 +82,16 @@ export default function ConnectorsPage() {
   const [saving, setSaving] = useState<string>("");
   const [editing, setEditing] = useState<string>("");
   const [apps, setApps] = useState<MarketApp[]>([]);
-  const [marketReady, setMarketReady] = useState(false);
+  const [marketReady, setMarketReady] = useState<boolean | null>(null);
   const [marketQuery, setMarketQuery] = useState("");
   const [connecting, setConnecting] = useState("");
   const [notice, setNotice] = useState("");
   const [agents, setAgents] = useState<WorkspaceAgent[]>([]);
   const [assignments, setAssignments] = useState<Record<string, string[]>>({});
+  const [toolkitAssignments, setToolkitAssignments] = useState<Record<string, string[]>>({});
   const [assigning, setAssigning] = useState("");
   const [github, setGithub] = useState<GithubStatus | null>(null);
+  const [selected, setSelected] = useState("");
 
   async function loadGithub() {
     const res = await fetch("/api/connectors/github/status", { credentials: "include" });
@@ -101,6 +115,7 @@ export default function ConnectorsPage() {
     const roster = await loadWorkspace();
     setAgents((roster.agents || []).filter((a) => !a.archived));
     setAssignments(roster.connector_assignments || {});
+    setToolkitAssignments(roster.toolkit_assignments || {});
   }
 
   useEffect(() => {
@@ -129,23 +144,42 @@ export default function ConnectorsPage() {
     setApps(data.apps || []);
   }
 
-  async function connectApp(slug: string) {
+  async function connectApp(slug: string, credentials?: Record<string, string>) {
     setConnecting(slug);
     setError("");
     try {
-      const res = await fetch("/api/connectors/marketplace/connect", {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ toolkit: slug }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : "Could not start Composio sign-in");
+      const data = await connectMarketplace(slug, undefined, credentials);
       if (data.redirect_url) {
         window.location.href = data.redirect_url;
-        return;
+        return data;
       }
-      throw new Error("No sign-in URL returned");
+      if (data.connected) {
+        setNotice(`${data.name || slug} connected. Agents can use it from chat.`);
+        await loadMarket(marketQuery);
+        await refresh();
+        return data;
+      }
+      if (data.needs_credentials) return data;
+      throw new Error("Could not connect this app");
+    } catch (err: any) {
+      setError(err.message);
+      return null;
+    } finally {
+      setConnecting("");
+    }
+  }
+
+  async function disconnectApp(accountId: string) {
+    setConnecting(accountId);
+    setError("");
+    try {
+      const res = await fetch(`/api/connectors/marketplace/connections/${encodeURIComponent(accountId)}`, {
+        method: "DELETE",
+        credentials: "include",
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : "Could not disconnect");
+      await loadMarket(marketQuery);
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -221,7 +255,12 @@ export default function ConnectorsPage() {
   }
 
   async function remove(id: string) {
-    await fetch(`/api/connectors/${id}`, { method: "DELETE", credentials: "include" });
+    const res = await fetch(`/api/connectors/${id}`, { method: "DELETE", credentials: "include" });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      setError(typeof data.detail === "string" ? data.detail : "Could not remove connector");
+      return;
+    }
     refresh();
   }
 
@@ -229,252 +268,459 @@ export default function ConnectorsPage() {
     return drafts[c.id] || { alias: c.alias || "", description: c.description || "" };
   }
 
+  const rail = useMemo<RailItem[]>(() => {
+    const items: RailItem[] = rows.map((c) => ({
+      key: `conn:${c.id}`,
+      kind: "connector",
+      title: c.alias || c.name,
+      connected: c.enabled && c.health === "ok",
+      connector: c,
+    }));
+    items.push({ key: "github", kind: "github", title: "GitHub App", connected: Boolean(github?.installed) });
+    items.push({ key: "deploy", kind: "deploy", title: "Deploy", connected: false });
+    items.push({ key: "mcp", kind: "mcp", title: "Add MCP", connected: false });
+    const taken = new Set(
+      rows.flatMap((c) => [c.slug, c.provider].map((value) => String(value || "").toLowerCase()).filter(Boolean)),
+    );
+    taken.add("composio");
+    for (const app of apps) {
+      const slug = String(app.slug || "").toLowerCase();
+      if (!slug || taken.has(slug)) continue;
+      items.push({
+        key: `app:${app.slug}`,
+        kind: "app",
+        title: app.name,
+        logo: app.logo,
+        connected: Boolean(app.connected),
+        app,
+      });
+    }
+    return items;
+  }, [rows, apps, github]);
+
+  const filteredRail = useMemo(() => {
+    const q = marketQuery.trim().toLowerCase();
+    if (!q) return rail;
+    return rail.filter((item) => item.title.toLowerCase().includes(q) || item.key.toLowerCase().includes(q));
+  }, [rail, marketQuery]);
+
+  useEffect(() => {
+    if (filteredRail.some((item) => item.key === selected)) return;
+    const live = filteredRail.find((item) => item.connected && item.kind !== "github");
+    const next = live || filteredRail.find((item) => item.kind === "app") || filteredRail[0];
+    if (next) setSelected(next.key);
+  }, [filteredRail, selected]);
+
+  const current = filteredRail.find((item) => item.key === selected) || filteredRail[0];
+
   return (
     <AppShell me={me} current="connectors">
-      <div className="page">
+      <div className="page conn-page">
         <div className="conn-hero page-hero">
           <div>
             <h1>Connectors</h1>
-            <p className="muted">Link mail, a cloud computer, and marketplace apps, then choose which agents can use each one.</p>
+            <p className="muted">Choose an app, then pick which agents can use it.</p>
           </div>
-        </div>
-        <div className="conn-connect">
-          <a className="conn-brand" href="/api/auth/google/login?mode=link">
-            <GoogleMark />
-            <span>
-              <strong>Gmail</strong>
-              <span>Mail, calendar, and attachments</span>
-            </span>
-          </a>
-          <a className="conn-brand" href="/api/auth/microsoft/login?mode=link">
-            <MicrosoftMark />
-            <span>
-              <strong>Outlook</strong>
-              <span>Outlook mail and calendar</span>
-            </span>
-          </a>
+          <form
+            className="conn-search"
+            onSubmit={(e) => {
+              e.preventDefault();
+              loadMarket(marketQuery);
+            }}
+          >
+            <input
+              type="search"
+              placeholder="Search apps"
+              value={marketQuery}
+              onChange={(e) => setMarketQuery(e.target.value)}
+            />
+          </form>
         </div>
         {error ? <p className="err">{error}</p> : null}
         {notice ? <p className="ok">{notice}</p> : null}
-        <div className="card stack" style={{ marginBottom: 18 }}>
-          <header className="row" style={{ justifyContent: "space-between" }}>
-            <strong>GitHub</strong>
-            <span className={`badge ${github?.installed ? "ok" : "down"}`}>
-              {!github ? "checking" : !github.configured ? "not set up" : github.installed ? "installed" : "not installed"}
-            </span>
-          </header>
-          <p className="muted" style={{ margin: 0 }}>
-            Install the Checkme GitHub App on the repos your Coder should work on. It reads code, pushes only to agent/*
-            branches, and every push, PR, and merge waits for your approval.
-          </p>
-          {github && !github.configured ? (
-            <p className="muted" style={{ margin: 0 }}>
-              The GitHub App is not configured on this server yet ({github.missing_env.join(", ")}). Composio GitHub or a
-              GitHub MCP server still work below.
-            </p>
-          ) : null}
-          {github?.installations.map((inst) => (
-            <div key={inst.installation_id} className="row" style={{ justifyContent: "space-between" }}>
-              <span>
-                @{inst.account} · {inst.repository_selection === "all" ? "all repos" : "selected repos"}
-                {inst.suspended ? " · suspended" : ""}
-              </span>
-              <span className="row">
-                <a className="btn secondary" href={inst.manage_url} target="_blank" rel="noreferrer">
-                  Manage on GitHub
-                </a>
-                <button className="btn secondary" onClick={() => forgetGithub(inst.installation_id)}>
-                  Forget
+        {marketReady === false ? (
+          <p className="muted">Add a Composio platform API key on the server to list every marketplace app here.</p>
+        ) : null}
+        <div className="conn-board">
+          <section className="conn-catalog">
+            <div className="conn-catalog-head">
+              <strong>Apps</strong>
+              <span className="muted">{filteredRail.length}</span>
+            </div>
+            <div className="conn-icons" role="list">
+              {filteredRail.map((item) => (
+                <button
+                  key={item.key}
+                  type="button"
+                  role="listitem"
+                  aria-pressed={item.key === selected}
+                  className={`conn-icon${item.key === selected ? " on" : ""}${item.connected ? " live" : ""}`}
+                  title={item.title}
+                  onClick={() => setSelected(item.key)}
+                >
+                  <RailMark item={item} />
+                  <span className="conn-icon-name">{item.title}</span>
                 </button>
-              </span>
-            </div>
-          ))}
-          {github?.configured ? (
-            <div>
-              <a className="btn" href={github.install_url}>
-                {github.installed ? "Add another account or repo" : "Install GitHub App"}
-              </a>
-            </div>
-          ) : null}
-        </div>
-        <DeployPlatforms />
-        {marketReady ? (
-          <div className="card stack" style={{ marginBottom: 18 }}>
-            <strong>Composio marketplace</strong>
-            <p className="muted" style={{ margin: 0 }}>
-              Connect GitHub, Slack, Notion, and other apps. The assistant searches and runs their tools from chat.
-            </p>
-            <form
-              className="row"
-              onSubmit={(e) => {
-                e.preventDefault();
-                loadMarket(marketQuery);
-              }}
-            >
-              <input
-                type="search"
-                placeholder="Search apps"
-                value={marketQuery}
-                onChange={(e) => setMarketQuery(e.target.value)}
-              />
-              <button className="btn secondary" type="submit">
-                Search
-              </button>
-            </form>
-            <div className="conn-grid">
-              {apps.map((app) => (
-                <div key={app.slug} className="conn-tile">
-                  <header>
-                    <strong>{app.name}</strong>
-                    <span className={`badge ${app.connected ? "ok" : "down"}`}>{app.connected ? "connected" : "available"}</span>
-                  </header>
-                  <p>{app.description || "Marketplace app"}</p>
-                  <div className="conn-count">
-                    @{app.slug}
-                    {app.tools_count != null ? ` · ${app.tools_count} tools` : ""}
-                  </div>
-                  <button className="btn" disabled={connecting === app.slug} onClick={() => connectApp(app.slug)}>
-                    {connecting === app.slug ? "Opening…" : app.connected ? "Reconnect" : "Connect"}
-                  </button>
-                </div>
               ))}
             </div>
-          </div>
-        ) : null}
-        <form className="card stack" onSubmit={add} style={{ marginBottom: 18 }}>
-          <strong>Add a system</strong>
-          <p className="muted" style={{ margin: 0 }}>
-            Point at an MCP server. The assistant will discover its tools after you connect.
-          </p>
-          <input type="url" required placeholder="https://mcp.example.com/mcp" value={url} onChange={(e) => setUrl(e.target.value)} />
-          <input type="text" placeholder="Short name, e.g. digital" value={alias} onChange={(e) => setAlias(e.target.value)} />
-          <textarea
-            className="field"
-            placeholder="Describe what this connector is for. Example: daily sales, retail KPIs, finance reports."
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-          />
-          <select
-            value={authType}
-            onChange={(e) => setAuthType(e.target.value)}
-          >
-            <option value="oauth">OAuth (MCP spec)</option>
-            <option value="bearer">Bearer token</option>
-            <option value="none">No auth</option>
-          </select>
-          {authType === "bearer" ? (
-            <input type="text" placeholder="Token" value={token} onChange={(e) => setToken(e.target.value)} />
-          ) : null}
-          <button className="btn" disabled={busy}>
-            {busy ? "Connecting…" : "Connect"}
-          </button>
-        </form>
-        <div className="conn-grid">
-          {rows.map((c) => {
-            const draft = draftFor(c);
-            const open = editing === c.id;
-            return (
-              <div key={c.id} className="conn-tile">
-                <header>
-                  <strong>{c.alias || c.name}</strong>
-                  <span className={`badge ${c.health === "ok" ? "ok" : "down"}`}>{c.health}</span>
-                </header>
-                <p>{c.description || "No description yet. Add one so chat knows when to use this."}</p>
-                <div className="conn-count">
-                  {c.kind} · @{c.slug}
-                  {c.tool_count != null ? ` · ${c.tool_count} tools` : ""}
-                </div>
-                {c.kind === "mcp" && (c.health === "pending" || c.health === "auth_expired") ? (
-                  <a className="btn" href={`/api/connectors/${c.id}/oauth/start`}>
-                    Finish sign-in
-                  </a>
+          </section>
+          <section className="conn-inspector">
+            {current?.kind === "github" ? (
+              <GithubDetail github={github} onForget={forgetGithub} />
+            ) : current?.kind === "deploy" ? (
+              <DeployPlatforms />
+            ) : current?.kind === "mcp" ? (
+              <form className="card stack" onSubmit={add}>
+                <strong>Add a system</strong>
+                <p className="muted" style={{ margin: 0 }}>
+                  Point at an MCP server. The assistant will discover its tools after you connect.
+                </p>
+                <input type="url" required placeholder="https://mcp.example.com/mcp" value={url} onChange={(e) => setUrl(e.target.value)} />
+                <input type="text" placeholder="Short name, e.g. digital" value={alias} onChange={(e) => setAlias(e.target.value)} />
+                <textarea
+                  className="field"
+                  placeholder="Describe what this connector is for. Example: daily sales, retail KPIs, finance reports."
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                />
+                <select value={authType} onChange={(e) => setAuthType(e.target.value)}>
+                  <option value="oauth">OAuth (MCP spec)</option>
+                  <option value="bearer">Bearer token</option>
+                  <option value="none">No auth</option>
+                </select>
+                {authType === "bearer" ? (
+                  <input type="text" placeholder="Token" value={token} onChange={(e) => setToken(e.target.value)} />
                 ) : null}
-                {c.health === "auth_expired" && c.provider !== "mcp" ? (
-                  <a className="btn" href={c.provider === "gmail" ? "/api/auth/google/login?mode=link" : "/api/auth/microsoft/login?mode=link"}>
-                    Reconnect
-                  </a>
-                ) : null}
-                {open ? (
-                  <div className="stack">
-                    <input
-                      type="text"
-                      placeholder="Short name the assistant should recognize"
-                      value={draft.alias}
-                      onChange={(e) => setDrafts((d) => ({ ...d, [c.id]: { ...draft, alias: e.target.value } }))}
-                    />
-                    <textarea
-                      className="field"
-                      placeholder="What this MCP can do, brands, metrics, when to use it"
-                      value={draft.description}
-                      onChange={(e) => setDrafts((d) => ({ ...d, [c.id]: { ...draft, description: e.target.value } }))}
-                    />
-                    <button className="btn secondary" disabled={saving === c.id} onClick={() => saveDescribe(c)}>
-                      {saving === c.id ? "Saving…" : "Save description"}
-                    </button>
-                  </div>
-                ) : null}
-                {agents.length ? (
-                  <div className="conn-agents">
-                    <span className="conn-agents-label">Available to</span>
-                    {agents.map((agent) => {
-                      const restricted = assignments[c.id] || [];
-                      const checked = !restricted.length || restricted.includes(agent.id);
-                      return (
-                        <label key={agent.id} className="agent-check">
-                          <input
-                            type="checkbox"
-                            checked={checked}
-                            onChange={() => {
-                              const nextIds = nextAssignedAgents(
-                                restricted,
-                                agent.id,
-                                agents.map((a) => a.id),
-                              );
-                              setAssignments((cur) => ({ ...cur, [c.id]: nextIds }));
-                              setAssigning(c.id);
-                              setError("");
-                              void assignConnectorAgents(c.id, nextIds)
-                                .then((next) => setAssignments((cur) => ({ ...cur, [c.id]: next.agent_ids || nextIds })))
-                                .catch((err: any) => {
-                                  setAssignments((cur) => ({ ...cur, [c.id]: restricted }));
-                                  setError(err.message || "Could not update agents");
-                                })
-                                .finally(() => setAssigning(""));
-                            }}
-                          />
-                          <span className="agent-avatar tiny" style={{ background: agent.color }}>
-                            {(agent.name || "?").slice(0, 1).toUpperCase()}
-                          </span>
-                          {agent.name}
-                        </label>
-                      );
-                    })}
-                    <small className="muted">
-                      {(assignments[c.id] || []).length
-                        ? `${assignments[c.id].length} of ${agents.length} agents`
-                        : "Every agent"}
-                    </small>
-                  </div>
-                ) : null}
-                <div className="row">
-                  <button className="icon-btn" onClick={() => setEditing(open ? "" : c.id)}>
-                    {open ? "Close" : "Edit"}
-                  </button>
-                  <button className="icon-btn" onClick={() => patch(c.id, { enabled: !c.enabled })}>
-                    {c.enabled ? "Disable" : "Enable"}
-                  </button>
-                  {c.kind !== "builtin" ? (
-                    <button className="icon-btn" onClick={() => remove(c.id)}>
-                      Remove
-                    </button>
-                  ) : null}
-                </div>
-              </div>
-            );
-          })}
+                <button className="btn" disabled={busy}>
+                  {busy ? "Connecting…" : "Connect"}
+                </button>
+              </form>
+            ) : current?.kind === "app" ? (
+              <AppDetail
+                key={current.app.slug}
+                app={current.app}
+                agents={agents}
+                assignments={toolkitAssignments}
+                connecting={connecting}
+                assigning={assigning}
+                onConnect={(credentials) => connectApp(current.app.slug, credentials)}
+                onDisconnect={() => current.app.connection_id && disconnectApp(current.app.connection_id)}
+                onAssign={(slug, nextIds, previous) => {
+                  setToolkitAssignments((cur) => ({ ...cur, [slug]: nextIds }));
+                  setAssigning(slug);
+                  setError("");
+                  void assignToolkitAgents(slug, nextIds)
+                    .then((next) => setToolkitAssignments((cur) => ({ ...cur, [slug]: next.agent_ids || nextIds })))
+                    .catch((err: any) => {
+                      setToolkitAssignments((cur) => ({ ...cur, [slug]: previous }));
+                      setError(err.message || "Could not update agents");
+                    })
+                    .finally(() => setAssigning(""));
+                }}
+              />
+            ) : current?.kind === "connector" ? (
+              <ConnectorDetail
+                c={current.connector}
+                draft={draftFor(current.connector)}
+                open={editing === current.connector.id}
+                saving={saving === current.connector.id}
+                agents={agents}
+                assignments={assignments}
+                assigning={assigning === current.connector.id}
+                onDraft={(next) => setDrafts((d) => ({ ...d, [current.connector.id]: next }))}
+                onEdit={() => setEditing(editing === current.connector.id ? "" : current.connector.id)}
+                onSave={() => saveDescribe(current.connector)}
+                onPatch={(body) => patch(current.connector.id, body)}
+                onRemove={() => remove(current.connector.id)}
+                onAssign={(nextIds, previous) => {
+                  const id = current.connector.id;
+                  setAssignments((cur) => ({ ...cur, [id]: nextIds }));
+                  setAssigning(id);
+                  setError("");
+                  void assignConnectorAgents(id, nextIds)
+                    .then((next) => setAssignments((cur) => ({ ...cur, [id]: next.agent_ids || nextIds })))
+                    .catch((err: any) => {
+                      setAssignments((cur) => ({ ...cur, [id]: previous }));
+                      setError(err.message || "Could not update agents");
+                    })
+                    .finally(() => setAssigning(""));
+                }}
+              />
+            ) : (
+              <p className="muted">Select an app to see details.</p>
+            )}
+          </section>
         </div>
       </div>
     </AppShell>
+  );
+}
+
+function RailMark({ item }: { item: RailItem }) {
+  if (item.kind === "app" && item.logo) return <img src={item.logo} alt="" />;
+  if (item.kind === "connector" && item.connector.slug === "gmail") return <GoogleMark />;
+  if (item.kind === "connector" && (item.connector.slug === "outlook" || item.connector.provider === "microsoft")) return <MicrosoftMark />;
+  const letter = (item.title || "?").slice(0, 1).toUpperCase();
+  return <span className="conn-icon-mark">{letter}</span>;
+}
+
+function AgentAssign({
+  agents,
+  restricted,
+  assigning,
+  onToggle,
+}: {
+  agents: WorkspaceAgent[];
+  restricted: string[];
+  assigning: boolean;
+  onToggle: (nextIds: string[], previous: string[]) => void;
+}) {
+  if (!agents.length) return null;
+  return (
+    <div className="conn-agents">
+      <span className="conn-agents-label">Available to</span>
+      {agents.map((agent) => {
+        const checked = !restricted.length || restricted.includes(agent.id);
+        return (
+          <label key={agent.id} className="agent-check">
+            <input
+              type="checkbox"
+              checked={checked}
+              disabled={assigning}
+              onChange={() => {
+                onToggle(
+                  nextAssignedAgents(
+                    restricted,
+                    agent.id,
+                    agents.map((a) => a.id),
+                  ),
+                  restricted,
+                );
+              }}
+            />
+            <span className="agent-avatar tiny" style={{ background: agent.color }}>
+              {(agent.name || "?").slice(0, 1).toUpperCase()}
+            </span>
+            <span className="agent-check-name">{agent.name}</span>
+          </label>
+        );
+      })}
+      <small className="muted">
+        {restricted.length ? `${restricted.length} of ${agents.length} agents` : "Every agent"}
+      </small>
+    </div>
+  );
+}
+
+function ConnectorDetail({
+  c,
+  draft,
+  open,
+  saving,
+  agents,
+  assignments,
+  assigning,
+  onDraft,
+  onEdit,
+  onSave,
+  onPatch,
+  onRemove,
+  onAssign,
+}: {
+  c: Connector;
+  draft: { alias: string; description: string };
+  open: boolean;
+  saving: boolean;
+  agents: WorkspaceAgent[];
+  assignments: Record<string, string[]>;
+  assigning: boolean;
+  onDraft: (next: { alias: string; description: string }) => void;
+  onEdit: () => void;
+  onSave: () => void;
+  onPatch: (body: Record<string, unknown>) => Promise<void>;
+  onRemove: () => void;
+  onAssign: (nextIds: string[], previous: string[]) => void;
+}) {
+  const restricted = assignments[c.id] || [];
+  const canRemove = c.slug !== "computer";
+  return (
+    <div className="conn-tile conn-detail-card">
+      <header>
+        <strong>{c.alias || c.name}</strong>
+        <span className={`badge ${c.health === "ok" ? "ok" : "down"}`}>{c.health}</span>
+      </header>
+      <p>{c.description || "No description yet. Add one so chat knows when to use this."}</p>
+      <div className="conn-count">
+        {c.kind} · @{c.slug}
+        {c.tool_count != null ? ` · ${c.tool_count} tools` : ""}
+      </div>
+      {c.kind === "mcp" && (c.health === "pending" || c.health === "auth_expired") ? (
+        <a className="btn" href={`/api/connectors/${c.id}/oauth/start`}>
+          Finish sign-in
+        </a>
+      ) : null}
+      {c.health === "auth_expired" && c.provider !== "mcp" ? (
+        <a className="btn" href={c.provider === "gmail" ? "/api/auth/google/login?mode=link" : "/api/auth/microsoft/login?mode=link"}>
+          Reconnect
+        </a>
+      ) : null}
+      {open ? (
+        <div className="stack">
+          <input
+            type="text"
+            placeholder="Short name the assistant should recognize"
+            value={draft.alias}
+            onChange={(e) => onDraft({ ...draft, alias: e.target.value })}
+          />
+          <textarea
+            className="field"
+            placeholder="What this MCP can do, brands, metrics, when to use it"
+            value={draft.description}
+            onChange={(e) => onDraft({ ...draft, description: e.target.value })}
+          />
+          <button className="btn secondary" disabled={saving} onClick={onSave}>
+            {saving ? "Saving…" : "Save description"}
+          </button>
+        </div>
+      ) : null}
+      <AgentAssign agents={agents} restricted={restricted} assigning={assigning} onToggle={onAssign} />
+      <div className="conn-actions">
+        <button className="icon-btn" onClick={onEdit}>
+          {open ? "Close" : "Edit"}
+        </button>
+        <button className="icon-btn" onClick={() => onPatch({ enabled: !c.enabled })}>
+          {c.enabled ? "Disable" : "Enable"}
+        </button>
+        {canRemove ? (
+          <button className="icon-btn" onClick={onRemove}>
+            Remove
+          </button>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function AppDetail({
+  app,
+  agents,
+  assignments,
+  connecting,
+  assigning,
+  onConnect,
+  onDisconnect,
+  onAssign,
+}: {
+  app: MarketApp;
+  agents: WorkspaceAgent[];
+  assignments: Record<string, string[]>;
+  connecting: string;
+  assigning: string;
+  onConnect: (credentials?: Record<string, string>) => Promise<any>;
+  onDisconnect: () => void;
+  onAssign: (slug: string, nextIds: string[], previous: string[]) => void;
+}) {
+  const restricted = assignments[app.slug] || [];
+  const kind = app.auth_kind || ((app.auth_schemes || []).includes("API_KEY") ? "api_key" : "oauth");
+  const needsKey = kind === "api_key" && !app.connected;
+  const [apiKey, setApiKey] = useState("");
+  return (
+    <div className="conn-tile conn-detail-card">
+      <header className="conn-detail-head">
+        {app.logo ? <img className="conn-detail-logo" src={app.logo} alt="" /> : <span className="conn-icon-mark lg">{(app.name || "?").slice(0, 1)}</span>}
+        <div>
+          <strong>{app.name}</strong>
+          <div className="conn-count">@{app.slug}{app.tools_count != null ? ` · ${app.tools_count} tools` : ""}</div>
+        </div>
+        <span className={`badge ${app.connected ? "ok" : "down"}`}>{app.connected ? "connected" : "available"}</span>
+      </header>
+      <p>{app.description || "Composio marketplace app. Connect it, then choose which agents can use it from chat."}</p>
+      {needsKey ? (
+        <label className="conn-key-field">
+          API key
+          <input
+            type="password"
+            autoComplete="off"
+            placeholder={`Paste your ${app.name} API key`}
+            value={apiKey}
+            onChange={(e) => setApiKey(e.target.value)}
+          />
+          <small className="muted">Composio does not manage OAuth for this app. Paste the key from the provider dashboard.</small>
+        </label>
+      ) : null}
+      <AgentAssign
+        agents={agents}
+        restricted={restricted}
+        assigning={assigning === app.slug}
+        onToggle={(nextIds, previous) => onAssign(app.slug, nextIds, previous)}
+      />
+      <div className="conn-actions">
+        <button
+          className="btn"
+          disabled={connecting === app.slug || (needsKey && !apiKey.trim())}
+          onClick={() => void onConnect(needsKey ? { generic_api_key: apiKey.trim() } : undefined)}
+        >
+          {connecting === app.slug ? "Connecting…" : app.connected ? "Reconnect" : needsKey ? "Save key" : "Connect"}
+        </button>
+        {app.connected && app.connection_id ? (
+          <button className="icon-btn" disabled={connecting === app.connection_id} onClick={onDisconnect}>
+            Remove
+          </button>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function GithubDetail({
+  github,
+  onForget,
+}: {
+  github: GithubStatus | null;
+  onForget: (id: number) => void;
+}) {
+  return (
+    <div className="card stack">
+      <header className="row" style={{ justifyContent: "space-between" }}>
+        <strong>GitHub</strong>
+        <span className={`badge ${github?.installed ? "ok" : "down"}`}>
+          {!github ? "checking" : !github.configured ? "not set up" : github.installed ? "installed" : "not installed"}
+        </span>
+      </header>
+      <p className="muted" style={{ margin: 0 }}>
+        Install the Checkme GitHub App on the repos your Coder should work on. It reads code, pushes only to agent/*
+        branches, and every push, PR, and merge waits for your approval.
+      </p>
+      {github && !github.configured ? (
+        <p className="muted" style={{ margin: 0 }}>
+          The GitHub App is not configured on this server yet ({github.missing_env.join(", ")}). Composio GitHub or a
+          GitHub MCP server still work in the app catalog.
+        </p>
+      ) : null}
+      {github?.installations.map((inst) => (
+        <div key={inst.installation_id} className="row" style={{ justifyContent: "space-between" }}>
+          <span>
+            @{inst.account} · {inst.repository_selection === "all" ? "all repos" : "selected repos"}
+            {inst.suspended ? " · suspended" : ""}
+          </span>
+          <span className="row">
+            <a className="btn secondary" href={inst.manage_url} target="_blank" rel="noreferrer">
+              Manage on GitHub
+            </a>
+            <button className="btn secondary" onClick={() => onForget(inst.installation_id)}>
+              Forget
+            </button>
+          </span>
+        </div>
+      ))}
+      {github?.configured ? (
+        <div>
+          <a className="btn" href={github.install_url}>
+            {github.installed ? "Add another account or repo" : "Install GitHub App"}
+          </a>
+        </div>
+      ) : null}
+    </div>
   );
 }
 

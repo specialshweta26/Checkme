@@ -59,6 +59,7 @@ export type WorkspaceRoster = {
   groups: AgentGroup[];
   default_agent_id?: string;
   connector_assignments?: Record<string, string[]>;
+  toolkit_assignments?: Record<string, string[]>;
 };
 
 /** Fired on window when a chat turn created, changed, or deleted agents or groups. */
@@ -146,7 +147,45 @@ export async function moveAgentToGroup(agentId: string, groupId: string) {
 }
 
 export async function assignConnectorAgents(connectorId: string, agentIds: string[]) {
-  return agentAction(`/api/agents/connector-assignments/${connectorId}`, "PUT", { agent_ids: agentIds });
+  return agentAction(`/api/agents/connector-assignments/${connectorId}`, "PUT", { agent_ids: agentIds }) as Promise<{
+    connector_id: string;
+    agent_ids: string[];
+  }>;
+}
+
+export async function grantConnectorAgent(connectorId: string, agentId: string) {
+  return agentAction(`/api/agents/connector-assignments/${connectorId}/grant`, "POST", { agent_id: agentId });
+}
+
+export async function assignToolkitAgents(toolkit: string, agentIds: string[]) {
+  return agentAction(`/api/agents/toolkit-assignments/${encodeURIComponent(toolkit)}`, "PUT", { agent_ids: agentIds }) as Promise<{
+    toolkit: string;
+    agent_ids: string[];
+  }>;
+}
+
+export async function grantToolkitAgent(toolkit: string, agentId: string) {
+  return agentAction(`/api/agents/toolkit-assignments/${encodeURIComponent(toolkit)}/grant`, "POST", { agent_id: agentId });
+}
+
+export async function connectMarketplace(toolkit: string, agentId?: string, credentials?: Record<string, string>) {
+  const res = await fetch("/api/connectors/marketplace/connect", {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ toolkit, agent_id: agentId || undefined, credentials }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(apiError(data, "Could not start Composio sign-in"));
+  return data as {
+    redirect_url?: string;
+    toolkit?: string;
+    name?: string;
+    logo?: string;
+    connected?: boolean;
+    needs_credentials?: boolean;
+    fields?: { name: string; label?: string; secret?: boolean; description?: string }[];
+  };
 }
 
 export function nextAssignedAgents(assigned: string[] | undefined, agentId: string, allAgentIds: string[]) {

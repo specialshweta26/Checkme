@@ -5,7 +5,9 @@ import { FormEvent, useEffect, useMemo, useRef, useState, type MouseEvent, type 
 import { createPortal } from "react-dom";
 import {
   assignConnectorAgents,
+  assignToolkitAgents,
   chatHref,
+  connectMarketplace,
   clearAgentChat,
   createAgent,
   createGroup,
@@ -163,6 +165,7 @@ export function AgentsNav({
   const [moveOpen, setMoveOpen] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
   const [connectors, setConnectors] = useState<{ id: string; name: string; alias?: string; slug: string }[]>([]);
+  const [marketApps, setMarketApps] = useState<{ slug: string; name: string; logo?: string; connected?: boolean }[]>([]);
   const [saving, setSaving] = useState(false);
   const pathname = usePathname();
 
@@ -222,7 +225,6 @@ export function AgentsNav({
   const groups = roster.groups;
   const liveAgents = agents.filter((a) => !a.archived);
   const archivedAgents = agents.filter((a) => a.archived);
-  const assignments = roster.connector_assignments || {};
 
   function resetForm() {
     setForm(null);
@@ -258,6 +260,12 @@ export function AgentsNav({
     setEditingId(agent.id);
     setForm("connectors");
     setCtx(null);
+    if (!marketApps.length) {
+      fetch("/api/connectors/marketplace", { credentials: "include" })
+        .then((res) => res.json())
+        .then((data) => setMarketApps(data.apps || []))
+        .catch(() => undefined);
+    }
   }
 
   async function onCreateAgent(e: FormEvent) {
@@ -552,7 +560,7 @@ export function AgentsNav({
         ? createPortal(
         <div className="agent-form-scrim" onClick={resetForm}>
           <form
-            className="agent-form"
+            className={`agent-form${form === "connectors" ? " wide" : ""}`}
             onClick={(e) => e.stopPropagation()}
             onSubmit={form === "connectors" ? (e) => e.preventDefault() : form === "group" ? onCreateGroup : form === "edit" ? onEditAgent : onCreateAgent}
           >
@@ -563,9 +571,24 @@ export function AgentsNav({
                 agentId={editingId}
                 agents={agents}
                 connectors={connectors}
-                assignments={assignments}
+                apps={marketApps}
+                assignments={roster.connector_assignments || {}}
+                toolkitAssignments={roster.toolkit_assignments || {}}
                 onSave={async (connectorId, agentIds) => {
                   await assignConnectorAgents(connectorId, agentIds);
+                  await refresh();
+                }}
+                onSaveToolkit={async (toolkit, agentIds) => {
+                  await assignToolkitAgents(toolkit, agentIds);
+                  await refresh();
+                }}
+                onError={setError}
+                onConnectApp={async (slug) => {
+                  const data = await connectMarketplace(slug, editingId);
+                  if (data.needs_credentials) {
+                    throw new Error("This app uses an API key. Open Connectors, paste the key, then assign it here.");
+                  }
+                  if (data.redirect_url) window.open(data.redirect_url, "_blank", "noreferrer");
                   await refresh();
                 }}
               />
@@ -877,38 +900,106 @@ function ConnectorPicker({
   agentId,
   agents,
   connectors,
+  apps,
   assignments,
+  toolkitAssignments,
   onSave,
+  onSaveToolkit,
+  onConnectApp,
+  onError,
 }: {
   agentId: string;
   agents: WorkspaceAgent[];
   connectors: { id: string; name: string; alias?: string; slug: string }[];
+  apps: { slug: string; name: string; logo?: string; connected?: boolean }[];
   assignments: Record<string, string[]>;
+  toolkitAssignments: Record<string, string[]>;
   onSave: (connectorId: string, agentIds: string[]) => Promise<void>;
+  onSaveToolkit: (toolkit: string, agentIds: string[]) => Promise<void>;
+  onConnectApp: (slug: string) => Promise<void>;
+  onError?: (message: string) => void;
 }) {
-  if (!connectors.length) {
+  const [query, setQuery] = useState("");
+  const [busy, setBusy] = useState("");
+  const q = query.trim().toLowerCase();
+  const shownConnectors = connectors.filter((conn) => {
+    if (!q) return true;
+    return `${conn.alias || ""} ${conn.name} ${conn.slug}`.toLowerCase().includes(q);
+  });
+  const shownApps = apps.filter((app) => {
+    if (!q) return true;
+    return `${app.name} ${app.slug}`.toLowerCase().includes(q);
+  });
+  if (!connectors.length && !apps.length) {
     return <p className="muted">No connectors yet. Add them on the Connectors page, then assign them here.</p>;
   }
+  const agentIds = agents.map((a) => a.id);
   return (
-    <fieldset>
+    <fieldset className="conn-picker">
       <legend>This agent can use</legend>
-      {connectors.map((conn) => {
-        const restricted = assignments[conn.id] || [];
-        const checked = !restricted.length || restricted.includes(agentId);
-        return (
-          <label key={conn.id} className="agent-check">
-            <input
-              type="checkbox"
-              checked={checked}
-              onChange={async () => {
-                await onSave(conn.id, nextAssignedAgents(restricted, agentId, agents.map((a) => a.id)));
-              }}
-            />
-            {conn.alias || conn.name}
-            <span className="muted"> @{conn.slug}</span>
-          </label>
-        );
-      })}
+      <input
+        type="search"
+        placeholder="Search connectors"
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+      />
+      <div className="conn-picker-list">
+        {shownConnectors.map((conn) => {
+          const restricted = assignments[conn.id] || [];
+          const checked = !restricted.length || restricted.includes(agentId);
+          return (
+            <label key={conn.id} className="agent-check">
+              <input
+                type="checkbox"
+                checked={checked}
+                disabled={busy === conn.id}
+                onChange={async () => {
+                  setBusy(conn.id);
+                  try {
+                    await onSave(conn.id, nextAssignedAgents(restricted, agentId, agentIds));
+                  } finally {
+                    setBusy("");
+                  }
+                }}
+              />
+              <span className="conn-picker-mark">{(conn.alias || conn.name || "?").slice(0, 1).toUpperCase()}</span>
+              <span className="agent-check-name">
+                {conn.alias || conn.name}
+                <span className="muted"> @{conn.slug}</span>
+              </span>
+            </label>
+          );
+        })}
+        {shownApps.map((app) => {
+          const restricted = toolkitAssignments[app.slug] || [];
+          const checked = !restricted.length || restricted.includes(agentId);
+          return (
+            <label key={`app-${app.slug}`} className="agent-check">
+              <input
+                type="checkbox"
+                checked={checked}
+                disabled={busy === app.slug}
+                onChange={async () => {
+                  setBusy(app.slug);
+                  try {
+                    if (!checked && !app.connected) await onConnectApp(app.slug);
+                    await onSaveToolkit(app.slug, nextAssignedAgents(restricted, agentId, agentIds));
+                  } catch (err: any) {
+                    onError?.(err.message || "Could not connect this app");
+                  } finally {
+                    setBusy("");
+                  }
+                }}
+              />
+              {app.logo ? <img className="conn-picker-logo" src={app.logo} alt="" /> : <span className="conn-picker-mark" />}
+              <span className="agent-check-name">
+                {app.name}
+                <span className="muted"> {app.connected ? "connected" : "available"}</span>
+              </span>
+            </label>
+          );
+        })}
+      </div>
     </fieldset>
   );
 }

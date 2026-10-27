@@ -41,6 +41,10 @@ class ConnectorAgentsIn(BaseModel):
     agent_ids: list[uuid.UUID] = []
 
 
+class GrantAgentIn(BaseModel):
+    agent_id: uuid.UUID
+
+
 class GroupIn(BaseModel):
     name: str
     member_ids: list[uuid.UUID]
@@ -130,6 +134,45 @@ async def assign_connector_agents(
 ):
     try:
         return await service.set_connector_agents(db, user, connector_id, [str(i) for i in body.agent_ids])
+    except service.AgentError as exc:
+        raise _err(exc) from exc
+
+
+@router.post("/connector-assignments/{connector_id}/grant")
+async def grant_connector_agent(
+    connector_id: uuid.UUID,
+    body: GrantAgentIn,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        return await service.grant_connector_agent(db, user, connector_id, body.agent_id)
+    except service.AgentError as exc:
+        raise _err(exc) from exc
+
+
+@router.put("/toolkit-assignments/{toolkit}")
+async def assign_toolkit_agents(
+    toolkit: str,
+    body: ConnectorAgentsIn,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        return await service.set_toolkit_agents(db, user, toolkit, [str(i) for i in body.agent_ids])
+    except service.AgentError as exc:
+        raise _err(exc) from exc
+
+
+@router.post("/toolkit-assignments/{toolkit}/grant")
+async def grant_toolkit_agent(
+    toolkit: str,
+    body: GrantAgentIn,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        return await service.grant_toolkit_agent(db, user, toolkit, body.agent_id)
     except service.AgentError as exc:
         raise _err(exc) from exc
 
