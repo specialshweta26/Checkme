@@ -142,11 +142,11 @@ async def test_not_configured_without_composio_key(monkeypatch):
     assert "COMPOSIO_API_KEY" in str(exc.value)
 
 
-async def test_not_connected_points_to_connectors_page(fake):
+async def test_not_connected_points_to_cli_signin(fake):
     fake.composio.accounts = [a for a in fake.composio.accounts if a["toolkit"]["slug"] != "github"]
     with pytest.raises(gh.NotConnected) as exc:
         await gh.call_github(ROW, "list_repos", {})
-    assert "Connectors" in str(exc.value) and "Composio" in str(exc.value)
+    assert "GitHub CLI" in str(exc.value) and "one link" in str(exc.value)
 
 
 async def test_account_lookup_filters_and_prefers_newest_or_pinned(fake, monkeypatch):

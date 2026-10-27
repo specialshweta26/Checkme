@@ -16,7 +16,7 @@ from app.models import User
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/connectors/github", tags=["github"])
-WAITING_FOR = ("github", "composio_github", "github_app")
+WAITING_FOR = ("github", "composio_github", "github_app", "login_github")
 
 
 async def github_status(user: User) -> dict:

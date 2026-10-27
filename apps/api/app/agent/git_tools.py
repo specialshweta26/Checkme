@@ -150,6 +150,9 @@ async def sandbox_read_bytes(ctx, path: str) -> bytes:
 
 
 async def git_checkout(ctx, repo: str, branch: str = "", base: str = "") -> dict:
+    """Clone or update ~/work/<repo>. Tries, in order: the Composio token; anonymous https and the computer's own git
+    credentials (gh auth); a Composio tarball snapshot; a snapshot rebuilt from the git trees API. When all fail it
+    starts `gh auth login --web` on the computer and returns its link (status=awaiting_user_login)."""
     try:
         owner, name = coding.split_repo(repo)
         branch = coding.check_ref(branch)
@@ -163,14 +166,39 @@ async def git_checkout(ctx, repo: str, branch: str = "", base: str = "") -> dict
         return res
     auth = "composio_token" if token else "public_or_sandbox_credentials"
     snapshot_dir = "snapshot_dir=1" in str(res.get("output") or "")
-    if res.get("exit_code") not in (0, None) and (not token or snapshot_dir):
+    tried = [auth]
+    if res.get("exit_code") not in (0, None) and token and not snapshot_dir:
+        # A stale or under-scoped token makes even public repos fail; retry without it (anonymous / gh auth).
+        retry = await sandbox_exec(ctx, coding.checkout_script(owner, name, branch, base, authed=False), 600)
+        tried.append("public_or_sandbox_credentials")
+        if not retry.get("error"):
+            res, auth = retry, "public_or_sandbox_credentials"
+    if res.get("exit_code") not in (0, None):
         status = await github_status(ctx)
         if status.get("connected"):
             snap = await _snapshot_checkout(ctx, full, name, branch, base)
-            if snap is not None:
+            tried.append("composio_snapshot")
+            if snap is not None and snap.get("exit_code") in (0, None) and not snap.get("error"):
                 res, auth = snap, "composio_snapshot"
-        elif status.get("connect_hint"):
-            res["hint"] = "Private repo? " + status["connect_hint"]
+            else:
+                tree = await _tree_checkout(ctx, full, name, branch, base)
+                tried.append("github_tree_snapshot")
+                if tree is not None and tree.get("exit_code") in (0, None) and not tree.get("error"):
+                    res, auth = tree, "composio_snapshot"
+                elif snap is not None and snap.get("error"):
+                    res.setdefault("detail", snap["error"])
+    if res.get("exit_code") not in (0, None):
+        from app.agent import cli_login
+
+        login = await cli_login.ensure_login(ctx, "github", f"to check out {full}")
+        if login.get("status") == "logged_in":
+            again = await sandbox_exec(ctx, coding.checkout_script(owner, name, branch, base, authed=False), 600)
+            tried.append("gh_cli_session")
+            if not again.get("error"):
+                res, auth = again, "gh_cli_session"
+        elif login.get("status") == "awaiting_user_login":
+            return {**login, "repo": full, "exit_code": res.get("exit_code"), "tried": tried,
+                    "output": str(res.get("output") or "")[-1500:]}
     info = _kv(res.get("output") or "")
     res.update(
         repo=full,
@@ -179,12 +207,33 @@ async def git_checkout(ctx, repo: str, branch: str = "", base: str = "") -> dict
         base=info.get("base", base),
         auth=auth,
     )
+    if res.get("exit_code") not in (0, None):
+        res["tried"] = tried
     if auth == "composio_snapshot" and res.get("exit_code") in (0, None):
         res["note"] = (
             "Private repo unpacked from a GitHub snapshot (no git history; git log shows snapshot commits). Edit, test "
             "and git_commit as usual; push_branch sends the committed changes through the GitHub API."
         )
     return res
+
+
+async def ensure_checkout(ctx, repo: str, branch: str = "") -> dict:
+    """Make sure ~/work/<repo> exists before deploy / inspect tools run; clone it (git_checkout) when missing.
+    Returns {"ok": True, ...} or the git_checkout result (an error or a sign-in handoff)."""
+    try:
+        owner, name = coding.split_repo(repo)
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+    probe = await sandbox_exec(ctx, f'[ -d "$HOME/work/{name}/.git" ] && echo present=1 || echo present=0', 30)
+    if probe.get("error"):
+        return probe
+    if "present=1" in str(probe.get("output") or ""):
+        return {"ok": True, "repo": f"{owner}/{name}", "checked_out": False}
+    res = await git_checkout(ctx, f"{owner}/{name}", branch)
+    if res.get("status") == "awaiting_user_login" or res.get("error") or res.get("exit_code") not in (0, None):
+        return res
+    await _record(ctx, "step", f"Checked out {owner}/{name}", {"repo": f"{owner}/{name}", "auth": res.get("auth")})
+    return {"ok": True, "repo": f"{owner}/{name}", "checked_out": True, "auth": res.get("auth"), "branch": res.get("branch")}
 
 
 async def _snapshot_checkout(ctx, full: str, name: str, branch: str, base: str) -> dict | None:
@@ -200,6 +249,41 @@ async def _snapshot_checkout(ctx, full: str, name: str, branch: str, base: str) 
         coding.snapshot_script(name, src["ref"], src["sha"], src["base"], branch),
         600,
         secret_env={coding.ARCHIVE_ENV: src["url"]},
+    )
+
+
+async def sandbox_write(ctx, path: str, content: str) -> dict:
+    from app.connectors.runtime import RuntimeConnector
+
+    conn = ctx.connectors.get(coding.COMPUTER_SLUG)
+    if conn is None:
+        return {"error": coding.readiness(ctx.connectors)["missing"][0]}
+    args = {"path": path, "content": content}
+    try:
+        if getattr(ctx, "call_impl", None) is not None:
+            raw = await ctx.call_impl(coding.COMPUTER_SLUG, "write_file", args)
+        else:
+            raw = await RuntimeConnector(conn).call("write_file", args)
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+    return raw if isinstance(raw, dict) else {"ok": True}
+
+
+async def _tree_checkout(ctx, full: str, name: str, branch: str, base: str) -> dict | None:
+    """When the proxy gives no tarball URL: rebuild the archive from the trees + blobs API, write it to the computer
+    and unpack it the same way."""
+    from app.connectors import github as gh
+
+    try:
+        src = await gh.tree_archive(ctx.user.id, full, branch, base)
+    except Exception as exc:  # noqa: BLE001
+        return {"exit_code": 1, "output": "", "error": f"Could not rebuild {full} from the GitHub API: {coding.scrub(str(exc))[:300]}"}
+    path = f"/tmp/checkme-{name}-{src['sha'][:12]}.tgz.b64"
+    wrote = await sandbox_write(ctx, path, src["archive_b64"])
+    if wrote.get("error") or wrote.get("ok") is False:
+        return {"exit_code": 1, "output": "", "error": wrote.get("error") or "could not write the archive"}
+    return await sandbox_exec(
+        ctx, coding.snapshot_script(name, src["ref"], src["sha"], src["base"], branch), 600, env={coding.ARCHIVE_FILE_ENV: path}
     )
 
 
@@ -288,31 +372,32 @@ def _patch_slug(branch: str) -> str:
 
 
 async def blocked_push(ctx, owner: str, name: str, branch: str, base: str) -> dict | None:
-    """No Composio GitHub connection and no git credentials on the computer: save the work as a patch and say what
-    is missing."""
+    """No Composio GitHub connection and no git credentials on the computer: sign the GitHub CLI in on the computer
+    (one link for the user), keeping the commits as a patch meanwhile. None when pushing can go ahead."""
     status = await github_status(ctx)
     if status.get("connected"):
         return None
     probe = await sandbox_exec(ctx, coding.creds_script(), 30)
     if "creds=ok" in str(probe.get("output") or ""):
         return None
+    from app.agent import cli_login
+
+    login = await cli_login.ensure_login(ctx, "github", f"to push {branch} to {owner}/{name}")
+    if login.get("status") == "logged_in":
+        return None
     slug = _patch_slug(branch)
     saved = await sandbox_exec(ctx, coding.save_patch_script(name, branch, base, slug), 60)
     patch_dir = f"~/work/_patches/{name}-{slug}"
-    missing = f"GitHub access to {owner}/{name}: GitHub is not connected through Composio, and the computer has no git credentials."
-    out = {
-        "status": "blocked",
-        "missing": missing,
-        "connect": status.get("connect_hint") or "",
-        "saved": "commits saved as patches in " + patch_dir if saved.get("exit_code") == 0 else "could not save a patch",
-        "patch_dir": patch_dir,
-        "branch": branch,
-        "next": "Tell the user exactly what is missing: connect GitHub in Checkme → Connectors → GitHub (Composio). Call "
-        "ask_user with waiting_for='github' so the job resumes after they connect; then call push_branch again (the "
-        "commits are still on the branch).",
-    }
+    if login.get("status") == "awaiting_user_login":
+        return {**login, "branch": branch, "patch_dir": patch_dir,
+                "saved": "commits kept on the branch and as patches in " + patch_dir if saved.get("exit_code") == 0 else ""}
+    missing = f"GitHub access to {owner}/{name}: " + (login.get("error") or "could not sign in to GitHub on the computer")
     await _record(ctx, "status", f"Blocked: {missing}", {"patch_dir": patch_dir})
-    return out
+    return {
+        "status": "blocked", "missing": missing, "branch": branch, "patch_dir": patch_dir,
+        "saved": "commits saved as patches in " + patch_dir if saved.get("exit_code") == 0 else "could not save a patch",
+        "next": "Report the error in one sentence; the commits are still on the branch.",
+    }
 
 
 def _push_confirmed(ctx, repo: str, branch: str) -> bool:
@@ -422,7 +507,7 @@ async def run_push(ctx, args: dict) -> dict:
         await _record(ctx, "step", f"Pushed {branch} to {full}", {"repo": full, "branch": branch, "via": via})
     if not out["pushed"]:
         if not status.get("connected"):
-            out["hint"] = "No push access from the computer. " + (status.get("connect_hint") or gh.CONNECT_HINT)
+            out["hint"] = "No push access from the computer; call push_branch again and it signs the GitHub CLI in (one link for the user)."
         return out
     if args.get("pr_number"):
         out["pr_number"] = int(args["pr_number"])

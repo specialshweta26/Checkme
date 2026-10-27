@@ -87,9 +87,10 @@ async def _resume(db: AsyncSession, user: User, key: str) -> None:
     note = f"The user connected {deploy.PLATFORMS[key].name} for deploys. Continue: propose the deploy again with the deploy tool (it asks for approval)."
     n = 0
     for job in rows:
-        for ev in jobs.resume_waiting_for(job, f"deploy_{key}", note):
-            db.add(ev)
-            n += 1
+        for what in (f"deploy_{key}", f"login_{key}"):
+            for ev in jobs.resume_waiting_for(job, what, note):
+                db.add(ev)
+                n += 1
     if n:
         await db.commit()
         from app.jobs.worker import wake

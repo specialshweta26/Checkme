@@ -99,8 +99,8 @@ async def understand_parts(query: str, history: list[dict] | None = None) -> lis
                         "search is a short query for finding tools for that part only. "
                         "If the question is only about how a previous figure was produced, "
                         "set explain_previous true, leave search empty, and do not invent a new tool job.\n"
-                        f"{('Previous assistant answer:\\n' + prior + '\\n') if prior else ''}"
-                        f"Question: {query}\n"
+                        + (("Previous assistant answer:\n" + prior + "\n") if prior else "")
+                        + f"Question: {query}\n"
                         "Each part json: "
                         '{"question":"","entity":"","metric":"","period":{"label":"","start":"","end":"","days":0},"grain":"total","search":"","plan":"","reason":"","tool_hint":"","explain_previous":false}'
                     ),

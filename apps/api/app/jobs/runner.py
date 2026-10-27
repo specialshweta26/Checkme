@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Callable
 
 from app.jobs import service
 from app.models import AgentJob, ChatSession, User, WorkspaceAgent
@@ -24,7 +24,9 @@ ROLE_BRIEF = {
         "only after an explicit yes (or when the task says to merge): check_merge first, then composio-github "
         "merge_pull_request with its head_sha, whose approval card the user must approve; never say it is merged until the result says so. "
         "If the task asks to deploy, do it after the merge (or on the branch the user named): detect_deploy_targets, then "
-        "deploy (approval card), then deploy_status / deploy_logs; report the URL or the error. "
+        "deploy (it signs in and shows one approval card), then fix and retry on failure; report the live URL or the error. "
+        "Never ask the user to configure or connect anything: when a tool returns status=awaiting_user_login, reply with "
+        "only its link in one sentence and end the turn (the job resumes after they sign in). "
         "Finish with the PR link, what changed, the checks, the review verdict, any deploy and any caveats."
     ),
     "coder": (
@@ -33,7 +35,8 @@ ROLE_BRIEF = {
         "find_symbol / find_references / read_file_range, edit with sandbox_shell, run_checks until they pass (up to 3 "
         "attempts), git_diff, git_commit, then push_branch with a body of ## Summary, ## Changes, ## Tests, ## Caveats (it "
         "waits for the user's approval; pr_number updates an existing PR). Merge only if the task explicitly says the user "
-        "said yes. Finish with the PR link, what changed and the check results."
+        "said yes. If a tool returns status=awaiting_user_login, give only its link in one sentence and end the turn. "
+        "Finish with the PR link, what changed and the check results."
     ),
     "reviewer": (
         "You are the reviewer for this background job. Read the pull request (get_pull_request, compare_refs, "

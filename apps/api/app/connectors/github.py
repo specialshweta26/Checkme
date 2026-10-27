@@ -50,8 +50,8 @@ DISCUSSION_TOOLS = frozenset({"comment_pull_request", "create_review", "request_
 MERGE_METHODS = ("merge", "squash", "rebase")
 
 CONNECT_HINT = (
-    "GitHub is not connected. Open Checkme → Connectors → GitHub (Composio) and click Connect GitHub, or ask me to "
-    "run composio connect_app with toolkit github. Then I can continue."
+    "GitHub (Composio) is not connected for API tools. Git on the computer still works: git_checkout / push_branch "
+    "sign the GitHub CLI in there and hand the user one link when needed."
 )
 
 
@@ -1379,6 +1379,65 @@ async def snapshot_source(user_id, repo: str, branch: str = "", base: str = "") 
     if not url.startswith("https://"):
         raise ToolError("Composio did not return a downloadable archive for this repository.")
     return {"ref": ref, "sha": sha, "base": base, "url": url}
+
+
+TREE_MAX_FILES = 400
+TREE_MAX_BYTES = 25 * 1024 * 1024
+
+
+async def tree_archive(user_id, repo: str, branch: str = "", base: str = "", *, max_files: int = TREE_MAX_FILES,
+                       max_bytes: int = TREE_MAX_BYTES) -> dict:
+    """Fallback when the tarball endpoint gives no downloadable URL through the proxy: rebuild a .tar.gz from the
+    git trees + blobs API (small and medium repos only). Returns the same shape as snapshot_source with
+    ``archive_b64`` instead of ``url``."""
+    import asyncio
+    import base64 as b64
+    import io
+    import tarfile
+
+    owner, name = split_repo(repo)
+    acct = await account_for(user_id)
+    path = f"/repos/{owner}/{name}"
+    base = _ref(base, "base branch") or await _default_branch(path, acct)
+    ref, sha = base, ""
+    if branch:
+        try:
+            got = await _request("GET", f"{path}/git/ref/heads/{quote(_ref(branch), safe='/')}", auth=acct)
+            ref, sha = branch, str((got.get("object") or {}).get("sha") or "")
+        except GitHubError as exc:
+            if exc.status != 404:
+                raise
+    if not sha:
+        got = await _request("GET", f"{path}/git/ref/heads/{quote(base, safe='/')}", auth=acct)
+        sha = str((got.get("object") or {}).get("sha") or "")
+    if not SHA_RE.match(sha):
+        raise ToolError(f"Could not resolve {ref} on {owner}/{name}.")
+    tree = await _request("GET", f"{path}/git/trees/{sha}", auth=acct, params={"recursive": 1})
+    blobs = [e for e in (tree.get("tree") or []) if e.get("type") == "blob"]
+    if tree.get("truncated") or len(blobs) > max_files:
+        raise ToolError(f"{owner}/{name} is too large to rebuild file by file ({len(blobs)} files).")
+    total = sum(int(e.get("size") or 0) for e in blobs)
+    if total > max_bytes:
+        raise ToolError(f"{owner}/{name} is too large to rebuild file by file ({total // 1048576} MB).")
+    sem = asyncio.Semaphore(8)
+
+    async def fetch(e: dict) -> tuple[dict, bytes]:
+        async with sem:
+            data = await _request("GET", f"{path}/git/blobs/{e['sha']}", auth=acct)
+        raw = str(data.get("content") or "")
+        return e, (b64.b64decode(raw) if data.get("encoding") == "base64" else raw.encode("utf-8"))
+
+    files = await asyncio.gather(*(fetch(e) for e in blobs))
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for e, content in files:
+            info = tarfile.TarInfo(f"{name}-{sha[:7]}/{e['path']}")
+            if e.get("mode") == "120000":
+                info.type, info.linkname = tarfile.SYMTYPE, content.decode("utf-8", "replace")
+            else:
+                info.size, info.mode = len(content), 0o755 if e.get("mode") == "100755" else 0o644
+            tar.addfile(info, None if info.type == tarfile.SYMTYPE else io.BytesIO(content))
+    return {"ref": ref, "sha": sha, "base": base, "archive_b64": b64.b64encode(buf.getvalue()).decode("ascii"), "files": len(files)}
 
 
 # ---------------------------------------------------------------------------

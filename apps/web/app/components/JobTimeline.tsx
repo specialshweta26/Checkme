@@ -50,6 +50,7 @@ const ICON: Record<string, string> = {
   status: "·",
   question: "?",
   deploy: "🚀",
+  login: "🔑",
 };
 const TODO_MARK: Record<string, string> = { completed: "✓", in_progress: "▸", pending: "○" };
 
@@ -72,6 +73,7 @@ export function JobTimeline({ jobId, after: startAfter = 0, onSettled }: { jobId
   const [busy, setBusy] = useState("");
   const [err, setErr] = useState("");
   const [nudge, setNudge] = useState(0);
+  const [loginCode, setLoginCode] = useState("");
   const after = useRef(startAfter);
   const settled = useRef(false);
   const sawActive = useRef(false);
@@ -206,6 +208,43 @@ export function JobTimeline({ jobId, after: startAfter = 0, onSettled }: { jobId
                 ) : (
                   <span className="job-text">{ev.text}</span>
                 )}
+                {ev.kind === "login" && ev.data?.url ? (
+                  <div className="job-login">
+                    <a className="btn secondary" href={ev.data.url} target="_blank" rel="noreferrer">
+                      Open sign-in page
+                    </a>
+                    {ev.data?.code && !ev.data?.needs_code ? (
+                      <span className="job-text">
+                        {" "}
+                        Code: <code>{ev.data.code}</code>
+                      </span>
+                    ) : null}
+                    {ev.data?.needs_code && owner?.status === "waiting_input" ? (
+                      <form
+                        className="approval-actions"
+                        onSubmit={(e) => {
+                          e.preventDefault();
+                          const code = loginCode.trim();
+                          if (!code) return;
+                          setLoginCode("");
+                          reply(ev.job_id, code);
+                        }}
+                      >
+                        <input
+                          className="input"
+                          type="password"
+                          autoComplete="off"
+                          placeholder="Paste the code the page shows"
+                          value={loginCode}
+                          onChange={(e) => setLoginCode(e.target.value)}
+                        />
+                        <button className="btn" type="submit" disabled={!!busy || !loginCode.trim()}>
+                          Send code
+                        </button>
+                      </form>
+                    ) : null}
+                  </div>
+                ) : null}
                 {ev.kind === "test" && ev.data?.table ? (
                   <details open={ev.data?.passed === false}>
                     <summary>Check results{ev.data?.attempt ? ` (run ${ev.data.attempt})` : ""}</summary>
