@@ -175,12 +175,22 @@ export async function grantToolkitAgent(toolkit: string, agentId: string) {
   return agentAction(`/api/agents/toolkit-assignments/${encodeURIComponent(toolkit)}/grant`, "POST", { agent_id: agentId });
 }
 
-export async function connectMarketplace(toolkit: string, agentId?: string, credentials?: Record<string, string>) {
+export async function connectMarketplace(
+  toolkit: string,
+  agentId?: string,
+  credentials?: Record<string, string>,
+  agentIds?: string[],
+) {
   const res = await fetch("/api/connectors/marketplace/connect", {
     method: "POST",
     credentials: "include",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ toolkit, agent_id: agentId || undefined, credentials }),
+    body: JSON.stringify({
+      toolkit,
+      agent_id: agentId || undefined,
+      agent_ids: agentIds?.length ? agentIds : undefined,
+      credentials,
+    }),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(apiError(data, "Could not start Composio sign-in"));

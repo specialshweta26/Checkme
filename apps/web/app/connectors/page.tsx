@@ -149,11 +149,12 @@ export default function ConnectorsPage() {
     setApps(data.apps || []);
   }
 
-  async function connectApp(slug: string, credentials?: Record<string, string>) {
+  async function connectApp(slug: string, credentials?: Record<string, string>, agentIds?: string[]) {
     setConnecting(slug);
     setError("");
     try {
-      const data = await connectMarketplace(slug, undefined, credentials);
+      const selected = agentIds || toolkitAssignments[slug] || [];
+      const data = await connectMarketplace(slug, undefined, credentials, selected);
       if (data.redirect_url) {
         window.location.href = data.redirect_url;
         return data;
@@ -398,7 +399,7 @@ export default function ConnectorsPage() {
                 assignments={toolkitAssignments}
                 connecting={connecting}
                 assigning={assigning}
-                onConnect={(credentials) => connectApp(current.app.slug, credentials)}
+                onConnect={(credentials, agentIds) => connectApp(current.app.slug, credentials, agentIds)}
                 onDisconnect={() => current.app.connection_id && disconnectApp(current.app.connection_id)}
                 onAssign={(slug, nextIds, previous) => {
                   setToolkitAssignments((cur) => ({ ...cur, [slug]: nextIds }));
@@ -533,7 +534,7 @@ function AgentAssign({
         );
       })}
       <small className="muted">
-        {restricted.length ? `${restricted.length} of ${agents.length} agents` : "Every agent"}
+        {restricted.length ? `${restricted.length} of ${agents.length} agents can use this app` : "Every agent can use this app after you connect"}
       </small>
     </div>
   );
@@ -643,7 +644,7 @@ function AppDetail({
   assignments: Record<string, string[]>;
   connecting: string;
   assigning: string;
-  onConnect: (credentials?: Record<string, string>) => Promise<any>;
+  onConnect: (credentials?: Record<string, string>, agentIds?: string[]) => Promise<any>;
   onDisconnect: () => void;
   onAssign: (slug: string, nextIds: string[], previous: string[]) => void;
 }) {
@@ -661,7 +662,7 @@ function AppDetail({
         </div>
         <span className={`badge ${app.connected ? "ok" : "down"}`}>{app.connected ? "connected" : "available"}</span>
       </header>
-      <p className="conn-detail-copy">{app.description || "Composio marketplace app. Connect it, then choose which agents can use it from chat."}</p>
+      <p className="conn-detail-copy">{app.description || "Composio marketplace app. Choose agents, then connect so they can use it from chat."}</p>
       {needsKey ? (
         <label className="conn-key-field">
           API key
@@ -685,7 +686,7 @@ function AppDetail({
         <button
           className="btn"
           disabled={connecting === app.slug || (needsKey && !apiKey.trim())}
-          onClick={() => void onConnect(needsKey ? { generic_api_key: apiKey.trim() } : undefined)}
+          onClick={() => void onConnect(needsKey ? { generic_api_key: apiKey.trim() } : undefined, restricted)}
         >
           {connecting === app.slug ? "Connecting…" : app.connected ? "Reconnect" : needsKey ? "Save key" : "Connect"}
         </button>

@@ -111,6 +111,7 @@ async def marketplace(query: str = "", user: User = Depends(current_user), db: A
 class ConnectAppBody(BaseModel):
     toolkit: str
     agent_id: str | None = None
+    agent_ids: list[str] | None = None
     credentials: dict[str, str] | None = None
 
 
@@ -133,13 +134,22 @@ async def marketplace_connect(body: ConnectAppBody, user: User = Depends(current
         pass
     elif not data.get("redirect_url"):
         raise HTTPException(400, "Composio did not return a sign-in URL. This app may need an API key instead of OAuth.")
-    if body.agent_id:
-        from app.agents import service as agents_service
+    assignee_ids = list(dict.fromkeys([*(body.agent_ids or []), *([body.agent_id] if body.agent_id else [])]))
+    from app.agents import service as agents_service
 
-        try:
-            await agents_service.grant_toolkit_agent(db, user, toolkit, body.agent_id)
-        except agents_service.AgentError:
-            pass
+    try:
+        if assignee_ids:
+            for aid in assignee_ids:
+                await agents_service.grant_toolkit_agent(db, user, toolkit, aid)
+        else:
+            await agents_service.set_toolkit_agents(db, user, toolkit, [])
+            composio = (
+                await db.execute(select(Connector).where(Connector.user_id == user.id, Connector.slug == "composio"))
+            ).scalar_one_or_none()
+            if composio is not None:
+                await agents_service.set_connector_agents(db, user, composio.id, [])
+    except agents_service.AgentError:
+        pass
     return {
         **data,
         "toolkit": toolkit,

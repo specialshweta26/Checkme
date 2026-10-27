@@ -9,6 +9,7 @@ from app.agents.service import (
     GROUP_MEMBER_MIN,
     AgentError,
     agent_may_use_connector,
+    agent_may_use_toolkit,
     filter_connectors,
     pick_color,
     serialize_agent,
@@ -127,3 +128,10 @@ def test_connector_assignments_restrict_specific_agents():
     assert [c.slug for c in kept] == ["computer"]
     group_kept = filter_connectors([gmail, computer], agent_id="cc", teammate_ids=["jj"], assignments=mapping)
     assert {c.slug for c in group_kept} == {"gmail", "computer"}
+    market = SimpleNamespace(id="c-comp", slug="composio", provider="composio")
+    mapping["c-comp"] = ["jj"]
+    kept_market = filter_connectors([gmail, computer, market], agent_id="cc", assignments=mapping)
+    assert {c.slug for c in kept_market} == {"computer", "composio"}
+    assert agent_may_use_toolkit("cc", "figma", {})
+    assert agent_may_use_toolkit("cc", "figma", {"figma": ["cc", "jj"]})
+    assert not agent_may_use_toolkit("cc", "figma", {"figma": ["jj"]})

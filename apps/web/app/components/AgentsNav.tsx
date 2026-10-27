@@ -946,14 +946,15 @@ function ConnectorPicker({
     return `${conn.alias || ""} ${conn.name} ${conn.slug}`.toLowerCase().includes(q);
   });
   const shownApps = apps.filter((app) => {
+    if (!app.connected) return false;
     if (!q) return true;
     return `${app.name} ${app.slug}`.toLowerCase().includes(q);
   });
-  if (!connectors.length && !apps.length) {
+  if (!connectors.length && !apps.some((app) => app.connected)) {
     return (
       <p className="muted">
         {catalogReady
-          ? "No connectors yet. Add them on the Connectors page, then assign them here."
+          ? "No connected apps yet. Connect them on the Connectors page, then assign them here."
           : "Loading connectors…"}
       </p>
     );
