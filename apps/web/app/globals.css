@@ -22,8 +22,10 @@
   --radius-lg: 20px;
   --sidebar-w: 280px;
   --rail-w: 300px;
-  --font-ui: var(--font-sans), "IBM Plex Sans", "Segoe UI", sans-serif;
-  --font-display: var(--font-serif), Newsreader, "Times New Roman", serif;
+  --font-sans: "IBM Plex Sans";
+  --font-serif: Newsreader;
+  --font-ui: var(--font-sans), "Segoe UI", sans-serif;
+  --font-display: var(--font-serif), "Times New Roman", serif;
 }
 
 * { box-sizing: border-box; }
