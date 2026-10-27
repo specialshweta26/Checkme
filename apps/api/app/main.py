@@ -84,7 +84,7 @@ async def lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Personal Assistant", lifespan=lifespan)
+app = FastAPI(title="Lumio", lifespan=lifespan)
 s = get_settings()
 app.add_middleware(
     CORSMiddleware,
