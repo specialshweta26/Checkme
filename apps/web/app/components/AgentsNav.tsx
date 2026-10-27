@@ -166,6 +166,7 @@ export function AgentsNav({
   const [showArchived, setShowArchived] = useState(false);
   const [connectors, setConnectors] = useState<{ id: string; name: string; alias?: string; slug: string }[]>([]);
   const [marketApps, setMarketApps] = useState<{ slug: string; name: string; logo?: string; connected?: boolean }[]>([]);
+  const [catalogReady, setCatalogReady] = useState(false);
   const [saving, setSaving] = useState(false);
   const pathname = usePathname();
 
@@ -177,10 +178,6 @@ export function AgentsNav({
 
   useEffect(() => {
     refresh().catch(() => undefined);
-    fetch("/api/connectors", { credentials: "include" })
-      .then((res) => res.json())
-      .then((data) => setConnectors(data.connectors || []))
-      .catch(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -242,6 +239,7 @@ export function AgentsNav({
     setError("");
     setMenu(false);
     setSaving(false);
+    setCatalogReady(false);
   }
 
   function openEdit(agent: WorkspaceAgent) {
@@ -260,12 +258,29 @@ export function AgentsNav({
     setEditingId(agent.id);
     setForm("connectors");
     setCtx(null);
-    if (!marketApps.length) {
-      fetch("/api/connectors/marketplace", { credentials: "include" })
-        .then((res) => res.json())
-        .then((data) => setMarketApps(data.apps || []))
-        .catch(() => undefined);
+    const jobs: Promise<void>[] = [];
+    if (!connectors.length) {
+      jobs.push(
+        fetch("/api/connectors", { credentials: "include" })
+          .then((res) => res.json())
+          .then((data) => setConnectors(data.connectors || []))
+          .catch(() => undefined),
+      );
     }
+    if (!marketApps.length) {
+      jobs.push(
+        fetch("/api/connectors/marketplace", { credentials: "include" })
+          .then((res) => res.json())
+          .then((data) => setMarketApps(data.apps || []))
+          .catch(() => undefined),
+      );
+    }
+    if (!jobs.length) {
+      setCatalogReady(true);
+      return;
+    }
+    setCatalogReady(false);
+    void Promise.all(jobs).finally(() => setCatalogReady(true));
   }
 
   async function onCreateAgent(e: FormEvent) {
@@ -572,16 +587,16 @@ export function AgentsNav({
                 agents={agents}
                 connectors={connectors}
                 apps={marketApps}
+                catalogReady={catalogReady}
                 assignments={roster.connector_assignments || {}}
                 toolkitAssignments={roster.toolkit_assignments || {}}
                 onSave={async (connectorId, agentIds) => {
                   await assignConnectorAgents(connectorId, agentIds);
-                  await refresh();
                 }}
                 onSaveToolkit={async (toolkit, agentIds) => {
                   await assignToolkitAgents(toolkit, agentIds);
-                  await refresh();
                 }}
+                onRefresh={refresh}
                 onError={setError}
                 onConnectApp={async (slug) => {
                   const data = await connectMarketplace(slug, editingId);
@@ -901,10 +916,12 @@ function ConnectorPicker({
   agents,
   connectors,
   apps,
+  catalogReady,
   assignments,
   toolkitAssignments,
   onSave,
   onSaveToolkit,
+  onRefresh,
   onConnectApp,
   onError,
 }: {
@@ -912,10 +929,12 @@ function ConnectorPicker({
   agents: WorkspaceAgent[];
   connectors: { id: string; name: string; alias?: string; slug: string }[];
   apps: { slug: string; name: string; logo?: string; connected?: boolean }[];
+  catalogReady: boolean;
   assignments: Record<string, string[]>;
   toolkitAssignments: Record<string, string[]>;
   onSave: (connectorId: string, agentIds: string[]) => Promise<void>;
   onSaveToolkit: (toolkit: string, agentIds: string[]) => Promise<void>;
+  onRefresh: () => Promise<void>;
   onConnectApp: (slug: string) => Promise<void>;
   onError?: (message: string) => void;
 }) {
@@ -931,7 +950,13 @@ function ConnectorPicker({
     return `${app.name} ${app.slug}`.toLowerCase().includes(q);
   });
   if (!connectors.length && !apps.length) {
-    return <p className="muted">No connectors yet. Add them on the Connectors page, then assign them here.</p>;
+    return (
+      <p className="muted">
+        {catalogReady
+          ? "No connectors yet. Add them on the Connectors page, then assign them here."
+          : "Loading connectors…"}
+      </p>
+    );
   }
   const agentIds = agents.map((a) => a.id);
   const shown = [
@@ -951,14 +976,17 @@ function ConnectorPicker({
   async function toggleShown(want: boolean) {
     setBusy("all");
     try {
-      const jobs = shown
-        .filter((row) => row.checked !== want)
-        .map((row) =>
-          row.kind === "connector"
-            ? onSave(row.conn.id, nextAssignedAgents(row.restricted, agentId, agentIds))
-            : onSaveToolkit(row.app.slug, nextAssignedAgents(row.restricted, agentId, agentIds)),
+      const jobs = shown.filter((row) => row.checked !== want);
+      for (let i = 0; i < jobs.length; i += 8) {
+        await Promise.all(
+          jobs.slice(i, i + 8).map((row) =>
+            row.kind === "connector"
+              ? onSave(row.conn.id, nextAssignedAgents(row.restricted, agentId, agentIds))
+              : onSaveToolkit(row.app.slug, nextAssignedAgents(row.restricted, agentId, agentIds)),
+          ),
         );
-      await Promise.all(jobs);
+      }
+      await onRefresh();
     } catch (err: any) {
       onError?.(err.message || "Could not update connectors");
     } finally {
@@ -1009,6 +1037,7 @@ function ConnectorPicker({
                   setBusy(conn.id);
                   try {
                     await onSave(conn.id, nextAssignedAgents(restricted, agentId, agentIds));
+                    await onRefresh();
                   } finally {
                     setBusy("");
                   }
@@ -1036,6 +1065,7 @@ function ConnectorPicker({
                   try {
                     if (!checked && !app.connected) await onConnectApp(app.slug);
                     await onSaveToolkit(app.slug, nextAssignedAgents(restricted, agentId, agentIds));
+                    await onRefresh();
                   } catch (err: any) {
                     onError?.(err.message || "Could not connect this app");
                   } finally {
@@ -1043,7 +1073,11 @@ function ConnectorPicker({
                   }
                 }}
               />
-              {app.logo ? <img className="conn-picker-logo" src={app.logo} alt="" /> : <span className="conn-picker-mark" />}
+              {app.logo ? (
+                <img className="conn-picker-logo" src={app.logo} alt="" loading="lazy" decoding="async" width={20} height={20} />
+              ) : (
+                <span className="conn-picker-mark" />
+              )}
               <span className="agent-check-name">
                 {app.name}
                 <span className="muted"> {app.connected ? "connected" : "available"}</span>

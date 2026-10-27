@@ -76,7 +76,7 @@ async def inbox_loop() -> None:
     await asyncio.sleep(30)
     while True:
         try:
-            count = await asyncio.wait_for(ingest_all_inboxes(), timeout=20)
+            count = await ingest_all_inboxes()
             if count:
                 log.info("inbox worker stored %s new messages", count)
         except asyncio.TimeoutError:

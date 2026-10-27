@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import time
 from typing import Any
 from urllib.parse import urlencode
@@ -10,10 +12,14 @@ import httpx
 
 from connector_core import ToolError, ToolSpec
 from connector_core.http import shared_client
+from app.cache import get_redis
 from app.config import get_settings
 
-_TOOLKIT_CACHE: tuple[float, str, list] | None = None
+_TOOLKIT_MEM: dict[str, tuple[float, list]] = {}
+_TOOLKIT_LOCK = asyncio.Lock()
 _TOOLKIT_TTL = 300.0
+_FULL_CATALOG_KEY = "|2000"
+_REDIS_CATALOG_KEY = "composio:toolkits:v1"
 _OAUTH_SCHEMES = frozenset({"OAUTH2", "OAUTH1", "DCR_OAUTH"})
 _KEY_SCHEMES = frozenset({"API_KEY", "BEARER_TOKEN", "BASIC", "BASIC_WITH_JWT", "CALCOM_AUTH"})
 
@@ -207,12 +213,43 @@ def _next_cursor(data: Any) -> str:
     return str(val).strip() if val else ""
 
 
-async def list_toolkits(query: str = "", limit: int = 40) -> list[dict]:
-    global _TOOLKIT_CACHE
-    cache_key = f"{query}|{limit}"
-    if _TOOLKIT_CACHE and _TOOLKIT_CACHE[1] == cache_key and time.monotonic() - _TOOLKIT_CACHE[0] < _TOOLKIT_TTL:
-        return list(_TOOLKIT_CACHE[2])
-    want = min(max(limit, 1), 2000)
+def _matches_query(row: dict, query: str) -> bool:
+    needle = query.strip().lower()
+    if not needle:
+        return True
+    return any(needle in str(row.get(key) or "").lower() for key in ("slug", "name", "description"))
+
+
+def _mem_get(key: str) -> list | None:
+    hit = _TOOLKIT_MEM.get(key)
+    if hit and time.monotonic() - hit[0] < _TOOLKIT_TTL:
+        return list(hit[1])
+    return None
+
+
+def _mem_set(key: str, rows: list) -> None:
+    _TOOLKIT_MEM[key] = (time.monotonic(), list(rows))
+
+
+async def _redis_get_catalog() -> list | None:
+    try:
+        raw = await get_redis().get(_REDIS_CATALOG_KEY)
+        if not raw:
+            return None
+        data = json.loads(raw)
+        return data if isinstance(data, list) else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+async def _redis_set_catalog(rows: list) -> None:
+    try:
+        await get_redis().set(_REDIS_CATALOG_KEY, json.dumps(rows).encode(), ex=int(_TOOLKIT_TTL))
+    except Exception:  # noqa: BLE001
+        return
+
+
+async def _fetch_catalog_pages(query: str, want: int) -> list[dict]:
     out: list[dict] = []
     seen: set[str] = set()
     cursor = ""
@@ -252,8 +289,41 @@ async def list_toolkits(query: str = "", limit: int = 40) -> list[dict]:
         if added == 0 or not nxt or nxt == cursor:
             break
         cursor = nxt
-    _TOOLKIT_CACHE = (time.monotonic(), cache_key, out)
     return out
+
+
+async def _full_catalog(*, fetch: bool) -> list[dict] | None:
+    cached = _mem_get(_FULL_CATALOG_KEY)
+    if cached is not None:
+        return cached
+    cached = await _redis_get_catalog()
+    if cached is not None:
+        _mem_set(_FULL_CATALOG_KEY, cached)
+        return cached
+    if not fetch:
+        return None
+    async with _TOOLKIT_LOCK:
+        cached = _mem_get(_FULL_CATALOG_KEY)
+        if cached is not None:
+            return cached
+        cached = await _redis_get_catalog()
+        if cached is not None:
+            _mem_set(_FULL_CATALOG_KEY, cached)
+            return cached
+        rows = await _fetch_catalog_pages("", 2000)
+        _mem_set(_FULL_CATALOG_KEY, rows)
+        await _redis_set_catalog(rows)
+        return rows
+
+
+async def list_toolkits(query: str = "", limit: int = 40) -> list[dict]:
+    want = min(max(limit, 1), 2000)
+    q = (query or "").strip()
+    catalog = await _full_catalog(fetch=not q or want >= 200)
+    if catalog is not None:
+        rows = catalog if not q else [row for row in catalog if _matches_query(row, q)]
+        return list(rows[:want])
+    return await _fetch_catalog_pages(q, want)
 
 
 async def search_tools(query: str, toolkit: str | None = None, limit: int = 12) -> list[dict]:
@@ -293,22 +363,36 @@ async def disconnect_account(account_id: str) -> dict:
 
 
 async def list_connections(user_id: str) -> list[dict]:
-    data = await composio_request(
-        "GET",
-        f"/connected_accounts?{urlencode({'user_ids': user_id, 'limit': 50})}",
-        timeout=httpx.Timeout(20.0, connect=8.0),
-    )
-    out = []
-    for item in _items(data):
-        toolkit = item.get("toolkit") if isinstance(item.get("toolkit"), dict) else {}
-        out.append(
-            {
-                "id": item.get("id") or item.get("nano_id"),
-                "status": item.get("status"),
-                "toolkit": toolkit.get("slug") or item.get("toolkit_slug"),
-                "created_at": item.get("created_at"),
-            }
+    out: list[dict] = []
+    cursor = ""
+    pages = 0
+    while pages < 5:
+        pages += 1
+        params: dict[str, Any] = {"user_ids": user_id, "limit": 50}
+        if cursor:
+            params["cursor"] = cursor
+        data = await composio_request(
+            "GET",
+            f"/connected_accounts?{urlencode(params)}",
+            timeout=httpx.Timeout(8.0, connect=3.0),
         )
+        batch = _items(data)
+        if not batch:
+            break
+        for item in batch:
+            toolkit = item.get("toolkit") if isinstance(item.get("toolkit"), dict) else {}
+            out.append(
+                {
+                    "id": item.get("id") or item.get("nano_id"),
+                    "status": item.get("status"),
+                    "toolkit": toolkit.get("slug") or item.get("toolkit_slug"),
+                    "created_at": item.get("created_at"),
+                }
+            )
+        nxt = _next_cursor(data)
+        if not nxt or nxt == cursor:
+            break
+        cursor = nxt
     return out
 
 
@@ -440,6 +524,15 @@ async def connect_custom(user_id: str, toolkit: str, scheme: str, credentials: d
     }
 
 
+def _public_toolkit(info: dict) -> dict:
+    row = _toolkit_row(info) if info else {}
+    return {
+        "name": row.get("name") or info.get("name") or "",
+        "logo": row.get("logo") or "",
+        "description": (row.get("description") or "")[:240],
+    }
+
+
 async def start_connect(user_id: str, toolkit: str, callback_url: str, credentials: dict | None = None) -> dict:
     info = {}
     try:
@@ -447,14 +540,13 @@ async def start_connect(user_id: str, toolkit: str, callback_url: str, credentia
     except Exception:  # noqa: BLE001
         info = {}
     if not info:
-        try:
-            apps = await list_toolkits(toolkit, 8)
-            info = next((row for row in apps if str(row.get("slug") or "").lower() == toolkit), {}) or {}
-        except Exception:  # noqa: BLE001
-            info = {}
+        catalog = await _full_catalog(fetch=False)
+        if catalog:
+            info = next((row for row in catalog if str(row.get("slug") or "").lower() == toolkit), {}) or {}
     scheme, fields = _initiation(info) if info else ("OAUTH2", [])
+    meta = _public_toolkit(info)
     if scheme == "NO_AUTH":
-        return await connect_custom(user_id, toolkit, "NO_AUTH", credentials or {})
+        return {**await connect_custom(user_id, toolkit, "NO_AUTH", credentials or {}), **meta, "name": meta.get("name") or toolkit}
     if scheme in _KEY_SCHEMES:
         supplied = {str(k): str(v).strip() for k, v in (credentials or {}).items() if str(v).strip()}
         missing = [f["name"] for f in fields if f.get("name") and f["name"] not in supplied]
@@ -464,11 +556,11 @@ async def start_connect(user_id: str, toolkit: str, callback_url: str, credentia
                 "needs_credentials": True,
                 "scheme": scheme,
                 "fields": fields,
-                "name": info.get("name") or toolkit,
-                "logo": (info.get("meta") or {}).get("logo") if isinstance(info.get("meta"), dict) else info.get("logo"),
-                "description": ((info.get("meta") or {}).get("description") if isinstance(info.get("meta"), dict) else "")[:240],
+                "name": meta.get("name") or toolkit,
+                "logo": meta.get("logo"),
+                "description": meta.get("description") or "",
             }
-        return await connect_custom(user_id, toolkit, scheme, supplied)
+        return {**await connect_custom(user_id, toolkit, scheme, supplied), **meta, "name": meta.get("name") or toolkit}
     auth_config_id = await ensure_auth_config(toolkit, "OAUTH2")
     data = await composio_request(
         "POST",
@@ -480,6 +572,9 @@ async def start_connect(user_id: str, toolkit: str, callback_url: str, credentia
         "redirect_url": data.get("redirect_url") or data.get("redirectUrl"),
         "connected_account_id": data.get("connected_account_id"),
         "expires_at": data.get("expires_at"),
+        "name": meta.get("name") or toolkit,
+        "logo": meta.get("logo"),
+        "description": meta.get("description") or "",
     }
 
 
@@ -514,20 +609,12 @@ async def call_composio(row, name: str, args: dict[str, Any]) -> Any:
         callback = f"{get_settings().public_web_url.rstrip('/')}/connectors?composio=connected"
         creds = args.get("credentials") if isinstance(args.get("credentials"), dict) else None
         data = await start_connect(user_id, toolkit, callback, creds)
-        meta: dict = {}
-        try:
-            apps = await list_toolkits(toolkit, 8)
-            meta = next((row for row in apps if str(row.get("slug") or "").lower() == toolkit), {}) or {}
-            if not meta and apps:
-                meta = apps[0]
-        except Exception:  # noqa: BLE001
-            meta = {}
         return {
             **data,
             "toolkit": toolkit,
-            "name": data.get("name") or meta.get("name") or toolkit,
-            "logo": data.get("logo") or meta.get("logo"),
-            "description": data.get("description") or (meta.get("description") or "")[:240],
+            "name": data.get("name") or toolkit,
+            "logo": data.get("logo"),
+            "description": (data.get("description") or "")[:240],
         }
     if name == "list_connections":
         return {"connections": await list_connections(user_id)}

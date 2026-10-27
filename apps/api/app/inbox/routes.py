@@ -62,23 +62,19 @@ async def inbox_events(user: User = Depends(current_user)):
 
     async def gen():
         last = None
-        ticks = 0
         while True:
             try:
                 async with SessionLocal() as db:
                     current = await db.get(User, user_id)
                     if current is None:
                         break
-                    if ticks > 0 and ticks % 15 == 0:
-                        await service.refresh_mailboxes(db, current, unread_only=False, classify=False)
                     badge = await service.badge(db, current)
-                    inbox = await service.list_inbox(db, current, live=False, mark_seen=False)
                 payload = {
                     "count": badge.get("count") or 0,
                     "pending": badge.get("pending") or 0,
                     "items": badge.get("items") or [],
-                    "inbox": inbox.get("items") or [],
-                    "connected": inbox.get("connected", True),
+                    "inbox": badge.get("inbox") or [],
+                    "connected": badge.get("connected", True),
                 }
                 stamp = (
                     payload["count"],
@@ -95,7 +91,6 @@ async def inbox_events(user: User = Depends(current_user)):
             except Exception:  # noqa: BLE001
                 log.exception("inbox stream failed")
                 yield "event: error\ndata: {}\n\n"
-            ticks += 1
             await asyncio.sleep(2)
 
     return StreamingResponse(

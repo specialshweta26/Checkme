@@ -1,7 +1,7 @@
 "use client";
 
 import { DeployPlatforms } from "../components/DeployPlatforms";
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, memo, useEffect, useMemo, useState } from "react";
 import { AppShell } from "../components/AppShell";
 import {
   assignConnectorAgents,
@@ -107,14 +107,13 @@ export default function ConnectorsPage() {
   }
 
   async function refresh() {
-    const res = await fetch("/api/connectors", { credentials: "include" });
+    const [res, roster] = await Promise.all([fetch("/api/connectors", { credentials: "include" }), loadWorkspace()]);
     if (res.status === 401) {
       window.location.replace("/");
       return;
     }
     const data = await res.json();
     setRows(data.connectors || []);
-    const roster = await loadWorkspace();
     setAgents((roster.agents || []).filter((a) => !a.archived));
     setAssignments(roster.connector_assignments || {});
     setToolkitAssignments(roster.toolkit_assignments || {});
@@ -358,23 +357,7 @@ export default function ConnectorsPage() {
               <strong>Apps</strong>
               <span className="muted">{filteredRail.length}</span>
             </div>
-            <div className="conn-icons" role="list">
-              {filteredRail.map((item) => (
-                <button
-                  key={item.key}
-                  type="button"
-                  role="listitem"
-                  aria-pressed={item.key === selected}
-                  className={`conn-icon${item.key === selected ? " on" : ""}${item.connected ? " live" : ""}`}
-                  title={item.title}
-                  aria-label={item.title}
-                  onClick={() => setSelected(item.key)}
-                >
-                  <RailMark item={item} />
-                  <span className="conn-icon-name">{item.title}</span>
-                </button>
-              ))}
-            </div>
+            <CatalogRail items={filteredRail} selected={selected} onSelect={setSelected} />
           </section>
           <section className="conn-inspector">
             {current?.kind === "github" ? (
@@ -468,13 +451,45 @@ export default function ConnectorsPage() {
   );
 }
 
-function RailMark({ item }: { item: RailItem }) {
-  if (item.kind === "app" && item.logo) return <img src={item.logo} alt="" />;
+const CatalogRail = memo(function CatalogRail({
+  items,
+  selected,
+  onSelect,
+}: {
+  items: RailItem[];
+  selected: string;
+  onSelect: (key: string) => void;
+}) {
+  return (
+    <div className="conn-icons" role="list">
+      {items.map((item) => (
+        <button
+          key={item.key}
+          type="button"
+          role="listitem"
+          aria-pressed={item.key === selected}
+          className={`conn-icon${item.key === selected ? " on" : ""}${item.connected ? " live" : ""}`}
+          title={item.title}
+          aria-label={item.title}
+          onClick={() => onSelect(item.key)}
+        >
+          <RailMark item={item} />
+          <span className="conn-icon-name">{item.title}</span>
+        </button>
+      ))}
+    </div>
+  );
+});
+
+const RailMark = memo(function RailMark({ item }: { item: RailItem }) {
+  if (item.kind === "app" && item.logo) {
+    return <img src={item.logo} alt="" loading="lazy" decoding="async" width={36} height={36} />;
+  }
   if (item.kind === "connector" && item.connector.slug === "gmail") return <GoogleMark />;
   if (item.kind === "connector" && (item.connector.slug === "outlook" || item.connector.provider === "microsoft")) return <MicrosoftMark />;
   const letter = (item.title || "?").slice(0, 1).toUpperCase();
   return <span className="conn-icon-mark">{letter}</span>;
-}
+});
 
 function AgentAssign({
   agents,

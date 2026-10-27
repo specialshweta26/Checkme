@@ -1,4 +1,4 @@
-from app.connectors.composio_box import _auth_kind, _initiation, _toolkit_row
+from app.connectors.composio_box import _auth_kind, _initiation, _matches_query, _toolkit_row
 
 
 def test_auth_kind_oauth_vs_api_key():
@@ -39,3 +39,10 @@ def test_initiation_falls_back_to_auth_kind():
     scheme, fields = _initiation({"auth_schemes": ["API_KEY"], "composio_managed_auth_schemes": []})
     assert scheme == "API_KEY"
     assert fields[0]["name"] == "generic_api_key"
+
+
+def test_matches_query_uses_slug_name_and_description():
+    row = {"slug": "serpapi", "name": "SerpApi", "description": "search results"}
+    assert _matches_query(row, "serp")
+    assert _matches_query(row, "RESULTS")
+    assert not _matches_query(row, "gmail")

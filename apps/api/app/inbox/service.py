@@ -534,16 +534,20 @@ async def _ingest_locked(
         except Exception as exc:  # noqa: BLE001
             log.warning("inbox list failed for %s: %s", runtime.slug, exc)
             continue
+        mids = [msg.get("message_id") for msg in listed if msg.get("message_id")]
+        existing: dict[str, InboxItem] = {}
+        if mids:
+            existing = {
+                item.message_id: item
+                for item in (
+                    await db.execute(select(InboxItem).where(InboxItem.user_id == user.id, InboxItem.message_id.in_(mids)))
+                ).scalars()
+            }
         for msg in listed:
-            await asyncio.sleep(0)
             mid = msg.get("message_id")
             if not mid:
                 continue
-            row = (
-                await db.execute(
-                    select(InboxItem).where(InboxItem.user_id == user.id, InboxItem.message_id == mid)
-                )
-            ).scalar_one_or_none()
+            row = existing.get(mid)
             if row is None:
                 row = InboxItem(
                     user_id=user.id,
@@ -562,6 +566,7 @@ async def _ingest_locked(
                     status="pending",
                 )
                 db.add(row)
+                existing[mid] = row
                 arrived += 1
             else:
                 row.unread = bool(msg.get("unread", row.unread))
