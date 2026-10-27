@@ -218,13 +218,36 @@ async def test_confirmation_for_one_branch_does_not_cover_another(app_on):
     assert out["status"] == "awaiting_user_confirmation"
 
 
-async def test_push_without_connection_is_blocked_with_connect_steps(monkeypatch):
+async def test_push_without_connection_hands_over_github_cli_login(monkeypatch):
+    from app.agent import cli_login
+
     _connect(monkeypatch, connected=False)
+    seen = []
+
+    async def fake_login(ctx, key, why=""):
+        seen.append(key)
+        return {"status": "awaiting_user_login", "platform": "github", "url": "https://github.com/login/device", "code": "ABCD-1234"}
+
+    monkeypatch.setattr(cli_login, "ensure_login", fake_login)
     calls = []
     ctx = _ctx(calls, stdout="creds=none")
     out = await git_tools.push_branch(ctx, "octo/app", "agent/x")
-    assert out["status"] == "blocked" and "Composio" in out["connect"]
-    assert "waiting_for='github'" in out["next"] and ctx.pending == []
+    assert seen == ["github"] and out["status"] == "awaiting_user_login" and out["url"] == "https://github.com/login/device"
+    assert out["patch_dir"].endswith("app-agent-x") and ctx.pending == []
+
+
+async def test_push_after_github_cli_login_goes_to_the_card(monkeypatch):
+    from app.agent import cli_login
+
+    _connect(monkeypatch, connected=False)
+
+    async def fake_login(ctx, key, why=""):
+        return {"status": "logged_in", "platform": "github", "via": "cli_session"}
+
+    monkeypatch.setattr(cli_login, "ensure_login", fake_login)
+    ctx = _ctx([], stdout="creds=none")
+    out = await git_tools.push_branch(ctx, "octo/app", "agent/x")
+    assert out["status"] == "awaiting_user_confirmation" and ctx.pending
 
 
 async def test_push_without_any_credentials_says_how_to_fix(monkeypatch):
@@ -237,7 +260,7 @@ async def test_push_without_any_credentials_says_how_to_fix(monkeypatch):
     ctx.call_impl = fail_call
     out = await git_tools.run_push(ctx, {"repo": "octo/app", "branch": "agent/x", "open_pr": True})
     assert out["pushed"] is False and out["via"] == "sandbox_credentials"
-    assert "Connectors" in out["hint"] and "Composio" in out["hint"]
+    assert "signs the GitHub CLI in" in out["hint"]
 
 
 async def test_github_status_never_carries_the_token(app_on):
@@ -272,7 +295,7 @@ def test_coding_agent_gets_git_tools_and_shell_steers_to_them():
 def test_readiness_points_to_composio_when_github_not_connected():
     conns = {"computer": SimpleNamespace(slug="computer", name="Computer", provider="daytona", alias="", description="", tags=[])}
     out = coding.readiness(conns, {"git": "git 2"}, "", {"configured": True, "connected": False})
-    assert any("Connectors" in m and "Composio" in m for m in out["missing"])
+    assert not any("GitHub" in m for m in out["missing"]) and any("GitHub CLI" in c for c in out["can"])
     ok = coding.readiness(conns, {"git": "git 2"}, "", {"configured": True, "connected": True, "login": "octo", "git_transport": "api"})
     assert any("@octo" in c for c in ok["can"])
     assert not any("GitHub" in m for m in ok["missing"])

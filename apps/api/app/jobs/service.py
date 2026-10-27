@@ -183,6 +183,11 @@ def clean_question(raw: Any) -> dict | None:
         out["waiting_for"] = str(raw["waiting_for"])[:40]
     if raw.get("pr"):
         out["pr"] = raw["pr"]
+    if raw.get("needs_code"):
+        out["needs_code"] = True
+    login = raw.get("login")
+    if isinstance(login, dict) and str(login.get("url") or "").startswith("https://"):
+        out["login"] = {k: clip(str(login.get(k) or ""), 600) for k in ("platform", "url", "code")}
     return out
 
 
@@ -294,6 +299,13 @@ def apply_outcome(job: AgentJob, query: str, result: dict) -> list[JobEvent]:
     return events
 
 
+def is_code_answer(job: AgentJob, text: str) -> bool:
+    """The reply is a pasted CLI authorization code (so the chat copy should be redacted)."""
+    q = (job.meta or {}).get("question") or {}
+    return (job.status == "waiting_input" and str(q.get("waiting_for") or "").startswith("login_") and bool(q.get("needs_code"))
+            and (text or "").strip() not in (q.get("options") or []))
+
+
 def answer(job: AgentJob, text: str) -> list[JobEvent]:
     """The user picked an option (or typed a reply) for the job's question."""
     if job.status != "waiting_input":
@@ -304,6 +316,23 @@ def answer(job: AgentJob, text: str) -> list[JobEvent]:
     if not text:
         raise JobError("Empty answer.")
     extra = ""
+    wf = str(q.get("waiting_for") or "")
+    if wf.startswith("login_") and q.get("needs_code") and text not in (q.get("options") or []):
+        # A pasted CLI authorization code: keep it encrypted for the next run's ensure_login, never in the
+        # prompt or the timeline.
+        from app.security import encrypt
+
+        codes = dict(meta.get("login_codes") or {})
+        codes[wf[len("login_"):]] = encrypt({"code": text.split()[0] if text.split() else text})
+        meta["login_codes"] = codes
+        meta["next_query"] = (
+            f"The user pasted the authorization code for {wf[len('login_'):]}. Call the same tool again (deploy / "
+            "git_checkout); it finishes the sign-in with the stored code."
+        )
+        job.meta = meta
+        job.status = "queued"
+        job.finished_at = None
+        return [event(job, "status", "You sent the authorization code", {"status": "queued", "answer": "[authorization code]"})]
     if q.get("pr"):
         pr = q["pr"]
         extra = (

@@ -1,4 +1,5 @@
-"""Deploy (PR #17): detection, routing, commands, approval cards, secret handling. All CLIs/sandboxes mocked."""
+"""Deploy: detection, routing, CLI sign-in handoff, generated configs, approval cards, secret handling.
+All CLIs/sandboxes mocked."""
 
 import asyncio
 import uuid
@@ -6,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.agent import coding, deploy, git_tools
+from app.agent import cli_login, coding, deploy, deploy_config, git_tools
 
 SECRET = "rnd_SuperSecretTokenValue1234567890"
 
@@ -32,7 +33,9 @@ def run(coro):
 
 @pytest.fixture
 def fake(monkeypatch):
-    state = SimpleNamespace(saved={}, env={}, calls=[], records=[], exit=0, output="Deployed https://app.onrender.com done")
+    state = SimpleNamespace(saved={}, env={}, calls=[], records=[], exit=0, output="Deployed https://app.onrender.com done",
+                            handler=None, logins=[], login={"status": "logged_in", "platform": "x", "via": "cli_session"},
+                            checkout={"ok": True})
 
     async def saved_env_names(ctx):
         return state.saved
@@ -42,16 +45,35 @@ def fake(monkeypatch):
 
     async def _exec(ctx, script, timeout, env=None):
         state.calls.append({"script": script, "timeout": timeout, "env": env})
+        if state.handler is not None:
+            got = state.handler(script)
+            if got is not None:
+                return got
         return {"exit_code": state.exit, "output": state.output}
 
     async def _record(ctx, kind, text, data):
         state.records.append((kind, text, data))
 
+    async def ensure_login(ctx, key, why=""):
+        state.logins.append(key)
+        if state.login.get("status") == "awaiting_user_login":
+            ctx.question = {"question": "Sign in", "options": ["I've signed in", "Cancel"], "waiting_for": f"login_{key}"}
+        return dict(state.login, platform=key)
+
+    async def ensure_checkout(ctx, repo):
+        return dict(state.checkout)
+
     monkeypatch.setattr(deploy, "saved_env_names", saved_env_names)
     monkeypatch.setattr(deploy, "load_env", load_env)
     monkeypatch.setattr(deploy, "_exec", _exec)
     monkeypatch.setattr(deploy, "_record", _record)
+    monkeypatch.setattr(deploy, "_ensure_checkout", ensure_checkout)
+    monkeypatch.setattr(cli_login, "ensure_login", ensure_login)
     return state
+
+
+def _deploy_runs(state, needle):
+    return [c for c in state.calls if needle in c["script"]]
 
 
 # --- detection -----------------------------------------------------------------------------------------
@@ -191,20 +213,20 @@ def test_connector_for_prefers_mcp_and_skips_github():
     assert deploy.connector_for({"render": RENDER_MCP}, deploy.PLATFORMS["vercel"]) is None
 
 
-def test_route_for_connector_cli_connect():
+def test_route_for_connector_key_or_cli_login():
     p = deploy.PLATFORMS["vercel"]
-    assert deploy.route_for(p, {}, {"vercel": deploy.env_names(p)})["route"] == "cli"
+    assert deploy.route_for(p, {}, {"vercel": deploy.env_names(p)})["auth"] == "saved_key"
     r = deploy.route_for(p, {}, {})
-    assert r["route"] == "connect" and r["connect_url"].endswith("deploy=vercel")
+    assert r["route"] == "cli" and r["auth"] == "cli_login" and "sign-in" in r["how"] and "Connectors" not in r["how"]
     assert deploy.route_for(deploy.PLATFORMS["render"], {"render": RENDER_MCP}, {})["route"] == "connector"
 
 
-def test_add_readiness_lists_ready_platforms():
+def test_add_readiness_never_blocks():
     p = deploy.PLATFORMS["fly"]
     out = deploy.add_readiness({"missing": ["No deploy connector"], "can": []}, {"render": RENDER_MCP}, {"fly": [e for e, _ in p.env]})
-    assert set(out["deploy"]["ready"]) == {"render", "fly"}
-    assert out["deploy"]["connect_url"].endswith("deploy=all")
-    assert not any("No deploy connector" in m for m in out.get("missing", []))
+    assert set(out["deploy"]["ready"]) == set(deploy.PLATFORMS)
+    assert out["deploy"]["keys_optional_at"].endswith("deploy=all")
+    assert not out["missing"] and any("signs in through one link" in c for c in out["can"])
 
 
 def test_is_deploy_write_gates_writes_not_reads():
@@ -236,36 +258,48 @@ def test_request_prefers_connector(fake):
     assert out["status"] == "use_connector" and not ctx.pending and not fake.calls
 
 
-def test_request_blocked_gives_connect_link(fake):
+def test_request_without_key_starts_cli_login(fake):
+    fake.login = {"status": "awaiting_user_login", "url": "https://vercel.com/oauth/device?user_code=ABCD-EFGH", "code": "ABCD-EFGH"}
     ctx = _ctx()
     out = run(deploy.request_action(ctx, "deploy", "o/r", "vercel", {}))
-    assert out["status"] == "blocked" and out["connect_url"].endswith("deploy=vercel")
-    assert "VERCEL_TOKEN" in out["missing"] and "deploy_vercel" in out["next"]
-    assert not ctx.pending and not fake.calls
+    assert out["status"] == "awaiting_user_login" and out["url"].startswith("https://vercel.com/oauth/device")
+    assert fake.logins == ["vercel"] and ctx.question["waiting_for"] == "login_vercel"
+    assert not ctx.pending and not _deploy_runs(fake, "vercel deploy")
+    assert "connect_url" not in out and "Connectors" not in str(out)
+
+
+def test_request_with_cli_session_creates_card(fake):
+    ctx = _ctx()
+    out = run(deploy.request_action(ctx, "deploy", "o/r", "vercel", {}))
+    assert out["status"] == "awaiting_user_confirmation" and fake.logins == ["vercel"]
+    pv = ctx.pending[0]["preview"]
+    assert "CLI session" in pv["credentials"] and pv["cost"].startswith("Vercel Hobby") and pv["repo"] == "o/r"
+    assert not _deploy_runs(fake, "vercel deploy")
 
 
 def test_request_creates_card_and_never_runs(fake):
-    fake.saved = {"render": ["RENDER_API_KEY"]}
+    fake.env = {"RENDER_API_KEY": SECRET}
     ctx = _ctx(connectors={"render": RENDER_MCP})
     out = run(deploy.request_action(ctx, "deploy", "o/r", "render", {"service": "srv-1"}, use_cli=True))
     assert out["status"] == "awaiting_user_confirmation"
-    assert not fake.calls, "nothing may run before the user approves"
+    assert not _deploy_runs(fake, "render deploys create"), "nothing may deploy before the user approves"
     card = ctx.pending[0]
     assert card["needs_confirm"] and card["kind"] == "deploy" and "Render" in card["title"]
-    assert "RENDER_API_KEY" in card["preview"]["credentials"] and SECRET not in str(card)
+    pv = card["preview"]
+    assert pv["service"] == "srv-1" and pv["region"] == "singapore" and "free" in pv["cost"].lower()
+    assert "saved Render key" in pv["credentials"] and SECRET not in str(card) and not fake.logins
 
 
 def test_request_runs_only_with_exact_confirmation(fake):
-    fake.saved = {"render": ["RENDER_API_KEY"]}
     fake.env = {"RENDER_API_KEY": SECRET}
     args = {"action": "deploy", "repo": "o/r", "platform": "render", "params": {"service": "srv-1"}, "cwd": "."}
     other = {**args, "params": {"service": "srv-2"}}
     ctx = _ctx(confirmations=[{"slug": coding.CODING_SLUG, "tool": "deploy_action", "args": other}])
     run(deploy.request_action(ctx, "deploy", "o/r", "render", {"service": "srv-1"}))
-    assert not fake.calls and ctx.pending
+    assert not _deploy_runs(fake, "render deploys create") and ctx.pending
     ctx = _ctx(confirmations=[{"slug": coding.CODING_SLUG, "tool": "deploy_action", "args": args}])
     out = run(deploy.request_action(ctx, "deploy", "o/r", "render", {"service": "srv-1"}))
-    assert out["ok"] and fake.calls and not ctx.pending
+    assert out["ok"] and _deploy_runs(fake, "render deploys create") and not ctx.pending
 
 
 def test_run_action_passes_env_and_records(fake):
@@ -285,9 +319,18 @@ def test_run_action_failure_suggests_fix(fake):
     assert not out["ok"] and "next" in out and "failed" in fake.records[-1][1]
 
 
-def test_run_action_blocked_when_credential_removed(fake):
-    out = run(deploy.run_action(_ctx(), {"action": "deploy", "repo": "o/r", "platform": "render", "params": {"service": "srv-1"}, "cwd": "."}))
-    assert out["status"] == "blocked" and not fake.calls
+def test_run_action_without_session_hands_over_login_and_keeps_approval(fake):
+    fake.login = {"status": "awaiting_user_login", "url": "https://dashboard.render.com/device-authorization/X1", "code": "X1"}
+    args = {"action": "deploy", "repo": "o/r", "platform": "render", "params": {"service": "srv-1"}, "cwd": "."}
+    job = SimpleNamespace(meta={})
+    ctx = _ctx(job=job, confirmations=[{"slug": coding.CODING_SLUG, "tool": "deploy_action", "args": args}])
+    out = run(deploy.run_action(ctx, args))
+    assert out["status"] == "awaiting_user_login" and not _deploy_runs(fake, "render deploys")
+    # after sign-in the resumed run deploys the same approved args without a second card
+    fake.login = {"status": "logged_in"}
+    ctx2 = _ctx(job=job)
+    out = run(deploy.request_action(ctx2, "deploy", "o/r", "render", {"service": "srv-1"}))
+    assert out["ok"] and not ctx2.pending and _deploy_runs(fake, "render deploys create")
 
 
 def test_run_action_rejects_tampered_args(fake):
@@ -307,7 +350,8 @@ def test_detect_deploy_targets_routes(fake):
     fake.output = "@@FILE render.yaml\nservices:\n  - name: api\n@@END\n@@FILE Dockerfile\nFROM x\n@@END\n"
     out = run(deploy.detect_deploy_targets(_ctx(), "o/r"))
     assert {t["platform"] for t in out["targets"]} == {"render", "container"}
-    assert "fly" in out["platforms"] and out["platforms"]["render"]["route"] == "connect"
+    assert "fly" in out["platforms"] and out["platforms"]["render"]["auth"] == "cli_login"
+    assert "suggested" not in out
 
 
 def test_run_confirmed_dispatches_deploy(monkeypatch):
@@ -414,3 +458,262 @@ def test_deploy_routes_save_list_forget(monkeypatch):
     assert decrypt_json(db.rows[0].credentials_enc)["RENDER_API_KEY"] == SECRET
     run(dr.forget("render", user=user, db=db))
     assert not db.rows
+
+
+
+# --- autonomous deploys: checkout, stack detection, generated config, Render create, retries -------------
+
+NEXT_STACK = (
+    '@@STACK {"files": ["app", "package.json", "package-lock.json"], "package": {"name": "testing", "scripts": '
+    '{"dev": "next dev", "build": "next build", "start": "next start"}, "deps": ["next", "react", "openai"]}, '
+    '"env_keys": ["OPENAI_API_KEY"], "locks": ["package-lock.json"]}\n@@BRANCH main\n'
+)
+
+
+def _repo_handler(script):
+    if "@@FILE" in script or "find ." in script and "render.yaml" in script:
+        return {"exit_code": 0, "output": ""}
+    if "@@STACK" in script:
+        return {"exit_code": 0, "output": NEXT_STACK}
+    return None
+
+
+def test_checkout_failure_or_login_is_returned_before_anything_else(fake):
+    fake.checkout = {"status": "awaiting_user_login", "platform": "github", "url": "https://github.com/login/device", "code": "AB-CD"}
+    ctx = _ctx()
+    out = run(deploy.request_action(ctx, "deploy", "o/private", "render", {}))
+    assert out["status"] == "awaiting_user_login" and out["platform"] == "github" and not fake.calls and not ctx.pending
+    out = run(deploy.detect_deploy_targets(_ctx(), "o/private"))
+    assert out["status"] == "awaiting_user_login"
+
+
+def test_detect_without_config_suggests_platform_and_stack(fake):
+    fake.handler = _repo_handler
+    out = run(deploy.detect_deploy_targets(_ctx(), "specialshweta26/testing"))
+    assert out["targets"] == [] and out["stack"]["kind"] == "next" and out["stack"]["env_keys"] == ["OPENAI_API_KEY"]
+    assert out["suggested"]["platform"] in deploy.PLATFORMS and "render" in out["platforms"]
+    assert "Ask the user" not in out["note"] and "deploy(platform" in out["note"]
+
+
+def test_render_first_deploy_creates_service_from_repo(fake):
+    fake.handler = _repo_handler
+    ctx = _ctx()
+    out = run(deploy.request_action(ctx, "deploy", "specialshweta26/testing", "render", {}))
+    assert out["status"] == "awaiting_user_confirmation"
+    pv = ctx.pending[0]["preview"]
+    assert "create node web service 'testing' (free, singapore)" in pv["command"]
+    assert pv["branch"] == "main" and pv["service"] == "testing" and pv["region"] == "singapore"
+    # the signed args carry the Render spec, so the approved run uses exactly what the card showed
+    from app.agent.confirm import read_confirm
+
+    create = read_confirm(ctx.pending[0]["token"])["payload"]["args"]["create"]
+    assert create["serviceDetails"]["plan"] == "free" and create["repo"] == "https://github.com/specialshweta26/testing"
+    assert create["serviceDetails"]["envSpecificDetails"] == {"buildCommand": "npm ci && npm run build", "startCommand": "npm run start"}
+
+
+def test_render_create_run_reports_live_url_and_probes_it(fake):
+    def handler(script):
+        if "api.render.com/v1" in script:
+            return {"exit_code": 0, "output": '@@RENDER {"service": "srv-9", "url": "https://testing-x.onrender.com", "dashboard": "https://dashboard.render.com/web/srv-9"}\n'
+                                              '@@RENDER {"ok": true, "status": "live", "service": "srv-9", "url": "https://testing-x.onrender.com"}\n'}
+        if "curl -s -o /dev/null" in script:
+            return {"exit_code": 0, "output": "200"}
+        return None
+
+    fake.handler = handler
+    create = deploy_config.render_spec({"kind": "next", "runtime": "node", "build": "npm ci && npm run build", "start": "npm start"},
+                                       "testing", "https://github.com/o/testing", "main")
+    args = {"action": "deploy", "repo": "o/testing", "platform": "render", "params": {}, "cwd": ".", "create": create}
+    out = run(deploy.run_action(_ctx(confirmations=[{"slug": coding.CODING_SLUG, "tool": "deploy_action", "args": args}]), args))
+    assert out["ok"] and out["live_url"] == "https://testing-x.onrender.com" and out["http_status"] == 200
+    assert out["service"] == "srv-9" and fake.records[-1][2]["url"] == "https://testing-x.onrender.com"
+    script = _deploy_runs(fake, "api.render.com/v1")[0]["script"]
+    assert "cli.yaml" in script and SECRET not in script and "$RK" in script
+
+
+def test_render_payment_required_is_a_human_step(fake):
+    fake.handler = lambda s: ({"exit_code": 7, "output": '@@RENDER {"ok": false, "status": 402, "error": "Render needs a payment method", '
+                                                         '"human": "https://dashboard.render.com/billing"}'} if "api.render.com" in s else None)
+    create = deploy_config.render_spec({"kind": "node", "runtime": "node", "build": "npm i", "start": "npm start"}, "a", "https://github.com/o/a", "main")
+    args = {"action": "deploy", "repo": "o/a", "platform": "render", "params": {}, "cwd": ".", "create": create}
+    out = run(deploy.run_action(_ctx(), args))
+    assert not out["ok"] and out["human_step"]["url"] == "https://dashboard.render.com/billing"
+
+
+def test_failed_deploy_retries_reuse_the_approval_a_bounded_number_of_times(fake):
+    fake.exit, fake.output = 1, "build failed"
+    args = {"action": "deploy", "repo": "o/r", "platform": "vercel", "params": {}, "cwd": "."}
+    job = SimpleNamespace(meta={})
+    out = run(deploy.run_action(_ctx(job=job, confirmations=[{"slug": coding.CODING_SLUG, "tool": "deploy_action", "args": args}]), args))
+    assert not out["ok"] and "retries reuse this approval" in out["next"]
+    runs = 0
+    for _ in range(deploy.GRANT_RETRIES + 1):
+        ctx = _ctx(job=job)
+        out = run(deploy.request_action(ctx, "deploy", "o/r", "vercel", {}))
+        if ctx.pending:
+            break
+        runs += 1
+    assert runs == deploy.GRANT_RETRIES and ctx.pending, "after the bounded retries a new approval card is required"
+
+
+def test_rollback_never_reuses_a_grant(fake):
+    args = {"action": "rollback", "repo": "o/r", "platform": "vercel", "params": {}, "cwd": "."}
+    job = SimpleNamespace(meta={})
+    run(deploy.run_action(_ctx(job=job, confirmations=[{"slug": coding.CODING_SLUG, "tool": "deploy_action", "args": args}]), args))
+    ctx = _ctx(job=job)
+    out = run(deploy.request_action(ctx, "rollback", "o/r", "vercel", {}))
+    assert out["status"] == "awaiting_user_confirmation" and ctx.pending
+
+
+def test_expired_cli_session_relogs_in(fake, monkeypatch):
+    fake.exit, fake.output = 1, "Error: not logged in. Please run vercel login"
+    seq = [{"status": "logged_in"}, {"status": "awaiting_user_login", "url": "https://vercel.com/oauth/device?user_code=Q", "code": "Q"}]
+
+    async def ensure_login(ctx, key, why=""):
+        fake.logins.append(key)
+        return dict(seq.pop(0), platform=key)
+
+    monkeypatch.setattr(cli_login, "ensure_login", ensure_login)
+    args = {"action": "deploy", "repo": "o/r", "platform": "vercel", "params": {}, "cwd": "."}
+    out = run(deploy.run_action(_ctx(job=SimpleNamespace(meta={})), args))
+    assert out["status"] == "awaiting_user_login" and fake.logins == ["vercel", "vercel"]
+
+
+def test_no_platform_named_picks_default_and_says_so(fake):
+    fake.handler = _repo_handler
+    ctx = _ctx()
+    out = run(deploy.request_action(ctx, "deploy", "o/testing", "", {}))
+    assert out["status"] == "awaiting_user_confirmation" and "No platform was named" in out["note"]
+    assert ctx.pending[0]["preview"]["why_platform"]
+
+
+def test_aws_without_iac_is_refused_honestly(fake):
+    out = run(deploy.request_action(_ctx(), "deploy", "o/r", "aws", {}))
+    assert "infrastructure-as-code" in out["error"] and not fake.logins
+
+
+def test_defaults_fill_names_and_india_regions(fake):
+    p = deploy.PLATFORMS
+    assert deploy._defaults(p["azure"], "deploy", {}, "My App", []) == {"app": "my-app", "group": "my-app-rg", "region": "centralindia"}
+    assert deploy._defaults(p["gcloud"], "deploy", {}, "x", []) == {"flavor": "run", "service": "x", "region": "asia-south1"}
+    assert deploy._defaults(p["fly"], "deploy", {}, "x", [])["app"] == "x"
+    cmd = deploy.command(p["fly"], "deploy", {"app": "x"}, name="x")
+    assert "flyctl launch --no-deploy" in cmd and "--region bom" in cmd
+    assert "--site-name app" in deploy.command(p["netlify"], "deploy", {}, name="app")
+    assert '${VERCEL_TOKEN:+--token "$VERCEL_TOKEN"}' in deploy.command(p["vercel"], "deploy", {})
+
+
+def test_generate_config_writes_without_overwriting(fake):
+    def handler(script):
+        r = _repo_handler(script)
+        if r is not None:
+            return r
+        if "base64 -d" in script:
+            return {"exit_code": 0, "output": "wrote render.yaml\n"}
+        return None
+
+    fake.handler = handler
+    out = run(deploy.generate_config(_ctx(), "o/testing", "render"))
+    assert out["platform"] == "render" and out["written"] == ["render.yaml"]
+    body = out["files"]["render.yaml"]
+    assert "plan: free" in body and "region: singapore" in body and "OPENAI_API_KEY" in body and "sync: false" in body
+    assert "if [ -e render.yaml ]" in _deploy_runs(fake, "base64 -d")[0]["script"]
+
+
+@pytest.mark.parametrize(
+    "facts,kind,static",
+    [
+        ({"package": {"scripts": {"build": "vite build"}, "deps": ["vite", "react"]}}, "static", True),
+        ({"package": {"scripts": {"start": "node server.js"}, "deps": ["express"]}, "files": ["server.js"]}, "node", None),
+        ({"python": {"requirements.txt": "fastapi\nuvicorn"}, "files": ["main.py"]}, "fastapi", None),
+        ({"python": {"requirements.txt": "flask"}}, "flask", None),
+        ({"dockerfile": "FROM x\nEXPOSE 9000"}, "docker", None),
+        ({"go": True}, "go", None),
+        ({"index_html": True, "files": ["index.html"]}, "static", True),
+        ({}, "unknown", None),
+    ],
+)
+def test_stack_detection(facts, kind, static):
+    st = deploy_config.stack_from_facts(facts)
+    assert st["kind"] == kind and st.get("static") == static
+
+
+@pytest.mark.parametrize("key", ["render", "vercel", "netlify", "fly", "railway", "gcloud", "azure"])
+def test_config_files_for_every_platform(key):
+    stack = deploy_config.stack_from_facts({"package": {"scripts": {"build": "next build", "start": "next start"}, "deps": ["next"]}})
+    gen = deploy_config.config_files(key, stack, "Testing App")
+    assert gen["files"] and any("Defaults:" in n for n in gen["notes"])
+    if key == "fly":
+        assert 'primary_region = "bom"' in gen["files"]["fly.toml"] and "Dockerfile" in gen["files"]
+
+
+def test_stack_script_prints_only_env_names(tmp_path):
+    import subprocess
+
+    repo = tmp_path / "work" / "r"
+    repo.mkdir(parents=True)
+    (repo / "package.json").write_text('{"scripts": {"build": "next build"}, "dependencies": {"next": "15"}}')
+    (repo / ".env.example").write_text("OPENAI_API_KEY=sk-live-should-not-leak\nexport DB_URL=postgres://x\n")
+    out = subprocess.run(["bash", "-c", deploy_config.stack_script("r")], capture_output=True, text=True, env={"HOME": str(tmp_path), "PATH": "/usr/bin:/bin"})
+    facts = deploy_config.parse_stack(out.stdout)
+    assert facts["env_keys"] == ["DB_URL", "OPENAI_API_KEY"] and "sk-live" not in out.stdout
+    assert deploy_config.stack_from_facts(facts)["kind"] == "next"
+
+
+def test_render_create_script_against_a_fake_api(tmp_path):
+    """Runs the real script (bash + python3) against a local fake of the Render REST API."""
+    import json as _json
+    import subprocess
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    seen = []
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def _send(self, code, body):
+            raw = _json.dumps(body).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def do_GET(self):
+            seen.append(("GET", self.path, self.headers.get("Authorization")))
+            if self.path.startswith("/services?"):
+                return self._send(200, [])
+            if self.path.startswith("/services/srv-1/deploys"):
+                return self._send(200, [{"deploy": {"id": "dep-1", "status": "live"}}])
+            return self._send(404, {"message": "nope"})
+
+        def do_POST(self):
+            n = int(self.headers.get("Content-Length") or 0)
+            body = _json.loads(self.rfile.read(n) or b"{}")
+            seen.append(("POST", self.path, body))
+            return self._send(201, {"service": {"id": "srv-1", "dashboardUrl": "https://dashboard.render.com/web/srv-1",
+                                                "serviceDetails": {"url": "https://testing.onrender.com"}}, "deployId": "dep-1"})
+
+    srv = HTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        home = tmp_path
+        (home / ".render").mkdir()
+        (home / ".render" / "cli.yaml").write_text("version: 1\nworkspace: tea-123\nworkspace_name: Mine\napi:\n    key: rnd_cli_session_token\n    expires_at: 1\n")
+        spec = deploy_config.render_spec({"kind": "next", "runtime": "node", "build": "npm ci && npm run build", "start": "npm start"},
+                                         "testing", "https://github.com/o/testing", "main")
+        cmd = deploy.render_create_command(spec)
+        env = {"HOME": str(home), "PATH": "/usr/bin:/bin:/usr/local/bin", "CHECKME_RENDER_API": f"http://127.0.0.1:{srv.server_port}",
+               "CHECKME_RENDER_POLL_S": "0", "CHECKME_RENDER_POLLS": "2"}
+        out = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, env=env, timeout=60)
+    finally:
+        srv.shutdown()
+    assert out.returncode == 0, out.stdout + out.stderr
+    ev = deploy._render_events(out.stdout)
+    assert ev["ok"] and ev["status"] == "live" and ev["url"] == "https://testing.onrender.com" and ev["service"] == "srv-1"
+    post = next(x for x in seen if x[0] == "POST")
+    assert post[1] == "/services" and post[2]["ownerId"] == "tea-123" and post[2]["serviceDetails"]["plan"] == "free"
+    assert all(x[2] == "Bearer rnd_cli_session_token" for x in seen if x[0] == "GET")
+    assert "rnd_cli_session_token" not in out.stdout

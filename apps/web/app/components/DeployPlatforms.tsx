@@ -55,7 +55,7 @@ export function DeployPlatforms() {
       if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : "Could not save");
       setValues({});
       setOpen("");
-      setMsg(`${p.name} connected. Your Coder can deploy there; each deploy asks for your approval.`);
+      setMsg(`${p.name} key saved. Your Coder uses it instead of a sign-in link; each deploy asks for your approval.`);
       await load();
     } catch (e: any) {
       setErr(e.message || "Could not save");
@@ -75,14 +75,15 @@ export function DeployPlatforms() {
     <div id="deploy-platforms" className="card stack" style={{ marginBottom: 18 }}>
       <header className="row" style={{ justifyContent: "space-between" }}>
         <strong>Deploy platforms</strong>
-        <span className={`badge ${platforms.some((p) => p.connected) ? "ok" : "down"}`}>
-          {platforms.filter((p) => p.connected).length} connected
+        <span className="badge ok">
+          {platforms.filter((p) => p.connected).length ? `${platforms.filter((p) => p.connected).length} keys saved` : "Ready · keys optional"}
         </span>
       </header>
       <p className="muted" style={{ margin: 0 }}>
-        Let your Coder deploy with each platform&apos;s CLI on its computer. Keys are stored encrypted and never shown
-        again, to you or to the agent. Every deploy and rollback waits for your approval. A platform&apos;s MCP connector,
-        if you add one below, is used first.
+        Nothing to set up: your Coder installs each platform&apos;s CLI on its computer and, the first time, sends you one
+        sign-in link in chat; the session stays on the computer. Saving a key here is an optional shortcut (stored
+        encrypted, never shown again, to you or to the agent). Every deploy and rollback waits for your approval. A
+        platform&apos;s MCP connector, if you add one, is used first.
       </p>
       {msg ? <p className="ok" style={{ margin: 0 }}>{msg}</p> : null}
       {err ? <p className="err" style={{ margin: 0 }}>{err}</p> : null}
@@ -95,7 +96,7 @@ export function DeployPlatforms() {
             </span>
             <span className="row">
               <button className="btn secondary" type="button" onClick={() => { setOpen(open === p.key ? "" : p.key); setValues({}); }}>
-                {p.connected ? "Update" : "Connect"}
+                {p.connected ? "Update key" : "Add key (optional)"}
               </button>
               {p.connected ? (
                 <button className="btn secondary" type="button" disabled={busy === p.key} onClick={() => forget(p)}>

@@ -22,6 +22,7 @@ from app.models import AgentJob
 log = logging.getLogger(__name__)
 
 POLL_S = 3
+LOGIN_POLL_TICKS = 5  # jobs waiting on a CLI sign-in are checked about every 15 s
 HEARTBEAT_S = 60
 STALE_S = 300
 MAX_CONCURRENT = 4
@@ -145,10 +146,13 @@ async def worker_loop(session_factory: Callable | None = None) -> None:
     await asyncio.sleep(5)
     active: dict = {}  # task -> user_id
     tick = 0
+    login_poll: asyncio.Task | None = None
     while True:
         try:
             if tick % 20 == 0:
                 await recover_stale(session_factory)
+            if tick % LOGIN_POLL_TICKS == 0 and (login_poll is None or login_poll.done()):
+                login_poll = asyncio.create_task(_poll_logins(session_factory), name="login-poll")
             tick += 1
             for task in [t for t in active if t.done()]:
                 active.pop(task, None)
@@ -165,6 +169,17 @@ async def worker_loop(session_factory: Callable | None = None) -> None:
             await asyncio.wait_for(_wake.wait(), timeout=POLL_S)
         except asyncio.TimeoutError:
             pass
+
+
+async def _poll_logins(session_factory: Callable) -> None:
+    """Resume jobs whose user finished a CLI browser / device sign-in (see app.agent.cli_login)."""
+    from app.agent import cli_login
+
+    try:
+        if await cli_login.poll_waiting_logins(session_factory):
+            wake()
+    except Exception:  # noqa: BLE001
+        log.exception("login poll failed")
 
 
 async def start_job_worker() -> asyncio.Task:

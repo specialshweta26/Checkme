@@ -1722,14 +1722,21 @@ class DeployParams(BaseModel):
 
 
 class DetectDeployInput(BaseModel):
-    repo: str = Field(description="owner/name, already checked out with git_checkout")
+    repo: str = Field(description="owner/name (cloned onto the computer automatically if it is not there yet)")
+
+
+class GenerateDeployConfigInput(BaseModel):
+    repo: str = Field(description="owner/name (cloned automatically if needed)")
+    platform: str = Field(default="", description="render, vercel, fly, netlify, railway, gcloud or azure; empty picks a default for the stack")
+    cwd: str = Field(default=".", description="Directory inside the repo")
+    write: bool = Field(default=True, description="Write the files into the working tree (never overwrites existing ones)")
 
 
 class DeployInput(BaseModel):
-    repo: str = Field(description="owner/name, checked out on the computer")
-    platform: str = Field(description="render, vercel, fly, netlify, railway, aws, gcloud or azure")
+    repo: str = Field(description="owner/name (cloned onto the computer automatically if it is not there yet)")
+    platform: str = Field(default="", description="render, vercel, fly, netlify, railway, aws, gcloud or azure: the one the user named; empty picks a sensible default (say which)")
     params: DeployParams = Field(default_factory=DeployParams)
-    cwd: str = Field(default=".", description="Directory inside the repo with the deploy config (from detect_deploy_targets)")
+    cwd: str = Field(default=".", description="Directory inside the repo (from detect_deploy_targets)")
     use_cli: bool = Field(default=False, description="Use the CLI even though a connector for this platform exists")
 
 
@@ -1743,7 +1750,7 @@ class DeployReadInput(BaseModel):
 class AskUserInput(BaseModel):
     question: str = Field(description="One short question.")
     options: list[str] = Field(description="2-5 short answer options shown as buttons, e.g. repo names or Yes / No.")
-    waiting_for: str = Field(default="", description="Set to github (GitHub not connected through Composio) or deploy_<platform> (e.g. deploy_render) when blocked on a connection, so the job resumes after the user connects.")
+    waiting_for: str = Field(default="", description="Rarely needed: sign-in waits (login_<platform>) are set automatically by deploy / git_checkout / push_branch. Set login_<platform> only if you hand over a sign-in link yourself, so the job resumes when it completes.")
 
 
 class RememberCodingInput(BaseModel):
@@ -2021,7 +2028,7 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
     if is_coding_agent(ctx.agent):
 
         async def coding_status() -> str:
-            """Check what you can do for coding work right now: computer (sandbox) and dev toolchain, git push credentials, the Composio GitHub connection, deploy connectors, and exactly what is missing. Call once per coding task, before building."""
+            """Check what you can do for coding work right now: computer (sandbox) and dev toolchain, git credentials, the Composio GitHub connection and deploy routes. GitHub and deploy platforms are never blockers: the tools sign in through a link when needed. Call once per coding task, before building."""
             ctx.used_tools.append("coding_workspace_status")
             return dumps(await coding_workspace_status(ctx), 8000)
 
@@ -2034,7 +2041,7 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
         from app.agent import git_tools
 
         async def checkout(repo: str, branch: str = "", base: str = "") -> str:
-            """Clone (or update) a GitHub repo into ~/work/<name> on the computer and check out a branch. Private repos work through the Composio GitHub connection (a real clone when its token is available, else a snapshot). Start every code change here with branch=agent/<short-name>."""
+            """Clone (or update) a GitHub repo into ~/work/<name> on the computer and check out a branch. Tries the Composio GitHub token, anonymous / the computer's gh credentials, then a snapshot; if none works it starts the GitHub CLI sign-in and returns status=awaiting_user_login with the link (give it to the user in one line; the job resumes). Start every code change here with branch=agent/<short-name>."""
             ctx.used_tools.append("git_checkout")
             return dumps(await git_tools.git_checkout(ctx, repo, branch, base), 20000)
 
@@ -2122,7 +2129,7 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
             return dumps(await dev_tools.review_pull_request(ctx, repo, number, verdict, summary, items, include_checks), 4000)
 
         async def ask(question: str, options: list[str], waiting_for: str = "") -> str:
-            """Ask the user one short question with 2-5 option buttons, only when something is genuinely ambiguous (which repo or branch, a destructive step) or you are blocked (waiting_for='github'). Otherwise decide and proceed. End your turn after asking."""
+            """Ask the user one short question with 2-5 option buttons, only when something is genuinely ambiguous (which repo, a destructive step). Never ask them to configure, connect or install something: the tools sign in through a link themselves. Otherwise decide and proceed. End your turn after asking."""
             ctx.used_tools.append("ask_user")
             opts = [str(o).strip() for o in options or [] if str(o).strip()][:5]
             if not question.strip() or len(opts) < 2:
@@ -2148,16 +2155,16 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
             return {k: v for k, v in raw.items() if v not in ("", None) and not (k == "production" and v is True)}
 
         async def detect_targets(repo: str) -> str:
-            """Find how this repo deploys: render.yaml, vercel.json, fly.toml, netlify.toml, railway.json/toml, serverless.yml, SAM, CDK, app.yaml, azure.yaml, Dockerfile. For each platform it says the route: a connected connector (preferred), a saved CLI credential, or the link the user opens to connect one. Call before any deploy."""
+            """Find how this repo deploys (clones it first if needed): render.yaml, vercel.json, fly.toml, netlify.toml, railway.json/toml, serverless.yml, SAM, CDK, app.yaml, azure.yaml, Dockerfile. Without a config it detects the stack (Next.js, Vite, Node, FastAPI, Django, Flask, Go, static, Docker) and suggests a platform; no config is required to deploy. For each platform: connector, saved key, or CLI sign-in (handled by deploy)."""
             ctx.used_tools.append("detect_deploy_targets")
             return dumps(await deploy_mod.detect_deploy_targets(ctx, repo), 8000)
 
-        async def deploy_tool(repo: str, platform: str, params=None, cwd: str = ".", use_cli: bool = False) -> str:
-            """Deploy the checked-out repo to a platform. Never runs directly: it always shows the user an approval card with the exact command and target (also in scheduled runs). Prefers a connected connector for that platform; otherwise installs the CLI on the computer and uses the user's saved credential, which you never see. If not connected, returns the connect link: tell the user exactly what is missing. Deploy only what is merged or what the user asked for."""
+        async def deploy_tool(repo: str, platform: str = "", params=None, cwd: str = ".", use_cli: bool = False) -> str:
+            """Deploy a repo to a platform, end to end: clones it if needed, installs the CLI, signs in (saved key, the CLI's session on the computer, or it starts the CLI's browser login and returns status=awaiting_user_login with the link: give the user just that link in one line and end the turn; the job resumes by itself), fills free-tier / India-region defaults, creates the service on first deploy (Render: from the GitHub repo), then shows ONE approval card (platform, service, repo/branch, region, cost). After approval it waits until live, probes the URL and returns live_url, or the failure output: fix and call again (bounded retries reuse the approval). Never tell the user to configure or connect anything."""
             ctx.used_tools.append("deploy")
             return dumps(await deploy_mod.request_action(ctx, "deploy", repo, platform, _params(params or DeployParams()), cwd, use_cli), 8000)
 
-        async def rollback_tool(repo: str, platform: str, params=None, cwd: str = ".", use_cli: bool = False) -> str:
+        async def rollback_tool(repo: str, platform: str = "", params=None, cwd: str = ".", use_cli: bool = False) -> str:
             """Roll a deployment back to an earlier deploy / version / image. Always shows an approval card first. Find the target with deploy_status."""
             ctx.used_tools.append("deploy_rollback")
             return dumps(await deploy_mod.request_action(ctx, "rollback", repo, platform, _params(params or DeployParams()), cwd, use_cli), 8000)
@@ -2172,9 +2179,15 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
             ctx.used_tools.append("deploy_logs")
             return dumps(await deploy_mod.read_action(ctx, "logs", repo, platform, _params(params or DeployParams()), cwd), 12000)
 
+        async def gen_config_tool(repo: str, platform: str = "", cwd: str = ".", write: bool = True) -> str:
+            """Generate a deploy config for a repo that has none (render.yaml, vercel.json, netlify.toml, fly.toml, railway.json, Dockerfile) from its detected stack, with free-tier and India-region defaults. Writes into the working tree without overwriting; commit it with git_commit + push_branch (approval) to put it in a PR. No approval needed to generate."""
+            ctx.used_tools.append("generate_deploy_config")
+            return dumps(await deploy_mod.generate_config(ctx, repo, platform, cwd, write), 8000)
+
         tools.extend(
             [
                 StructuredTool.from_function(coroutine=detect_targets, name="detect_deploy_targets", description=detect_targets.__doc__, args_schema=DetectDeployInput),
+                StructuredTool.from_function(coroutine=gen_config_tool, name="generate_deploy_config", description=gen_config_tool.__doc__, args_schema=GenerateDeployConfigInput),
                 StructuredTool.from_function(coroutine=deploy_tool, name="deploy", description=deploy_tool.__doc__, args_schema=DeployInput),
                 StructuredTool.from_function(coroutine=rollback_tool, name="deploy_rollback", description=rollback_tool.__doc__, args_schema=DeployInput),
                 StructuredTool.from_function(coroutine=deploy_status_tool, name="deploy_status", description=deploy_status_tool.__doc__, args_schema=DeployReadInput),
@@ -2206,7 +2219,9 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
         if ctx.job is None or (getattr(ctx.job, "depth", 1) or 1) <= 1:
             # Only the user-facing level asks questions: chat turns and root jobs (children report to their parent).
             tools.append(StructuredTool.from_function(coroutine=ask, name="ask_user", description=ask.__doc__, args_schema=AskUserInput))
-        if ctx.job is None and ctx.teammate_depth == 0 and ctx.db is not None:
+        if ctx.job is None and ctx.db is not None and (ctx.teammate_depth == 0 or coding_mod.is_coding_agent(ctx.agent)):
+            # Coding teammates reached through ask_teammate (group chats) may start jobs too, so long work (and
+            # waiting for a sign-in) runs in the background instead of inline.
 
             async def start_job(task: str, title: str = "") -> str:
                 """Start a background coding job for multi-step work (code changes, fixes, features, reviews, merges, deploys). It runs on the computer without the chat timeout and shows a live timeline (todo list, steps, tests, PR links) with approval and answer buttons in this chat. Give a self-contained task: repo (owner/name), goal and acceptance criteria. Follow-ups in this chat continue the same job."""
@@ -2308,6 +2323,9 @@ def system_prompt(
         "Never search_tools, list_connectors, or call_tool for these, and never offer a third-party app's 'group' (LiveChat, Slack, Teams, CRM) for them. "
         f"A group has {GROUP_MEMBER_MIN} to {GROUP_MEMBER_MAX} agents; for 'all my agents' pass all_agents=true. "
         "One owner per stage is the kickoff rule; hand the next step with ask_teammate. "
+        "Code, repo and deploy work goes to a coding teammate through ask_teammate and they act on it (clone, sign in, deploy): "
+        "never tell the user to connect, install or configure a platform first. If the answer has a sign-in link, pass on just "
+        "that link in one sentence. "
         "If a tool returns an error about the size, explain it and ask which agents to use. "
         "delete_agent and delete_agent_group only show a confirmation card; say it is waiting for their confirmation. "
         "After creating or changing one, tell the user its name and that it is in the left sidebar under Personal, where they can open it.\n"
@@ -2556,6 +2574,10 @@ async def _ask_teammate(ctx: RunContext, agent_id: str, prompt: str) -> dict:
         ctx.workspace_changed = True
     for item in nested.get("pending_confirms") or []:
         ctx.pending.append(item)
+    for info in nested.get("jobs_started") or []:
+        ctx.jobs_started.append(info)
+    if nested.get("question") and ctx.question is None:
+        ctx.question = nested["question"]
     for view in nested.get("browser") or []:
         ctx.results.append(
             {

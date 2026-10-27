@@ -111,15 +111,15 @@ def readiness(
     elif git_push:
         can.append("push and open pull requests with git/gh credentials already on the computer")
     else:
-        missing.append(
-            "GitHub is not connected, so I cannot reach private repos, push or open pull requests. Connect it in "
-            "Checkme → Connectors → GitHub (Composio) → Connect GitHub (or composio connect_app github). "
-            "Public repos can still be cloned and worked on."
+        can.append(
+            "work on GitHub repos with git on the computer: public repos clone right away; for private repos and pushes "
+            "git_checkout / push_branch sign the GitHub CLI in there and hand the user one link (no setup needed)"
         )
     if found["deploy"]:
         can.append("trigger and check deploys through " + ", ".join(sorted({c.name for c in found["deploy"]})))
     else:
-        missing.append("No deploy connector (Render, Vercel, Netlify, ...) is connected, so I cannot trigger or check deploys.")
+        can.append("deploy with the platform CLI on the computer (Render, Vercel, Fly.io, Netlify, Railway, Google Cloud, Azure, AWS): "
+                   "it installs the CLI, signs in with one link for the user when needed, and asks for approval before deploying")
     return {
         "computer": "ready" if computer is not None and not probe_error else "missing",
         "toolchain": {k: v for k, v in probe.items() if k in {"git", "gh", "node", "python", "rg", "ctags", "work"} and v},
@@ -433,6 +433,7 @@ def save_patch_script(name: str, branch: str, base: str, slug: str) -> str:
 
 
 ARCHIVE_ENV = "CHECKME_ARCHIVE_URL"
+ARCHIVE_FILE_ENV = "CHECKME_ARCHIVE_FILE"  # base64 .tar.gz already written on the computer
 PUSH_BUNDLE_DIR = "$HOME/work/_push"
 MAP_FILE = ".git/checkme-map"  # "<local sha> <github sha>" lines: snapshot and API-pushed commits
 
@@ -450,7 +451,8 @@ def snapshot_script(name: str, ref: str, remote_sha: str, base: str, branch: str
         f"cd {q(name)} || exit 1; ",
         "[ \"$(git config --local checkme.snapshot)\" = true ] || { echo 'this folder is a git clone, not a snapshot'; exit 1; }; ",
         'T=$(mktemp -d); trap \'rm -rf "$T"\' EXIT; ',
-        f'curl -fsSL "${ARCHIVE_ENV}" -o "$T/a.tgz" || {{ echo "could not download the repository archive"; exit 1; }}; ',
+        f'if [ -n "${{{ARCHIVE_FILE_ENV}:-}}" ]; then base64 -d "${ARCHIVE_FILE_ENV}" > "$T/a.tgz" && rm -f "${ARCHIVE_FILE_ENV}" || {{ echo "bad archive file"; exit 1; }}; '
+        f'else curl -fsSL "${ARCHIVE_ENV}" -o "$T/a.tgz" || {{ echo "could not download the repository archive"; exit 1; }}; fi; ',
         'mkdir "$T/x" && tar -xzf "$T/a.tgz" -C "$T/x" --strip-components=1 || { echo "bad archive"; exit 1; }; ',
         'export GIT_INDEX_FILE="$T/idx"; git --work-tree="$T/x" add -A -f . >/dev/null && TREE=$(git --work-tree="$T/x" write-tree) || exit 1; ',
         "unset GIT_INDEX_FILE; ",

@@ -178,7 +178,9 @@ async def test_push_to_named_pr_branch_is_verified(monkeypatch):
     assert "not open" in (await git_tools.push_branch(_ctx(), "a/b", "feature/login", pr_number=9))["error"]
 
 
-async def test_blocked_push_saves_patch_and_gives_connect_steps(monkeypatch):
+async def test_blocked_push_saves_patch_and_hands_over_login(monkeypatch):
+    from app.agent import cli_login
+
     scripts = []
 
     async def fake_exec(ctx, script, timeout=0, token=None, env=None, secret_env=None):
@@ -188,16 +190,18 @@ async def test_blocked_push_saves_patch_and_gives_connect_steps(monkeypatch):
         return {"exit_code": 0, "output": "0001-fix.patch"}
 
     async def status(ctx, fresh=False):
-        from app.connectors import github as gh
+        return {"configured": True, "connected": False}
 
-        return {"configured": True, "connected": False, "connect_hint": gh.CONNECT_HINT}
+    async def no_login(ctx, key, why=""):
+        return {"error": "gh could not start"}
 
     monkeypatch.setattr(git_tools, "sandbox_exec", fake_exec)
     monkeypatch.setattr(git_tools, "github_status", status)
+    monkeypatch.setattr(cli_login, "ensure_login", no_login)
     ctx = _ctx()
     out = await git_tools.push_branch(ctx, "a/b", "agent/fix")
-    assert out["status"] == "blocked" and "Connectors" in out["connect"] and "Composio" in out["connect"]
-    assert out["patch_dir"] == "~/work/_patches/b-agent-fix" and "waiting_for='github'" in out["next"]
+    assert out["status"] == "blocked" and "gh could not start" in out["missing"]
+    assert out["patch_dir"] == "~/work/_patches/b-agent-fix" and "Connectors" not in str(out)
     assert any("format-patch" in s for s in scripts) and not ctx.pending
     assert ctx.progress.items[-1][0] == "status"
 
@@ -270,6 +274,14 @@ def test_coder_tools_are_registered():
               "run_checks", "review_pull_request", "ask_user", "remember_coding", "push_branch"):
         assert n in got, n
     assert "ask_user" not in names(job=SimpleNamespace(id=uuid.uuid4(), depth=2))
+    for n in ("detect_deploy_targets", "generate_deploy_config", "deploy", "deploy_status", "deploy_logs", "git_checkout"):
+        assert n in got, n
+    # a coding teammate reached through ask_teammate (group chats) can still start a background job
+    def with_db(**kw):
+        ctx = deep.RunContext(db=object(), user=SimpleNamespace(id=uuid.uuid4()), connectors={}, agent=SimpleNamespace(id=uuid.uuid4(), name="C", focus="coding"), **kw)
+        return {t.name for t in deep.harness_tools(ctx)}
+
+    assert "start_coding_job" in with_db() and "start_coding_job" in with_db(teammate_depth=1)
 
 
 # --- IDE: toolchain, overview, symbols, checks, review ---------------------------------------------------
