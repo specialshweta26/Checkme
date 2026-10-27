@@ -934,6 +934,38 @@ function ConnectorPicker({
     return <p className="muted">No connectors yet. Add them on the Connectors page, then assign them here.</p>;
   }
   const agentIds = agents.map((a) => a.id);
+  const shown = [
+    ...shownConnectors.map((conn) => {
+      const restricted = assignments[conn.id] || [];
+      return { key: conn.id, kind: "connector" as const, conn, restricted, checked: !restricted.length || restricted.includes(agentId) };
+    }),
+    ...shownApps.map((app) => {
+      const restricted = toolkitAssignments[app.slug] || [];
+      return { key: app.slug, kind: "app" as const, app, restricted, checked: !restricted.length || restricted.includes(agentId) };
+    }),
+  ];
+  const checkedCount = shown.filter((row) => row.checked).length;
+  const allChecked = shown.length > 0 && checkedCount === shown.length;
+  const someChecked = checkedCount > 0 && !allChecked;
+
+  async function toggleShown(want: boolean) {
+    setBusy("all");
+    try {
+      const jobs = shown
+        .filter((row) => row.checked !== want)
+        .map((row) =>
+          row.kind === "connector"
+            ? onSave(row.conn.id, nextAssignedAgents(row.restricted, agentId, agentIds))
+            : onSaveToolkit(row.app.slug, nextAssignedAgents(row.restricted, agentId, agentIds)),
+        );
+      await Promise.all(jobs);
+    } catch (err: any) {
+      onError?.(err.message || "Could not update connectors");
+    } finally {
+      setBusy("");
+    }
+  }
+
   return (
     <fieldset className="conn-picker">
       <legend>This agent can use</legend>
@@ -944,6 +976,26 @@ function ConnectorPicker({
         onChange={(e) => setQuery(e.target.value)}
       />
       <div className="conn-picker-list">
+        {shown.length ? (
+          <label className="agent-check conn-picker-all">
+            <input
+              type="checkbox"
+              checked={allChecked}
+              disabled={Boolean(busy)}
+              ref={(el) => {
+                if (el) el.indeterminate = someChecked;
+              }}
+              onChange={() => void toggleShown(!allChecked)}
+            />
+            <span className="agent-check-name">
+              {allChecked ? "Deselect all" : q ? "Select all matches" : "Select all"}
+              <span className="muted">
+                {" "}
+                {checkedCount} of {shown.length}
+              </span>
+            </span>
+          </label>
+        ) : null}
         {shownConnectors.map((conn) => {
           const restricted = assignments[conn.id] || [];
           const checked = !restricted.length || restricted.includes(agentId);
@@ -952,7 +1004,7 @@ function ConnectorPicker({
               <input
                 type="checkbox"
                 checked={checked}
-                disabled={busy === conn.id}
+                disabled={Boolean(busy)}
                 onChange={async () => {
                   setBusy(conn.id);
                   try {
@@ -978,7 +1030,7 @@ function ConnectorPicker({
               <input
                 type="checkbox"
                 checked={checked}
-                disabled={busy === app.slug}
+                disabled={Boolean(busy)}
                 onChange={async () => {
                   setBusy(app.slug);
                   try {
