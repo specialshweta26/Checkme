@@ -991,13 +991,15 @@ export default function ChatPage() {
             onTeachStart={async () => {
               const group = roster.groups.find((row) => row.id === groupId);
               const skillAgentId = agentId || group?.owner_id || group?.members[0]?.id;
-              await startTeaching(skillAgentId || undefined);
+              const started = await startTeaching(skillAgentId || undefined);
               setTeaching(true);
               setControlling(true);
+              return started;
             }}
             onTeachStop={async (name) => {
-              await stopTeaching(name);
+              const saved = await stopTeaching(name);
               setTeaching(false);
+              return saved;
             }}
             onRelease={() => {
               const handoff = pending.filter((p) => p.kind === "handoff" || p.preview?.kind === "handoff");

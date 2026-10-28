@@ -323,6 +323,9 @@ async def computer_control(body: ComputerControlBody, user: User = Depends(curre
         "dy": body.dy,
         "ms": body.ms,
     }
+    from app.skills.service import record_user_input
+
+    record_user_input(user.id, "control", **{"action": step["kind"], **{k: v for k, v in step.items() if k != "kind"}})
     try:
         data = await call_daytona(row, "computer_act", {"actions": [step]})
     except Exception as vis_exc:  # noqa: BLE001
@@ -363,6 +366,10 @@ async def computer_input(body: ComputerInputBody, user: User = Depends(current_u
         raise HTTPException(503, "No computer is configured on the server (set E2B_API_KEY).")
     row = await _computer_row(db, user)
     from connector_core import ToolError
+
+    from app.skills.service import record_user_input
+
+    record_user_input(user.id, "input", text=body.text, key=body.key)
 
     try:
         if backend == "e2b":

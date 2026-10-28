@@ -891,7 +891,7 @@ function SkillEditor({
   return (
     <fieldset>
       <legend>Skills</legend>
-      <p className="muted">Save a workflow, or teach one by demonstration while the bot watches the screen. Teaching records up to ten minutes of visible screen activity and no microphone audio.</p>
+      <p className="muted">Save a workflow, or teach one by demonstration while the bot watches the screen. Teaching records up to ten minutes of your clicks, typing, and screen; you can also narrate with the microphone from the screen panel.</p>
       {skills.length ? (
         <ul className="skill-list">
           {skills.map((skill) => (
@@ -966,7 +966,7 @@ function SkillEditor({
           </button>
         )}
       </div>
-      {teaching ? <p className="muted">Watching the computer screen (max 10 minutes). Microphone is off.</p> : null}
+      {teaching ? <p className="muted">Recording the computer screen (max 10 minutes). Open the screen panel to use it and to turn on the microphone for narration.</p> : null}
     </fieldset>
   );
 }

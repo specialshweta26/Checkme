@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.db import get_db
 from app.deps import current_user
 from app.models import User
@@ -64,6 +65,26 @@ async def create_skill(body: SkillIn, user: User = Depends(current_user), db: As
 @router.post("/teach/start")
 async def teach_start(body: TeachIn, user: User = Depends(current_user)):
     return service.start_teaching(user, body.agent_id)
+
+
+@router.get("/teach/status")
+async def teach_status(user: User = Depends(current_user)):
+    return service.teaching_status(user)
+
+
+@router.post("/teach/audio")
+async def teach_audio(
+    audio: UploadFile = File(...),
+    offset_ms: int = Form(0),
+    user: User = Depends(current_user),
+):
+    """One microphone clip recorded while teaching (webm/opus, audio/mp4 from iOS Safari, ...)."""
+    limit = int(get_settings().teach_audio_max_bytes or 0) or 24 * 1024 * 1024
+    data = await audio.read(limit + 1)
+    try:
+        return await service.add_narration(user, data, audio.content_type or "", audio.filename or "", offset_ms)
+    except service.SkillError as exc:
+        raise HTTPException(413 if "too large" in str(exc) else 400, str(exc)) from exc
 
 
 @router.post("/teach/stop")

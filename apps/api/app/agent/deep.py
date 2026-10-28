@@ -1988,13 +1988,13 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
         return dumps({"ok": True, "id": str(row.id), "name": row.name})
 
     async def start_teaching() -> str:
-        """Watch the computer screen while the user demonstrates a workflow. Max ten minutes. Does not record microphone audio."""
+        """Record the computer while the user demonstrates a workflow (the user may narrate out loud from the screen panel). Max ten minutes by default."""
         from app.skills.service import start_teaching as _start
 
         return dumps(_start(ctx.user, getattr(ctx.agent, "id", None)))
 
     async def stop_teaching(name: str = "") -> str:
-        """Stop watching the screen and save the taught skill. No audio was recorded."""
+        """Stop recording and save the taught skill (actions plus any narration; the instruction is written up in the background)."""
         from app.skills.service import stop_teaching as _stop
 
         if ctx.db is None:
@@ -2585,7 +2585,7 @@ def system_prompt(
         "Scratchpad: scratchpad_add a short plan for multi-step work in this chat, then complete items as you go.\n"
         "Skills: skill_create / save_skill for a repeatable workflow, skill_read / skill_update / skill_delete to manage them, "
         "or start_teaching so the user demonstrates on the visible screen "
-        "(up to ten minutes, no microphone audio), then stop_teaching with a name.\n"
+        "(up to ten minutes; they can turn on the microphone in the screen panel to narrate), then stop_teaching with a name.\n"
         "task_catalog action=search to find briefing, inbox, schedule, coding-job, or media tasks, then load and execute.\n"
         "Do not replay a completed or uncertain action. That is the computer browser, not Outlook or mail.\n"
         "search_tools already expands gateway catalogs into callable data tools. Prefer those names. "
