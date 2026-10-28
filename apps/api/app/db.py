@@ -77,6 +77,16 @@ async def _migrate() -> None:
         await conn.execute(text("ALTER TABLE agent_groups ADD COLUMN IF NOT EXISTS owner_id UUID"))
         await conn.execute(text("ALTER TABLE automations ADD COLUMN IF NOT EXISTS trigger_type VARCHAR(20) DEFAULT 'schedule'"))
         await conn.execute(text("ALTER TABLE automations ADD COLUMN IF NOT EXISTS webhook_secret_hash VARCHAR(64)"))
+        for ddl in (
+            "status VARCHAR(20) DEFAULT 'ready'",
+            "error TEXT DEFAULT ''",
+            "transcript JSONB DEFAULT '[]'::jsonb",
+            "frames JSONB DEFAULT '[]'::jsonb",
+            "notes JSONB DEFAULT '[]'::jsonb",
+            "auto_named BOOLEAN DEFAULT false",
+            "updated_at TIMESTAMPTZ",
+        ):
+            await conn.execute(text(f"ALTER TABLE agent_skills ADD COLUMN IF NOT EXISTS {ddl}"))
         await _migrate_github(conn)
         await _migrate_jobs(conn)
         await _migrate_agent_scope(conn)

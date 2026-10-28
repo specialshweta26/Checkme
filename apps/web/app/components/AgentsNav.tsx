@@ -15,6 +15,7 @@ import {
   deleteGroup,
   duplicateAgent,
   listSkills,
+  skillBusy,
   loadWorkspace,
   moveAgentToGroup,
   nextAssignedAgents,
@@ -28,6 +29,7 @@ import {
   type WorkspaceAgent,
   type WorkspaceRoster,
 } from "../lib";
+import { SkillDetail, SkillStatusChip } from "./SkillDetail";
 
 type Ctx = { kind: "agent" | "group"; id: string; x: number; y: number };
 
@@ -884,20 +886,32 @@ function SkillEditor({
   onTeaching: (v: boolean) => void;
   onError: (v: string) => void;
 }) {
+  const [openSkill, setOpenSkill] = useState<string | null>(null);
   async function refresh() {
     const data = await listSkills(agentId);
     onSkills(data.skills || []);
   }
+  const anyBusy = skills.some((s) => skillBusy(s));
+  // A skill that is still recording or being written up refreshes on its own.
+  useEffect(() => {
+    if (!anyBusy) return;
+    const timer = window.setInterval(() => void refresh(), 3000);
+    return () => window.clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [anyBusy, agentId]);
   return (
     <fieldset>
       <legend>Skills</legend>
       <p className="muted">Save a workflow, or teach one by demonstration while the bot watches the screen. Teaching records up to ten minutes of your clicks, typing, and screen; you can also narrate with the microphone from the screen panel.</p>
       {skills.length ? (
-        <ul className="skill-list">
+        <ul className="skill-list clickable">
           {skills.map((skill) => (
             <li key={skill.id}>
-              <strong>{skill.name}</strong>
-              <span className="muted"> {skill.kind === "taught" ? "taught" : "saved"}</span>
+              <button type="button" className="skill-row" onClick={() => setOpenSkill(skill.id)} aria-label={`Open skill ${skill.name}`}>
+                <strong>{skill.name}</strong>
+                <span className="muted">{skill.kind === "taught" ? "taught" : "saved"}{skill.step_count ? ` · ${skill.step_count} steps` : ""}</span>
+                <SkillStatusChip skill={skill} />
+              </button>
             </li>
           ))}
         </ul>
@@ -937,12 +951,18 @@ function SkillEditor({
             onClick={async () => {
               onError("");
               try {
-                await stopTeaching(skillName);
+                const saved = await stopTeaching(skillName);
                 onTeaching(false);
                 onSkillName("");
                 await refresh();
+                if (saved?.id) setOpenSkill(saved.id);
               } catch (err: any) {
-                onError(err.message || "Could not stop teaching");
+                const msg = String(err?.message || "");
+                if (msg.includes("No teaching session")) {
+                  onTeaching(false);
+                  await refresh();
+                }
+                onError(msg || "Could not stop teaching");
               }
             }}
           >
@@ -967,6 +987,7 @@ function SkillEditor({
         )}
       </div>
       {teaching ? <p className="muted">Recording the computer screen (max 10 minutes). Open the screen panel to use it and to turn on the microphone for narration.</p> : null}
+      {openSkill ? <SkillDetail skillId={openSkill} onClose={() => setOpenSkill(null)} onChanged={() => void refresh()} /> : null}
     </fieldset>
   );
 }

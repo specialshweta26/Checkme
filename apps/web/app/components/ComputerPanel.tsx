@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, type MouseEvent } from "react";
-import { teachingStatus, uploadNarration, type TeachStart } from "../lib";
+import { getSkill, rewriteSkill, teachingStatus, uploadNarration, type AgentSkill, type TeachStart } from "../lib";
 import { useNarration } from "./useNarration";
 
 export type ComputerSession = {
@@ -308,7 +308,7 @@ export function ScreenRail({
   onTakeControl?: () => void;
   onRelease?: () => void;
   onTeachStart?: () => Promise<TeachStart | void>;
-  onTeachStop?: (name: string) => Promise<{ writing?: boolean; narrated?: boolean } | void>;
+  onTeachStop?: (name: string) => Promise<{ id?: string | null; name?: string; writing?: boolean; narrated?: boolean } | void>;
   onClose?: () => void;
 }) {
   const still = useCredentialedImage(session?.preview_url || session?.download_url);
@@ -343,6 +343,8 @@ export function ScreenRail({
   const waking = useRef(false);
   const [teachingBusy, setTeachingBusy] = useState(false);
   const [notice, setNotice] = useState("");
+  // The skill just taught: polled until its write-up finishes (never blocks the panel).
+  const [taught, setTaught] = useState<{ id: string; prefix: string; skill?: AgentSkill | null; gone?: boolean } | null>(null);
   // Teaching clock: when the session started (ms epoch) and how long it may run.
   const [teachStarted, setTeachStarted] = useState(0);
   const [teachLimit, setTeachLimit] = useState(600);
@@ -555,16 +557,65 @@ export function ScreenRail({
       }
       const saved = await onTeachStop(name.trim() || "Taught workflow");
       const prefix = auto ? "Time limit reached. " : "";
-      setNotice(
-        saved && saved.writing
-          ? `${prefix}Skill saved. Writing it up from your demonstration${uploaded ? " and narration" : ""}…`
-          : `${prefix}Skill saved. Your agent can reuse this task.`,
-      );
+      if (saved && saved.id) {
+        setTaught({ id: saved.id, prefix });
+        setNotice(`${prefix}Skill saved with every recorded step. Writing it up${uploaded ? " with your narration" : ""}…`);
+      } else {
+        setNotice(`${prefix}Teaching stopped.`);
+      }
       onRelease?.();
     } catch (err: any) {
-      setNotice(err?.message || "Could not save the skill");
+      const msg = String(err?.message || "Could not save the skill");
+      setNotice(msg.includes("No teaching session") ? "Teaching had already stopped (the server restarted). What was recorded is saved in the agent's Skills." : msg);
     } finally {
       setTeachingBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!taught || taught.gone || (taught.skill && taught.skill.status === "ready")) return;
+    let stop = false;
+    const started = Date.now();
+    const tick = async () => {
+      try {
+        const row = await getSkill(taught.id);
+        if (stop) return;
+        if (!row) {
+          setTaught((t) => (t && t.id === taught.id ? { ...t, gone: true } : t));
+          setNotice("Nothing was recorded, so no skill was saved.");
+          return;
+        }
+        setTaught((t) => (t && t.id === taught.id ? { ...t, skill: row } : t));
+        if (row.status === "ready") {
+          setNotice(row.error ? `Saved “${row.name}” with its recorded steps, but the write-up failed.` : `Skill “${row.name}” is ready. Open it from the agent's Skills to view or edit.`);
+        } else if (Date.now() - started > 4 * 60_000) {
+          setNotice(`“${row.name}” is saved; the write-up is still running. Check the agent's Skills.`);
+          stop = true;
+        }
+      } catch {
+        /* keep polling */
+      }
+    };
+    const timer = window.setInterval(() => {
+      if (stop) window.clearInterval(timer);
+      else void tick();
+    }, 3000);
+    void tick();
+    return () => {
+      stop = true;
+      window.clearInterval(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [taught?.id, taught?.skill?.status, taught?.gone]);
+
+  async function retryWriteUp() {
+    if (!taught) return;
+    try {
+      const row = await rewriteSkill(taught.id);
+      setTaught({ ...taught, skill: row });
+      setNotice("Writing the skill up again…");
+    } catch (err: any) {
+      setNotice(err?.message || "Could not restart the write-up");
     }
   }
 
@@ -735,7 +786,19 @@ export function ScreenRail({
             : `${agentName}'s screen`}
       </p>
       {teaching && narration.error ? <p className="screen-notice">{narration.error}</p> : null}
-      {notice ? <p className="screen-notice">{notice}</p> : null}
+      {notice ? (
+        <p className="screen-notice">
+          {notice}
+          {taught?.skill?.status === "ready" && taught.skill.error ? (
+            <>
+              {" "}
+              <button type="button" className="btn secondary" onClick={retryWriteUp}>
+                Retry write-up
+              </button>
+            </>
+          ) : null}
+        </p>
+      ) : null}
       {interactive || streaming || machine === "running" ? <ComputerInputBar /> : null}
     </aside>
   );

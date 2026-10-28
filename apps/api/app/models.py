@@ -478,6 +478,14 @@ class AgentSkill(Base):
     instruction: Mapped[str] = mapped_column(Text, default="")
     duration_ms: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    # Taught skills are saved while recording: recording -> writing -> ready. ``error`` holds a failed write-up.
+    status: Mapped[str] = mapped_column(String(20), default="ready")
+    error: Mapped[str] = mapped_column(Text, default="")
+    transcript: Mapped[list] = mapped_column(JSONB, default=list)  # narration segments {t, t_end, text}
+    frames: Mapped[list] = mapped_column(JSONB, default=list)  # key screenshots {t, jpeg (base64)}
+    notes: Mapped[list] = mapped_column(JSONB, default=list)
+    auto_named: Mapped[bool] = mapped_column(Boolean, default=False)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class InboxItem(Base):

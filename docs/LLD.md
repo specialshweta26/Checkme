@@ -326,6 +326,32 @@ Files: `apps/api/app/agent/git_tools.py`, `apps/api/app/agent/coding.py`. These 
 
 `detect_deploy_targets` probes the deploy configs (render.yaml, vercel.json, fly.toml, netlify.toml, railway, serverless / SAM / CDK, app.yaml, azure.yaml, Dockerfile) and returns a route per platform (`connector` / `cli` / `connect`). `deploy` and `deploy_rollback` validate the params (allow-list and regex) and `cwd`, prefer a connector (`use_connector`), and otherwise return `blocked` with `/connectors?deploy=<key>` (then `ask_user(waiting_for='deploy_<key>')`) or create a `kind=deploy` card (`slug=coding, tool=deploy_action`, exact args). The card is replayed through `git_tools.run_confirmed` → `deploy.run_action`, which loads the `deploy_credentials` row (Fernet), passes it as exec env only (`sandbox_exec(env=…)`, scrubbed with `secrets_of`), installs the CLI if needed, and records a `deploy` event with the URL. `deploy_status` / `deploy_logs` are read-only, with no card. Connector deploy writes are gated by `git_write_gate` → `is_deploy_write`. Credentials API: `/api/connectors/deploy` (GET names, PUT, DELETE; PUT resumes waiting jobs). Details: [DEPLOY.md](DEPLOY.md).
 
+### 6.10 Agent profile, skills and teach-by-demonstration (`app/skills/`)
+
+**Profile + skill index (every turn, every agent, 1:1 and group).** `run_deep_agent` loads all of the agent's skills (`list_skills`: the agent's own plus unassigned ones) and `system_prompt` injects `profile.capabilities_block`:
+- identity: name, title, focus (plus the agent's instructions and focus prompt above it);
+- a complete skill index, one line per skill: `name [taught|saved, id]: when to use` (first sentence of the instruction). Skills still `recording` are left out; `writing` ones are marked. Capped at 40 lines;
+- for questions *about* the agent ("what skills do you have", "what can you do", "who are you", `profile.is_meta_question`) an explicit "answer from this profile, do not run a skill or continue an earlier task";
+- the full body (≤2400 chars) only of the skills routed to this request.
+
+The block is rebuilt from the database on each turn; nothing caches the prompt, so a skill created, renamed, edited or finished by the background write-up is visible on the next turn. Embeddings for routing are cached in Redis by text hash (`llm.embed_texts`), so a changed skill text gets a new vector automatically.
+
+**Routing (`profile.route_skills`).** Keyword prefilter that ignores generic words (`skill`, `what`, `you`, …) plus cosine similarity of `text-embedding` vectors (query vs `name: instruction`), threshold 0.42; keyword-only when embeddings are unavailable; never for meta questions. Up to 2 skills, each tagged `match: {score, by}`. The turn emits "Skill for this task: …" to live progress and returns `skills_used` (stored in the assistant message meta). Tools: `list_my_skills` (index with ids) and `get_skill` (full instructions, steps, transcript; emits "Using skill: …"). The prompt tells the agent to say which skill it is using and to ignore a routed skill that does not fit.
+
+*Bug this fixes (Oct 28):* the old `match_skills` scored any word ≥3 letters, so "What skill you have" matched "Yc skill" on the word "skill", and the prompt said "when a request matches one, follow its instructions"; with the Anjuna bike-rental task in the recent history the agent re-ran that research instead of answering.
+
+**Teaching is saved while it happens.** `POST /skills/teach/start` creates the `agent_skills` row at once (`kind=taught`, `status=recording`, `name="Taught workflow"`, `auto_named=true`). A flush loop (every 5 s) writes the merged, narration-aligned timeline (rail input + in-desktop capture via `recorder.peek` + transcribed narration), the transcript, key screenshots (base64 JPEG in `frames`, only when changed), notes and duration into that row. Typed text that looks secret (password/OTP/PIN/card context, 6–8 or 13–19 digit numbers, password-shaped tokens) is replaced by `•••• (hidden, N characters)` before it is stored or sent to the LLM.
+
+**Stop returns immediately.** `POST /skills/teach/stop` marks the row `writing` (and applies a user-chosen name) and returns `{id, status:"writing"}`. A background job stops the recorder, waits ≤90 s for transcripts, stores the final recording (or deletes the row if nothing at all was recorded), then `write_up`: the LLM (screenshots + timeline, 75 s timeout, 2 attempts, then text-only; "JSON" is in the *input* because the Responses API rejects `json_object` otherwise). On success it sets the instruction and, if still auto-named, the generated name. On failure it writes a deterministic numbered step list, an auto name (first spoken sentence or main window title), `status=ready` and `error` with the reason. `POST /skills/{id}/rewrite` re-runs it (Retry).
+
+**Restarts.** The in-memory session is lost on deploy, but the row is not: stop with no in-memory session finalizes the user's latest `recording` row; `list_skills` housekeeping finalizes orphaned `recording` rows (>60 s without a flush), turns stale `writing` rows (>3 min, no job) into `ready` + error, and deletes empty default-named taught rows.
+
+**Recorder fix.** The in-desktop capture was never starting because `pkill -f /tmp/checkme_teach.py` matched the `bash -c` that ran it and killed it (exit 143 → `CommandExitException`). Patterns are now bracketed (`/tmp/[c]heckme_teach.py`) and start is retried 3×.
+
+**API.** `GET /skills?agent_id=` (list, adds `status`, `error`, `step_count`, `frame_count`), `GET /skills/{id}` (full: steps, transcript, notes, frame indexes), `GET /skills/{id}/frames/{i}` (JPEG), `PATCH /skills/{id}` (name, instruction), `DELETE /skills/{id}`, `POST /skills/{id}/rewrite`.
+
+**UI.** Agent settings → Skills: each skill is a button with status chips (recording…, writing skill…, write-up failed) and refreshes every 3 s while any is busy. Tapping opens `SkillDetail` (full-screen sheet on phones): rename, edit instructions, Save, Re-run write-up, Delete (confirm), recorded steps, narration, screenshots. The screen panel polls the taught skill after Stop and updates its notice (ready / failed + Retry write-up / nothing recorded); a stop that finds no session leaves teaching mode instead of sticking.
+
 ## 7. Connector runtime
 
 `RuntimeConnector.call(name, args)`:
