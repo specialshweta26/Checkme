@@ -92,12 +92,25 @@ class ResearchInput(BaseModel):
     same_site: bool = Field(default=False, description="Only follow links on the start sites.")
     crawl_id: str = Field(default="", description="Resume an earlier crawl instead of starting one.")
     more_pages: int = Field(default=0, description="When resuming: extra pages to read.")
+    max_age_hours: float = Field(default=72.0, description="Reuse pages you already read within this many hours instead of refetching (0 = always fetch).")
+    rerank: str = Field(default="auto", description="Link scoring: auto (keywords + embeddings), llm (also a cheap LLM rerank of the top links), or keywords.")
 
 
 class RankLinksInput(BaseModel):
     goal: str = Field(description="What you are looking for on this site.")
     tab: str = Field(default="", description="Optional tab id; default the active tab.")
     top: int = Field(default=12, description="How many links.")
+
+
+class ResearchMemoryInput(BaseModel):
+    query: str = Field(description="What earlier research to look for.")
+    top: int = Field(default=10, description="How many pages and summaries (max 30).")
+
+
+class ResearchSummaryInput(BaseModel):
+    goal: str = Field(description="The research question this answers.")
+    summary: str = Field(description="The conclusion, with the key facts.")
+    sources: list[str] = Field(default_factory=list, description="Source URLs.")
 
 
 class ResearchNotesInput(BaseModel):
@@ -314,14 +327,16 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         same_site: bool = False,
         crawl_id: str = "",
         more_pages: int = 0,
+        max_age_hours: float = 72.0,
+        rerank: str = "auto",
     ) -> str:
-        """Read many pages toward a goal without filling your context: fetches start URLs (or search results) in parallel over HTTP, follows the links most relevant to the goal (best-first, deduped, page/depth budgets), and returns short per-page notes ranked by relevance plus pages that need the real browser. Checkpointed: resume with crawl_id and more_pages. Use for research across many sources; for one page use web_fetch."""
+        """Read many pages toward a goal without filling your context: fetches start URLs (or search results) in parallel over HTTP, follows the links most relevant to the goal (best-first, deduped, page/depth budgets), and returns short per-page notes ranked by relevance plus pages that need the real browser. Checkpointed: resume with crawl_id and more_pages. Reuses pages you read in earlier jobs while fresh, and flags facts that conflict between sources. Use for research across many sources; for one page use web_fetch."""
         from app.agent import research
 
         ctx.used_tools.append("research_crawl")
         return _dumps(
             await research.run_research_tool(
-                ctx, goal, seeds, queries, max_pages, max_depth, same_site, crawl_id, more_pages
+                ctx, goal, seeds, queries, max_pages, max_depth, same_site, crawl_id, more_pages, max_age_hours, rerank
             ),
             40000,
         )
@@ -334,7 +349,9 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         snap = await computer.run_computer(ctx, "browser_snapshot", {"tab": tab} if tab else {})
         if not isinstance(snap, dict) or snap.get("ok") is False:
             return _dumps(snap)
-        return _dumps(research.rank_snapshot_links(goal, snap, top))
+        from app.agent.relevance import default_scorer
+
+        return _dumps(await research.rank_snapshot_links(goal, snap, top, scorer=default_scorer()))
 
     async def research_notes(crawl_id: str, query: str = "", top: int = 15) -> str:
         """Read more notes from a research_crawl, optionally ranked by a narrower question (map step for synthesis)."""
@@ -342,6 +359,20 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
 
         ctx.used_tools.append("research_notes")
         return _dumps(await research.research_notes_tool(ctx, crawl_id, query, top), 40000)
+
+    async def research_memory_search(query: str, top: int = 10) -> str:
+        """Search research you did in earlier jobs (pages read, with notes and fetch time, and saved conclusions) before crawling again."""
+        from app.agent import research
+
+        ctx.used_tools.append("research_memory_search")
+        return _dumps(await research.research_memory_search_tool(ctx, query, top), 40000)
+
+    async def research_save_summary(goal: str, summary: str, sources: list[str] | None = None) -> str:
+        """Remember a finished research conclusion (with sources) so later jobs can find it with research_memory_search."""
+        from app.agent import research
+
+        ctx.used_tools.append("research_save_summary")
+        return _dumps(await research.research_save_summary_tool(ctx, goal, summary, sources))
 
     async def render_plot(title: str, labels: list[str], values: list[float], chart_type: str = "bar", series_name: str = "") -> str:
         """Build a downloadable chart (line/bar/pie) on the computer and return download_url. Pass labels and numeric values."""
@@ -510,6 +541,8 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         StructuredTool.from_function(coroutine=research_crawl, name="research_crawl", description=research_crawl.__doc__, args_schema=ResearchInput),
         StructuredTool.from_function(coroutine=browser_rank_links, name="browser_rank_links", description=browser_rank_links.__doc__, args_schema=RankLinksInput),
         StructuredTool.from_function(coroutine=research_notes, name="research_notes", description=research_notes.__doc__, args_schema=ResearchNotesInput),
+        StructuredTool.from_function(coroutine=research_memory_search, name="research_memory_search", description=research_memory_search.__doc__, args_schema=ResearchMemoryInput),
+        StructuredTool.from_function(coroutine=research_save_summary, name="research_save_summary", description=research_save_summary.__doc__, args_schema=ResearchSummaryInput),
         StructuredTool.from_function(coroutine=render_plot, name="render_plot", description=render_plot.__doc__, args_schema=PlotInput),
         StructuredTool.from_function(coroutine=generate_image, name="generate_image", description=generate_image.__doc__, args_schema=ImageInput),
         StructuredTool.from_function(coroutine=generate_video, name="generate_video", description=generate_video.__doc__, args_schema=VideoInput),

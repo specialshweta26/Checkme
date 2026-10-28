@@ -250,6 +250,10 @@ def describe_tool(name: str, args: dict | None, connector_names: dict[str, str] 
         return f"Researching: {_clip(a.get('goal'), 60)}" if a.get("goal") else "Continuing the research crawl"
     if n == "research_notes":
         return "Reading research notes"
+    if n == "research_memory_search":
+        return f"Checking earlier research: {_clip(a.get('query'), 50)}"
+    if n == "research_save_summary":
+        return "Saving the research conclusion"
     if n == "browser_new_tab":
         return f"Opening a new tab: {_host(a.get('url'))}" if a.get("url") else "Opening a new browser tab"
     if n == "browser_switch_tab":

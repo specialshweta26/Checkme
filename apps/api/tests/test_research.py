@@ -5,6 +5,9 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from app.agent import research as R
+from app.agent.relevance import Scorer
+
+KW = Scorer(mode="keywords")
 
 FILLER = " ".join(["Plain filler sentence about nothing in particular here."] * 6)
 
@@ -82,9 +85,9 @@ async def test_best_first_crawl_follows_relevant_links_only():
 async def test_page_budget_checkpoints_and_resume():
     redis = FakeRedis()
     ctx = SimpleNamespace(user=SimpleNamespace(id="u1"), progress=None)
-    first = await R.run_research_tool(ctx, "solar panel efficiency", ["https://s.test/"], max_pages=1, max_depth=3, fetch=fake_fetch, redis_client=redis)
+    first = await R.run_research_tool(ctx, "solar panel efficiency", ["https://s.test/"], max_pages=1, max_depth=3, fetch=fake_fetch, redis_client=redis, scorer=KW)
     assert first["pages_read"] == 1 and first["stop_reason"] == "page budget reached"
-    more = await R.run_research_tool(ctx, "", crawl_id=first["crawl_id"], more_pages=5, fetch=fake_fetch, redis_client=redis)
+    more = await R.run_research_tool(ctx, "", crawl_id=first["crawl_id"], more_pages=5, fetch=fake_fetch, redis_client=redis, scorer=KW)
     assert more["pages_read"] == 3 and more["crawl_id"] == first["crawl_id"]
     notes = await R.research_notes_tool(ctx, first["crawl_id"], query="temperature heat", redis_client=redis)
     assert notes["notes"][0]["url"].endswith("/temperature")
@@ -109,7 +112,7 @@ async def test_thin_or_failed_pages_go_to_the_browser_list():
     assert not state.notes
 
 
-def test_rank_snapshot_links():
+async def test_rank_snapshot_links():
     snap = {
         "url": "https://s.test/",
         "elements": [
@@ -118,5 +121,5 @@ def test_rank_snapshot_links():
             {"ref": "e2", "href": "", "name": "Search"},
         ],
     }
-    out = R.rank_snapshot_links("solar efficiency", snap)
+    out = await R.rank_snapshot_links("solar efficiency", snap)
     assert [r["ref"] for r in out["links"]] == ["e1", "e0"]

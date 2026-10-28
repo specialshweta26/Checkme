@@ -406,6 +406,26 @@ Why: mobile Safari fails a `fetch` with "Load failed" after about 60 s without a
 - **Browser fallback.** Thin JS shells, bot walls and failed fetches are listed under `needs_browser` for the computer tools. In the browser, `browser_rank_links(goal)` scores the current page's link refs, so the agent clicks the best ones or opens several in background tabs.
 - **Long runs.** These belong in `start_background_task` (worker brief, §7.4), and the deliverable is written as linked markdown pages with sources.
 
+**Semantic relevance (`app/agent/relevance.py`).** Link and page scores are hybrid, and the same `Scorer` serves the crawl queue and `browser_rank_links`.
+- **Keyword prefilter.** The keyword score above is always computed. The top 80 candidates per page go on to embeddings, and zero-overlap links are kept, because those are what embeddings rescue (e.g. "semaphore" → "Synchronization Primitives").
+- **Embeddings.** The app's configured provider (`app.llm.embed_texts`, OpenAI `text-embedding-3-small`, Redis-cached 7 days) embeds the goal and each link's "anchor | host path words". A link's score is `max(kw, (0.3·kw + 0.7·sem) · low-value penalty)`. Here `sem` mixes a within-page calibration (median link → 0, best → 1) with an absolute cosine scale (0.15 → 0, 0.55 → 1). Page scores are `0.4·kw + 0.6·abs-cosine(goal, title+text)`.
+- **LLM rerank.** With `rerank="llm"`, one batched cheap `chat_complete` JSON call rescores the top 20 links.
+- **Fallback.** With no `OPENAI_API_KEY`, `rerank="keywords"`, or three provider errors, scoring stays keyword-only and the crawl never fails on scoring. The digest and `browser_rank_links` report `scoring`.
+- **Anchors.** Duplicate links to one canonical URL merge their anchors ("synchronize / Synchronization Primitives").
+
+**Contradictions (`app/agent/contradictions.py`).** The digest carries `conflicts: [{about, kind, claims:[{value, url, quote}]}]`.
+- **Heuristic pass (always on).** Extracts `<subject words> <number><unit>` claims from each note (scales thousand/million/lakh/crore, units, years). It flags the same subject (≥2 shared words) and unit when values differ by more than 5% on different pages.
+- **LLM pass (when a chat provider is configured).** Covers the best 12 notes and catches non-numeric conflicts. It is kept only when it cites ≥2 URLs that are really in the notes.
+- **Synthesis.** The tool's `next` and the worker brief tell the agent to state conflicts with both sources instead of silently picking one.
+
+**Research memory (`app/agent/research_store.py`; tables `research_pages`, `research_summaries`; tools `research_memory_search`, `research_save_summary`).**
+- **What is stored.** `research_pages` holds one row per `(user_id, canonical_url)` (unique, upserted). Each row has the url, title, clipped text (12k), note, the extracted links, the goal, the embedding (`Vector(DIMS)`, NULL when the provider's dimension differs) and `fetched_at`. `research_summaries` holds a crawl or job's conclusion with sources, its embedding and `job_id`.
+- **Reuse.** Before fetching a batch, the crawl asks for rows of this user fetched within `max_age_hours` (default 72; 0 = always refetch). Fresh rows are used as the page, including their stored links, so deeper crawling works without a fetch. Notes say `from_memory` and `fetched_at`, and the digest says `reused_from_memory`. Newly fetched pages are upserted after each batch.
+- **Summaries.** A finished crawl saves a summary automatically. Agents can save their own conclusion with `research_save_summary`.
+- **Search.** `research_memory_search(query)` uses pgvector cosine when a query embedding is available, else keyword `ILIKE`. It covers both tables.
+- **Isolation.** Every query filters `user_id`, and rows cascade-delete with the user. Memory is used only for real user ids (UUID). Store errors are logged and the crawl just fetches.
+- **Tables.** They are created by `Base.metadata.create_all` in `_migrate`.
+
 **Tabs (daemon v13).**
 - **Tracking.** The daemon keeps `t1, t2, …` for the pages of its one persistent context, up to 12. Pages opened by `target=_blank` or `window.open` are registered automatically.
 - **Tools.** `browser_tabs`, `browser_new_tab(url, background)`, `browser_switch_tab(tab)` and `browser_close_tab(tab)`. `browser_navigate`, `browser_snapshot`, `browser_act` and `computer_observe` accept `tab=` to work on a tab without switching the screen.
