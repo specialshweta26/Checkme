@@ -111,6 +111,9 @@ class RunContext:
     toolkit_assignments: dict = field(default_factory=dict)
     scratchpad: list = field(default_factory=list)  # this-chat checklist (scratchpad_*)
     active_skills: list = field(default_factory=list)  # skills routed to / loaded by this task
+    task_key: str = ""  # isolates this task's skill state (app/skills/task_state.py)
+    task_state: dict | None = None  # the skill this task follows and how far it got (checkpointed)
+    task_resumed: bool = False
 
 
 def _json_size(value: Any) -> int:
@@ -1619,6 +1622,14 @@ class GetSkillInput(BaseModel):
     name: str = Field(default="", description="Skill name, when you do not have the id.")
 
 
+class SkillProgressInput(BaseModel):
+    step: int = Field(description="How many steps of the skill are done now (1 after the first step).")
+    note: str = Field(default="", description="One line on what this step did or found.")
+    artifact_label: str = Field(default="", description="Name of something produced (link, file, id, quote). Optional.")
+    artifact_value: str = Field(default="", description="Its value. Optional.")
+    done: bool = Field(default=False, description="True when the whole skill is finished.")
+
+
 class StopTeachingInput(BaseModel):
     name: str = Field(default="", description="Name for the taught skill.")
 
@@ -1726,6 +1737,10 @@ async def delegate_job(ctx: "RunContext", role: str, task: str, agent_name: str 
     await ctx.db.flush()
     info = jobs.serialize_job(child)
     ctx.jobs_started.append(info)
+    handed = await _hand_over_state(ctx, getattr(agent, "id", None), getattr(agent, "name", "") or role, f"job:{child.id}", job_id=child.id)
+    if handed:
+        child.meta = {**(child.meta or {}), "skill_state_id": handed["id"], "skill_name": handed.get("skill_name")}
+        info["skill_state"] = handed
     if ctx.progress is not None and hasattr(ctx.progress, "record"):
         await ctx.progress.record("status", f"Delegated to {info['agent_name'] or role} ({role}): {info['title']}", {"child_id": info["id"]})
     return {
@@ -2021,9 +2036,29 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
         data.pop("frames", None)
         if not any(str(s.get("id")) == data["id"] for s in ctx.active_skills):
             ctx.active_skills.append({"id": data["id"], "name": data["name"], "match": {"by": "loaded"}})
+        if ctx.task_key and (ctx.task_state is None or str(ctx.task_state.get("skill_id")) != data["id"]):
+            await _begin_task_state(ctx, data, resumed_ok=False)
         if ctx.progress is not None:
             await ctx.progress.emit(f"Using skill: {data['name']}", kind="skill", tool="get_skill")
         return dumps(data, 16000)
+
+    async def skill_progress(step: int, note: str = "", artifact_label: str = "", artifact_value: str = "", done: bool = False) -> str:
+        """Checkpoint the skill this task is following: steps done, a progress note, anything produced. Saved at once, so the task resumes here after a restart or handover."""
+        from app.skills import task_state as ts
+
+        ctx.used_tools.append("skill_progress")
+        if not ctx.task_state:
+            return dumps({"error": "This task is not following a skill. Load one with get_skill first."})
+        by = getattr(ctx.agent, "name", "") or ""
+        artifact = {"label": artifact_label, "value": artifact_value} if (artifact_label or artifact_value) else None
+        state = await ts.checkpoint(ctx.task_state["id"], step_index=step, note=note, artifact=artifact, by=by)
+        if state is None:
+            return dumps({"error": "Task state is gone."})
+        if done:
+            state = await ts.finish(state["id"], note or "Done.", by=by) or state
+        ctx.task_state = state
+        await _narrate_task_state(ctx, note)
+        return dumps({"saved": True, "state": ts.serialize(state)}, 4000)
 
     async def start_teaching() -> str:
         """Record the computer while the user demonstrates a workflow (the user may narrate out loud from the screen panel). Max ten minutes by default."""
@@ -2464,6 +2499,12 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
                 args_schema=GetSkillInput,
             ),
             StructuredTool.from_function(
+                coroutine=skill_progress,
+                name="skill_progress",
+                description=skill_progress.__doc__,
+                args_schema=SkillProgressInput,
+            ),
+            StructuredTool.from_function(
                 coroutine=start_teaching,
                 name="start_teaching",
                 description=start_teaching.__doc__,
@@ -2490,6 +2531,8 @@ def system_prompt(
     skills: list | None = None,
     matched_skills: list | None = None,
     query: str = "",
+    task_state: dict | None = None,
+    task_resumed: bool = False,
 ) -> str:
     tz = getattr(user, "timezone", None) or "Asia/Kolkata"
     now = _now(tz)
@@ -2508,6 +2551,9 @@ def system_prompt(
     # Profile + full skill index every turn (rebuilt from the DB, so new or rewritten skills show up at once);
     # only the skills routed to this request carry their full bodies.
     identity += capabilities_block(agent, skills, matched_skills, query)
+    from app.skills.task_state import prompt_block
+
+    identity += prompt_block(task_state, task_resumed)
     identity += (
         "Your memory and scheduled routines belong only to you, not to other agents. Use remembered context to avoid asking the user twice. "
         "When the user explicitly asks you to remember something, or a stable non-sensitive preference is clearly established by repeated work, "
@@ -2800,6 +2846,8 @@ async def _ask_teammate(ctx: RunContext, agent_id: str, prompt: str) -> dict:
         f"The user said: {clip(ctx.query, 500)}\n"
         f"{from_name} asked you: {task}"
     )
+    peer_key = f"peer:{ctx.task_state['id']}:{member.id}" if ctx.task_state else None
+    handed = await _hand_over_state(ctx, member.id, member.name, peer_key) if peer_key else None
     nested = await run_deep_agent(
         ctx.db,
         ctx.user,
@@ -2807,6 +2855,7 @@ async def _ask_teammate(ctx: RunContext, agent_id: str, prompt: str) -> dict:
         ctx.request_id or "peer",
         [],
         nested_query,
+        task_key=peer_key,
         auto_confirm=ctx.auto_confirm,
         workspace_agent=member,
         group=ctx.group,
@@ -2816,6 +2865,8 @@ async def _ask_teammate(ctx: RunContext, agent_id: str, prompt: str) -> dict:
         progress=ctx.progress.child(member.name) if ctx.progress is not None else None,
     )
     ctx.used_tools.append(f"ask_teammate:{member.name}")
+    if handed:
+        await _take_back_state(ctx, handed["id"], nested.get("text") or "", member.name)
     for item in nested.get("attachments") or []:
         ctx.attachments.append(item)
     for name in nested.get("used_tools") or []:
@@ -2889,6 +2940,89 @@ async def with_computer(db: AsyncSession, user, conns: list) -> list:
     return [*conns, row]
 
 
+async def _begin_task_state(ctx: RunContext, skill: dict | None, meta_question: bool = False, resumed_ok: bool = True) -> None:
+    """Open or resume this task's skill state and narrate it (chat status line + job timeline)."""
+    from app.skills import task_state as ts
+
+    if ctx.db is None or not ctx.task_key:
+        return
+    try:
+        state, resumed = await ts.begin(
+            ctx.user,
+            ctx.task_key,
+            agent_id=getattr(ctx.agent, "id", None),
+            skill=skill,
+            session_id=ctx.session_id,
+            job_id=getattr(ctx.job, "id", None),
+            meta_question=meta_question,
+        )
+    except Exception:  # noqa: BLE001 - never block a turn on task state
+        log.info("task state: begin failed", exc_info=True)
+        return
+    ctx.task_state = state
+    ctx.task_resumed = bool(resumed and resumed_ok)
+    if state:
+        if not any(str(s.get("id")) == str(state.get("skill_id")) for s in ctx.active_skills):
+            ctx.active_skills.append({"id": state.get("skill_id"), "name": state.get("skill_name"), "match": {"by": "resumed" if resumed else "loaded"}})
+        await _narrate_task_state(ctx, "", resumed=resumed)
+
+
+async def _narrate_task_state(ctx: RunContext, note: str = "", resumed: bool = False) -> None:
+    from app.skills import task_state as ts
+
+    state = ctx.task_state
+    if not state or ctx.progress is None:
+        return
+    verb = "Resuming skill" if resumed else "Using skill"
+    line = f"{verb}: {state.get('skill_name')} · {ts.step_label(state)}" + (f" — {clip(note, 160)}" if note else "")
+    if hasattr(ctx.progress, "record"):  # job timeline: a status event carrying the state
+        await ctx.progress.record("status", line, {"skill_state": ts.serialize(state)})
+    else:  # chat: the live status line
+        await ctx.progress.emit(line, kind="skill")
+
+
+async def _hand_over_state(ctx: RunContext, to_agent_id, to_name: str, task_key: str, job_id=None) -> dict | None:
+    """Pass this task's skill state to another agent (delegate / ask_teammate). Returns the child state."""
+    from app.skills import task_state as ts
+
+    if not ctx.task_state or not task_key:
+        return None
+    try:
+        child = await ts.handover(ctx.task_state, to_agent_id, task_key, by=getattr(ctx.agent, "name", "") or "", to_name=to_name, job_id=job_id)
+        ctx.task_state = await ts.STORE.get(ctx.task_state["id"]) or ctx.task_state
+    except Exception:  # noqa: BLE001
+        log.info("task state: handover failed", exc_info=True)
+        return None
+    if ctx.progress is not None:
+        line = f"Handing skill {child.get('skill_name')} ({ts.step_label(child)}) to {to_name}"
+        if hasattr(ctx.progress, "record"):
+            await ctx.progress.record("status", line, {"skill_state": ts.serialize(child)})
+        else:
+            await ctx.progress.emit(line, kind="skill")
+    return ts.serialize(child)
+
+
+async def _take_back_state(ctx: RunContext, child_id, result: str, by: str) -> None:
+    """A teammate finished its part in this turn: close its state and write the result back to ours."""
+    from app.skills import task_state as ts
+
+    try:
+        await ts.finish(child_id, result, ok=True, by=by)
+        if ctx.task_state:
+            ctx.task_state = await ts.STORE.get(ctx.task_state["id"]) or ctx.task_state
+    except Exception:  # noqa: BLE001
+        log.info("task state: taking back the handover failed", exc_info=True)
+        return
+    if ctx.task_state:
+        await _narrate_task_state(ctx, f"result back from {by}")
+
+
+def _task_state_out(ctx: RunContext) -> dict | None:
+    from app.skills import task_state as ts
+
+    return ts.serialize(ctx.task_state)
+
+
 async def run_deep_agent(
     db: AsyncSession,
     user,
@@ -2905,6 +3039,7 @@ async def run_deep_agent(
     mentions: dict | None = None,
     progress: Any = None,
     job: Any = None,
+    task_key: str | None = None,
 ) -> dict[str, Any]:
     from app.connectors.platform import ensure_platform_connectors
     from app.debug_ndjson import dbg as _dbg_start
@@ -2978,8 +3113,19 @@ async def run_deep_agent(
         except Exception:  # noqa: BLE001
             log.info("skills: loading the skill index failed", exc_info=True)
             await db.rollback()
+        from app.skills import task_state as ts
+        from app.skills.profile import is_meta_question
+
+        if matched_skills:
+            matched_skills = await ts.confirm_skills(query, matched_skills)
         ctx.active_skills = [{"id": s.get("id"), "name": s.get("name"), "match": s.get("match")} for s in matched_skills]
-        if matched_skills and progress is not None:
+        ctx.task_key = task_key or ts.task_key_for(
+            session_id=session_id, agent_id=getattr(workspace_agent, "id", None), job_id=getattr(job, "id", None)
+        )
+        await _begin_task_state(
+            ctx, matched_skills[0] if matched_skills else None, meta_question=is_meta_question(query)
+        )
+        if matched_skills and progress is not None and not ctx.task_state:
             names = ", ".join(str(s.get("name")) for s in matched_skills)
             await progress.emit(f"Skill for this task: {names}", kind="skill")
     from langchain_core.messages import HumanMessage
@@ -3031,6 +3177,8 @@ async def run_deep_agent(
             skills=all_skills,
             matched_skills=matched_skills,
             query=query,
+            task_state=ctx.task_state,
+            task_resumed=ctx.task_resumed,
         ),
     )
     payload = {"messages": _lc_messages(history, query, extra)}
@@ -3105,6 +3253,7 @@ async def run_deep_agent(
         "attachments": ctx.attachments,
         "used_tools": ctx.used_tools,
         "skills_used": ctx.active_skills,
+        "task_state": _task_state_out(ctx),
         "route": "deep",
         "source": source,
         "mail_threads": _mail_threads(ctx),

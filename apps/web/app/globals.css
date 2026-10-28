@@ -2533,3 +2533,6 @@ input.tasks-search { width: min(260px, 100%); }
   .skill-sheet { padding: 0; }
   .skill-detail { width: 100%; min-height: 100dvh; max-height: none; border-radius: 0; }
 }
+
+.skill-used { margin-top: 6px; font-size: 12px; color: var(--muted, #8a8f98); }
+.job-chip.skill { border-style: dashed; }

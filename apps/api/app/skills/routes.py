@@ -96,6 +96,21 @@ async def teach_stop(body: TeachStopIn, user: User = Depends(current_user), db: 
         raise _err(vis_exc) from vis_exc
 
 
+@router.get("/tasks/states")
+async def task_states(session_id: str = "", job_id: str = "", user: User = Depends(current_user)):
+    """Which skill each task in a chat or job tree follows, its step, notes and artifacts (newest first)."""
+    from app.skills import task_state
+
+    for value in (session_id, job_id):
+        if value:
+            try:
+                uuid.UUID(value)
+            except ValueError:
+                raise HTTPException(400, "Bad id") from None
+    rows = await task_state.STORE.list_for(user.id, session_id=session_id or None, job_id=job_id or None)
+    return {"states": [task_state.serialize(r) for r in rows]}
+
+
 @router.get("/{skill_id}")
 async def read_skill(skill_id: uuid.UUID, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     """One skill in full: instructions, steps, narration transcript, notes and screenshot indexes."""

@@ -293,6 +293,7 @@ async def chat(
                 "route": result.get("route"),
                 "used_tools": result.get("used_tools"),
                 "skills_used": result.get("skills_used") or [],
+                "task_state": result.get("task_state"),
                 "pending_confirms": result.get("pending_confirms"),
                 "attachments": result.get("attachments"),
                 "source": result.get("source"),

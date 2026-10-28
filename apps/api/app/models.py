@@ -488,6 +488,36 @@ class AgentSkill(Base):
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class TaskSkillState(Base):
+    """Which skill one task (a chat turn's thread or a background job) is following and how far it got.
+
+    ``task_key`` isolates concurrent tasks: ``job:<job id>`` or ``chat:<session id>:<agent id>``. A handover to another
+    agent creates a child row (``parent_id``) that starts from the same skill and step; its result is written back.
+    """
+
+    __tablename__ = "task_skill_states"
+    __table_args__ = (Index("ix_task_skill_states_user_key", "user_id", "task_key"),)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    task_key: Mapped[str] = mapped_column(String(200))
+    session_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    job_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    parent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    skill_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    skill_name: Mapped[str] = mapped_column(String(160), default="")
+    skill_version: Mapped[str] = mapped_column(String(40), default="")  # the skill's updated_at when chosen
+    # active | handed_off | done | failed | dropped
+    status: Mapped[str] = mapped_column(String(20), default="active")
+    step_index: Mapped[int] = mapped_column(Integer, default=0)  # steps done so far (0 = not started)
+    step_count: Mapped[int] = mapped_column(Integer, default=0)
+    notes: Mapped[list] = mapped_column(JSONB, default=list)  # {at, text, by}
+    artifacts: Mapped[list] = mapped_column(JSONB, default=list)  # {at, label, value, by}
+    result: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
 class InboxItem(Base):
     """Triaged inbox card: classification, thread-aware draft, and user action state."""
 

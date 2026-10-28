@@ -72,3 +72,50 @@ def skill_store(monkeypatch):
             if task is not None:
                 task.cancel()
     service._TEACH.clear()
+
+
+class TaskStateStore:
+    """In-memory stand-in for app.skills.task_state.DbStore."""
+
+    def __init__(self):
+        self.rows: dict[str, dict] = {}
+
+    async def find_open(self, user_id, task_key):
+        from app.skills.task_state import OPEN
+
+        hits = [r for r in self.rows.values() if r["user_id"] == str(user_id) and r["task_key"] == task_key and r["status"] in OPEN]
+        return copy.deepcopy(sorted(hits, key=lambda r: r["updated_at"])[-1]) if hits else None
+
+    async def get(self, state_id):
+        row = self.rows.get(str(state_id))
+        return copy.deepcopy(row) if row else None
+
+    async def create(self, data):
+        from app.skills.task_state import _now
+
+        sid = str(uuid.uuid4())
+        row = {"parent_id": None, **copy.deepcopy(data), "id": sid, "created_at": _now(), "updated_at": _now()}
+        self.rows[sid] = row
+        return copy.deepcopy(row)
+
+    async def update(self, state_id, **fields):
+        from app.skills.task_state import _now
+
+        row = self.rows.get(str(state_id))
+        if row is None:
+            return None
+        row.update(copy.deepcopy(fields))
+        row["updated_at"] = _now()
+        return copy.deepcopy(row)
+
+    async def list_for(self, user_id, session_id=None, job_id=None, limit=20):
+        return [copy.deepcopy(r) for r in self.rows.values() if r["user_id"] == str(user_id)][:limit]
+
+
+@pytest.fixture(autouse=True)
+def task_store(monkeypatch):
+    from app.skills import task_state
+
+    store = TaskStateStore()
+    monkeypatch.setattr(task_state, "STORE", store)
+    return store

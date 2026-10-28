@@ -54,6 +54,13 @@ const ICON: Record<string, string> = {
 };
 const TODO_MARK: Record<string, string> = { completed: "✓", in_progress: "▸", pending: "○" };
 
+function skillStep(st: { step_index?: number; step_count?: number }) {
+  const done = st.step_index || 0;
+  const total = st.step_count || 0;
+  if (!total) return `step ${done + 1}`;
+  return done >= total ? `all ${total} steps done` : `step ${done + 1}/${total}`;
+}
+
 async function post(path: string, body?: any) {
   const res = await fetch(path, {
     method: "POST",
@@ -148,6 +155,14 @@ export function JobTimeline({ jobId, after: startAfter = 0, onSettled }: { jobId
 
   const planEvent = [...events].reverse().find((ev) => ev.kind === "plan" && Array.isArray(ev.data?.todos) && ev.data.todos.length);
   const todos: Todo[] = planEvent ? planEvent.data.todos : [];
+  // Latest skill state per agent in this job tree: which skill each task follows and its step.
+  const skillStates = Object.values(
+    events.reduce<Record<string, any>>((acc, ev) => {
+      const st = ev.data?.skill_state;
+      if (st && st.id) acc[st.id] = { ...st, who: ev.agent_name };
+      return acc;
+    }, {}),
+  ).filter((st: any) => st.status !== "dropped");
 
   async function cancel() {
     setBusy("cancel");
@@ -177,6 +192,16 @@ export function JobTimeline({ jobId, after: startAfter = 0, onSettled }: { jobId
           {jobs.map((j) => (
             <span key={j.id} className={`job-chip ${j.status}`}>
               {j.agent_name || j.role} · {j.role} · {STATUS_LABEL[j.status] || j.status}
+            </span>
+          ))}
+        </div>
+      ) : null}
+      {skillStates.length ? (
+        <div className="job-tree job-skills" aria-label="Skills in use">
+          {skillStates.map((st: any) => (
+            <span key={st.id} className={`job-chip skill ${st.status}`} title={(st.notes || []).map((n: any) => n.text).join("\n")}>
+              {st.who ? `${st.who} · ` : ""}Skill: {st.skill_name} · {skillStep(st)}
+              {st.status === "handed_off" ? " · handed over" : st.status === "done" ? " · done" : ""}
             </span>
           ))}
         </div>
