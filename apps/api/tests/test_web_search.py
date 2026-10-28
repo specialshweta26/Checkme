@@ -108,7 +108,7 @@ async def test_all_engines_fail_returns_clear_error_not_invented_results(http):
     out = await web_tools.web_search("anything")
     assert out["results"] == []
     assert "no results" in out["error"].lower() and "do not invent" in out["error"].lower()
-    assert len(out["tried"]) == 3
+    assert len(out["tried"]) == 4 and out["tried"][-1] == "browser: skipped (no cloud computer connected)"
     # one retry per request on timeouts
     assert sum(1 for r in http.seen if r.url.host == "search.brave.com") == 2
 
@@ -125,7 +125,7 @@ async def test_retry_recovers_from_a_5xx(http):
     assert out["source"] == "brave" and calls["n"] == 2
 
 
-async def test_api_providers_first_in_order(http, monkeypatch):
+async def test_paid_providers_are_the_last_resort_in_order(http, monkeypatch):
     monkeypatch.setattr(web_tools, "get_settings", lambda: _settings(tavily_api_key="tv", serper_api_key="sp"))
     http.routes["POST api.tavily.com/search"] = lambda r: httpx.Response(401, json={"detail": "bad key"})
 
@@ -138,8 +138,9 @@ async def test_api_providers_first_in_order(http, monkeypatch):
     out = await web_tools.web_search("fastapi")
     assert out["source"] == "serper"
     assert out["results"] == [{"title": "FastAPI", "url": "https://fastapi.tiangolo.com/", "snippet": "Docs"}]
-    assert out["fallback_from"][0].startswith("tavily: RuntimeError HTTP 401")
-    assert [name for name, _ in web_tools.search_providers()][:2] == ["tavily", "serper"]
+    assert [t.split(":")[0] for t in out["fallback_from"]] == ["brave", "duckduckgo", "wikipedia", "browser", "tavily"]
+    assert out["fallback_from"][-1].startswith("tavily: RuntimeError HTTP 401")
+    assert [name for name, _ in web_tools.search_providers()] == ["brave", "duckduckgo", "wikipedia", "tavily", "serper"]
 
 
 async def test_tavily_brave_exa_parsers(http, monkeypatch):

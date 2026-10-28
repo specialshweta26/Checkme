@@ -94,6 +94,19 @@ def browser_failed(data: dict | None, requested: str = "") -> bool:
     return False
 
 
+def needs_real_browser(page: dict | None) -> bool:
+    """True when the server's static HTML would show an empty or blocked shell (JS apps, bot checks, errors)."""
+    from app.connectors.computer_daemon import bot_wall, page_is_thin
+
+    page = page or {}
+    if page.get("ok") is False:
+        return True
+    text = str(page.get("text") or "")
+    if bot_wall(str(page.get("url") or ""), str(page.get("title") or ""), text):
+        return True
+    return page_is_thin(text)
+
+
 async def fetch_public_page(url: str) -> dict:
     from app.connectors.daytona_box import safe_http_url
 

@@ -435,12 +435,13 @@ Why: mobile Safari fails a `fetch` with "Load failed" after about 60 s without a
 
 ### 7.3 Web search (`app/agent/web_tools.py`)
 
-`web_search(query)` tries providers in order and returns `{query, results:[{title,url,snippet}], source, fallback_from?}` from the first that has results, or `{results: [], error, tried}`. It never invents results.
+`web_search(query)` runs stages in `SEARCH_ORDER` (default `free,browser,paid`) and returns `{query, results:[{title,url,snippet}], source, fallback_from?, took_s}` from the first that has results, or `{results: [], error, tried, order, search_api_configured, setup?, configure_one_of?}`. It never invents results.
 
-1. API providers whose key is set: `TAVILY_API_KEY`, `BRAVE_SEARCH_API_KEY`, `SERPER_API_KEY`, `EXA_API_KEY`.
-2. Keyless: Brave HTML (`search.brave.com`, over HTTP/2: Brave answers HTTP/1.1 clients with 429), DuckDuckGo html/lite (HTTP 202 "anomaly" pages are detected as a bot check, not as "0 results"), Wikipedia search (marked with a `note`).
+1. **free** (keyless, server-side): Brave HTML (`search.brave.com`, over HTTP/2), DuckDuckGo html/lite (HTTP 202 "anomaly" pages are a bot check, not "0 results"), Wikipedia (hits must share a word with the query; marked with a `note`). Each engine gets `SEARCH_PROVIDER_TIMEOUT_S` (8 s); all together `SEARCH_FREE_TIMEOUT_S` (15 s).
+2. **browser**: when a cloud computer is connected, `browser_search` runs the query in its real browser (Bing, DuckDuckGo, Google; background tab; results read from the DOM; CAPTCHA/verification/error pages are reported, never bypassed). Budget `SEARCH_BROWSER_TIMEOUT_S` (45 s) when the computer is running. If it is stopped, `SEARCH_BROWSER_BOOT=auto` skips the stage when a paid key is left (a cold boot is too slow for a search) and otherwise boots it within `SEARCH_BROWSER_COLD_TIMEOUT_S` (120 s); `always` / `never` force it.
+3. **paid** (last resort, only when keyed): `TAVILY_API_KEY`, `BRAVE_SEARCH_API_KEY`, `SERPER_API_KEY`, `EXA_API_KEY`, in that order, within `SEARCH_PAID_TIMEOUT_S` (20 s).
 
-Each request has a 10 s timeout and one retry on timeouts, connection errors and 5xx. `web_fetch` returns `{ok: false, error}` instead of raising (an uncaught `httpx.ReadTimeout` used to fail the whole turn).
+`SEARCH_ORDER` also accepts single provider names (e.g. `brave,browser,tavily`). With no paid key, failures carry `setup` naming the env vars to set. Each HTTP request has a 10 s timeout and one retry on timeouts, connection errors and 5xx. `web_fetch` returns `{ok: false, error}` instead of raising; on the computer, thin/JS/blocked pages load in the real browser (consent prompts dismissed, wait for content) instead of painting static HTML.
 
 ## 8. Inbox pipeline
 
@@ -605,7 +606,8 @@ See `.env.example`. Important knobs in `app/config.py`:
 | `COMPUTER_PROVIDER` | `e2b` or `daytona`; picks the backend when both keys are set |
 | `E2B_SANDBOX_TIMEOUT` / `E2B_TEMPLATE` | Idle seconds before pause (Hobby ≤ 3600, Pro ≤ 86400) / custom template (default `desktop`) |
 | `DAYTONA_API_KEY` | Daytona computer (fallback) |
-| `TAVILY_API_KEY` / `BRAVE_SEARCH_API_KEY` / `SERPER_API_KEY` / `EXA_API_KEY` | Optional web search APIs, tried in this order before the keyless fallback |
+| `TAVILY_API_KEY` / `BRAVE_SEARCH_API_KEY` / `SERPER_API_KEY` / `EXA_API_KEY` | Optional paid web search APIs, the last resort after the free and browser stages |
+| `SEARCH_ORDER` and `SEARCH_*_TIMEOUT_S`, `SEARCH_BROWSER_BOOT` | Web search stage order (default `free,browser,paid`) and time budgets (§7.3) |
 | `COMPOSIO_API_KEY` | Composio marketplace and the built-in GitHub connector (proxy, accounts) |
 | `COMPOSIO_GITHUB_AUTH_CONFIG_ID` | Optional: pin the GitHub auth config; a custom OAuth one with unmasked secrets enables real git clone/push |
 

@@ -100,7 +100,18 @@ class Settings(BaseSettings):
     e2b_template: str = ""  # empty = E2B's public "desktop" template
     # Seconds of inactivity before the sandbox pauses (Hobby plan max 3600, Pro max 86400). Each tool call extends it.
     e2b_sandbox_timeout: int = 3600
-    # Optional web search API keys. Tried in this order; with none set a keyless fallback is used.
+    # Web search order (comma list of stages or provider names). Default: keyless engines (brave, duckduckgo,
+    # wikipedia), then a search in the cloud computer's browser, then paid APIs (tavily, brave_api, serper, exa)
+    # as the last resort. Each stage has a time budget so a blocked engine can't stall a search.
+    search_order: str = "free,browser,paid"
+    search_provider_timeout_s: float = 8.0  # each free engine
+    search_free_timeout_s: float = 15.0  # all free engines together
+    search_browser_timeout_s: float = 45.0  # browser stage when the computer is already running
+    search_browser_cold_timeout_s: float = 120.0  # browser stage when it has to boot the computer first
+    # auto: boot a stopped computer for search only when no paid provider is left; always; never
+    search_browser_boot: str = "auto"
+    search_paid_timeout_s: float = 20.0  # all paid providers together
+    # Optional paid web search API keys (Tavily first). Only used after the free and browser stages fail.
     tavily_api_key: str = ""
     brave_search_api_key: str = ""
     serper_api_key: str = ""
