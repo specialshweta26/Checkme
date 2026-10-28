@@ -148,6 +148,58 @@ async def test_failure_marks_failed_and_tells_chat(factory):
         assert "sandbox unavailable" in row.error
 
 
+async def test_webhook_delivery_queues_one_agent_job_and_deduplicates(factory):
+    from app.automations.service import accept_webhook, create_webhook
+    from app.models import AgentJob
+
+    user, agent = await _user_and_agent(factory, "Inbox Manager")
+    async with factory() as db:
+        hook = await create_webhook(
+            db,
+            user,
+            name="New issue triage",
+            trigger="issues",
+            condition="Only process newly opened issues.",
+            action="Summarize the issue and prepare a priority recommendation.",
+            agent_id=agent.id,
+            requires_approval=True,
+        )
+        created = await accept_webhook(
+            db,
+            hook["id"],
+            secret=hook["secret"],
+            event_name="issues",
+            event_id="delivery-1",
+            payload={"action": "opened", "issue": {"number": 42, "title": "Fix login"}},
+        )
+        assert created["accepted"] and not created["duplicate"]
+        job_id = uuid.UUID(created["job_id"])
+        job = await db.get(AgentJob, job_id)
+        assert job is not None and job.kind == "event" and job.status == "queued"
+        assert job.meta["requires_approval"] is True
+        assert "Fix login" in job.prompt
+
+    async with factory() as db:
+        duplicate = await accept_webhook(
+            db,
+            hook["id"],
+            secret=hook["secret"],
+            event_name="issues",
+            event_id="delivery-1",
+            payload={"action": "opened", "issue": {"number": 42, "title": "Fix login"}},
+        )
+        assert duplicate["duplicate"] is True and duplicate["job_id"] == str(job_id)
+        mismatch = await accept_webhook(
+            db,
+            hook["id"],
+            secret=hook["secret"],
+            event_name="push",
+            event_id="delivery-2",
+            payload={"ref": "main"},
+        )
+        assert mismatch["ignored"] is True
+
+
 async def _drain(factory, agent_impl, user_id, limit=20):
     """Run queued jobs for one user until nothing is claimable."""
     from app.jobs import worker

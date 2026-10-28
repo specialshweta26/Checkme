@@ -75,6 +75,8 @@ async def _migrate() -> None:
         await conn.execute(text("ALTER TABLE workspace_agents ADD COLUMN IF NOT EXISTS focus VARCHAR(40) DEFAULT ''"))
         await conn.execute(text("ALTER TABLE agent_groups ADD COLUMN IF NOT EXISTS outcome TEXT DEFAULT ''"))
         await conn.execute(text("ALTER TABLE agent_groups ADD COLUMN IF NOT EXISTS owner_id UUID"))
+        await conn.execute(text("ALTER TABLE automations ADD COLUMN IF NOT EXISTS trigger_type VARCHAR(20) DEFAULT 'schedule'"))
+        await conn.execute(text("ALTER TABLE automations ADD COLUMN IF NOT EXISTS webhook_secret_hash VARCHAR(64)"))
         await _migrate_github(conn)
         await _migrate_jobs(conn)
         await _migrate_agent_scope(conn)

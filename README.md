@@ -13,6 +13,7 @@ Design docs:
 | Surface | What it does |
 | --- | --- |
 | **Chat** | Ask about mail, calendar, attachments, or any connected MCP. Open threads, summarize, send (with in-app confirm, including **Cc/Bcc**), schedule later work. **See full email** on mail answers. |
+| **Agents and groups** | Create persistent specialists, give each private instructions and skills, then run group work in a shared thread with explicit handoffs between agents. |
 | **Inbox** | Background ingest of Gmail/Outlook **To and Cc** (Bcc when the mailbox exposes it). Newest 40 pending cards. Classify reply / respond / discard, draft a thread-aware reply, rephrase, attach files, add **Cc/Bcc/Reply all**, send, or delete. **See full email** on every summary. |
 | **Connectors** | Link the other mailbox, or add an MCP URL (OAuth, bearer, or none). |
 | **Tasks** | One-shot or recurring jobs the scheduler runs even when you are logged out. |
@@ -107,3 +108,28 @@ Gmail and Outlook expose the **same tool names** (`list_messages`, `get_thread`,
 `list_messages` returns inbox mail on **To or Cc**, each row tagged `recipient_role` (`to` | `cc` | `bcc`). `send_message` and `reply` accept extra `cc` / `bcc` (and `reply_all` on reply). Opening or summarizing mail loads the **full thread** (Outlook `conversationId` / Gmail `threadId`), not only the latest reply. Inbox and chat both offer **See full email**.
 
 Standalone MCP (`gmail-mcp`, `outlook-mcp`) for Cursor needs a refresh token in the environment. This web app stores tokens encrypted per user instead.
+
+## Agents, groups, and reusable skills
+
+Each agent has its own instructions, memory, connector access, and skills. On a new agent's first chat, choose a focus to see starter prompts for useful recurring work. Selecting a prompt sends it to the agent; it does not start running until you choose it. You can also attach a starter skill while creating the agent, save one later from its profile, or teach a workflow by demonstrating it on the computer. Matching skills are loaded into that agent's prompt on later turns.
+
+Create a group from two to six agents and describe the outcome it should finish. In the group's chat, **Start the group's outcome** kicks off that work with the selected owner. Agents can hand stages to teammates with `ask_teammate`, and each teammate replies under its own name in the shared thread. Scheduled runs keep recurring agents active in the background; sensitive external actions still use the existing confirmation flow.
+
+### Webhook automations
+
+Ask an agent to create a webhook automation and specify the event name, condition, action, and (optionally) the agent that should run it. The automation returns a webhook URL and one-time secret. Send the secret in `X-Checkme-Secret`, the exact configured event in `X-Event-Type`, and a stable delivery id in `Idempotency-Key`. Webhook payloads are treated as untrusted event data; they cannot override the agent's instructions. External actions require approval by default.
+
+```bash
+curl -X POST 'https://YOUR_CHECKME/api/webhooks/AUTOMATION_ID' \
+  -H 'Content-Type: application/json' \
+  -H 'X-Checkme-Secret: ONE_TIME_SECRET' \
+  -H 'X-Event-Type: issues' \
+  -H 'Idempotency-Key: github-delivery-id' \
+  -d '{"action":"opened","issue":{"number":42,"title":"Fix login"}}'
+```
+
+Create and manage hooks through the authenticated API at `POST /api/automations/webhooks`, `GET /api/automations`, `PATCH /api/automations/{id}`, and `DELETE /api/automations/{id}`. The secret is stored as a SHA-256 hash and cannot be retrieved after creation. Repeated deliveries with the same idempotency key are accepted without starting another job.
+
+### Agent memory and personalization
+
+Each agent keeps its own learned preferences and recent-work memory. In chat, tell an agent “remember that…” to save a durable preference; agents avoid storing passwords, API keys, tokens, or recovery codes. Open an agent's **Edit Profile** panel and expand **What this agent remembers** to review its saved context. The authenticated `GET /api/agents/{agent_id}/memory` endpoint returns that same agent's memory only. Agents can also be trained through chat by asking them to change their role or instructions; they may suggest a schedule or webhook when repeated requests would benefit from proactive follow-through.

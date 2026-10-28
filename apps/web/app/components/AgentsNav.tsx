@@ -157,6 +157,8 @@ export function AgentsNav({
   const [outcome, setOutcome] = useState("");
   const [ownerId, setOwnerId] = useState("");
   const [skills, setSkills] = useState<AgentSkill[]>([]);
+  const [agentMemory, setAgentMemory] = useState<{ core: { label: string; value: string }[]; recent_work: { id: number; kind: string; text: string; created_at: string }[] } | null>(null);
+  const [memoryLoading, setMemoryLoading] = useState(false);
   const [skillName, setSkillName] = useState("");
   const [skillHint, setSkillHint] = useState("");
   const [teaching, setTeaching] = useState(false);
@@ -232,6 +234,8 @@ export function AgentsNav({
     setOutcome("");
     setOwnerId("");
     setSkills([]);
+    setAgentMemory(null);
+    setMemoryLoading(false);
     setSkillName("");
     setSkillHint("");
     setTeaching(false);
@@ -252,6 +256,13 @@ export function AgentsNav({
     listSkills(agent.id)
       .then((data) => setSkills(data.skills || []))
       .catch(() => setSkills([]));
+    setAgentMemory(null);
+    setMemoryLoading(true);
+    fetch(`/api/agents/${agent.id}/memory`, { credentials: "include" })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => setAgentMemory(data))
+      .catch(() => setAgentMemory(null))
+      .finally(() => setMemoryLoading(false));
   }
 
   function openConnectors(agent: WorkspaceAgent) {
@@ -287,13 +298,37 @@ export function AgentsNav({
     e.preventDefault();
     e.stopPropagation();
     if (saving) return;
+    if (Boolean(skillName.trim()) !== Boolean(skillHint.trim())) {
+      setError("Enter both the starter skill name and instructions, or leave both blank.");
+      return;
+    }
     setSaving(true);
     setError("");
     try {
+      const initialSkillName = skillName.trim();
+      const initialSkillHint = skillHint.trim();
       const row = await createAgent({ name, title, instructions });
+      let skillSaveError = "";
+      if (initialSkillName && initialSkillHint) {
+        try {
+          await saveSkill({ name: initialSkillName, agent_id: row.id, instruction: initialSkillHint });
+        } catch (err: any) {
+          skillSaveError = `Starter skill could not be saved: ${err.message || "try again"}`;
+        }
+      }
       resetForm();
       await refresh();
       onSelectAgent?.(row.id);
+      if (skillSaveError) {
+        setEditingId(row.id);
+        setName(row.name);
+        setTitle(row.title || "");
+        setInstructions(row.instructions || "");
+        setSkillName(initialSkillName);
+        setSkillHint(initialSkillHint);
+        setForm("edit");
+        setError(skillSaveError);
+      }
     } catch (err: any) {
       setError(err.message || "Could not create agent");
       setSaving(false);
@@ -676,18 +711,43 @@ export function AgentsNav({
                       <textarea value={instructions} onChange={(e) => setInstructions(e.target.value)} rows={5} placeholder="How this agent should work…" />
                     </label>
                     {form === "edit" && editingId ? (
-                      <SkillEditor
-                        agentId={editingId}
-                        skills={skills}
-                        skillName={skillName}
-                        skillHint={skillHint}
-                        teaching={teaching}
-                        onSkillName={setSkillName}
-                        onSkillHint={setSkillHint}
-                        onSkills={setSkills}
-                        onTeaching={setTeaching}
-                        onError={setError}
-                      />
+                      <>
+                        <SkillEditor
+                          agentId={editingId}
+                          skills={skills}
+                          skillName={skillName}
+                          skillHint={skillHint}
+                          teaching={teaching}
+                          onSkillName={setSkillName}
+                          onSkillHint={setSkillHint}
+                          onSkills={setSkills}
+                          onTeaching={setTeaching}
+                          onError={setError}
+                        />
+                        <details className="agent-memory">
+                          <summary>What this agent remembers</summary>
+                          {memoryLoading ? <p className="muted">Loading private agent memory…</p> : agentMemory ? (
+                            <>
+                              {agentMemory.core.length ? <div><strong>Learned preferences</strong>{agentMemory.core.map((item) => <p key={item.label}><b>{item.label}:</b> {item.value}</p>)}</div> : <p className="muted">No saved preferences yet. Tell this agent “remember that…” in chat.</p>}
+                              {agentMemory.recent_work.length ? <div><strong>Recent work</strong>{agentMemory.recent_work.slice(0, 8).map((item) => <p key={item.id}>{item.text}</p>)}</div> : null}
+                              <p className="muted">This memory belongs to {name || "this agent"}; teammates keep separate memories.</p>
+                            </>
+                          ) : <p className="muted">Memory could not be loaded.</p>}
+                        </details>
+                      </>
+                    ) : form === "agent" ? (
+                      <fieldset>
+                        <legend>Starter skill (optional)</legend>
+                        <p className="muted">Give this agent a reusable procedure. It will be available only to this agent.</p>
+                        <label>
+                          Skill name
+                          <input value={skillName} onChange={(e) => setSkillName(e.target.value)} maxLength={160} placeholder="Weekly competitor review" />
+                        </label>
+                        <label>
+                          How to do it
+                          <textarea value={skillHint} onChange={(e) => setSkillHint(e.target.value)} rows={3} placeholder="Sources to check, steps to follow, and how to report the result…" />
+                        </label>
+                      </fieldset>
                     ) : null}
                   </>
                 )}

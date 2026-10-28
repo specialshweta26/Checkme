@@ -1887,6 +1887,10 @@ input.tasks-search { width: min(260px, 100%); }
   font: inherit;
   color: var(--text);
 }
+.agent-memory { border-top: 1px solid var(--line); padding-top: 10px; font-size: 13px; }
+.agent-memory summary { cursor: pointer; font-weight: 650; color: var(--text); }
+.agent-memory p { margin: 8px 0; overflow-wrap: anywhere; line-height: 1.45; }
+.agent-memory strong { display: block; margin-top: 10px; }
 .agent-check {
   display: flex;
   align-items: center;

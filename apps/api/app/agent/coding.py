@@ -451,7 +451,7 @@ def snapshot_script(name: str, ref: str, remote_sha: str, base: str, branch: str
         f"cd {q(name)} || exit 1; ",
         "[ \"$(git config --local checkme.snapshot)\" = true ] || { echo 'this folder is a git clone, not a snapshot'; exit 1; }; ",
         'T=$(mktemp -d); trap \'rm -rf "$T"\' EXIT; ',
-        f'if [ -n "${{{ARCHIVE_FILE_ENV}:-}}" ]; then base64 -d "${ARCHIVE_FILE_ENV}" > "$T/a.tgz" && rm -f "${ARCHIVE_FILE_ENV}" || {{ echo "bad archive file"; exit 1; }}; '
+        f'if [ -n "${{{ARCHIVE_FILE_ENV}:-}}" ]; then python3 -c \'import base64,os,sys;sys.stdout.buffer.write(base64.b64decode(open(os.environ["{ARCHIVE_FILE_ENV}"],"rb").read()))\' > "$T/a.tgz" && rm -f "${ARCHIVE_FILE_ENV}" || {{ echo "bad archive file"; exit 1; }}; '
         f'else curl -fsSL "${ARCHIVE_ENV}" -o "$T/a.tgz" || {{ echo "could not download the repository archive"; exit 1; }}; fi; ',
         'mkdir "$T/x" && tar -xzf "$T/a.tgz" -C "$T/x" --strip-components=1 || { echo "bad archive"; exit 1; }; ',
         'export GIT_INDEX_FILE="$T/idx"; git --work-tree="$T/x" add -A -f . >/dev/null && TREE=$(git --work-tree="$T/x" write-tree) || exit 1; ',

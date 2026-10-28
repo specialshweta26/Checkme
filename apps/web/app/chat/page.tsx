@@ -32,7 +32,7 @@ function newProgressId() {
 }
 
 /** Poll the API for live status lines of one in-flight chat turn. Returns a stop function. */
-function pollProgress(progressId: string, onSteps: (steps: string[]) => void, everyMs = 1200) {
+function pollProgress(progressId: string, onSteps: (steps: string[]) => void, everyMs = 1200, onDone?: () => void) {
   let stopped = false;
   let last = 0;
   let timer: number | undefined;
@@ -47,7 +47,10 @@ function pollProgress(progressId: string, onSteps: (steps: string[]) => void, ev
           last = steps.length;
           onSteps(steps);
         }
-        if (data.done) return;
+        if (data.done) {
+          onDone?.();
+          return;
+        }
       }
     } catch {
       // Status is best effort; the chat reply still arrives on the POST.
@@ -71,6 +74,11 @@ type Msg = { role: "user" | "assistant"; content: string; meta?: any };
 type Confirm = { token: string; title: string; preview: any; kind?: string };
 type AgentView = { sessionId: string | null; messages: Msg[]; pending: Confirm[] };
 
+function pendingFor(messages: Msg[]): Confirm[] {
+  const latest = [...messages].reverse().find((m) => m.role === "assistant" && Array.isArray(m.meta?.pending_confirms));
+  return (latest?.meta?.pending_confirms || []) as Confirm[];
+}
+
 export default function ChatPage() {
   const [me, setMe] = useState<Me | null>(null);
   const [messages, setMessages] = useState<Msg[]>([]);
@@ -83,6 +91,7 @@ export default function ChatPage() {
   const viewsRef = useRef<Record<string, AgentView>>({});
   const scopeRef = useRef("");
   const inflightRef = useRef<Set<string>>(new Set());
+  const progressStopsRef = useRef<Record<string, () => void>>({});
   const [notice, setNotice] = useState("");
   const end = useRef<HTMLDivElement>(null);
   const box = useRef<HTMLTextAreaElement>(null);
@@ -129,11 +138,9 @@ export default function ChatPage() {
     const nextMessages = (data.messages || [])
       .filter((m: Msg) => m.role === "user" || m.role === "assistant")
       .map((m: Msg) => ({ role: m.role, content: m.content || "", meta: m.meta }));
-    const view = { sessionId: id, messages: nextMessages, pending: [] as Confirm[] };
+    const view = { sessionId: id, messages: nextMessages, pending: pendingFor(nextMessages) };
     viewsRef.current[scopeKey(nextAgent, nextGroup)] = view;
-    setSessionId(id);
-    setMessages(nextMessages);
-    setPending([]);
+    showView(view);
     setGroupId(nextGroup);
     setAgentId(nextAgent);
     rememberScope(nextAgent, nextGroup);
@@ -141,6 +148,7 @@ export default function ChatPage() {
     if (typeof window !== "undefined") {
       window.history.replaceState(null, "", chatHref({ agent: nextAgent, group: nextGroup, conversation: id }));
     }
+    resumeProgress(scopeKey(nextAgent, nextGroup), id, nextMessages);
   }
 
   function newChat() {
@@ -229,6 +237,7 @@ export default function ChatPage() {
     const stopProgress = pollProgress(progressId, (steps) =>
       setProgress((all) => (all[key] ? { ...all, [key]: { ...all[key], steps } } : all)),
     );
+    progressStopsRef.current[key] = stopProgress;
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
@@ -304,6 +313,7 @@ export default function ChatPage() {
       if (scopeRef.current === key) showView(failView);
     } finally {
       stopProgress();
+      if (progressStopsRef.current[key] === stopProgress) delete progressStopsRef.current[key];
       setProgress((all) => {
         const next = { ...all };
         delete next[key];
@@ -319,12 +329,41 @@ export default function ChatPage() {
     // A background job finished: pull its final reply into the open chat.
     if (!id) return;
     const loaded = await loadSession(id).catch(() => null);
-    if (!loaded?.messages || scopeRef.current !== scopeKey(agentId, groupId)) return;
+    if (!loaded?.messages) return;
     const next: Msg[] = loaded.messages
       .filter((m: Msg) => m.role === "user" || m.role === "assistant")
       .map((m: Msg) => ({ role: m.role, content: m.content || "", meta: m.meta }));
-    setMessages(next);
-    persistView(scopeKey(agentId, groupId), { messages: next, pending });
+    const key = scopeKey(loaded.session?.agent_id, loaded.session?.group_id);
+    const view = { sessionId: id, messages: next, pending: pendingFor(next) };
+    viewsRef.current[key] = view;
+    if (!next.some((m) => m.meta?.in_progress) && progressStopsRef.current[key]) {
+      progressStopsRef.current[key]();
+      delete progressStopsRef.current[key];
+      inflightRef.current.delete(key);
+      setBusyScopes((keys) => keys.filter((item) => item !== key));
+      if (scopeRef.current === key) setWatching(false);
+    }
+    if (scopeRef.current === key) showView(view);
+  }
+
+  function resumeProgress(key: string, id: string, loadedMessages: Msg[]) {
+    const active = [...loadedMessages].reverse().find((m) => m.role === "assistant" && m.meta?.in_progress && m.meta?.progress_id);
+    if (!active || progressStopsRef.current[key]) return;
+    const progressId = String(active.meta.progress_id);
+    const hint = [...loadedMessages].reverse().find((m) => m.role === "user")?.content || "your request";
+    inflightRef.current.add(key);
+    setBusyScopes((keys) => (keys.includes(key) ? keys : [...keys, key]));
+    setProgress((all) => ({ ...all, [key]: { steps: [], hint } }));
+    if (scopeRef.current === key) setWatching(true);
+    const stop = pollProgress(
+      progressId,
+      (steps) => setProgress((all) => (all[key] ? { ...all, [key]: { ...all[key], steps } } : all)),
+      1200,
+      () => {
+        window.setTimeout(() => void reloadSession(id), 350);
+      },
+    );
+    progressStopsRef.current[key] = stop;
   }
 
   async function removeChat(id: string) {
@@ -372,14 +411,13 @@ export default function ChatPage() {
     if (!activeAgent) return;
     const id = activeAgent.id;
     try {
-      await updateAgent(id, { focus: option.key });
-      setRoster((r) => ({ ...r, agents: r.agents.map((a) => (a.id === id ? { ...a, focus: option.key, focus_label: option.label } : a)) }));
+      const updated = await updateAgent(id, { focus: option.key });
+      setRoster((r) => ({ ...r, agents: r.agents.map((a) => (a.id === id ? updated : a)) }));
       announceWorkspaceChanged();
     } catch {
       // The agent can still set its own focus from the answer (set_my_focus).
     }
     hideFocusCard(id);
-    void send(option.answer);
   }
   const scopedSessions = sessions.filter((s) => sessionInScopeRow(s, agentId, groupId));
   const computer = [...messages].reverse().map((m) => computerFromMeta(m.meta)).find(Boolean) || null;
@@ -447,7 +485,8 @@ export default function ChatPage() {
       const nextMessages = (data.messages || [])
         .filter((m: Msg) => m.role === "user" || m.role === "assistant")
         .map((m: Msg) => ({ role: m.role, content: m.content || "", meta: m.meta }));
-      apply({ sessionId: pick, messages: nextMessages, pending: [] });
+      apply({ sessionId: pick, messages: nextMessages, pending: pendingFor(nextMessages) });
+      resumeProgress(wanted, pick, nextMessages);
       return;
     }
     apply({ sessionId: null, messages: [], pending: [] });
@@ -568,13 +607,22 @@ export default function ChatPage() {
                     <p>
                       {activeGroup
                         ? `${firstName(me)} set this group up. The kickoff owner introduces proposed roles, then each bot replies as itself. @ one bot, or @everyone, and they talk to each other in this thread.`
-                        : "Here's what's happening today — brief the inbox, ask a connected system, or schedule a send."}
+                        : activeAgent?.suggested_tasks?.length
+                          ? `${activeAgent.name} is ready to work. Pick a useful first task, or describe a different one below.`
+                          : "Here's what's happening today — brief the inbox, ask a connected system, or schedule a send."}
                     </p>
                   </>
                 )}
                 <div className="hero-cards">
                   {activeGroup ? (
                     <>
+                      {activeGroup.outcome ? (
+                        <button className="hero-card" onClick={() => send(activeGroup.outcome || "")}>
+                          <span className="mark" />
+                          <strong>Start the group’s outcome</strong>
+                          <span>{activeGroup.outcome} The kickoff owner can hand work to teammates and coordinate their replies here.</span>
+                        </button>
+                      ) : null}
                       <button
                         className="hero-card"
                         onClick={() =>
@@ -594,6 +642,14 @@ export default function ChatPage() {
                         <span>Each responsible bot replies in its own bubble. They can hand work to each other.</span>
                       </button>
                     </>
+                  ) : activeAgent?.suggested_tasks?.length ? (
+                    activeAgent.suggested_tasks.map((task) => (
+                      <button key={task.title} className="hero-card" onClick={() => send(task.prompt)}>
+                        <span className="mark" />
+                        <strong>{task.title}</strong>
+                        <span>{task.prompt}</span>
+                      </button>
+                    ))
                   ) : (
                     <>
                       <button className="hero-card" onClick={() => send("What matters today? Give me my chief of staff briefing.")}>

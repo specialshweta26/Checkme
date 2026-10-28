@@ -23,7 +23,7 @@ export function dismissFocusCard(agentId: string) {
 
 /**
  * Greeting + "What would you most like a hand with?" card shown on a new agent's empty chat.
- * Picking an option stores it as the agent's focus and sends it as the user's answer.
+ * Picking an option stores the agent's focus and reveals tailored starter tasks.
  */
 export function FocusOnboarding({
   userName,
@@ -72,7 +72,7 @@ export function FocusOnboarding({
           ))}
         </ul>
       </div>
-      <p className="focus-hint">Or answer in the chat below</p>
+      <p className="focus-hint">Pick a focus to see task ideas. They won’t run until you choose one.</p>
     </div>
   );
 }

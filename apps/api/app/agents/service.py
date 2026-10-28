@@ -7,7 +7,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.collab import GROUP_MEMBER_MAX, GROUP_MEMBER_MIN
-from app.agents.focus import FOCUSES, focus_label, normalize_focus
+from app.agents.focus import FOCUSES, focus_label, normalize_focus, suggested_tasks
 
 from app.models import (
     AgentConnector,
@@ -57,6 +57,7 @@ def serialize_agent(row: WorkspaceAgent) -> dict:
         "instructions": row.instructions or "",
         "focus": getattr(row, "focus", "") or "",
         "focus_label": focus_label(getattr(row, "focus", "") or ""),
+        "suggested_tasks": suggested_tasks(getattr(row, "focus", "") or ""),
         "color": row.color or DEFAULT_AGENT_COLOR,
         "kind": row.kind or "custom",
         "pinned": bool(getattr(row, "pinned", False)),

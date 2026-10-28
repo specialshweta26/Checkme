@@ -7,12 +7,19 @@ focus prompt (and, for coding, extra plan-and-build tools) on every turn.
 
 from __future__ import annotations
 
+from typing import Any
+
 FOCUS_ORDER = ("email_calendar", "coding", "research", "errands")
 
-FOCUSES: dict[str, dict[str, str]] = {
+FOCUSES: dict[str, dict[str, Any]] = {
     "email_calendar": {
         "label": "Email and calendar",
         "title": "email and calendar assistant",
+        "suggested_tasks": [
+            {"title": "Daily inbox triage", "prompt": "Every weekday at 8:30 AM, review my unread inbox, group messages by urgency, draft replies for routine requests, and flag anything that needs my decision."},
+            {"title": "Prepare for meetings", "prompt": "Every weekday at 8:00 AM, review today's calendar and prepare a short briefing with attendee context, relevant email threads, and anything I should bring up."},
+            {"title": "Follow up on open threads", "prompt": "Every Friday at 3:00 PM, find important email threads waiting on me or someone else, draft follow-ups, and show me the drafts before sending."},
+        ],
         "answer": "I'd most like a hand with email and calendar.",
         "prompt": (
             "Focus: Email and calendar. Keep the user's inbox and calendar under control: triage what needs a reply, "
@@ -24,6 +31,11 @@ FOCUSES: dict[str, dict[str, str]] = {
     "coding": {
         "label": "Coding and deployments",
         "title": "software engineer",
+        "suggested_tasks": [
+            {"title": "Review new issues", "prompt": "Every weekday at 9:00 AM, review new issues in my connected repositories, group them by severity, and recommend the next coding task."},
+            {"title": "Check open pull requests", "prompt": "Every weekday at 10:00 AM, review my open pull requests for failing checks, review comments, and merge blockers. Report findings and suggest fixes; do not merge."},
+            {"title": "Weekly dependency review", "prompt": "Every Monday at 9:00 AM, check my active repository for outdated or vulnerable dependencies, summarize the risk, and propose a safe update plan."},
+        ],
         "answer": "I'd most like a hand with coding and deployments.",
         "prompt": (
             "Focus: Coding and deployments. You are a hands-on, general-purpose software engineer. You work on this user's "
@@ -91,6 +103,11 @@ FOCUSES: dict[str, dict[str, str]] = {
     "research": {
         "label": "Research and writing",
         "title": "researcher and writer",
+        "suggested_tasks": [
+            {"title": "Weekly topic briefing", "prompt": "Every Monday at 8:00 AM, research the latest developments in [topic], prioritize primary sources, and send me a cited briefing with implications and open questions."},
+            {"title": "Track competitor updates", "prompt": "Every Friday at 10:00 AM, check [competitors] for product, pricing, and leadership changes and summarize only verified updates with sources."},
+            {"title": "Turn notes into a draft", "prompt": "When I share research notes, organize them into a clear outline, identify missing evidence, and draft in my preferred voice. Ask before publishing or sending."},
+        ],
         "answer": "I'd most like a hand with research and writing.",
         "prompt": (
             "Focus: Research and writing. Research on the web with the computer browser (a Google search, then open at least "
@@ -104,6 +121,11 @@ FOCUSES: dict[str, dict[str, str]] = {
     "errands": {
         "label": "Errands and bookings",
         "title": "errands and bookings assistant",
+        "suggested_tasks": [
+            {"title": "Plan the week", "prompt": "Every Sunday at 5:00 PM, review the errands and appointments I mentioned this week and prepare a prioritized plan for the coming week."},
+            {"title": "Watch for booking options", "prompt": "Each morning, check [site or provider] for available [appointment or booking] options matching [my constraints], then send me the best choices. Never book or pay without approval."},
+            {"title": "Compare before booking", "prompt": "Compare [options] by price, time, location, and cancellation terms, then recommend the best fit. Do not make a purchase or reservation without my approval."},
+        ],
         "answer": "I'd most like a hand with errands and bookings.",
         "prompt": (
             "Focus: Errands and bookings. Find, compare and book things (tables, tickets, travel, appointments, orders) using "
@@ -155,6 +177,11 @@ def normalize_focus(value: str | None) -> str:
 def focus_label(key: str | None) -> str:
     meta = FOCUSES.get(key or "")
     return meta["label"] if meta else ""
+
+
+def suggested_tasks(key: str | None) -> list[dict[str, str]]:
+    meta = FOCUSES.get(key or "")
+    return [dict(task) for task in (meta or {}).get("suggested_tasks", [])]
 
 
 def focus_prompt(agent) -> str:
