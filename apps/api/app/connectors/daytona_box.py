@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import shlex
 import time
 from contextvars import ContextVar
@@ -28,6 +29,7 @@ _COMPUTER_USE = {
     "browse_open",
     "browser_navigate",
     "web_fetch",
+    "browser_search",
     "browser_snapshot",
     "browser_act",
     "browser_tabs",
@@ -324,6 +326,23 @@ DAYTONA_TOOLS = [
         group="computer",
         read_only=False,
         tags=("computer", "browser", "handoff"),
+    ),
+    ToolSpec(
+        name="browser_search",
+        description=(
+            "Search the web inside the computer's real browser (Bing, DuckDuckGo, then Google) and return result "
+            "links read from the page. Use when web_search comes back empty or blocked."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "What to search for."},
+                "count": {"type": "integer", "description": "Max results (1-12).", "default": 8},
+            },
+            "required": ["query"],
+        },
+        group="computer",
+        tags=("computer", "browser", "search"),
     ),
     ToolSpec(
         name="web_fetch",
@@ -753,6 +772,100 @@ async def _computer_status(proc) -> dict:
     }
 
 
+BROWSER_SEARCH_ENGINES = ("bing", "duckduckgo", "google")
+
+
+def unwrap_result_url(url: str) -> str:
+    """Resolve search-engine redirect links (Bing /ck/a, DuckDuckGo /l/?uddg=, Google /url?q=) to the target."""
+    import base64
+    from urllib.parse import parse_qs, unquote, urlparse
+
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return url
+    host = (parsed.hostname or "").lower()
+    qs = parse_qs(parsed.query)
+    if host.endswith("bing.com") and parsed.path.startswith("/ck/"):
+        raw = (qs.get("u") or [""])[0]
+        if raw.startswith("a1"):
+            raw = raw[2:]
+            try:
+                return base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)).decode("utf-8", "replace")
+            except Exception:  # noqa: BLE001
+                return url
+    if "duckduckgo.com" in host and parsed.path.startswith("/l/"):
+        return unquote((qs.get("uddg") or [url])[0])
+    if host.endswith("google.com") and parsed.path == "/url":
+        return (qs.get("q") or qs.get("url") or [url])[0]
+    return url
+
+
+_STOP = frozenset("the and for with from that this what when where which near best how are you your www com".split())
+
+
+def _query_terms(query: str) -> set[str]:
+    return {t for t in re.findall(r"[a-z0-9]{3,}", (query or "").lower()) if t not in _STOP}
+
+
+def _clean_serp(rows: list, count: int, query: str = "") -> list[dict]:
+    """Real result links only. Drops engine-internal links and rows that share no word with the query
+    (search engines sometimes serve unrelated filler results to automated browsers)."""
+    from urllib.parse import urlparse
+
+    terms = _query_terms(query)
+    out: list[dict] = []
+    seen: set[str] = set()
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        url = unwrap_result_url(str(row.get("url") or ""))
+        host = (urlparse(url).hostname or "").lower()
+        if not url.startswith(("http://", "https://")) or not host:
+            continue
+        if any(host.endswith(d) for d in ("bing.com", "duckduckgo.com", "google.com")) and "/maps" not in url:
+            continue
+        if url in seen:
+            continue
+        blob = f"{row.get('title') or ''} {row.get('snippet') or ''} {url}".lower()
+        if terms and not any(t in blob for t in terms):
+            continue
+        seen.add(url)
+        out.append({"title": str(row.get("title") or "")[:200], "url": url, "snippet": str(row.get("snippet") or "")[:400]})
+        if len(out) >= count:
+            break
+    return out
+
+
+async def browser_search(proc, fs, query: str, count: int = 8, engines=None) -> dict:
+    """Search in the cloud browser. A CAPTCHA/verification page is reported, never solved; then the next engine."""
+    query = (query or "").strip()
+    if not query:
+        raise ToolError("browser_search requires query")
+    count = max(1, min(int(count or 8), 12))
+    order = [e for e in (engines or BROWSER_SEARCH_ENGINES) if e in BROWSER_SEARCH_ENGINES] or list(BROWSER_SEARCH_ENGINES)
+    tried: list[str] = []
+    for engine in order:
+        try:
+            data = await _browser_rpc(proc, {"command": "serp", "engine": engine, "query": query, "count": count}, 75, fs)
+        except Exception as exc:  # noqa: BLE001 - one engine failing must not end the search
+            tried.append(f"browser:{engine}: {type(exc).__name__}: {str(exc)[:120]}")
+            continue
+        if not isinstance(data, dict):
+            tried.append(f"browser:{engine}: no response")
+            continue
+        if data.get("blocked"):
+            tried.append(f"browser:{engine}: blocked ({data.get('blocked')} page; not bypassed)")
+            continue
+        results = _clean_serp(data.get("results") or [], count, query)
+        if results:
+            return {"ok": True, "query": query, "results": results, "source": f"browser:{engine}", "tried": tried}
+        raw = len(data.get("results") or [])
+        detail = f" ({raw} unrelated links dropped)" if raw else ""
+        tried.append(f"browser:{engine}: no results{detail}" + (f" (error: {data.get('error')})" if data.get("error") else ""))
+    return {"ok": False, "query": query, "results": [], "tried": tried, "error": "Browser search found nothing. " + "; ".join(tried)}
+
+
 async def _open_in_browser(proc, fs, url: str, wait_ms: int = 1200, tab: str = "") -> dict:
     from app.connectors.computer_daemon import annotate_page
     from app.connectors.web_fetch import browser_failed, fetch_public_page
@@ -1047,17 +1160,27 @@ async def _invoke_daytona(row, name: str, args: dict[str, Any]) -> Any:
         if name == "browser_close_tab":
             return await _browser_rpc(proc, {"command": "close_tab", "tab": tab}, 30, fs)
         if name == "web_fetch":
-            from app.connectors.web_fetch import fetch_public_page
+            from app.connectors.web_fetch import fetch_public_page, needs_real_browser
 
             url = safe_http_url(args.get("url") or "")
             try:
                 page = await fetch_public_page(url)
             except Exception as fetch_exc:  # noqa: BLE001 - e.g. httpx.ReadTimeout; never crash the turn
-                return {
-                    "ok": False,
-                    "url": url,
-                    "error": f"Could not fetch the page ({type(fetch_exc).__name__}). Try another source; do not invent its content.",
-                }
+                # The server could not reach it; the cloud browser often can (different network path).
+                shown = await _open_in_browser(proc, fs, url, tab=tab)
+                shown.setdefault("fetched_via", "browser")
+                if not shown.get("ok", True) and not shown.get("bot_wall"):
+                    shown["error"] = (
+                        f"Could not fetch the page ({type(fetch_exc).__name__}) and the browser could not load it. "
+                        "Try another source; do not invent its content."
+                    )
+                return shown
+            if needs_real_browser(page):
+                # JS apps (Google Maps, Search, listing sites) and blocked fetches: painting the server's static
+                # HTML shows an empty shell, so load the page for real and wait for it to render.
+                shown = await _open_in_browser(proc, fs, url, tab=tab)
+                shown.setdefault("fetched_via", "browser")
+                return shown
             shown = await _browser_rpc(
                 proc, {"command": "load_html", "html": page.get("html") or "", "url": page.get("url") or url}, 60, fs
             )
@@ -1067,6 +1190,8 @@ async def _invoke_daytona(row, name: str, args: dict[str, Any]) -> Any:
             shown["text"] = page.get("text") or shown.get("text") or ""
             shown["fetched_via"] = "network"
             return shown
+        if name == "browser_search":
+            return await browser_search(proc, fs, str(args.get("query") or ""), int(args.get("count") or 8), args.get("engines"))
         if name == "browser_snapshot":
             return await _browser_rpc(proc, {"command": "snapshot", "tab": tab}, 60, fs)
         if name == "browser_act":

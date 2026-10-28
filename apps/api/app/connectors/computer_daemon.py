@@ -11,7 +11,7 @@ from pathlib import Path
 
 HOST = "127.0.0.1"
 PORT = 18765
-VERSION = "13"
+VERSION = "14"
 SHOT = "/tmp/checkme-browser.png"
 PROFILE = "/tmp/checkme-browser-profile"
 LAST = "/tmp/checkme-browser-last.json"
@@ -115,6 +115,165 @@ def annotate_page(data: dict | None) -> dict:
     else:
         row.setdefault("content_ready", True)
     return row
+
+
+# Cookie / consent interstitials -------------------------------------------------------------------------------
+# A person would click "Reject all" (or "Accept all" when that is the only choice) to get to the page. We do the
+# same, only on pages that are clearly a consent prompt. Never used on CAPTCHAs or verification walls.
+_CONSENT_CUES = (
+    "before you continue",
+    "we use cookies",
+    "use of cookies",
+    "cookie settings",
+    "cookie preferences",
+    "manage cookies",
+    "your privacy choices",
+    "consent",
+    "gdpr",
+)
+_CONSENT_REJECT = re.compile(r"^\s*(reject all|reject|decline all|decline|only necessary|necessary only|use necessary cookies only|refuse all)\s*$", re.I)
+_CONSENT_ACCEPT = re.compile(r"^\s*(accept all|accept|i agree|agree|allow all|accept cookies|accept all cookies|got it|ok)\s*$", re.I)
+
+
+def looks_like_consent(url: str, text: str) -> bool:
+    low = (text or "")[:5000].lower()
+    host = (url or "").lower()
+    if bot_wall(url, "", text):
+        return False
+    return "consent." in host or any(cue in low for cue in _CONSENT_CUES)
+
+
+def _dismiss_consent(page) -> str:
+    """Click the consent prompt's reject (else accept) button if one is showing. Returns what was clicked."""
+    try:
+        frames = [page.main_frame] + [f for f in page.frames if f != page.main_frame]
+    except Exception:
+        return ""
+    for frame in frames[:8]:
+        try:
+            text = frame.evaluate("() => (document.body && document.body.innerText || '').slice(0, 5000)") or ""
+        except Exception:
+            continue
+        if not looks_like_consent(frame.url or page.url, text):
+            continue
+        for pattern in (_CONSENT_REJECT, _CONSENT_ACCEPT):
+            for role in ("button", "link"):
+                try:
+                    loc = frame.get_by_role(role, name=pattern)
+                    if loc.count() and loc.first.is_visible():
+                        label = (loc.first.inner_text() or "").strip()[:40]
+                        loc.first.click(timeout=4000)
+                        try:
+                            page.wait_for_load_state("domcontentloaded", timeout=8000)
+                        except Exception:
+                            pass
+                        page.wait_for_timeout(600)
+                        return label or "consent"
+                except Exception:
+                    continue
+    return ""
+
+
+def _wait_content(page, max_ms: int = 8000) -> None:
+    """Wait until the page's text stops growing (JS apps, maps and listings render after DOMContentLoaded)."""
+    if max_ms <= 0:
+        return
+    try:
+        page.wait_for_load_state("networkidle", timeout=min(4000, max_ms))
+    except Exception:
+        pass
+    last, stable, waited = -1, 0, 0
+    while waited < max_ms:
+        try:
+            n = int(page.evaluate("() => (document.body && document.body.innerText || '').length") or 0)
+        except Exception:
+            return
+        if n == last and n >= 180:
+            stable += 1
+            if stable >= 2:
+                return
+        else:
+            stable = 0
+        last = n
+        page.wait_for_timeout(500)
+        waited += 500
+
+
+# Search result pages in the real browser -------------------------------------------------------------------------
+SERP_URLS = {
+    "bing": "https://www.bing.com/search?q={q}&setlang=en",
+    "duckduckgo": "https://html.duckduckgo.com/html/?q={q}",
+    "google": "https://www.google.com/search?q={q}&hl=en",
+}
+_SERP_ERROR = ("if this persists, please email us", "if error persists, please email us", "unexpected error. please try again")
+_SERP_JS = """(limit) => {
+  const host = location.hostname;
+  const rows = [];
+  const add = (a, snipEl) => {
+    if (!a) return;
+    const title = (a.innerText || a.textContent || '').replace(/\\s+/g, ' ').trim();
+    const href = a.href || '';
+    if (!title || !/^https?:/.test(href)) return;
+    rows.push({title: title.slice(0, 200), url: href, snippet: ((snipEl && snipEl.innerText) || '').replace(/\\s+/g, ' ').trim().slice(0, 400)});
+  };
+  if (host.includes('bing.')) {
+    document.querySelectorAll('li.b_algo').forEach((li) => add(li.querySelector('h2 a'), li.querySelector('.b_caption p, p')));
+  } else if (host.includes('duckduckgo.')) {
+    document.querySelectorAll('.result, article[data-testid="result"]').forEach((r) => add(
+      r.querySelector('a.result__a, a[data-testid="result-title-a"], h2 a'),
+      r.querySelector('.result__snippet, [data-result="snippet"]')));
+  } else {
+    document.querySelectorAll('#search a, #rso a').forEach((a) => {
+      const h = a.querySelector('h3');
+      if (!h) return;
+      const box = a.closest('div.g, div[data-hveid], div[data-snc]');
+      const sn = box && box.querySelector('.VwiC3b, [data-sncf], [style*="-webkit-line-clamp"]');
+      rows.push({title: h.innerText.trim().slice(0, 200), url: a.href, snippet: ((sn && sn.innerText) || '').trim().slice(0, 400)});
+    });
+  }
+  return rows.slice(0, limit * 2);
+}"""
+
+
+def _serp(cmd: dict) -> dict:
+    """Run one search in a background tab of the real browser and read the results from the DOM."""
+    from urllib.parse import quote_plus
+
+    engine = str(cmd.get("engine") or "bing").lower()
+    query = str(cmd.get("query") or "").strip()
+    limit = max(1, min(int(cmd.get("count") or 8), 12))
+    if engine not in SERP_URLS or not query:
+        raise RuntimeError("serp needs engine (bing|duckduckgo|google) and query")
+    _ensure_page()
+    page = _browser_context.new_page()
+    try:
+        url = SERP_URLS[engine].format(q=quote_plus(query))
+        page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(800)
+        consent = _dismiss_consent(page)
+        _wait_content(page, 5000)
+        try:
+            text = page.inner_text("body")[:4000]
+        except Exception:
+            text = ""
+        wall = bot_wall(page.url, page.title(), text)
+        if wall:
+            return {"ok": False, "engine": engine, "blocked": wall.get("bot_wall_kind") or "verification", "url": page.url}
+        low = text.lower()
+        if any(cue in low for cue in _SERP_ERROR):
+            return {"ok": False, "engine": engine, "blocked": "error page", "url": page.url}
+        rows = page.evaluate(_SERP_JS, limit) or []
+        return {"ok": True, "engine": engine, "url": page.url, "results": rows, "consent": consent}
+    finally:
+        try:
+            page.close()
+        except Exception:
+            pass
+        try:
+            if _browser_page is not None:
+                _browser_page.bring_to_front()
+        except Exception:
+            pass
 
 
 def _dump(page):
@@ -583,6 +742,8 @@ TAB_COMMANDS = {"tabs", "new_tab", "switch_tab", "close_tab"}
 
 def handle(cmd: dict) -> dict:
     command = str(cmd.get("command") or "").strip()
+    if command == "serp":
+        return _serp(cmd)
     if command in TAB_COMMANDS:
         return _tab_command(command, cmd)
     if command in {"navigate", "goto", "snapshot", "act", "observe", "screenshot", "load_html"}:
@@ -597,7 +758,9 @@ def _handle_page(command: str, cmd: dict, page) -> dict:
     if command in {"navigate", "goto"}:
         try:
             page.goto(cmd["url"], wait_until="domcontentloaded", timeout=60000)
-            page.wait_for_timeout(wait)
+            page.wait_for_timeout(min(wait, 1500))
+            consent = _dismiss_consent(page)
+            _wait_content(page, int(cmd.get("settle_ms") if cmd.get("settle_ms") is not None else 8000))
         except Exception as vis_exc:
             data = _dump(page)
             data["ok"] = False
@@ -614,6 +777,8 @@ def _handle_page(command: str, cmd: dict, page) -> dict:
             except Exception:
                 break
             data = _snapshot(page)
+        if consent:
+            data["consent_dismissed"] = consent
         return data
     if command == "snapshot":
         return _snapshot(page)

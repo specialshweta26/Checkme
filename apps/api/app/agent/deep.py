@@ -1058,6 +1058,7 @@ async def search_user_tools(ctx: RunContext, query: str, connector_slug: str | N
                     "computer_act",
                     "browser_handoff",
                     "web_fetch",
+                    "browser_search",
                     "browse_open",
                     "browse_act",
                     "publish_file",
@@ -2553,7 +2554,8 @@ def system_prompt(
         "If search is empty, browser_navigate a Google search URL with the user's words "
         "(https://www.google.com/search?q=...) then open at least two result links. Search the acronym; do not ask what it means first. "
         "If navigate returns chrome-error, chromewebdata, or connection reset, web_fetch the same URL (or another source) and keep going. "
-        "web_fetch paints that HTML onto the same computer screen; then browser_snapshot and browser_act on it. Do not wake the computer after a page is showing. "
+        "web_fetch shows the page on the same computer screen (JavaScript apps such as maps and listing sites are loaded in the real browser and given time to render); then browser_snapshot and browser_act on it. Do not wake the computer after a page is showing. "
+        "web_search already falls back to searching in the computer browser; browser_search does that directly. If web_search returns `setup`, tell the user in one line which search key to configure (it names the env vars) and why, then keep going with browser_navigate on known sites. "
         "Never stop after one failed page. Never say you cannot verify live updates until you have searched and opened at least one article.\n"
         "End-to-end web work: browser_navigate, browser_snapshot for refs (e0, e1), then browser_act — click, fill, type, select, check, press, scroll. "
         "Fill whole forms from the snapshot: one fill per field, then click submit. "

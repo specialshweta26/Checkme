@@ -309,9 +309,15 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         return _dumps(await computer.request_takeover(ctx, reason, instruction))
 
     async def web_search(query: str, count: int = 8) -> str:
-        """Search the public web. Use for facts, news, and 'what is going on'. Then web_fetch or browser_navigate the best URLs. Do not search_tools for this. For live bookings, inventory, or forms, browser_navigate the site itself instead of a Google Search URL. If it returns an error or no results, say so and never make results up."""
+        """Search the public web. Use for facts, news, and 'what is going on'. Then web_fetch or browser_navigate the best URLs. Do not search_tools for this. For live bookings, inventory, or forms, browser_navigate the site itself instead of a Google Search URL. If it returns an error or no results, say so and never make results up. When the result has `setup`, tell the user which API key to configure."""
         ctx.used_tools.append("web_search")
-        return _dumps(await web_tools.web_search(query, count))
+        return _dumps(await web_tools.web_search(query, count, ctx))
+
+    async def browser_search(query: str, count: int = 8) -> str:
+        """Search the web inside the live computer browser (Bing, DuckDuckGo, then Google) and return result links read from the page. Use when web_search is empty or blocked. A CAPTCHA page is reported, never solved."""
+        ctx.used_tools.append("browser_search")
+        data = await web_tools._browser_search(ctx, query, max(1, min(int(count or 8), 12)))
+        return _dumps(data if data is not None else computer.computer_missing())
 
     async def web_fetch(url: str) -> str:
         """Fetch a public http(s) page. Paints it onto the computer screen when the sandbox is available; otherwise returns page text."""
@@ -537,6 +543,7 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         StructuredTool.from_function(coroutine=launch_app, name="launch_app", description=launch_app.__doc__, args_schema=LaunchAppInput),
         StructuredTool.from_function(coroutine=request_takeover, name="request_takeover", description=request_takeover.__doc__, args_schema=TakeoverInput),
         StructuredTool.from_function(coroutine=web_search, name="web_search", description=web_search.__doc__, args_schema=WebSearchInput),
+        StructuredTool.from_function(coroutine=browser_search, name="browser_search", description=browser_search.__doc__, args_schema=WebSearchInput),
         StructuredTool.from_function(coroutine=web_fetch, name="web_fetch", description=web_fetch.__doc__, args_schema=FetchInput),
         StructuredTool.from_function(coroutine=research_crawl, name="research_crawl", description=research_crawl.__doc__, args_schema=ResearchInput),
         StructuredTool.from_function(coroutine=browser_rank_links, name="browser_rank_links", description=browser_rank_links.__doc__, args_schema=RankLinksInput),

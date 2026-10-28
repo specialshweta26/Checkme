@@ -326,14 +326,68 @@ def search_providers() -> list[tuple[str, Any]]:
     return chain
 
 
-async def web_search(query: str, count: int = 8) -> dict:
-    """Real results from the first provider that answers, or a clear error. Never invents results."""
+SEARCH_KEY_ENVS = ("TAVILY_API_KEY", "BRAVE_SEARCH_API_KEY", "SERPER_API_KEY", "EXA_API_KEY")
+SETUP_HINT = (
+    "No search API key is configured on the server, and the keyless engines (Brave, DuckDuckGo) block or "
+    "rate-limit cloud server addresses. To fix it for good, set one of TAVILY_API_KEY, BRAVE_SEARCH_API_KEY, "
+    "SERPER_API_KEY or EXA_API_KEY on the API service (Render > checkme-api > Environment) and redeploy."
+)
+
+
+def search_api_configured() -> bool:
+    s = get_settings()
+    return any((k or "").strip() for k in (s.tavily_api_key, s.brave_search_api_key, s.serper_api_key, s.exa_api_key))
+
+
+async def _browser_search(ctx, query: str, limit: int) -> dict | None:
+    """Search inside the cloud computer's real browser. None when no computer is connected."""
+    slug = computer_slug(ctx) if ctx is not None else ""
+    if not slug:
+        return None
+    from app.agent.deep import call_user_tool
+
+    try:
+        data = await call_user_tool(ctx, slug, "browser_search", {"query": query, "count": limit})
+    except Exception as exc:  # noqa: BLE001
+        log.warning("web_search browser fallback failed: %s: %s", type(exc).__name__, str(exc)[:200])
+        return {"results": [], "tried": [f"browser: {type(exc).__name__} {str(exc)[:120]}".strip()]}
+    return data if isinstance(data, dict) else {"results": [], "tried": ["browser: no response"]}
+
+
+async def web_search(query: str, count: int = 8, ctx=None) -> dict:
+    """Real results from the first provider that answers, or a clear error. Never invents results.
+
+    Order: configured API providers, keyless HTTP engines, then (when a cloud computer is connected) the same
+    search in the computer's real browser, then Wikipedia. Verification pages are reported, never bypassed.
+    """
     q = (query or "").strip()
     if not q:
         return {"error": "query is required", "results": []}
     limit = max(1, min(int(count or 8), 12))
     tried: list[str] = []
+    keyed = search_api_configured()
+    browser_done = False
+
+    def _ok(hits: list, source: str) -> dict:
+        out: dict[str, Any] = {"query": q, "results": hits[:limit], "source": source}
+        if tried:
+            out["fallback_from"] = list(tried)
+        if not keyed:
+            out["setup"] = SETUP_HINT
+        return out
+
     for name, search in search_providers():
+        if name == "wikipedia" and not browser_done:
+            browser_done = True
+            data = await _browser_search(ctx, q, limit)
+            if data is not None:
+                hits = [h for h in (data.get("results") or []) if isinstance(h, dict) and str(h.get("url") or "").startswith("http")]
+                if hits:
+                    log.info("web_search answered by %s after: %s", data.get("source") or "browser", "; ".join(tried))
+                    out = _ok(hits, str(data.get("source") or "browser"))
+                    out["note"] = "Results were read from a search page in the cloud browser; open them to verify."
+                    return out
+                tried.extend(str(t) for t in (data.get("tried") or ["browser: no results"]))
         try:
             hits = await search(q, limit)
         except SearchBlocked as exc:
@@ -348,20 +402,23 @@ async def web_search(query: str, count: int = 8) -> dict:
         if not hits:
             tried.append(f"{name}: no results")
             continue
-        out: dict[str, Any] = {"query": q, "results": hits[:limit], "source": name}
-        if tried:
-            out["fallback_from"] = tried
+        out = _ok(hits, name)
         if name == "wikipedia":
             out["note"] = "Only Wikipedia answered; general web engines were unavailable. Say so if the answer needs fresher sources."
         return out
     log.warning("web_search found nothing for %r: %s", q[:80], "; ".join(tried))
-    return {
-        "query": q,
-        "results": [],
-        "error": "Web search returned no results. Engines tried: " + "; ".join(tried)
-        + ". Do not invent results: try a different query, open a known site with browser_navigate, or tell the user.",
-        "tried": tried,
-    }
+    error = "Web search returned no results. Engines tried: " + "; ".join(tried) + "."
+    if not keyed:
+        error += " " + SETUP_HINT
+    error += (
+        " Do not invent results: open a known site directly with browser_navigate, and tell the user plainly "
+        "which search engines failed" + (" and which key to configure." if not keyed else ".")
+    )
+    out: dict[str, Any] = {"query": q, "results": [], "error": error, "tried": tried, "search_api_configured": keyed}
+    if not keyed:
+        out["setup"] = SETUP_HINT
+        out["configure_one_of"] = list(SEARCH_KEY_ENVS)
+    return out
 
 
 async def web_fetch(ctx, url: str) -> Any:
