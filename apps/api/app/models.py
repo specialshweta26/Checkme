@@ -506,3 +506,36 @@ class InboxItem(Base):
     seen: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class ResearchPage(Base):
+    """One user's cached reading of a public page (research memory, reused across jobs while fresh)."""
+
+    __tablename__ = "research_pages"
+    __table_args__ = (UniqueConstraint("user_id", "canonical_url", name="uq_research_pages_user_url"),)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    canonical_url: Mapped[str] = mapped_column(String(2000))
+    url: Mapped[str] = mapped_column(String(2000))
+    title: Mapped[str] = mapped_column(String(300), default="")
+    text: Mapped[str] = mapped_column(Text, default="")  # readable text, clipped
+    note: Mapped[str] = mapped_column(Text, default="")  # last extractive note
+    links: Mapped[list] = mapped_column(JSONB, default=list)  # [[url, anchor], ...] for re-crawling without a fetch
+    goal: Mapped[str] = mapped_column(String(500), default="")  # goal of the crawl that last read it
+    embedding = mapped_column(Vector(DIMS), nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
+
+
+class ResearchSummary(Base):
+    """What a research crawl or job concluded, searchable by later jobs of the same user."""
+
+    __tablename__ = "research_summaries"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    crawl_id: Mapped[str] = mapped_column(String(40), default="")
+    job_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    goal: Mapped[str] = mapped_column(String(500), default="")
+    summary: Mapped[str] = mapped_column(Text, default="")
+    sources: Mapped[list] = mapped_column(JSONB, default=list)
+    embedding = mapped_column(Vector(DIMS), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
