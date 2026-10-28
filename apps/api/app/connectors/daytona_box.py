@@ -424,15 +424,24 @@ def _out(response) -> str:
     return str(getattr(response, "result", None) or getattr(response, "stdout", "") or "")
 
 
+PLAYWRIGHT_INSTALL = (
+    "python3 -m pip install -q playwright && python3 -m playwright install chromium"
+    " && python3 -c 'from playwright.sync_api import sync_playwright' && touch /tmp/checkme-pw-ready"
+)
+# E2B Desktop runs as a non-root user with passwordless sudo and lacks Chromium's system libraries.
+PLAYWRIGHT_INSTALL_DESKTOP = (
+    "(python3 -m pip install -q --user playwright || python3 -m pip install -q --user --break-system-packages playwright)"
+    " && (python3 -m playwright install --with-deps chromium || python3 -m playwright install chromium)"
+    " && python3 -c 'from playwright.sync_api import sync_playwright' && touch /tmp/checkme-pw-ready"
+)
+
+
 async def _ensure_playwright(proc) -> None:
     marker = await _exec(proc, "test -f /tmp/checkme-pw-ready && echo ready || echo missing", 15)
     if "ready" in _out(marker):
         return
-    install = await _exec(
-        proc,
-        "python3 -m pip install -q playwright && python3 -m playwright install chromium && python3 -c 'from playwright.sync_api import sync_playwright' && touch /tmp/checkme-pw-ready",
-        240,
-    )
+    desktop = bool(getattr(proc, "browser_deps", False))
+    install = await _exec(proc, PLAYWRIGHT_INSTALL_DESKTOP if desktop else PLAYWRIGHT_INSTALL, 480 if desktop else 240)
     if getattr(install, "exit_code", 1) not in {0, None}:
         raise ToolError("Could not install a browser in the computer sandbox. " + _clip(_out(install), 400))
 
@@ -484,7 +493,14 @@ async def _install_daemon(proc, fs=None) -> None:
 async def _daemon_up(proc) -> bool:
     ping = await _exec(proc, "curl -sf http://127.0.0.1:18765/health && echo OK || echo DOWN", 8)
     out = _out(ping)
-    return "OK" in out and '"version": "9"' in out
+    return daemon_current(out)
+
+
+def daemon_current(health_output: str) -> bool:
+    """True when the running daemon is healthy and is this release (a stale one is restarted)."""
+    from app.connectors.computer_daemon import VERSION
+
+    return "OK" in health_output and f'"version": "{VERSION}"' in health_output
 
 
 async def _ensure_daemon(proc, fs=None) -> None:
@@ -498,7 +514,9 @@ async def _ensure_daemon(proc, fs=None) -> None:
         raise ToolError("Computer browser did not start. Daemon file missing in sandbox.")
     boot = await _exec(
         proc,
-        "bash -lc 'nohup python3 /tmp/checkme_browser_daemon.py >/tmp/checkme-browser-daemon.log 2>&1 & disown; "
+        "bash -lc '"
+        + str(getattr(proc, "daemon_env", "") or "")
+        + "nohup python3 /tmp/checkme_browser_daemon.py >/tmp/checkme-browser-daemon.log 2>&1 & disown; "
         "for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do "
         "curl -sf http://127.0.0.1:18765/health && exit 0; sleep 2; done; "
         "tail -n 40 /tmp/checkme-browser-daemon.log; exit 1'",
@@ -657,7 +675,15 @@ async def _client():
     return AsyncDaytona(_config())
 
 
+def _use_e2b() -> bool:
+    return get_settings().computer_backend == "e2b"
+
+
 async def _ensure_sandbox(row) -> tuple[Any, Any]:
+    if _use_e2b():
+        from app.connectors import e2b_box
+
+        return None, await e2b_box.ensure_sandbox(row)
     from daytona import CreateSandboxFromSnapshotParams
 
     client = await _client()
@@ -690,6 +716,10 @@ async def _ensure_sandbox(row) -> tuple[Any, Any]:
 
 
 async def _existing_sandbox(row):
+    if _use_e2b():
+        from app.connectors import e2b_box
+
+        return None, await e2b_box.existing_sandbox(row)
     creds = decrypt_json(row.credentials_enc)
     sandbox_id = creds.get("sandbox_id")
     if not sandbox_id:
@@ -699,6 +729,41 @@ async def _existing_sandbox(row):
         return client, await client.get(sandbox_id)
     except Exception:  # noqa: BLE001
         return None, None
+
+
+async def _e2b_screen_or_status(row, name: str) -> Any:
+    """E2B: the screen is the real desktop; status never resumes a paused sandbox."""
+    from app.connectors import e2b_box
+
+    if name == "status":
+        data = await e2b_box.status(row)
+        data.setdefault("url", "")
+        data.setdefault("title", "")
+        if data.get("state") == "running":
+            sandbox = await e2b_box.existing_sandbox(row)
+            if sandbox is not None:
+                try:
+                    page = await _computer_status(sandbox.process)
+                    data["url"] = page.get("url") or ""
+                    data["title"] = page.get("title") or ""
+                except Exception:  # noqa: BLE001
+                    pass
+        data["screen_agent"] = live_screen_agent()
+        return data
+    sandbox = await e2b_box.existing_sandbox(row)
+    if sandbox is None:
+        raise ToolError("No live computer screen yet. Wake the computer first.")
+    try:
+        raw = await sandbox.screenshot()
+    except Exception as exc:  # noqa: BLE001
+        cached = live_screen_png()
+        if cached:
+            return cached
+        raise ToolError("No live computer screen yet. Wake the computer first.") from exc
+    if not raw.startswith(b"\x89PNG"):
+        raise ToolError("No live computer screen yet. Wake the computer first.")
+    remember_screen(raw)
+    return raw
 
 
 async def call_daytona(row, name: str, args: dict[str, Any]) -> Any:
@@ -732,6 +797,8 @@ async def _invoke_daytona(row, name: str, args: dict[str, Any]) -> Any:
         from app.connectors.analytics_report import render_report
 
         return render_report(args)
+    if name in {"screen_png", "status"} and _use_e2b():
+        return await _e2b_screen_or_status(row, name)
     if name in {"screen_png", "status"}:
         _client_obj, sandbox = await _existing_sandbox(row)
         if sandbox is None:
@@ -759,9 +826,14 @@ async def _invoke_daytona(row, name: str, args: dict[str, Any]) -> Any:
         if name == "boot":
             data = await _boot_computer(proc, fs)
             data["sandbox_id"] = getattr(sandbox, "id", None)
+            data["provider"] = getattr(sandbox, "provider", "daytona")
+            urls = getattr(sandbox, "stream_urls", None)
+            if callable(urls):
+                data.update(urls())
             return data
         if name == "sandbox_info":
             return {
+                "provider": getattr(sandbox, "provider", "daytona"),
                 "sandbox_id": getattr(sandbox, "id", None),
                 "state": str(getattr(sandbox, "state", None) or getattr(sandbox, "status", "")),
                 "cwd": getattr(sandbox, "user_cwd", None) or "/home/daytona",
@@ -785,7 +857,14 @@ async def _invoke_daytona(row, name: str, args: dict[str, Any]) -> Any:
             from app.connectors.web_fetch import fetch_public_page
 
             url = safe_http_url(args.get("url") or "")
-            page = await fetch_public_page(url)
+            try:
+                page = await fetch_public_page(url)
+            except Exception as fetch_exc:  # noqa: BLE001 - e.g. httpx.ReadTimeout; never crash the turn
+                return {
+                    "ok": False,
+                    "url": url,
+                    "error": f"Could not fetch the page ({type(fetch_exc).__name__}). Try another source; do not invent its content.",
+                }
             shown = await _browser_rpc(
                 proc, {"command": "load_html", "html": page.get("html") or "", "url": page.get("url") or url}, 60, fs
             )

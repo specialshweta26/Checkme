@@ -1,4 +1,4 @@
-"""Provision Daytona computer and Composio marketplace connectors for a user."""
+"""Provision the computer (E2B Desktop or Daytona) and Composio marketplace connectors for a user."""
 
 from __future__ import annotations
 
@@ -67,7 +67,7 @@ def platform_needs_sync(row: Connector | None) -> bool:
 async def ensure_platform_connectors(db: AsyncSession, user: User) -> list[Connector]:
     s = get_settings()
     wanted: list[tuple[str, bool]] = [
-        ("daytona", bool(s.daytona_api_key)),
+        ("daytona", bool(s.computer_backend)),  # the computer: E2B Desktop or Daytona
         ("composio", bool(s.composio_api_key)),
         # Always offered with Composio; each call checks the user's ACTIVE GitHub connection and says how to connect.
         (GITHUB_PROVIDER, bool(s.composio_api_key)),

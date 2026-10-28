@@ -31,8 +31,21 @@ function newProgressId() {
   return `turn_${Date.now().toString(36)}${rand}`;
 }
 
+/** Tools that drive the computer: when one runs, the live screen opens so the user can watch. */
+const COMPUTER_TOOL = /^(browser_|browse_|computer_|launch_app$|open_path$|request_takeover$|web_fetch$)/;
+
+function usesComputer(tools: string[]) {
+  return tools.some((name) => COMPUTER_TOOL.test(name));
+}
+
 /** Poll the API for live status lines of one in-flight chat turn. Returns a stop function. */
-function pollProgress(progressId: string, onSteps: (steps: string[]) => void, everyMs = 1200, onDone?: () => void) {
+function pollProgress(
+  progressId: string,
+  onSteps: (steps: string[]) => void,
+  everyMs = 1200,
+  onDone?: () => void,
+  onTools?: (tools: string[]) => void,
+) {
   let stopped = false;
   let last = 0;
   let timer: number | undefined;
@@ -46,6 +59,8 @@ function pollProgress(progressId: string, onSteps: (steps: string[]) => void, ev
         if (!stopped && steps.length !== last) {
           last = steps.length;
           onSteps(steps);
+          const tools: string[] = (data.steps || []).map((s: any) => String(s?.tool || "")).filter(Boolean);
+          if (tools.length) onTools?.(tools);
         }
         if (data.done) {
           onDone?.();
@@ -235,8 +250,18 @@ export default function ChatPage() {
     setUploadError("");
     const progressId = newProgressId();
     setProgress((all) => ({ ...all, [key]: { steps: [], hint: message || "your files" } }));
-    const stopProgress = pollProgress(progressId, (steps) =>
-      setProgress((all) => (all[key] ? { ...all, [key]: { ...all[key], steps } } : all)),
+    let screenShown = false;
+    const stopProgress = pollProgress(
+      progressId,
+      (steps) => setProgress((all) => (all[key] ? { ...all, [key]: { ...all[key], steps } } : all)),
+      1200,
+      undefined,
+      (tools) => {
+        // Open the live computer once per turn when the agent starts using it (the user can close it again).
+        if (screenShown || scopeRef.current !== key || !usesComputer(tools)) return;
+        screenShown = true;
+        setScreenOpen(true);
+      },
     );
     progressStopsRef.current[key] = stopProgress;
     try {

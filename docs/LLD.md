@@ -160,7 +160,8 @@ Startup backfill (`app/agents/scope.py`, applied from `db.py`): promote an exist
 
 - `GET/POST /connectors`, `PATCH/DELETE /connectors/{id}`, `POST .../sync`, MCP OAuth start/callback
 - `GET /connectors/marketplace`, `POST /connectors/marketplace/connect` — Composio app catalog + OAuth link
-- Builtin platform connectors (when keys are set): `@computer` (Daytona sandbox) and `@composio` (marketplace `find_tools` / `execute`)
+- Builtin platform connectors (when keys are set): `@computer` (E2B Desktop or Daytona sandbox, §7.2) and `@composio` (marketplace `find_tools` / `execute`)
+- `GET /connectors/computer/status` → `{state, screenAvailable, url, title, screen_agent, provider, stream_url?, control_url?}` (never resumes a paused sandbox); `POST /connectors/computer/boot` wakes it and returns the same stream fields; `GET /connectors/computer/screen` is a PNG (E2B: real desktop screenshot; Daytona: the Chromium frame); `POST /connectors/computer/control` is the click/type takeover used by Daytona and by teaching
 - `GET/POST /tasks`, `PATCH/DELETE /tasks/{id}`, `POST .../run`. `GET` accepts `agent_id` and `status`. `POST` body is `{ prompt, agent_id? }` — omitted `agent_id` uses Chief
 - `POST /files/upload`, `GET /files?t=&render=`
 - `GET /jobs?active=1` (root jobs), `GET /jobs/{id}`, `GET /jobs/{id}/events?after=` (whole tree: `{ root, jobs, events, waiting, done }`), `POST /jobs/{id}/approve|decline` `{ token }`, `POST /jobs/{id}/cancel` (cancels the subtree) — §10.1
@@ -282,7 +283,7 @@ Files: `apps/api/app/agents/focus.py`, `apps/api/app/agent/coding.py`, `apps/web
 
   Pushes stay on `agent/*`, except a user-named, verified existing PR branch (`push_branch(..., pr_number=N)`: the PR must be open and not from a fork), still behind the card. Deploys go through a deploy connector (Render MCP, Vercel, …) if there is one, else the platform CLI on the computer (`deploy`, `deploy_rollback`, `deploy_status`, `deploy_logs`, `detect_deploy_targets`; see [DEPLOY.md](DEPLOY.md)). Deploy and rollback always show an approval card, and the credentials are never shown to the model. If something is missing, the agent says exactly what. Extra harness tools exist only for coding agents:
   - `coding_workspace_status`: one sandbox `exec` probe (git, gh, `gh auth`, credential helper, node, python, rg, ctags, the `~/.checkme/toolchain-v1` marker, `~/work`) plus a connector scan (GitHub by slug/provider/name/tags, deploy hints, Composio). It returns `can`, `missing`, `workdir`, `toolchain`, `dev_toolchain`, `github_connectors` and `deploy_connectors`.
-  - `sandbox_shell(command, cwd?, timeout=300)`: `call_user_tool(computer, exec)` with a 10–900s timeout. Without a computer it returns the "Daytona is not configured" message.
+  - `sandbox_shell(command, cwd?, timeout=300)`: `call_user_tool(computer, exec)` with a 10–900s timeout. Without a computer it returns the "computer is not available" message (needs `E2B_API_KEY` or `DAYTONA_API_KEY`).
   - Coding agents get `recursion_limit ≥ 200` (retries up to 280; teammate runs up to 120).
   - Permissions are unchanged: sandbox `exec` isn't destructive, so it runs without a card, and destructive connector tools still use the confirmation card.
 
@@ -361,6 +362,27 @@ Gmail: `GET /threads/{id}` after resolving `threadId` from `messages/{id}` or fr
 `reply` extra recipients: Gmail composes To from Reply-To/From, merges Reply-all To/Cc plus extra `cc`, and sets `Bcc`. Outlook uses `reply` / `replyAll` when there are no extras or files; otherwise `createReply` / `createReplyAll`, PATCH merged `ccRecipients` / `bccRecipients`, attach, then send. `send_message` already takes `cc` and `bcc` on both providers.
 
 `GET /api/inbox/{id}/thread` and `GET /api/chat/thread` always pass `full=True`, `max_messages=100`.
+
+### 7.2 The computer: E2B Desktop (default) or Daytona
+
+Files: `app/connectors/daytona_box.py` (all computer tools, `call_daytona`), `app/connectors/e2b_box.py` (E2B backend), `app/connectors/computer_daemon.py` (Chromium daemon inside the sandbox).
+
+- **Backend choice.** `Settings.computer_backend`: `COMPUTER_PROVIDER=e2b|daytona` when that provider's key is set, else E2B whenever `E2B_API_KEY` is set, else Daytona. The connector keeps provider id `daytona` (slug `computer`) for both, so agents, prompts and tests see one computer; `call_daytona` picks the backend.
+- **Adapter.** `e2b_box.E2BComputer` mimics Daytona's sandbox: `process.exec(cmd, cwd, env, timeout)` → `{exit_code, result}` (stdout+stderr; non-zero exits and timeouts become exit codes), `fs.download_file / upload_file / list_files`. Default cwd is `/home/daytona` (created and chowned on the E2B desktop) so paths in tools and prompts are unchanged. The E2B SDK is sync; every call runs in `asyncio.to_thread`.
+- **Per-user persistence.** The sandbox id and the noVNC password are stored encrypted in the computer connector's credentials (`e2b_sandbox_id`, `e2b_stream_key`) and written to the DB immediately; E2B metadata `checkme_user=<id>` is a backup lookup. `ensure_sandbox`: in-process handle → `Sandbox.connect(id)` (resumes a paused sandbox with memory, so background processes come back) → create. A missing sandbox (`NotFound`) is recreated. Sandboxes are created with `lifecycle.on_timeout=pause`, timeout `E2B_SANDBOX_TIMEOUT` (default 3600 s), and each tool call extends it (keepalive, throttled to once a minute).
+- **Background processes.** `exec` rewrites `nohup` to `setsid nohup` so jobs (browser daemon, `launch_app`, dev servers) leave the command's process group and survive between tool calls; pause/resume keeps them.
+- **Desktop and stream.** Xvfb `:0` 1280×900 + XFCE. The stream is x11vnc + noVNC on port 6080 with a random password; `stream_url` is view-only, `control_url` accepts input. The browser daemon runs Chromium **headed** on `:0` (`CHECKME_BROWSER_HEADED=1`) so the agent's browsing is visible in the stream; on Daytona it stays headless and the UI polls PNG frames.
+- **Daemon version.** `_daemon_up` compares the health JSON with `computer_daemon.VERSION`; a stale daemon is restarted once, a current one is reused (a hard-coded `"9"` after the bump to `"10"` restarted Chromium on every call and lost the page).
+- **UI.** `ScreenRail` embeds `stream_url` in an iframe (pointer events off) and switches to `control_url` on Take control; it falls back to polled PNG frames for Daytona and while teaching (teaching records clicks through `/computer/control`). While the computer starts it shows "Starting computer…". The chat opens the rail automatically once per turn when a computer tool (`browser_*`, `browse_*`, `computer_*`, `launch_app`, `open_path`, `request_takeover`, `web_fetch`) shows up in the live progress. No CSP is set; if one is added, `frame-src` must allow `https://*.e2b.app` / `https://*.e2b.dev`.
+
+### 7.3 Web search (`app/agent/web_tools.py`)
+
+`web_search(query)` tries providers in order and returns `{query, results:[{title,url,snippet}], source, fallback_from?}` from the first that has results, or `{results: [], error, tried}`. It never invents results.
+
+1. API providers whose key is set: `TAVILY_API_KEY`, `BRAVE_SEARCH_API_KEY`, `SERPER_API_KEY`, `EXA_API_KEY`.
+2. Keyless: Brave HTML (`search.brave.com`, over HTTP/2: Brave answers HTTP/1.1 clients with 429), DuckDuckGo html/lite (HTTP 202 "anomaly" pages are detected as a bot check, not as "0 results"), Wikipedia search (marked with a `note`).
+
+Each request has a 10 s timeout and one retry on timeouts, connection errors and 5xx. `web_fetch` returns `{ok: false, error}` instead of raising (an uncaught `httpx.ReadTimeout` used to fail the whole turn).
 
 ## 8. Inbox pipeline
 
@@ -490,6 +512,9 @@ Staff `learn_voice` updates the speaking agent’s voice block from sent mail.
 | `test_agent_scope.py` | Memory isolation, task `agent_id`, `execute_task` agent, Chief backfill |
 | `test_agent_chat_tools.py` | Workspace tools registered and in prompt; create/rename agent; group from all/named agents, 2–10 errors, add/remove/rename; deletes only via confirmation, Chief and unattended refused; confirmed delete runs in `run_deep_agent` |
 
+| `test_e2b_box.py` | E2B adapter with a fake SDK: create when none (metadata, timeout, pause-on-timeout, id persisted), reconnect by id and reuse the running stream, recreate when expired, metadata lookup, keepalive + resume via connect, Daytona-shaped exec/fs, `setsid` for `nohup`, status never resumes, `call_daytona` routing, backend selection, daemon version check |
+| `test_web_search.py` | Mocked HTTP: Brave HTML / DDG lite parsers, DDG 202 challenge falls through, API providers first and in order, retry on 5xx and timeouts, all-fail returns an error with no results, `web_fetch` timeout returns an error |
+
 | `test_progress.py` | Status lines from real tool/model events (connector, query, URL, group, teammate, todos), Redis buffer + TTL + dedupe, Redis outage tolerated, teammate prefix, nested callbacks not double-reported, `run_deep_agent` wires the callback, `GET /chat/progress/{id}` |
 
 | `test_agent_focus.py` | A–D order, focus normalize/reject, `update_agent` focus + default title, route models, coding/research/unset prompts, coding-only tools, `set_my_focus`, `sandbox_shell` → computer `exec` (timeout clamp, missing computer), `coding_workspace_status` ready/missing, bigger step budget |
@@ -518,6 +543,11 @@ See `.env.example`. Important knobs in `app/config.py`:
 | `chat_rate_limit_per_minute` | 30 |
 | `history_messages` | 8 prior turns into the agent |
 | `max_agent_steps` | 20 (recursion uses ×8) |
+| `E2B_API_KEY` | E2B Desktop computer (default backend when set) |
+| `COMPUTER_PROVIDER` | `e2b` or `daytona`; picks the backend when both keys are set |
+| `E2B_SANDBOX_TIMEOUT` / `E2B_TEMPLATE` | Idle seconds before pause (Hobby ≤ 3600, Pro ≤ 86400) / custom template (default `desktop`) |
+| `DAYTONA_API_KEY` | Daytona computer (fallback) |
+| `TAVILY_API_KEY` / `BRAVE_SEARCH_API_KEY` / `SERPER_API_KEY` / `EXA_API_KEY` | Optional web search APIs, tried in this order before the keyless fallback |
 | `COMPOSIO_API_KEY` | Composio marketplace and the built-in GitHub connector (proxy, accounts) |
 | `COMPOSIO_GITHUB_AUTH_CONFIG_ID` | Optional: pin the GitHub auth config; a custom OAuth one with unmasked secrets enables real git clone/push |
 

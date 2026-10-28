@@ -1,15 +1,16 @@
-"""Persistent Chromium on the Daytona computer (Lumio page-browser pattern)."""
+"""Persistent Chromium on the cloud computer (Lumio page-browser pattern). Headed on E2B Desktop, headless elsewhere."""
 
 from __future__ import annotations
 
 import json
+import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 HOST = "127.0.0.1"
 PORT = 18765
-VERSION = "10"
+VERSION = "11"
 SHOT = "/tmp/checkme-browser.png"
 PROFILE = "/tmp/checkme-browser-profile"
 LAST = "/tmp/checkme-browser-last.json"
@@ -344,6 +345,11 @@ def _paint_desktop(page):
         )
 
 
+def browser_headed() -> bool:
+    """Headed Chromium only when asked for and an X display exists (E2B Desktop sets DISPLAY=:0)."""
+    return os.environ.get("CHECKME_BROWSER_HEADED") == "1" and bool(os.environ.get("DISPLAY"))
+
+
 def _ensure_page():
     global _browser_page, _browser_context
     if _browser_page is not None:
@@ -354,9 +360,12 @@ def _ensure_page():
 
     Path(PROFILE).mkdir(parents=True, exist_ok=True)
     pw = sync_playwright().start()
+    headed = browser_headed()
+    extra = ["--window-position=0,0", f"--window-size={VIEW_W},{VIEW_H + 100}", "--no-first-run", "--no-default-browser-check"] if headed else []
     _browser_context = pw.chromium.launch_persistent_context(
         PROFILE,
-        headless=True,
+        # On a real desktop (E2B) Chromium runs headed so it shows in the live stream; elsewhere it stays headless.
+        headless=not headed,
         viewport={"width": VIEW_W, "height": VIEW_H},
         user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
         args=[
@@ -366,6 +375,7 @@ def _ensure_page():
             "--disable-http2",
             "--disable-quic",
             "--ignore-certificate-errors",
+            *extra,
         ],
     )
     _browser_page = _browser_context.pages[0] if _browser_context.pages else _browser_context.new_page()

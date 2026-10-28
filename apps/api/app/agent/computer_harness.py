@@ -1,4 +1,4 @@
-"""First-class computer/browser/file verbs. They wrap this user's Daytona sandbox."""
+"""First-class computer/browser/file verbs. They wrap this user's cloud computer (E2B Desktop or Daytona)."""
 
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ def computer_missing() -> dict:
     return {
         "error": (
             "The computer (cloud sandbox) is not available for this agent. "
-            "It needs DAYTONA_API_KEY on the server, or the computer connector assigned to this agent."
+            "It needs E2B_API_KEY (or DAYTONA_API_KEY) on the server, or the computer connector assigned to this agent."
         )
     }
 

@@ -237,7 +237,7 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         return _dumps(await computer.request_takeover(ctx, reason, instruction))
 
     async def web_search(query: str, count: int = 8) -> str:
-        """Search the public web. Use for facts, news, and 'what is going on'. Then web_fetch or browser_navigate the best URLs. Do not search_tools for this. For live bookings, inventory, or forms, browser_navigate the site itself instead of a Google Search URL."""
+        """Search the public web. Use for facts, news, and 'what is going on'. Then web_fetch or browser_navigate the best URLs. Do not search_tools for this. For live bookings, inventory, or forms, browser_navigate the site itself instead of a Google Search URL. If it returns an error or no results, say so and never make results up."""
         ctx.used_tools.append("web_search")
         return _dumps(await web_tools.web_search(query, count))
 
