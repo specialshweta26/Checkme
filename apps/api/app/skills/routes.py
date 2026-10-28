@@ -72,3 +72,40 @@ async def teach_stop(body: TeachStopIn, user: User = Depends(current_user), db: 
         return await service.stop_teaching(db, user, body.name)
     except service.SkillError as vis_exc:
         raise _err(vis_exc) from vis_exc
+
+
+class SkillPatch(BaseModel):
+    name: str | None = None
+    instruction: str | None = None
+
+
+@router.patch("/{skill_id}")
+async def patch_skill(
+    skill_id: uuid.UUID,
+    body: SkillPatch,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        row = await service.update_skill(
+            db,
+            user,
+            skill_id=str(skill_id),
+            new_name=body.name or "",
+            instruction=body.instruction,
+        )
+    except service.SkillError as vis_exc:
+        raise _err(vis_exc) from vis_exc
+    return service.serialize_skill(row)
+
+
+@router.delete("/{skill_id}")
+async def drop_skill(
+    skill_id: uuid.UUID,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        return await service.delete_skill(db, user, skill_id=str(skill_id))
+    except service.SkillError as vis_exc:
+        raise _err(vis_exc) from vis_exc
