@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.llm import embed_one
-from app.models import MemoryBlock, MemoryPassage, User, WorkspaceAgent
+from app.models import ChatMessage, MemoryBlock, MemoryPassage, User, WorkspaceAgent
 from connector_core.http import shared_client
 
 log = logging.getLogger(__name__)
@@ -19,6 +19,7 @@ log = logging.getLogger(__name__)
 _LETTA_TIMEOUT = httpx.Timeout(2.5, connect=0.8)
 _letta_skip_until = 0.0
 _LABEL = re.compile(r"^[A-Za-z0-9_-]{1,50}$")
+CORE_LABELS = ("prefs", "people", "voice", "work", "coding")
 _SECRET_LANGUAGE = re.compile(r"\b(password|passphrase|api[ _-]?key|access[ _-]?token|refresh[ _-]?token|secret|private key|recovery code)\b", re.I)
 
 
@@ -394,6 +395,200 @@ async def upsert_core(db: AsyncSession, user_id: uuid.UUID, label: str, value: s
     await _ensure_saved_letta(db, user, owner)
     await db.commit()
     await _write_letta_block(owner, label, value[:800])
+
+
+def _need_db(ctx) -> dict | None:
+    if ctx.db is None:
+        return {"error": "Memory needs a workspace."}
+    return None
+
+
+async def remember_fact(ctx, text: str, label: str = "", shared: bool = False) -> dict:
+    missing = _need_db(ctx)
+    if missing:
+        return missing
+    body = " ".join((text or "").split())
+    if not body:
+        return {"error": "text is required"}
+    if _SECRET_LANGUAGE.search(body):
+        return {"error": "I can’t store passwords, keys, tokens, or recovery codes in memory."}
+    tag = (label or "").strip().lower()
+    owner = ctx.agent
+    if shared:
+        from app.agents.service import ensure_default_agent
+
+        owner = await ensure_default_agent(ctx.db, ctx.user)
+    if tag in CORE_LABELS:
+        existing = await read_core(ctx.db, ctx.user, tag, agent=owner)
+        merged = (existing.rstrip() + "\n" + body).strip() if existing else body
+        await upsert_core(ctx.db, ctx.user.id, tag, merged[:800], getattr(owner, "id", None))
+        return {"ok": True, "kind": "block", "label": tag, "shared": bool(shared), "value": merged[:800]}
+    await remember(ctx.db, ctx.user.id, "archival", body[:800], getattr(owner, "id", None))
+    return {"ok": True, "kind": "passage", "shared": bool(shared), "text": body[:800]}
+
+
+async def recall_memory(ctx, query: str = "", label: str = "") -> dict:
+    missing = _need_db(ctx)
+    if missing:
+        return missing
+    owner = await _memory_agent(ctx.db, ctx.user, agent=ctx.agent)
+    tag = (label or "").strip().lower()
+    blocks = (
+        await ctx.db.execute(
+            select(MemoryBlock).where(MemoryBlock.user_id == ctx.user.id, MemoryBlock.agent_id == owner.id)
+        )
+    ).scalars().all()
+    if tag:
+        blocks = [b for b in blocks if b.label == tag]
+    block_rows = [{"kind": "block", "label": b.label, "text": b.value} for b in blocks if b.value]
+    q = (query or "").strip()
+    passages: list[dict] = []
+    if q:
+        try:
+            vec = await embed_one(q)
+            vec_lit = "[" + ",".join(f"{x:.7f}" for x in vec) + "]"
+            rows = (
+                await ctx.db.execute(
+                    text(
+                        """
+                        SELECT id, kind, text FROM memory_passages
+                        WHERE user_id = :uid AND agent_id = :aid AND embedding IS NOT NULL
+                        ORDER BY embedding <=> CAST(:vec AS vector)
+                        LIMIT 6
+                        """
+                    ),
+                    {"uid": ctx.user.id, "aid": owner.id, "vec": vec_lit},
+                )
+            ).all()
+            passages = [{"kind": r[1], "id": r[0], "text": r[2]} for r in rows]
+        except Exception:  # noqa: BLE001
+            needle = f"%{q[:80]}%"
+            rows = (
+                await ctx.db.execute(
+                    select(MemoryPassage)
+                    .where(
+                        MemoryPassage.user_id == ctx.user.id,
+                        MemoryPassage.agent_id == owner.id,
+                        MemoryPassage.text.ilike(needle),
+                    )
+                    .order_by(MemoryPassage.id.desc())
+                    .limit(6)
+                )
+            ).scalars().all()
+            passages = [{"kind": r.kind, "id": r.id, "text": r.text} for r in rows]
+    else:
+        rows = (
+            await ctx.db.execute(
+                select(MemoryPassage)
+                .where(MemoryPassage.user_id == ctx.user.id, MemoryPassage.agent_id == owner.id)
+                .order_by(MemoryPassage.id.desc())
+                .limit(6)
+            )
+        ).scalars().all()
+        passages = [{"kind": r.kind, "id": r.id, "text": r.text} for r in rows]
+    return {"blocks": block_rows, "passages": passages}
+
+
+async def forget_memory(ctx, memory_id: str = "", label: str = "", text: str = "") -> dict:
+    missing = _need_db(ctx)
+    if missing:
+        return missing
+    owner = await _memory_agent(ctx.db, ctx.user, agent=ctx.agent)
+    removed: list[str] = []
+    tag = (label or "").strip().lower()
+    if tag:
+        row = (
+            await ctx.db.execute(
+                select(MemoryBlock).where(
+                    MemoryBlock.user_id == ctx.user.id,
+                    MemoryBlock.agent_id == owner.id,
+                    MemoryBlock.label == tag,
+                )
+            )
+        ).scalar_one_or_none()
+        if row is not None:
+            needle = (text or "").strip()
+            if needle and needle.lower() in (row.value or "").lower():
+                kept = "\n".join(line for line in row.value.splitlines() if needle.lower() not in line.lower())
+                row.value = kept[:800]
+                removed.append(f"block:{tag}")
+            else:
+                await ctx.db.delete(row)
+                removed.append(f"block:{tag}")
+    if memory_id:
+        try:
+            pid = int(str(memory_id).lstrip("#"))
+        except ValueError:
+            pid = None
+        if pid is not None:
+            row = await ctx.db.get(MemoryPassage, pid)
+            if row is not None and row.user_id == ctx.user.id and row.agent_id == owner.id:
+                await ctx.db.delete(row)
+                removed.append(f"passage:{pid}")
+    snippet = (text or "").strip()
+    if snippet and not memory_id and not tag:
+        rows = (
+            await ctx.db.execute(
+                select(MemoryPassage)
+                .where(
+                    MemoryPassage.user_id == ctx.user.id,
+                    MemoryPassage.agent_id == owner.id,
+                    MemoryPassage.text.ilike(f"%{snippet[:80]}%"),
+                )
+                .limit(8)
+            )
+        ).scalars().all()
+        for row in rows:
+            await ctx.db.delete(row)
+            removed.append(f"passage:{row.id}")
+    if not removed:
+        return {"error": "Nothing matched to forget. Pass memory_id, label, or text."}
+    await ctx.db.commit()
+    return {"ok": True, "removed": removed}
+
+
+async def search_history(ctx, query: str, limit: int = 12) -> dict:
+    missing = _need_db(ctx)
+    if missing:
+        return missing
+    q = (query or "").strip()
+    if not q:
+        return {"error": "query is required"}
+    stmt = (
+        select(ChatMessage)
+        .where(ChatMessage.user_id == ctx.user.id, ChatMessage.content.ilike(f"%{q[:80]}%"))
+        .order_by(ChatMessage.id.desc())
+        .limit(max(1, min(int(limit or 12), 30)))
+    )
+    if ctx.session_id:
+        stmt = stmt.where(ChatMessage.session_id == ctx.session_id)
+    rows = (await ctx.db.execute(stmt)).scalars().all()
+    return {
+        "query": q,
+        "messages": [
+            {"id": r.id, "role": r.role, "text": (r.content or "")[:400], "session_id": str(r.session_id)} for r in rows
+        ],
+    }
+
+
+async def read_history(ctx, limit: int = 8) -> dict:
+    missing = _need_db(ctx)
+    if missing:
+        return missing
+    if ctx.session_id is None:
+        return {"error": "No chat session is active."}
+    rows = (
+        await ctx.db.execute(
+            select(ChatMessage)
+            .where(ChatMessage.session_id == ctx.session_id)
+            .order_by(ChatMessage.id.desc())
+            .limit(max(1, min(int(limit or 8), 40)))
+        )
+    ).scalars().all()
+    rows = list(reversed(rows))
+    return {
+        "messages": [{"id": r.id, "role": r.role, "text": (r.content or "")[:600]} for r in rows],
+    }
 
 
 async def learn_for_agent(db: AsyncSession, user: User, agent, category: str, fact: str) -> dict:

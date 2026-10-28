@@ -242,8 +242,75 @@ def describe_tool(name: str, args: dict | None, connector_names: dict[str, str] 
         return f"Starting a background job: {_clip(a.get('title') or a.get('task'), 60)}"
     if n == "delegate":
         return f"Handing off to a {_clip(a.get('role') or 'teammate', 12)}: {_clip(a.get('title') or a.get('task'), 60)}"
-    if n == "sandbox_shell":
+    if n in {"sandbox_shell", "shell"}:
         return f"Running `{_clip(a.get('command'), 70)}` on the computer"
+    if n == "user_computer_shell":
+        return f"Running `{_clip(a.get('command'), 70)}` on your computer"
+    if n == "browser_navigate":
+        return f"Opening {_host(a.get('url'))} in the browser" if a.get("url") else "Opening a page in the browser"
+    if n == "browser_snapshot":
+        return "Reading the page"
+    if n == "browser_act":
+        return "Acting on the page"
+    if n == "computer_observe":
+        return "Looking at the computer screen"
+    if n == "computer_act":
+        return "Using the computer screen"
+    if n == "request_takeover":
+        return "Handing the computer to you"
+    if n == "web_search":
+        return f"Searching the web for {_quote(a.get('query'))}" if a.get("query") else "Searching the web"
+    if n == "web_fetch":
+        return f"Fetching {_host(a.get('url'))}" if a.get("url") else "Fetching a page"
+    if n == "list_files":
+        return f"Listing files in {_clip(a.get('path') or '/', 40)}"
+    if n == "attach_file":
+        return f"Attaching {_clip(a.get('filename') or a.get('path'), 50)}"
+    if n == "open_path":
+        return f"Opening {_clip(a.get('path'), 50)}"
+    if n == "launch_app":
+        return f"Opening {_clip(a.get('name'), 30)} on the computer"
+    if n == "render_plot":
+        return f"Drawing a chart: {_clip(a.get('title'), 50)}"
+    if n == "generate_image":
+        return f"Generating an image: {_clip(a.get('prompt'), 50)}"
+    if n == "generate_video":
+        return "Video generation is not configured"
+    if n in {"remember", "save_memory", "save_shared_memory"}:
+        return "Saving that to memory"
+    if n == "recall_memory":
+        return f"Recalling {_quote(a.get('query') or a.get('label') or 'what I know')}"
+    if n == "forget_memory":
+        return "Forgetting that"
+    if n == "search_history":
+        return f"Searching this chat for {_quote(a.get('query'))}"
+    if n == "read_history":
+        return "Reading recent messages in this chat"
+    if n == "skill_read":
+        return f"Reading the skill {_quote(a.get('name') or a.get('skill_id'))}"
+    if n == "skill_create":
+        return f"Saving the skill {_quote(a.get('name'))}"
+    if n == "skill_update":
+        return f"Updating the skill {_quote(a.get('name') or a.get('skill_id'))}"
+    if n == "skill_delete":
+        return f"Deleting the skill {_quote(a.get('name') or a.get('skill_id'))}"
+    if n == "scratchpad_list":
+        return "Checking the checklist"
+    if n == "scratchpad_add":
+        return f"Adding to the checklist: {_clip(a.get('text'), 50)}"
+    if n == "scratchpad_update":
+        return f"Updating checklist item {a.get('item_id')}"
+    if n == "scratchpad_complete":
+        return f"Checking off {a.get('item_id')}"
+    if n == "scratchpad_remove":
+        return f"Removing checklist item {a.get('item_id')}"
+    if n == "task_catalog":
+        verb = str(a.get("action") or "search")
+        if verb == "execute":
+            return f"Running task {_clip(a.get('name'), 40)}"
+        if verb == "load":
+            return f"Reading how to run {_clip(a.get('name'), 40)}"
+        return f"Looking for a task that can {_clip(a.get('query') or 'help', 40)}"
     # deepagents built-ins
     if n == "write_todos":
         todos = a.get("todos") or []

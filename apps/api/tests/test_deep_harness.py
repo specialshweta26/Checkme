@@ -509,6 +509,13 @@ def test_system_prompt_has_no_product_recipes():
     assert "data analyst" in lowered
     assert "write_analytics_report" in lowered
     assert "save_skill" in lowered
+    assert "web_search first" in lowered
+    assert "first-class tools" in lowered
+    assert "recall_memory" in lowered
+    assert "scratchpad_add" in lowered
+    assert "task_catalog" in lowered
+    assert "skill_create" in lowered
+    assert "request_takeover" in lowered
     assert "start_teaching" in lowered
     assert "ten minutes" in lowered
     assert "microphone" in lowered
@@ -538,6 +545,94 @@ def test_harness_exposes_schedule_task():
     assert "schedule_task" in names
     schedule = next(tool for tool in harness_tools(ctx) if tool.name == "schedule_task")
     assert "future" in (schedule.description or "").lower()
+
+
+FIRST_CLASS = [
+    "computer_observe",
+    "computer_act",
+    "browser_navigate",
+    "browser_snapshot",
+    "browser_act",
+    "shell",
+    "user_computer_shell",
+    "list_files",
+    "read_file",
+    "write_file",
+    "attach_file",
+    "open_path",
+    "launch_app",
+    "request_takeover",
+    "web_search",
+    "web_fetch",
+    "render_plot",
+    "generate_image",
+    "generate_video",
+    "remember",
+    "save_memory",
+    "save_shared_memory",
+    "recall_memory",
+    "forget_memory",
+    "search_history",
+    "read_history",
+    "skill_read",
+    "skill_create",
+    "skill_update",
+    "skill_delete",
+    "scratchpad_list",
+    "scratchpad_add",
+    "scratchpad_update",
+    "scratchpad_complete",
+    "scratchpad_remove",
+    "task_catalog",
+]
+
+
+def test_harness_exposes_first_class_computer_web_memory_tools():
+    ctx = _ctx([_conn()])
+    names = [tool.name for tool in harness_tools(ctx)]
+    missing = [n for n in FIRST_CLASS if n not in names]
+    assert missing == []
+
+
+async def test_browser_navigate_harness_uses_computer_connector():
+    calls = []
+
+    async def fake_call(slug, tool, args):
+        calls.append((slug, tool, dict(args)))
+        return {"ok": True, "url": args.get("url")}
+
+    computer = _conn(slug="computer", provider="daytona", kind="builtin", name="Computer", alias="computer")
+    ctx = _ctx([computer], call_impl=fake_call)
+    nav = next(tool for tool in harness_tools(ctx) if tool.name == "browser_navigate")
+    raw = await nav.coroutine(url="https://example.com")
+    data = json.loads(raw)
+    assert data["url"] == "https://example.com"
+    assert calls == [("computer", "browser_navigate", {"url": "https://example.com"})]
+
+
+async def test_user_computer_shell_does_not_use_daytona():
+    calls = []
+
+    async def fake_call(slug, tool, args):
+        calls.append(slug)
+        return {"ok": True}
+
+    computer = _conn(slug="computer", provider="daytona", kind="builtin", name="Computer", alias="computer")
+    ctx = _ctx([computer], call_impl=fake_call)
+    tool = next(t for t in harness_tools(ctx) if t.name == "user_computer_shell")
+    data = json.loads(await tool.coroutine(command="ls"))
+    assert data.get("error")
+    assert "local" in data["error"].lower()
+    assert calls == []
+
+
+async def test_request_takeover_is_browser_handoff():
+    computer = _conn(slug="computer", provider="daytona", kind="builtin", name="Computer", alias="computer")
+    ctx = _ctx([computer])
+    tool = next(t for t in harness_tools(ctx) if t.name == "request_takeover")
+    data = json.loads(await tool.coroutine(reason="Log in to the site."))
+    assert data["handoff"] is True
+    assert ctx.pending[0]["kind"] == "handoff"
 
 
 def test_last_text_skips_tool_calls():

@@ -89,6 +89,11 @@ def test_humanize_tool_names():
         ),
         ("read_file", {"file_path": "/notes.md"}, "Reading /notes.md"),
         ("inspect_result", {"search": "total"}, "Reading the results for “total”"),
+        ("web_search", {"query": "Pune weather"}, "Searching the web for “Pune weather”"),
+        ("browser_navigate", {"url": "https://www.example.com/a"}, "Opening example.com in the browser"),
+        ("remember", {"text": "prefers IST"}, "Saving that to memory"),
+        ("scratchpad_add", {"text": "Open the PR"}, "Adding to the checklist: Open the PR"),
+        ("task_catalog", {"action": "search", "query": "daily briefing"}, "Looking for a task that can daily briefing"),
     ],
 )
 def test_describe_tool_is_grounded_in_the_call(name, args, expected):
@@ -254,9 +259,9 @@ async def test_run_deep_agent_streams_live_steps(monkeypatch):
     monkeypatch.setattr(platform, "ensure_platform_connectors", noop)
     monkeypatch.setattr(deep, "user_connectors", conns)
     monkeypatch.setattr(deep, "connector_assignment_map", no_assign)
+    monkeypatch.setattr(deep, "toolkit_assignment_map", no_assign)
     monkeypatch.setattr(deep, "filter_connectors", lambda c, *a: c)
     monkeypatch.setattr(deep, "load_memory", memory)
-    monkeypatch.setattr(deep, "remember", noop)
     monkeypatch.setattr(deep, "_maybe_start_connect", noop)
     monkeypatch.setattr(deep, "build_agent", lambda ctx, prompt: Graph())
     monkeypatch.setattr(deep, "system_prompt", lambda *a, **k: "")

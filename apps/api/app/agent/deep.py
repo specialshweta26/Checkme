@@ -25,7 +25,7 @@ from app.agents.service import (
 )
 from app.agent.confirm import sign_confirm
 from app.agent.invoke import bump_usage, confirmed, invoke_named, preview
-from app.agent.memory import load_memory, remember
+from app.agent.memory import load_memory
 from app.agent.staff import STAFF_TOOLS, dispatch as staff_dispatch
 from app.auth.tokens import ReauthRequired
 from app.config import get_settings
@@ -109,6 +109,7 @@ class RunContext:
     check_results: dict = field(default_factory=dict)  # last run_checks per repo (for the PR body)
     check_attempts: dict = field(default_factory=dict)
     toolkit_assignments: dict = field(default_factory=dict)
+    scratchpad: list = field(default_factory=list)  # this-chat checklist (scratchpad_*)
 
 
 def _json_size(value: Any) -> int:
@@ -2037,6 +2038,8 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
         ctx.used_tools.append("delete_agent_group")
         return dumps(await workspace_tools.request_delete(ctx, "group", target))
 
+    from app.agent.harness_extra import extra_harness_tools
+
     tools = [
         StructuredTool.from_function(coroutine=list_connectors, name="list_connectors", description=list_connectors.__doc__),
         StructuredTool.from_function(
@@ -2075,6 +2078,10 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
             description=run_staff_tool.__doc__,
             args_schema=StaffInput,
         ),
+    ]
+    tools.extend(extra_harness_tools(ctx))
+    tools.extend(
+        [
         StructuredTool.from_function(
             coroutine=remember_for_me,
             name="remember_for_me",
@@ -2125,7 +2132,8 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
             description=delete_agent_group.__doc__,
             args_schema=DeleteWorkspaceInput,
         ),
-    ]
+        ]
+    )
     if ctx.agent is not None and (getattr(ctx.agent, "kind", "custom") or "custom") != "default":
 
         async def set_my_focus(focus: str) -> str:
@@ -2490,8 +2498,12 @@ def system_prompt(
         "If the user names a connected app, search_tools then call_tool on composio. Do not say it is unavailable. "
         "To connect an app the user named, call connect_app with that toolkit slug (gmail, github, figma, slack) — never a different vendor. "
         "connect_app returns redirect_url; the chat always shows the Composio connect card. Do not only paste the URL, and do not refuse to connect when composio is listed.\n"
-        "When the user asks for a chart, plot, HTML report, or downloadable file: fetch the data first, then computer "
-        "write_analytics_report with tables and charts, or write_file / run_code plus publish_file. "
+        "Computer, browser, files, web search, memory, skills, and scratchpad are first-class tools. Call them directly. "
+        "Do not search_tools or call_tool for browser_navigate, browser_snapshot, browser_act, computer_observe, computer_act, "
+        "shell, list_files, read_file, write_file, attach_file, open_path, launch_app, request_takeover, web_search, web_fetch, "
+        "remember, recall_memory, or scratchpad_add.\n"
+        "When the user asks for a chart, plot, HTML report, or downloadable file: fetch the data first, then "
+        "render_plot or write_analytics_report with tables and charts, or write_file plus attach_file / publish_file. "
         "Cite the download_url (and preview_url). Never cite sandbox: or /tmp paths — those are not downloadable.\n"
         "Data, sales, inventory, KPI, dashboard, and analytics questions: you are a data analyst. Always answer as a report, not a chat recap. "
         "Required sections, in order: title; period/as-of; executive summary; markdown pipe tables for every metric set, time series, and breakdown; findings; recommended actions; downloads. "
@@ -2511,18 +2523,26 @@ def system_prompt(
         "Use a connected data tool first only when list_connections shows that app is authorized.\n"
         "This user's computer is one shared live machine: shell/files, browser sessions, and logins. "
         "Each bot has its own screen on that machine. Only one computer-use task may run at a time. "
-        "Live news or 'what is going on' questions: browser_navigate a Google search URL with the user's words "
+        "shell is the cloud sandbox. user_computer_shell is the user's real machine and is unavailable until a local computer is connected.\n"
+        "Public facts, news, and 'what is going on': web_search first, then web_fetch the best URLs. "
+        "If search is empty, browser_navigate a Google search URL with the user's words "
         "(https://www.google.com/search?q=...) then open at least two result links. Search the acronym; do not ask what it means first. "
         "If navigate returns chrome-error, chromewebdata, or connection reset, web_fetch the same URL (or another source) and keep going. "
         "web_fetch paints that HTML onto the same computer screen; then browser_snapshot and browser_act on it. Do not wake the computer after a page is showing. "
-        "Never stop after one failed page. Never say you cannot verify live updates until you have opened a search and at least one article.\n"
+        "Never stop after one failed page. Never say you cannot verify live updates until you have searched and opened at least one article.\n"
         "End-to-end web work: browser_navigate, browser_snapshot for refs (e0, e1), then browser_act — click, fill, type, select, check, press, scroll. "
         "Fill whole forms from the snapshot: one fill per field, then click submit. "
         "If a page tool returns fallback computer_act, call computer_observe then computer_act (click x,y / type / key / scroll). "
-        "Login, 2FA, captcha, payment, or anything you cannot complete: browser_handoff with a short instruction so the user takes control of that same screen. After they finish, snapshot and continue. "
+        "Login, 2FA, captcha, payment, or anything you cannot complete: request_takeover (same as browser_handoff) with a short instruction so the user takes control of that same screen. After they finish, snapshot and continue. "
         "Never attach page.png in chat; the computer screen already shows the tab. "
-        "Skills: save a repeatable workflow with save_skill, or start_teaching so the user demonstrates on the visible screen "
+        "Memory: remember (or save_memory) only when the user asked to remember something or stated a lasting preference. "
+        "recall_memory to look it up, forget_memory to delete it, save_shared_memory for facts every agent should know. "
+        "Do not dump the whole chat into memory. search_history / read_history for this chat's messages.\n"
+        "Scratchpad: scratchpad_add a short plan for multi-step work in this chat, then complete items as you go.\n"
+        "Skills: skill_create / save_skill for a repeatable workflow, skill_read / skill_update / skill_delete to manage them, "
+        "or start_teaching so the user demonstrates on the visible screen "
         "(up to ten minutes, no microphone audio), then stop_teaching with a name.\n"
+        "task_catalog action=search to find briefing, inbox, schedule, coding-job, or media tasks, then load and execute.\n"
         "Do not replay a completed or uncertain action. That is the computer browser, not Outlook or mail.\n"
         "search_tools already expands gateway catalogs into callable data tools. Prefer those names. "
         "Do not call gateway catalog tools from core_tools unless search_tools returned no data tool.\n"
@@ -2816,23 +2836,16 @@ async def run_deep_agent(
         toolkit_assignments=toolkits,
     )
     await _maybe_start_connect(ctx, query)
+    from app.agent import scratchpad as pad
+
+    await pad.load(ctx)
     callbacks = _progress_callbacks(ctx, conns, query)
     if progress is not None:
         await progress.emit("Recalling what I know about this" if not teammate_depth else "Picking up the task", kind="memory")
     memory = await load_memory(db, user, query, workspace_agent)
-    from app.models import AgentSkill
-
-    skills = []
-    if db is not None and hasattr(db, "execute"):
-        skill_stmt = select(AgentSkill).where(
-            AgentSkill.user_id == user.id,
-            (AgentSkill.agent_id == getattr(workspace_agent, "id", None)) | (AgentSkill.agent_id.is_(None)),
-        ).order_by(AgentSkill.created_at.desc()).limit(12)
-        skill_rows = (await db.execute(skill_stmt)).scalars().all()
-        skills = [
-            {"name": row.name, "kind": row.kind, "instruction": row.instruction, "steps": row.steps or []}
-            for row in skill_rows
-        ]
+    pad_bit = pad.as_prompt(ctx.scratchpad)
+    if pad_bit:
+        memory = ((memory or "").rstrip() + "\n\n" + pad_bit).strip()
     from app.agent.coding import is_coding_agent as _is_coder
 
     if _is_coder(workspace_agent):
@@ -2842,6 +2855,17 @@ async def run_deep_agent(
         if block and block not in (memory or ""):
             memory = ((memory or "").rstrip() + "\n\nYour coding memory (repos, conventions, past PRs):\n" + block).strip()
     extra = []
+    matched_skills: list = []
+    if db is not None:
+        from app.skills.service import list_skills, match_skills
+
+        try:
+            matched_skills = match_skills(
+                await list_skills(db, user, getattr(workspace_agent, "id", None)),
+                query,
+            )
+        except Exception:  # noqa: BLE001
+            matched_skills = []
     from langchain_core.messages import HumanMessage
 
     for payload in ctx.confirmations:
@@ -2888,7 +2912,7 @@ async def run_deep_agent(
             group=group,
             teammates=teammates,
             mentions=mentions,
-            skills=skills,
+            skills=matched_skills,
         ),
     )
     payload = {"messages": _lc_messages(history, query, extra)}
@@ -2948,13 +2972,6 @@ async def run_deep_agent(
     if cards and not had_card:
         names = ", ".join(str(c.get("name") or c.get("toolkit") or "this app") for c in cards)
         text = f"Connect {names} using the card below. That opens Composio's authorization page."
-    await remember(
-        db,
-        user.id,
-        "episodic",
-        clip(f"Q: {query}\nA: {text}", 400),
-        getattr(workspace_agent, "id", None),
-    )
     speaker = None
     if workspace_agent is not None:
         speaker = {
