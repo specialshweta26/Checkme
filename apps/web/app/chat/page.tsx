@@ -800,6 +800,15 @@ export default function ChatPage() {
                     agentId={m.meta?.agent_id || agentId}
                     agentName={m.meta?.agent_name}
                   />
+                  {m.meta?.task_state?.skill_name ? (
+                    <div className="skill-used" title={(m.meta.task_state.notes || []).map((n: any) => n.text).join("\n")}>
+                      Skill: {m.meta.task_state.skill_name}
+                      {m.meta.task_state.step_count
+                        ? ` · ${Math.min(m.meta.task_state.step_index || 0, m.meta.task_state.step_count)}/${m.meta.task_state.step_count} steps`
+                        : ""}
+                      {m.meta.task_state.status === "handed_off" ? " · handed over" : m.meta.task_state.status === "done" ? " · done" : ""}
+                    </div>
+                  ) : null}
                   {m.meta?.job?.id && !m.meta?.job_result ? (
                     <JobTimeline
                       jobId={String(m.meta.job.id)}

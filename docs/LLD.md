@@ -352,6 +352,44 @@ The block is rebuilt from the database on each turn; nothing caches the prompt, 
 
 **UI.** Agent settings → Skills: each skill is a button with status chips (recording…, writing skill…, write-up failed) and refreshes every 3 s while any is busy. Tapping opens `SkillDetail` (full-screen sheet on phones): rename, edit instructions, Save, Re-run write-up, Delete (confirm), recorded steps, narration, screenshots. The screen panel polls the taught skill after Stop and updates its notice (ready / failed + Retry write-up / nothing recorded); a stop that finds no session leaves teaching mode instead of sticking.
 
+### 6.11 Per-task skill state and handover (`app/skills/task_state.py`)
+
+Each task records which skill it is following and how far it has got. The state is saved after every change, so a restart or a handover never loses progress.
+
+- **What a task is.** The `task_key` keeps concurrent work separate:
+  - `job:<job id>` is a background job. Each attempt and each resume after a restart reuses the same key.
+  - `chat:<session>:<agent>` is one agent's thread in a chat. Group chats get one key per agent.
+  - `peer:<state id>:<agent>` is a teammate working on a handed-over part.
+- **Row.** Each task has one row in `task_skill_states`:
+  - task: `task_key`, `session_id`, `job_id`, `agent_id` and `parent_id`;
+  - skill: `skill_id`, `skill_name` and `skill_version` (the skill's `updated_at` when it was chosen);
+  - progress: `status` (active | handed_off | done | failed | dropped), `step_index` and `step_count` (numbered lines in the instruction, or the number of recorded steps);
+  - output: `notes`, `artifacts` and `result`.
+
+  Every write runs in its own short session through `STORE`, so each write is a checkpoint. Tests swap in an in-memory store.
+- **Choosing the skill.**
+  - `route_skills` (6.10) proposes candidates using keywords and embeddings.
+  - `confirm_skills` then asks the LLM, in JSON mode with "JSON" in the input, which of them the request actually asks to perform. If no API key is set or the call fails or times out (12 s), the routed list is kept as it is.
+  - Meta questions never get here.
+- **Opening or resuming state** (`begin`).
+  - Jobs and peer tasks keep their state for life, even if a later attempt routes to a different skill.
+  - In a chat, a newly routed skill replaces the old state, which is marked `dropped`.
+  - A chat follow-up that routes no skill resumes the active state if it is under 6 h old. Meta questions never resume.
+  - When the agent loads a skill itself with `get_skill`, that also opens the state.
+- **Prompt.**
+  - `prompt_block` adds a "Task state" section: the skill and its version, how many steps are done and which is next, recent notes and artifacts, and "do not redo finished steps" when resuming.
+  - The agent calls `skill_progress(step, note, artifact_label, artifact_value, done)` after each step.
+- **Narration and timeline.**
+  - Chat: the status line shows "Using skill: X · step 2/5" or "Resuming skill…". The reply's meta holds `task_state`, and the web UI shows "Skill: X · 2/5 steps" under it.
+  - Jobs: the timeline gets a `status` event with `data.skill_state`. `JobTimeline` shows a chip per agent with the skill and current step, including "handed over" and "done".
+  - `GET /skills/tasks/states?session_id=|job_id=` lists the states.
+- **Handover.**
+  - `delegate` (in background jobs) and `ask_teammate` (in groups) call `handover`. It creates a child state for the receiving agent with the same skill, step, notes and artifacts plus a "handed over by" note. The parent is marked `handed_off`. A delegated job's id goes into `meta.skill_state_id`.
+  - The receiver's run resumes that state, and the prompt tells it the task was handed over.
+  - When the receiver finishes, `finish` writes the result back to the originating task: a "Result from X" note, the furthest step reached and the merged artifacts. The parent becomes `active` again.
+    - `ask_teammate`: the result comes back at the end of the nested run.
+    - Delegated jobs: `jobs.service.after_terminal` calls `finish_job`, and then the parent job resumes as usual with the result in its state.
+
 ## 7. Connector runtime
 
 `RuntimeConnector.call(name, args)`:

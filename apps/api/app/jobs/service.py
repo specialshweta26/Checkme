@@ -528,6 +528,9 @@ async def tree(db: AsyncSession, user: User, root_id, after: int = 0) -> dict:
 
 async def after_terminal(db: AsyncSession, job: AgentJob) -> None:
     """Finished job: wake the parent, or post the result to the chat for a root job."""
+    from app.skills.task_state import finish_job
+
+    await finish_job(job)  # closes its skill state; a handed-over one writes the result back to the parent task
     if job.parent_id:
         parent = await db.get(AgentJob, job.parent_id)
         if parent is None:
