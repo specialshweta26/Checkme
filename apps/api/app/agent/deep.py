@@ -1650,6 +1650,11 @@ class StartJobInput(BaseModel):
     title: str = Field(default="", description="Short title for the timeline.")
 
 
+class BackgroundTaskInput(BaseModel):
+    task: str = Field(description="Self-contained task: the goal, constraints (dates, places, sources, limits) and what to deliver.")
+    title: str = Field(default="", description="Short title for the timeline.")
+
+
 async def start_coding_job(ctx: "RunContext", task: str, title: str = "", role: str = "planner") -> dict:
     """Queue a background job for this agent in the current chat (chat turns only)."""
     from app.jobs import service as jobs
@@ -2360,6 +2365,18 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
                     coroutine=start_job, name="start_coding_job", description=start_job.__doc__, args_schema=StartJobInput
                 )
             )
+    if ctx.job is None and ctx.db is not None and ctx.agent is not None and ctx.teammate_depth == 0:
+
+        async def start_task(task: str, title: str = "") -> str:
+            """Move long work to the background: tasks with many steps or pages (multi-site comparisons, research across many sources, long computer sessions, anything likely to take more than a couple of minutes). It runs without the chat timeout, survives the user closing the chat or the app restarting, and shows a live timeline (plan, steps, results) under this reply. Give a self-contained task: goal, constraints, what to deliver. Quick lookups stay in this turn."""
+            ctx.used_tools.append("start_background_task")
+            return dumps(await start_coding_job(ctx, task, title, role="worker"), 4000)
+
+        tools.append(
+            StructuredTool.from_function(
+                coroutine=start_task, name="start_background_task", description=start_task.__doc__, args_schema=BackgroundTaskInput
+            )
+        )
     if ctx.job is not None and ctx.teammate_depth == 0 and ctx.db is not None:
         from app.jobs.service import MAX_DEPTH
 
@@ -2542,6 +2559,14 @@ def system_prompt(
         "If the page is a CAPTCHA, unusual-traffic, or verification wall (bot_wall): request_takeover immediately, tell the user to finish it on the live screen, and do not invent numbers. "
         "Login, 2FA, captcha, payment, or anything you cannot complete: request_takeover (same as browser_handoff) with a short instruction so the user takes control of that same screen. After they finish, snapshot and continue. "
         "Never attach page.png in chat; the computer screen already shows the tab. "
+        "Cheapest path first: a connector or API tool, then web_search + web_fetch; switch to the computer browser when "
+        "the answer needs interaction (search forms, dates, filters, logins, pages that only render in a browser) or the cheap "
+        "path came back empty or blocked. On the computer run a tight loop: act, read the returned snapshot (each "
+        "browser_navigate/browser_act returns a fresh tree with refs), decide, act again, until the task is done. "
+        "Refs (e0, e1) are only valid for the latest snapshot; after a page changes use the new ones. "
+        "If an action returns ok=false, read its error and the fresh snapshot, then adjust instead of stopping. "
+        "Long work (many pages or sites, or likely more than a couple of minutes) goes to start_background_task when "
+        "it is offered: start it, reply in a line or two, and let the job do the work.\n"
         "Every agent has the computer: when a task needs a website without an API, use it and carry the task through "
         "step by step (navigate, search, click, type, read, repeat) instead of describing how the user could do it. "
         "The computer boots on demand; the first call may take a minute. If a computer tool returns an error, try once "

@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 HOST = "127.0.0.1"
 PORT = 18765
-VERSION = "11"
+VERSION = "12"
 SHOT = "/tmp/checkme-browser.png"
 PROFILE = "/tmp/checkme-browser-profile"
 LAST = "/tmp/checkme-browser-last.json"
@@ -36,6 +37,7 @@ _lock = threading.Lock()
 _browser_page = None
 _browser_context = None
 _elements: list[dict] = []
+_elements_url = ""
 
 _BOT_URL = (
     "/sorry",
@@ -135,26 +137,42 @@ def _dump(page):
 def _snapshot(page):
     nodes = page.evaluate(
         """() => {
-          const sel = 'a, button, input, textarea, select, option, label, summary, [role="button"], [role="link"], [role="textbox"], [role="checkbox"], [role="radio"], [role="combobox"], [role="option"], [role="tab"], [contenteditable="true"]';
-          return Array.from(document.querySelectorAll(sel)).slice(0, 120).map((el, i) => {
-            const name = (el.getAttribute('aria-label') || el.getAttribute('name') || el.innerText || el.getAttribute('placeholder') || el.value || el.getAttribute('title') || '').replace(/\\s+/g, ' ').trim().slice(0, 80);
-            const tags = {A: 'link', BUTTON: 'button', INPUT: 'textbox', TEXTAREA: 'textbox', SELECT: 'combobox', OPTION: 'option', LABEL: 'label', SUMMARY: 'button'};
+          const sel = 'a, button, input, textarea, select, option, label, summary, [role="button"], [role="link"], [role="textbox"], [role="searchbox"], [role="checkbox"], [role="radio"], [role="combobox"], [role="option"], [role="tab"], [role="menuitem"], [contenteditable="true"]';
+          document.querySelectorAll('[data-checkme-ref]').forEach((el) => el.removeAttribute('data-checkme-ref'));
+          const visible = (el) => {
+            const r = el.getBoundingClientRect();
+            if (r.width < 1 || r.height < 1) return false;
+            const st = window.getComputedStyle(el);
+            return st.visibility !== 'hidden' && st.display !== 'none' && Number(st.opacity || 1) > 0.05;
+          };
+          const tags = {A: 'link', BUTTON: 'button', INPUT: 'textbox', TEXTAREA: 'textbox', SELECT: 'combobox', OPTION: 'option', LABEL: 'label', SUMMARY: 'button'};
+          const all = Array.from(document.querySelectorAll(sel)).filter(visible);
+          // Elements in view first (what the user sees on the screen), then the rest of the page.
+          const inView = (el) => { const r = el.getBoundingClientRect(); return r.bottom > 0 && r.top < window.innerHeight; };
+          const ordered = all.filter(inView).concat(all.filter((el) => !inView(el)));
+          const inputRole = {submit: 'button', button: 'button', reset: 'button', image: 'button', checkbox: 'checkbox', radio: 'radio', search: 'searchbox', range: 'slider'};
+          return ordered.slice(0, 150).map((el, i) => {
+            const ref = 'e' + i;
+            el.setAttribute('data-checkme-ref', ref);
+            const name = (el.getAttribute('aria-label') || el.innerText || el.getAttribute('placeholder') || el.value || el.getAttribute('title') || el.getAttribute('name') || '').replace(/\\s+/g, ' ').trim().slice(0, 80);
             const r = el.getBoundingClientRect();
             return {
-              ref: 'e' + i,
-              role: (el.getAttribute('role') || tags[el.tagName] || el.tagName.toLowerCase()),
+              ref,
+              role: (el.getAttribute('role') || (el.tagName === 'INPUT' && inputRole[(el.getAttribute('type') || '').toLowerCase()]) || tags[el.tagName] || el.tagName.toLowerCase()),
               name,
               tag: el.tagName.toLowerCase(),
               href: el.href || '',
               input_type: el.getAttribute('type') || '',
+              in_view: r.bottom > 0 && r.top < window.innerHeight,
               x: Math.round(r.x + r.width / 2),
               y: Math.round(r.y + r.height / 2),
             };
           });
         }"""
     )
-    global _elements
+    global _elements, _elements_url
     _elements = nodes if isinstance(nodes, list) else []
+    _elements_url = page.url
     tree = "\n".join(f"- {n.get('ref')} {n.get('role')} {n.get('name') or ''}".strip() for n in _elements)
     data = _dump(page)
     data["tree"] = tree
@@ -178,94 +196,152 @@ def _has(loc) -> bool:
         return True
 
 
+_REF = re.compile(r"^e\d+$")
+
+
 def _locator(page, step, node):
+    """Resolve a step's target. Snapshot refs map to the exact element the snapshot tagged
+    (data-checkme-ref); fuzzy text matching is only for free-form selectors, and exact matches win,
+    so a ref for a search box can never resolve to an unrelated link that merely contains the same word."""
     ref = str(step.get("ref") or step.get("selector") or "").strip()
-    if ref and not _find(ref):
-        for factory in (
-            lambda: page.locator(ref).first,
-            lambda: page.get_by_label(ref, exact=False).first,
-            lambda: page.get_by_placeholder(ref, exact=False).first,
-            lambda: page.get_by_text(ref, exact=False).first,
-        ):
+    if ref and _REF.match(ref):
+        loc = page.locator(f'[data-checkme-ref="{ref}"]').first
+        if _has(loc):
+            return loc
+        if node and node.get("name"):
+            role = str(node.get("role") or "generic")
             try:
-                loc = factory()
+                loc = page.get_by_role(role, name=node["name"], exact=True).first
             except Exception:
                 loc = None
             if _has(loc):
                 return loc
-    if node and node.get("name"):
-        role = str(node.get("role") or "generic")
-        for factory in (
-            lambda: page.get_by_role(role, name=node["name"]).first,
-            lambda: page.get_by_label(node["name"], exact=False).first,
-            lambda: page.get_by_placeholder(node["name"], exact=False).first,
-            lambda: page.get_by_text(node["name"], exact=False).first,
-        ):
-            try:
-                loc = factory()
-            except Exception:
-                loc = None
-            if _has(loc):
-                return loc
+        return None
+    if not ref:
+        return None
+    for factory in (
+        lambda: page.locator(ref).first,
+        lambda: page.get_by_label(ref, exact=True).first,
+        lambda: page.get_by_placeholder(ref, exact=True).first,
+        lambda: page.get_by_role("textbox", name=ref, exact=True).first,
+        lambda: page.get_by_role("combobox", name=ref, exact=True).first,
+        lambda: page.get_by_role("button", name=ref, exact=True).first,
+        lambda: page.get_by_role("link", name=ref, exact=True).first,
+        lambda: page.get_by_text(ref, exact=True).first,
+        lambda: page.get_by_label(ref, exact=False).first,
+        lambda: page.get_by_placeholder(ref, exact=False).first,
+        lambda: page.get_by_text(ref, exact=False).first,
+    ):
+        try:
+            loc = factory()
+        except Exception:
+            loc = None
+        if _has(loc):
+            return loc
     return None
+
+
+def _settle(page, timeout: int = 8000) -> None:
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=timeout)
+    except Exception:
+        pass
 
 
 def _act_page(page, actions: list):
     completed = 0
-    for step in actions:
-        kind = str(step.get("kind") or "").lower()
-        ref = str(step.get("ref") or step.get("selector") or "").strip()
-        node = _find(ref) if ref else None
-        loc = _locator(page, step, node)
-        if kind == "click":
-            if loc is not None:
-                loc.click(timeout=12000)
-            elif step.get("x") is not None:
-                page.mouse.click(int(step["x"]), int(step["y"]))
-            elif node and node.get("x") is not None:
-                page.mouse.click(int(node["x"]), int(node["y"]))
-            else:
-                raise RuntimeError(f"unknown ref {ref}")
-        elif kind in {"fill", "type"}:
-            text = str(step.get("text") or "")
-            if loc is not None:
-                loc.fill(text, timeout=12000) if kind == "fill" else loc.type(text, timeout=12000)
-            else:
-                page.keyboard.type(text)
-        elif kind in {"select", "select_option"}:
-            value = str(step.get("text") or step.get("value") or "")
-            if loc is None:
-                raise RuntimeError(f"unknown select ref {ref}")
-            loc.select_option(value, timeout=12000)
-        elif kind == "check":
-            if loc is None:
-                raise RuntimeError(f"unknown check ref {ref}")
-            loc.check(timeout=12000)
-        elif kind == "uncheck":
-            if loc is None:
-                raise RuntimeError(f"unknown uncheck ref {ref}")
-            loc.uncheck(timeout=12000)
-        elif kind == "hover":
-            if loc is None:
-                raise RuntimeError(f"unknown hover ref {ref}")
-            loc.hover(timeout=12000)
-        elif kind in {"press", "key"}:
-            page.keyboard.press(str(step.get("text") or step.get("key") or "Enter"))
-        elif kind == "scroll":
-            page.mouse.wheel(int(step.get("dx") or 0), int(step.get("dy") or 800))
-        elif kind == "wait":
-            page.wait_for_timeout(int(step.get("wait_ms") or step.get("ms") or 1000))
-        elif kind == "reload":
-            page.reload(wait_until="domcontentloaded")
-        elif kind == "back":
-            page.go_back(wait_until="domcontentloaded")
-        else:
-            raise RuntimeError(f"unsupported action {kind}")
-        completed += 1
-        page.wait_for_timeout(250)
+    try:
+        for step in actions:
+            _act_step(page, step)
+            completed += 1
+            page.wait_for_timeout(250)
+    except Exception as exc:
+        _settle(page)
+        data = _snapshot(page)
+        data["ok"] = False
+        data["completed"] = completed
+        data["error"] = f"step {completed + 1} failed: {str(exc)[:400]}"
+        data["hint"] = (
+            "The page may have changed. Use the refs in this fresh snapshot (tree) and try again, "
+            "or computer_observe + computer_act with x,y."
+        )
+        return data
+    _settle(page)
     data = _snapshot(page)
     data["completed"] = completed
     return data
+
+
+def _type_into(page, loc, node, text: str, replace: bool) -> None:
+    if loc is not None:
+        try:
+            if replace:
+                loc.fill(text, timeout=8000)
+            else:
+                loc.click(timeout=8000)
+                page.keyboard.type(text, delay=20)
+            return
+        except Exception:
+            # Not a plain input (custom combobox / contenteditable): click it and type like a person.
+            loc.click(timeout=8000)
+    elif node and node.get("x") is not None:
+        page.mouse.click(int(node["x"]), int(node["y"]))
+    if replace:
+        page.keyboard.press("Control+A")
+        page.keyboard.press("Backspace")
+    page.keyboard.type(text, delay=20)
+
+
+def _act_step(page, step: dict) -> None:
+    kind = str(step.get("kind") or "").lower()
+    ref = str(step.get("ref") or step.get("selector") or "").strip()
+    node = _find(ref) if ref else None
+    loc = _locator(page, step, node)
+    if loc is None and node is not None and page.url != _elements_url:
+        # The page changed since the snapshot: its coordinates belong to another page.
+        node = None
+        if step.get("x") is None and kind not in {"press", "key", "scroll", "wait", "reload", "back"}:
+            raise RuntimeError(f"ref {ref} is from an older page; take a new browser_snapshot")
+    if kind == "click":
+        if loc is not None:
+            loc.click(timeout=12000)
+        elif step.get("x") is not None:
+            page.mouse.click(int(step["x"]), int(step["y"]))
+        elif node and node.get("x") is not None:
+            page.mouse.click(int(node["x"]), int(node["y"]))
+        else:
+            raise RuntimeError(f"unknown ref {ref}; take a new browser_snapshot")
+    elif kind in {"fill", "type"}:
+        _type_into(page, loc, node, str(step.get("text") or ""), kind == "fill")
+    elif kind in {"select", "select_option"}:
+        value = str(step.get("text") or step.get("value") or "")
+        if loc is None:
+            raise RuntimeError(f"unknown select ref {ref}")
+        loc.select_option(value, timeout=12000)
+    elif kind == "check":
+        if loc is None:
+            raise RuntimeError(f"unknown check ref {ref}")
+        loc.check(timeout=12000)
+    elif kind == "uncheck":
+        if loc is None:
+            raise RuntimeError(f"unknown uncheck ref {ref}")
+        loc.uncheck(timeout=12000)
+    elif kind == "hover":
+        if loc is None:
+            raise RuntimeError(f"unknown hover ref {ref}")
+        loc.hover(timeout=12000)
+    elif kind in {"press", "key"}:
+        page.keyboard.press(str(step.get("text") or step.get("key") or "Enter"))
+    elif kind == "scroll":
+        page.mouse.wheel(int(step.get("dx") or 0), int(step.get("dy") or 800))
+    elif kind == "wait":
+        page.wait_for_timeout(int(step.get("wait_ms") or step.get("ms") or 1000))
+    elif kind == "reload":
+        page.reload(wait_until="domcontentloaded")
+    elif kind == "back":
+        page.go_back(wait_until="domcontentloaded")
+    else:
+        raise RuntimeError(f"unsupported action {kind}")
 
 
 def _desktop(page, actions: list):

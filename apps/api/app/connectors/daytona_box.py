@@ -158,8 +158,10 @@ DAYTONA_TOOLS = [
     ToolSpec(
         name="browser_snapshot",
         description=(
-            "Read the live computer browser: URL, title, page text, and up to 80 interactive refs (e0, e1). "
-            "Call this before browser_act. If it returns fallback computer_act, observe the screen instead."
+            "Read the live computer browser: URL, title, page text, and up to 150 visible interactive refs (e0, e1), "
+            "in-view elements first. Refs stay valid until the page changes. browser_navigate and browser_act already "
+            "return a fresh snapshot, so call this only when you need to re-read. If it returns fallback computer_act, "
+            "observe the screen instead."
         ),
         input_schema={"type": "object", "properties": {}},
         group="computer",
@@ -387,7 +389,7 @@ async def _file_bytes(fs, proc, path: str) -> bytes:
 
 async def _cache_shot(proc, fs) -> None:
     try:
-        remember_screen(await _file_bytes(fs, proc, "/tmp/checkme-browser.png"))
+        remember_screen(await asyncio.wait_for(_file_bytes(fs, proc, "/tmp/checkme-browser.png"), timeout=20))
     except Exception:  # noqa: BLE001
         pass
 
@@ -459,9 +461,9 @@ async def _put_sandbox_file(proc, fs, dest: str, data: bytes) -> None:
                 tmp.write(data)
                 local = tmp.name
             try:
-                await fs.upload_file(local, dest)
+                await asyncio.wait_for(fs.upload_file(local, dest), timeout=30)
             except TypeError:
-                await fs.upload_file(data, dest)
+                await asyncio.wait_for(fs.upload_file(data, dest), timeout=30)
             return
         except Exception:  # noqa: BLE001
             pass
@@ -538,36 +540,93 @@ async def _ensure_daemon_locked(proc, fs=None) -> None:
         raise ToolError("Computer browser did not start. " + _clip(_out(boot), 500))
 
 
+_RPC_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+def _rpc_error(url: str, message: str) -> dict:
+    return {
+        "ok": False,
+        "error": _clip(message, 500),
+        "fallback": "computer_act",
+        "url": url,
+        "title": "",
+        "text": "",
+        "screenshot_name": "page.png",
+    }
+
+
 async def _browser_rpc(proc, payload: dict, timeout: int = 90, fs=None) -> dict:
+    """One command to the browser daemon. Never hangs past ``timeout`` (plus queueing) and never raises:
+    failures come back as ``ok: false`` with the reason so the agent can retry or switch approach."""
     url = str(payload.get("url") or "")
     try:
         await _ensure_daemon(proc, fs)
-        await _put_sandbox_file(proc, fs, "/tmp/checkme_browser_cmd.json", json.dumps(payload).encode())
-        response = await proc.exec(
-            "curl -sS -m "
-            + str(max(15, timeout - 5))
-            + " -H 'Content-Type: application/json' --data-binary @/tmp/checkme_browser_cmd.json http://127.0.0.1:18765/",
-            timeout=timeout,
-        )
-        raw = _out(response).strip()
-        if getattr(response, "exit_code", 0) not in {0, None}:
-            raise ToolError("Computer browser action failed. " + _clip(raw, 600))
-        data = json.loads(raw.splitlines()[-1])
-        if not isinstance(data, dict):
-            raise ToolError("Computer browser returned no page data.")
-        data.setdefault("screenshot_name", "page.png")
-        await _cache_shot(proc, fs)
-        return data
     except Exception as exc:  # noqa: BLE001
-        return {
-            "ok": False,
-            "error": _clip(str(exc), 500),
-            "fallback": "computer_act",
-            "url": url,
-            "title": "",
-            "text": "",
-            "screenshot_name": "page.png",
-        }
+        return _rpc_error(url, str(exc) or type(exc).__name__)
+    # Browser commands for one user's computer run one at a time (the daemon drives a single tab), and
+    # each one ships its payload in its own file so parallel tool calls can never swap commands.
+    lock = _RPC_LOCKS.setdefault(_SCREEN_USER.get() or "default", asyncio.Lock())
+    try:
+        async with lock:
+            try:
+                return await asyncio.wait_for(_browser_rpc_once(proc, payload, timeout, fs), timeout=timeout + 30)
+            except _NotDelivered as first:
+                # The command never reached the browser (upload hiccup, daemon restarting): safe to retry once,
+                # even for clicks. Anything that may have run is not retried, so actions never double up.
+                log.info("e2b: browser %s not delivered (%s); retrying once", payload.get("command"), first)
+                await asyncio.sleep(1.0)
+                await _ensure_daemon(proc, fs)
+                return await asyncio.wait_for(_browser_rpc_once(proc, payload, timeout, fs), timeout=timeout + 30)
+    except (asyncio.TimeoutError, TimeoutError):
+        log.warning("e2b: browser %s timed out after %ss", payload.get("command"), timeout)
+        return _rpc_error(
+            url,
+            f"The computer browser did not answer '{payload.get('command')}' within {timeout}s. "
+            "Take a browser_snapshot or computer_observe to see the page, then continue or try another way.",
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _rpc_error(url, str(exc) or type(exc).__name__)
+
+
+class _NotDelivered(Exception):
+    """A browser command that provably did not reach the daemon."""
+
+
+# curl exit codes meaning the request never got to the daemon: 7 = connection refused, 26 = cannot read the
+# payload file.
+_CURL_NOT_SENT = {7, 26}
+
+
+async def _browser_rpc_once(proc, payload: dict, timeout: int, fs=None) -> dict:
+    import secrets as _secrets
+
+    cmd_path = f"/tmp/checkme_cmd_{_secrets.token_hex(6)}.json"
+    try:
+        await _put_sandbox_file(proc, fs, cmd_path, json.dumps(payload).encode())
+    except Exception as exc:  # noqa: BLE001
+        raise _NotDelivered(f"upload failed: {type(exc).__name__}") from exc
+    response = await proc.exec(
+        "curl -sS -m "
+        + str(max(15, timeout - 5))
+        + f" -H 'Content-Type: application/json' --data-binary @{cmd_path} http://127.0.0.1:18765/"
+        + f"; rc=$?; rm -f {cmd_path}; exit $rc",
+        timeout=timeout,
+    )
+    raw = _out(response).strip()
+    code = getattr(response, "exit_code", 0)
+    if code in _CURL_NOT_SENT:
+        raise _NotDelivered(f"curl exit {code}")
+    if code not in {0, None}:
+        raise ToolError("Computer browser action failed. " + _clip(raw, 600))
+    lines = raw.splitlines()
+    if not lines:
+        raise ToolError("Computer browser returned no page data.")
+    data = json.loads(lines[-1])
+    if not isinstance(data, dict):
+        raise ToolError("Computer browser returned no page data.")
+    data.setdefault("screenshot_name", "page.png")
+    await _cache_shot(proc, fs)
+    return data
 
 
 def decode_screen_b64(raw: str) -> bytes:
@@ -794,6 +853,27 @@ async def _e2b_screen_or_status(row, name: str) -> Any:
     return raw
 
 
+# Upper bound for one computer tool call, so a stuck sandbox call can never freeze a chat turn. Browser
+# tools also bound each daemon command; this is the outer backstop, sized to allow a first-run browser
+# install (several minutes) on a fresh computer.
+_BROWSER_CAP_S = 600.0
+_NO_CAP = {"screen_png", "status", "write_analytics_report", "browser_handoff", "computer_handoff"}
+
+
+def tool_time_cap(name: str, args: dict[str, Any] | None) -> float | None:
+    if name in _NO_CAP or name == "boot":
+        return None
+    if name in {"exec", "run_code"}:
+        try:
+            own = int((args or {}).get("timeout") or (120 if name == "run_code" else 60))
+        except (TypeError, ValueError):
+            own = 60
+        return float(max(30, own) + 90)
+    if name in {"read_bytes", "publish_file", "read_file", "write_file", "list_dir", "sandbox_info"}:
+        return 300.0
+    return _BROWSER_CAP_S
+
+
 async def call_daytona(row, name: str, args: dict[str, Any]) -> Any:
     agent_id, agent_name = _COMPUTER_AGENT.get()
     user_key = str(getattr(row, "user_id", "") or "")
@@ -804,7 +884,8 @@ async def call_daytona(row, name: str, args: dict[str, Any]) -> Any:
         record_computer_step(getattr(row, "user_id", None), name, args)
         if agent_id:
             _LIVE_AGENT[user_key or "default"] = agent_name or agent_id
-        if user_key:
+        if user_key and name != "boot":
+            # The UI's boot (no agent) must not lock the agent out of its own computer.
             holder = _COMPUTER_BUSY.get(user_key)
             if holder and holder != (agent_id or "shared"):
                 raise ToolError("The shared computer is already in use. One computer-use task at a time.")
@@ -812,8 +893,18 @@ async def call_daytona(row, name: str, args: dict[str, Any]) -> Any:
                 _COMPUTER_BUSY[user_key] = agent_id or "shared"
                 acquired = True
     screen_user_token = _SCREEN_USER.set(user_key or "default")
+    cap = tool_time_cap(name, args)
     try:
-        return await _invoke_daytona(row, name, args)
+        if cap is None:
+            return await _invoke_daytona(row, name, args)
+        try:
+            return await asyncio.wait_for(_invoke_daytona(row, name, args), timeout=cap)
+        except (asyncio.TimeoutError, TimeoutError) as exc:
+            log.warning("e2b: computer tool %s timed out after %ss", name, cap)
+            raise ToolError(
+                f"The computer did not finish {name} within {int(cap)}s, so it was stopped. "
+                "Check the screen with browser_snapshot or computer_observe, then continue or try another way."
+            ) from exc
     finally:
         _SCREEN_USER.reset(screen_user_token)
         if acquired and user_key:

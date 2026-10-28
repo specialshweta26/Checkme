@@ -79,6 +79,47 @@ function pollProgress(
   };
 }
 
+/** True when the chat POST died in transit (Safari "Load failed", proxy 502/504, cut stream), not on the server. */
+function lostInTransit(err: any) {
+  return err instanceof TypeError || err?.lostInTransit === true;
+}
+
+function transitError(message: string) {
+  const err: any = new Error(message);
+  err.lostInTransit = true;
+  return err;
+}
+
+/**
+ * The POST for a turn was lost, but the turn keeps running on the server. Follow its progress id until it is
+ * done, then load the stored session (retrying while the reply is still being saved). Returns null if the turn
+ * could not be found in time.
+ */
+async function recoverTurn(progressId: string, knownSessionId: string | null, maxMs = 15 * 60 * 1000) {
+  const started = Date.now();
+  let sessionId = knownSessionId;
+  let done = false;
+  while (Date.now() - started < maxMs) {
+    try {
+      const res = await fetch(`/api/chat/progress/${progressId}`, { credentials: "include", cache: "no-store" });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.session_id) sessionId = String(data.session_id);
+        if (data.done) done = true;
+      }
+    } catch {
+      // Still offline; keep waiting.
+    }
+    if (done && sessionId) {
+      const loaded = await loadSession(sessionId).catch(() => null);
+      const last = loaded?.messages?.filter((m: any) => m.role === "assistant").slice(-1)[0];
+      if (loaded?.messages && !last?.meta?.in_progress) return { sessionId, loaded };
+    }
+    await new Promise((r) => window.setTimeout(r, done ? 1500 : 3000));
+  }
+  return null;
+}
+
 function sessionInScopeRow(row: ChatSessionRow | undefined, agentId?: string | null, groupId?: string | null) {
   if (!row) return false;
   if (groupId) return row.group_id === groupId;
@@ -283,19 +324,22 @@ export default function ChatPage() {
           progress_id: progressId,
         }),
       });
-      const raw = await res.text();
+      // Long turns stream whitespace heartbeats before the JSON reply; JSON.parse ignores leading spaces.
+      const raw = (await res.text()).trim();
       let data: any = {};
       try {
         data = raw ? JSON.parse(raw) : {};
       } catch {
+        if (res.status >= 500 || !raw) throw transitError(raw.slice(0, 280) || "Chat failed");
         throw new Error(raw.slice(0, 280) || "Chat failed");
       }
-      if (!res.ok) {
+      if (!raw) throw transitError("Empty reply");
+      if (!res.ok || data.stream_error) {
         const detail = typeof data.detail === "string" ? data.detail : data.detail?.[0]?.msg;
         throw new Error(detail || raw.slice(0, 280) || "Chat failed");
       }
       if (data.workspace_changed) announceWorkspaceChanged();
-      const loaded = data.session_id ? await loadSession(data.session_id) : null;
+      const loaded = data.session_id ? await loadSession(data.session_id).catch(() => null) : null;
       const peerTurns: Msg[] = (data.thread || [])
         .filter((item: any) => (item?.text || "").trim())
         .map((item: any) => ({
@@ -334,13 +378,31 @@ export default function ChatPage() {
       }
       await refreshSessions();
     } catch (err: any) {
-      const failView: AgentView = {
-        sessionId,
-        messages: [...nextMessages, { role: "assistant", content: err.message || "Something went wrong" }],
-        pending: [],
-      };
-      viewsRef.current[key] = failView;
-      if (scopeRef.current === key) showView(failView);
+      // The connection dropped (e.g. mobile Safari's "Load failed"), but the server keeps working on the turn.
+      // Follow it by progress id and show the stored reply instead of the raw network error.
+      const inScope = sessionInScopeRow(sessions.find((s) => s.id === sessionId), sendAgent, sendGroup) ? sessionId : null;
+      const recovered = lostInTransit(err) ? await recoverTurn(progressId, inScope) : null;
+      if (recovered) {
+        const msgs: Msg[] = recovered.loaded.messages
+          .filter((m: Msg) => m.role === "user" || m.role === "assistant")
+          .map((m: Msg) => ({ role: m.role, content: m.content || "", meta: m.meta }));
+        const view: AgentView = { sessionId: recovered.sessionId, messages: msgs, pending: pendingFor(msgs) };
+        viewsRef.current[key] = view;
+        window.localStorage.setItem(scopeStore(sendAgent, sendGroup), recovered.sessionId);
+        if (scopeRef.current === key) showView(view);
+        await refreshSessions().catch(() => null);
+      } else {
+        const content = lostInTransit(err)
+          ? "The connection dropped before the reply arrived. The task may still finish; reopen this chat in a moment to see it."
+          : err.message || "Something went wrong";
+        const failView: AgentView = {
+          sessionId,
+          messages: [...nextMessages, { role: "assistant", content }],
+          pending: [],
+        };
+        viewsRef.current[key] = failView;
+        if (scopeRef.current === key) showView(failView);
+      }
     } finally {
       stopProgress();
       if (progressStopsRef.current[key] === stopProgress) delete progressStopsRef.current[key];

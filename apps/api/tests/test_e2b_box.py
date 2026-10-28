@@ -58,13 +58,13 @@ class FakeFiles:
     def __init__(self):
         self.data = {}
 
-    def read(self, path, format="text"):
+    def read(self, path, format="text", request_timeout=None):
         return bytearray(self.data[path])
 
-    def write(self, path, data):
+    def write(self, path, data, request_timeout=None):
         self.data[path] = bytes(data)
 
-    def list(self, path):
+    def list(self, path, request_timeout=None):
         return [SimpleNamespace(name=k.rsplit("/", 1)[-1], type="file") for k in self.data if k.startswith(path)]
 
 
