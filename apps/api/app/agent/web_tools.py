@@ -308,35 +308,87 @@ async def _search_wikipedia(q: str, limit: int) -> list[dict]:
     return out
 
 
+FREE_PROVIDERS = ("brave", "duckduckgo", "wikipedia")
+PAID_PROVIDERS = ("tavily", "brave_api", "serper", "exa")  # Tavily first among the paid ones
+DEFAULT_SEARCH_ORDER = "free,browser,paid"
+SEARCH_KEY_ENVS = ("TAVILY_API_KEY", "BRAVE_SEARCH_API_KEY", "SERPER_API_KEY", "EXA_API_KEY")
+_PAID_KEYS = {"tavily": "tavily_api_key", "brave_api": "brave_search_api_key", "serper": "serper_api_key", "exa": "exa_api_key"}
+_PAID_FNS = {"tavily": "_search_tavily", "brave_api": "_search_brave_api", "serper": "_search_serper", "exa": "_search_exa"}
+_FREE_FNS = {"brave": "_search_brave_html", "duckduckgo": "_search_ddg", "wikipedia": "_search_wikipedia"}
+_STOP = frozenset("the and for with from that this what when where which near best how are you your www com".split())
+
+
+def _cfg(name: str, default: Any) -> Any:
+    value = getattr(get_settings(), name, None)
+    return default if value in (None, "") else value
+
+
+def _key(name: str) -> str:
+    return str(getattr(get_settings(), _PAID_KEYS[name], "") or "").strip()
+
+
+def search_order() -> list[str]:
+    """SEARCH_ORDER as stages: 'free', 'browser', 'paid', or single provider names (brave, duckduckgo, wikipedia,
+    tavily, brave_api, serper, exa). Default 'free,browser,paid': paid APIs are the last resort."""
+    raw = str(_cfg("search_order", DEFAULT_SEARCH_ORDER))
+    out: list[str] = []
+    for token in (t.strip().lower() for t in raw.split(",")):
+        names = {"free": FREE_PROVIDERS, "paid": PAID_PROVIDERS, "browser": ("browser",)}.get(token, (token,))
+        for name in names:
+            if name in FREE_PROVIDERS + PAID_PROVIDERS + ("browser",) and name not in out:
+                out.append(name)
+    return out or list(FREE_PROVIDERS + ("browser",) + PAID_PROVIDERS)
+
+
 def search_providers() -> list[tuple[str, Any]]:
-    """Configured API providers first (in a fixed order), then keyless engines that work from a server."""
-    s = get_settings()
+    """HTTP providers in SEARCH_ORDER (the browser stage is handled by web_search). Paid ones only when keyed."""
     chain: list[tuple[str, Any]] = []
-    for name, key, fn in (
-        ("tavily", s.tavily_api_key, _search_tavily),
-        ("brave_api", s.brave_search_api_key, _search_brave_api),
-        ("serper", s.serper_api_key, _search_serper),
-        ("exa", s.exa_api_key, _search_exa),
-    ):
-        if (key or "").strip():
-            chain.append((name, (lambda f, k: (lambda q, n: f(q, n, k)))(fn, key.strip())))
-    chain.append(("brave", _search_brave_html))
-    chain.append(("duckduckgo", _search_ddg))
-    chain.append(("wikipedia", _search_wikipedia))
+    for name in search_order():
+        if name in _FREE_FNS:
+            chain.append((name, globals()[_FREE_FNS[name]]))
+        elif name in _PAID_FNS and _key(name):
+            fn, key = globals()[_PAID_FNS[name]], _key(name)
+            chain.append((name, (lambda f, k: (lambda q, n: f(q, n, k)))(fn, key)))
     return chain
 
 
-SEARCH_KEY_ENVS = ("TAVILY_API_KEY", "BRAVE_SEARCH_API_KEY", "SERPER_API_KEY", "EXA_API_KEY")
-SETUP_HINT = (
-    "No search API key is configured on the server, and the keyless engines (Brave, DuckDuckGo) block or "
-    "rate-limit cloud server addresses. To fix it for good, set one of TAVILY_API_KEY, BRAVE_SEARCH_API_KEY, "
-    "SERPER_API_KEY or EXA_API_KEY on the API service (Render > checkme-api > Environment) and redeploy."
-)
-
-
 def search_api_configured() -> bool:
-    s = get_settings()
-    return any((k or "").strip() for k in (s.tavily_api_key, s.brave_search_api_key, s.serper_api_key, s.exa_api_key))
+    return any(_key(name) for name in PAID_PROVIDERS)
+
+
+def setup_hint() -> str:
+    if search_api_configured():
+        return ""
+    return (
+        "No paid search API key is configured, so when the free engines (Brave, DuckDuckGo, Wikipedia) block or "
+        "rate-limit the cloud server and the computer's browser search also fails, there is nothing left to try. "
+        "Set TAVILY_API_KEY (or BRAVE_SEARCH_API_KEY, SERPER_API_KEY, EXA_API_KEY) on the API service "
+        "(Render > checkme-api > Environment); it is only used as the last resort."
+    )
+
+
+def _query_terms(query: str) -> set[str]:
+    return {t for t in re.findall(r"[a-z0-9]{3,}", (query or "").lower()) if t not in _STOP}
+
+
+def _relevant(hits: list[dict], query: str) -> list[dict]:
+    terms = _query_terms(query)
+    if not terms:
+        return hits
+    return [h for h in hits if any(t in f"{h.get('title') or ''} {h.get('snippet') or ''} {h.get('url') or ''}".lower() for t in terms)]
+
+
+def computer_warm(ctx) -> bool | None:
+    """True/False when we can tell whether the cloud computer is already running in this process; None if unknown."""
+    slug = computer_slug(ctx) if ctx is not None else ""
+    if not slug:
+        return None
+    try:
+        from app.connectors.daytona_box import computer_warm as warm
+
+        return warm(ctx.connectors.get(slug))
+    except Exception:  # noqa: BLE001
+        return None
 
 
 async def _browser_search(ctx, query: str, limit: int) -> dict | None:
@@ -354,42 +406,87 @@ async def _browser_search(ctx, query: str, limit: int) -> dict | None:
     return data if isinstance(data, dict) else {"results": [], "tried": ["browser: no response"]}
 
 
-async def web_search(query: str, count: int = 8, ctx=None) -> dict:
-    """Real results from the first provider that answers, or a clear error. Never invents results.
+def _browser_plan(ctx, paid_left: bool) -> tuple[bool, float, str]:
+    """(run?, timeout seconds, reason if skipped). Cold boots are slow, so by default ('auto') a cold computer is
+    only booted for search when no paid provider is left to try."""
+    if ctx is None or not computer_slug(ctx):
+        return False, 0.0, "browser: skipped (no cloud computer connected)"
+    warm = computer_warm(ctx)
+    timeout = float(_cfg("search_browser_timeout_s", 45.0))
+    if warm is not False:
+        return True, timeout, ""
+    policy = str(_cfg("search_browser_boot", "auto")).lower()
+    if policy == "never" or (policy == "auto" and paid_left):
+        return False, 0.0, "browser: skipped (computer is not running; a cold boot is too slow for a search)"
+    return True, max(timeout, float(_cfg("search_browser_cold_timeout_s", 120.0))), ""
 
-    Order: configured API providers, keyless HTTP engines, then (when a cloud computer is connected) the same
-    search in the computer's real browser, then Wikipedia. Verification pages are reported, never bypassed.
+
+async def web_search(query: str, count: int = 8, ctx=None) -> dict:
+    """Real results from the first stage that answers, or a clear error. Never invents results.
+
+    Default order (SEARCH_ORDER=free,browser,paid): keyless HTTP engines, then the same search in the cloud
+    computer's real browser, then paid APIs (Tavily first) as the last resort. Each stage has a time budget.
+    Verification pages are reported, never bypassed.
     """
+    import asyncio
+    import time
+
     q = (query or "").strip()
     if not q:
         return {"error": "query is required", "results": []}
     limit = max(1, min(int(count or 8), 12))
     tried: list[str] = []
-    keyed = search_api_configured()
-    browser_done = False
+    order = search_order()
+    providers = dict(search_providers())
+    hint = setup_hint()
+    per_provider = float(_cfg("search_provider_timeout_s", 8.0))
+    budgets = {"free": float(_cfg("search_free_timeout_s", 15.0)), "paid": float(_cfg("search_paid_timeout_s", 20.0))}
+    spent = {"free": 0.0, "paid": 0.0}
 
-    def _ok(hits: list, source: str) -> dict:
-        out: dict[str, Any] = {"query": q, "results": hits[:limit], "source": source}
+    def _ok(hits: list, source: str, started: float) -> dict:
+        out: dict[str, Any] = {"query": q, "results": hits[:limit], "source": source, "took_s": round(time.monotonic() - started, 1)}
         if tried:
             out["fallback_from"] = list(tried)
-        if not keyed:
-            out["setup"] = SETUP_HINT
         return out
 
-    for name, search in search_providers():
-        if name == "wikipedia" and not browser_done:
-            browser_done = True
-            data = await _browser_search(ctx, q, limit)
-            if data is not None:
-                hits = [h for h in (data.get("results") or []) if isinstance(h, dict) and str(h.get("url") or "").startswith("http")]
-                if hits:
-                    log.info("web_search answered by %s after: %s", data.get("source") or "browser", "; ".join(tried))
-                    out = _ok(hits, str(data.get("source") or "browser"))
-                    out["note"] = "Results were read from a search page in the cloud browser; open them to verify."
-                    return out
-                tried.extend(str(t) for t in (data.get("tried") or ["browser: no results"]))
+    started = time.monotonic()
+    for i, name in enumerate(order):
+        if name == "browser":
+            paid_left = any(n in PAID_PROVIDERS and n in providers for n in order[i + 1 :])
+            run, timeout, why = _browser_plan(ctx, paid_left)
+            if not run:
+                tried.append(why)
+                continue
+            try:
+                data = await asyncio.wait_for(_browser_search(ctx, q, limit), timeout=timeout)
+            except (asyncio.TimeoutError, TimeoutError):
+                log.warning("web_search browser stage timed out after %.0fs", timeout)
+                tried.append(f"browser: timed out after {timeout:g}s")
+                continue
+            data = data or {}
+            hits = _relevant([h for h in (data.get("results") or []) if isinstance(h, dict) and str(h.get("url") or "").startswith("http")], q)
+            if hits:
+                log.info("web_search answered by %s after: %s", data.get("source") or "browser", "; ".join(tried))
+                out = _ok(hits, str(data.get("source") or "browser"), started)
+                out["note"] = "Results were read from a search page in the cloud browser; open them to verify."
+                return out
+            tried.extend(str(t) for t in (data.get("tried") or ["browser: no results"]))
+            continue
+        search = providers.get(name)
+        if search is None:
+            continue  # a paid provider without a key
+        stage = "paid" if name in PAID_PROVIDERS else "free"
+        left = budgets[stage] - spent[stage]
+        if left <= 0.05:
+            tried.append(f"{name}: skipped ({stage} search time budget of {budgets[stage]:g}s used up)")
+            continue
+        t0 = time.monotonic()
         try:
-            hits = await search(q, limit)
+            hits = await asyncio.wait_for(search(q, limit), timeout=min(per_provider if stage == "free" else left, left))
+        except (asyncio.TimeoutError, TimeoutError):
+            log.warning("web_search %s timed out", name)
+            tried.append(f"{name}: timed out")
+            continue
         except SearchBlocked as exc:
             log.warning("web_search %s blocked: %s", name, exc)
             tried.append(f"{name}: blocked ({str(exc)[:120]})")
@@ -398,25 +495,37 @@ async def web_search(query: str, count: int = 8, ctx=None) -> dict:
             log.warning("web_search %s failed: %s: %s", name, type(exc).__name__, str(exc)[:200])
             tried.append(f"{name}: {type(exc).__name__} {str(exc)[:120]}".strip())
             continue
+        finally:
+            spent[stage] += time.monotonic() - t0
         hits = [h for h in hits if isinstance(h, dict) and str(h.get("url") or "").startswith("http")]
+        if name == "wikipedia":
+            hits = _relevant(hits, q)
         if not hits:
             tried.append(f"{name}: no results")
             continue
-        out = _ok(hits, name)
+        out = _ok(hits, name, started)
         if name == "wikipedia":
             out["note"] = "Only Wikipedia answered; general web engines were unavailable. Say so if the answer needs fresher sources."
         return out
     log.warning("web_search found nothing for %r: %s", q[:80], "; ".join(tried))
-    error = "Web search returned no results. Engines tried: " + "; ".join(tried) + "."
-    if not keyed:
-        error += " " + SETUP_HINT
+    error = "Web search returned no results. Engines tried, in order: " + "; ".join(tried) + "."
+    if hint:
+        error += " " + hint
     error += (
         " Do not invent results: open a known site directly with browser_navigate, and tell the user plainly "
-        "which search engines failed" + (" and which key to configure." if not keyed else ".")
+        "which search engines failed" + (" and which key to configure." if hint else ".")
     )
-    out: dict[str, Any] = {"query": q, "results": [], "error": error, "tried": tried, "search_api_configured": keyed}
-    if not keyed:
-        out["setup"] = SETUP_HINT
+    out: dict[str, Any] = {
+        "query": q,
+        "results": [],
+        "error": error,
+        "tried": tried,
+        "order": order,
+        "search_api_configured": not hint,
+        "took_s": round(time.monotonic() - started, 1),
+    }
+    if hint:
+        out["setup"] = hint
         out["configure_one_of"] = list(SEARCH_KEY_ENVS)
     return out
 

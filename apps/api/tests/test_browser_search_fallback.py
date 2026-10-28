@@ -48,7 +48,7 @@ async def test_no_key_and_no_computer_names_the_keys_to_configure(blocked_http, 
     assert "duckduckgo: blocked" in out["error"]
 
 
-async def test_falls_back_to_browser_search_before_wikipedia(blocked_http, monkeypatch):
+async def test_falls_back_to_browser_search_after_free_engines(blocked_http, monkeypatch):
     calls = []
 
     async def fake_call(ctx, slug, tool, args):
@@ -64,7 +64,7 @@ async def test_falls_back_to_browser_search_before_wikipedia(blocked_http, monke
     assert out["results"][0]["url"] == "https://example.com/anjuna"
     assert calls == [("computer", "browser_search", {"query": "scooter rental Anjuna", "count": 5})]
     assert any(t.startswith("brave: blocked") for t in out["fallback_from"])
-    assert "TAVILY_API_KEY" in out["setup"]
+    assert out["fallback_from"][-1] == "wikipedia: no results"
 
 
 async def test_browser_search_failure_is_listed_in_tried(blocked_http, monkeypatch):
@@ -77,18 +77,122 @@ async def test_browser_search_failure_is_listed_in_tried(blocked_http, monkeypat
     monkeypatch.setattr(deep, "call_user_tool", fake_call)
     out = await web_tools.web_search("q", 3, ctx=SimpleNamespace())
     assert out["results"] == []
-    assert "browser:bing: blocked (captcha page; not bypassed)" in out["tried"]
-    assert out["tried"][-1] == "wikipedia: no results"
+    assert out["tried"][-1] == "browser:bing: blocked (captcha page; not bypassed)"
+    assert "TAVILY_API_KEY" in out["setup"]
 
 
-async def test_keyed_provider_means_no_setup_hint(monkeypatch):
+async def test_keyed_provider_is_used_after_free_and_browser_fail(blocked_http, monkeypatch):
+    order = []
+
     async def tavily(q, n, key):
+        order.append("tavily")
         return [{"title": "t", "url": "https://example.com"}]
+
+    async def fake_call(ctx, slug, tool, args):
+        order.append("browser")
+        return {"ok": False, "results": [], "tried": ["browser:bing: no results"]}
+
+    import app.agent.deep as deep
 
     monkeypatch.setattr(web_tools, "get_settings", lambda: _settings(tavily_api_key="x"))
     monkeypatch.setattr(web_tools, "_search_tavily", tavily)
-    out = await web_tools.web_search("q", 3)
+    monkeypatch.setattr(web_tools, "computer_slug", lambda ctx: "computer")
+    monkeypatch.setattr(web_tools, "computer_warm", lambda ctx: True)
+    monkeypatch.setattr(deep, "call_user_tool", fake_call)
+    out = await web_tools.web_search("q", 3, ctx=SimpleNamespace())
+    assert order == ["browser", "tavily"]
     assert out["source"] == "tavily" and "setup" not in out
+
+
+async def test_free_success_never_touches_browser_or_paid(monkeypatch):
+    async def brave(q, n):
+        return [{"title": "Anjuna rentals", "url": "https://example.com/a"}]
+
+    async def tavily(q, n, key):
+        raise AssertionError("paid provider must not be called")
+
+    monkeypatch.setattr(web_tools, "get_settings", lambda: _settings(tavily_api_key="x"))
+    monkeypatch.setattr(web_tools, "_search_brave_html", brave)
+    monkeypatch.setattr(web_tools, "_search_tavily", tavily)
+    out = await web_tools.web_search("anjuna rentals", 3)
+    assert out["source"] == "brave"
+
+
+async def test_cold_computer_is_skipped_when_a_paid_key_is_left(blocked_http, monkeypatch):
+    async def tavily(q, n, key):
+        return [{"title": "t", "url": "https://example.com"}]
+
+    async def fake_call(*a):
+        raise AssertionError("must not boot the computer for a search")
+
+    import app.agent.deep as deep
+
+    monkeypatch.setattr(web_tools, "get_settings", lambda: _settings(tavily_api_key="x"))
+    monkeypatch.setattr(web_tools, "_search_tavily", tavily)
+    monkeypatch.setattr(web_tools, "computer_slug", lambda ctx: "computer")
+    monkeypatch.setattr(web_tools, "computer_warm", lambda ctx: False)
+    monkeypatch.setattr(deep, "call_user_tool", fake_call)
+    out = await web_tools.web_search("q", 3, ctx=SimpleNamespace())
+    assert out["source"] == "tavily"
+    assert "browser: skipped (computer is not running; a cold boot is too slow for a search)" in out["fallback_from"]
+
+
+async def test_cold_computer_is_booted_when_nothing_else_is_left(blocked_http, monkeypatch):
+    async def fake_call(ctx, slug, tool, args):
+        return {"ok": True, "results": [{"title": "q hit", "url": "https://example.com/q"}], "source": "browser:bing"}
+
+    import app.agent.deep as deep
+
+    monkeypatch.setattr(web_tools, "computer_slug", lambda ctx: "computer")
+    monkeypatch.setattr(web_tools, "computer_warm", lambda ctx: False)
+    monkeypatch.setattr(deep, "call_user_tool", fake_call)
+    out = await web_tools.web_search("q hit", 3, ctx=SimpleNamespace())
+    assert out["source"] == "browser:bing"
+
+
+async def test_stage_timeouts_keep_search_fast(monkeypatch):
+    import asyncio
+
+    async def slow(q, n):
+        await asyncio.sleep(5)
+        return []
+
+    async def slow_browser(ctx, slug, tool, args):
+        await asyncio.sleep(5)
+
+    async def tavily(q, n, key):
+        return [{"title": "t", "url": "https://example.com"}]
+
+    import app.agent.deep as deep
+
+    cfg = _settings(tavily_api_key="x")
+    cfg.search_provider_timeout_s = 0.05
+    cfg.search_free_timeout_s = 0.12
+    cfg.search_browser_timeout_s = 0.1
+    monkeypatch.setattr(web_tools, "get_settings", lambda: cfg)
+    for name in ("_search_brave_html", "_search_ddg", "_search_wikipedia"):
+        monkeypatch.setattr(web_tools, name, slow)
+    monkeypatch.setattr(web_tools, "_search_tavily", tavily)
+    monkeypatch.setattr(web_tools, "computer_slug", lambda ctx: "computer")
+    monkeypatch.setattr(web_tools, "computer_warm", lambda ctx: True)
+    monkeypatch.setattr(deep, "call_user_tool", slow_browser)
+    out = await web_tools.web_search("q", 3, ctx=SimpleNamespace())
+    assert out["source"] == "tavily" and out["took_s"] < 1.0
+    tried = out["fallback_from"]
+    assert tried[0] == "brave: timed out" and tried[1] == "duckduckgo: timed out"
+    assert tried[2].startswith("wikipedia: skipped (free search time budget")
+    assert tried[3] == "browser: timed out after 0.1s"
+
+
+def test_search_order_is_configurable(monkeypatch):
+    cfg = _settings(tavily_api_key="x", serper_api_key="y")
+    monkeypatch.setattr(web_tools, "get_settings", lambda: cfg)
+    assert web_tools.search_order() == ["brave", "duckduckgo", "wikipedia", "browser", "tavily", "brave_api", "serper", "exa"]
+    cfg.search_order = "paid, free"
+    assert web_tools.search_order()[:2] == ["tavily", "brave_api"] and "browser" not in web_tools.search_order()
+    cfg.search_order = "duckduckgo,browser,serper,bogus"
+    assert web_tools.search_order() == ["duckduckgo", "browser", "serper"]
+    assert [n for n, _ in web_tools.search_providers()] == ["duckduckgo", "serper"]
 
 
 def test_unwrap_result_urls():

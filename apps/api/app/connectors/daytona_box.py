@@ -847,7 +847,7 @@ async def browser_search(proc, fs, query: str, count: int = 8, engines=None) -> 
     tried: list[str] = []
     for engine in order:
         try:
-            data = await _browser_rpc(proc, {"command": "serp", "engine": engine, "query": query, "count": count}, 75, fs)
+            data = await _browser_rpc(proc, {"command": "serp", "engine": engine, "query": query, "count": count}, 35, fs)
         except Exception as exc:  # noqa: BLE001 - one engine failing must not end the search
             tried.append(f"browser:{engine}: {type(exc).__name__}: {str(exc)[:120]}")
             continue
@@ -925,6 +925,17 @@ async def _client():
     from daytona import AsyncDaytona
 
     return AsyncDaytona(_config())
+
+
+def computer_warm(row) -> bool | None:
+    """Whether the user's computer is already running in this process (no cold boot needed). None if unknown."""
+    if row is None:
+        return None
+    if _use_e2b():
+        from app.connectors import e2b_box
+
+        return e2b_box._user_key(row) in e2b_box._LIVE
+    return None
 
 
 def _use_e2b() -> bool:

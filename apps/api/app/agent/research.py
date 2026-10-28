@@ -544,7 +544,10 @@ async def run_research_tool(
             except Exception:  # noqa: BLE001 - skip private / malformed URLs
                 continue
         if search is None:
-            from app.agent.web_tools import web_search as search
+            from app.agent.web_tools import web_search
+
+            async def search(q: str, n: int) -> dict:  # noqa: F811 - same order as the chat tool (free, browser, paid)
+                return await web_search(q, n, ctx)
         for q in (queries or [])[:5]:
             try:
                 found = await search(q, 8)
