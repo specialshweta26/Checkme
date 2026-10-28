@@ -51,6 +51,14 @@ async def _sync_builtins_later() -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     await init_db()
+    _s = get_settings()
+    log.info(
+        "computer backend: %s (COMPUTER_PROVIDER=%s, E2B key set=%s, Daytona key set=%s)",
+        _s.computer_backend or "none",
+        _s.computer_provider or "unset",
+        bool(_s.e2b_api_key),
+        bool(_s.daytona_api_key),
+    )
     try:
         ensure_bucket()
     except Exception as vis_exc:  # noqa: BLE001

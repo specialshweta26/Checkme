@@ -71,8 +71,8 @@ def readiness(
     probe = probe or {}
     if computer is None:
         missing.append(
-            "The computer (Daytona sandbox) is not available for this agent, so I cannot clone, edit or run code. "
-            "It needs E2B_API_KEY (or DAYTONA_API_KEY) on the server, or the computer connector assigned to this agent."
+            "No cloud computer is configured on the server (E2B_API_KEY or DAYTONA_API_KEY is not set), "
+            "so I cannot clone, edit or run code."
         )
     elif probe_error:
         missing.append(f"The computer did not respond: {probe_error[:200]}")

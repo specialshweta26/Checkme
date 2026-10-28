@@ -487,7 +487,9 @@ def test_system_prompt_has_no_product_recipes():
     assert "live computer" in lowered or "persistent chromium" in lowered or "shared live machine" in lowered
     assert "do not open the browser" in lowered
     assert "not in list_connections" in lowered
-    assert "google flights" in lowered or "public lookup" in lowered
+    assert "website without an api" in lowered
+    assert "never say the computer or browser is unavailable" in lowered
+    assert "flight" not in lowered
     assert "instagram" in lowered
     assert "web_fetch paints" in lowered or "paints that html" in lowered
     assert "browser_handoff" in lowered

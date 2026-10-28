@@ -1026,8 +1026,12 @@ async def search_user_tools(ctx: RunContext, query: str, connector_slug: str | N
             "whats going on",
             "happening now",
             "live update",
-            "flight",
-            "flights",
+            "computer",
+            "click",
+            "sign in",
+            "log in",
+            "availability",
+            "price",
             "search the web",
             "look up",
             "look for",
@@ -2514,8 +2518,8 @@ def system_prompt(
         "Do this even if the user did not say chart, HTML, or download. Never cite sandbox: or /tmp paths.\n"
         "Pick a source in this order. Do not browse when a connected tool already has the answer.\n"
         "1) Mail, calendar, CRM, sales, inventory, KPI, dashboards, and other already-connected apps: search_tools then call_tool. Do not open the browser.\n"
-        "2) Public lookup the user can do in a normal browser — flights, fares, news, hours, prices, people, "
-        "Instagram/Twitter/Facebook profiles, Wikipedia, 'just check', 'look up', 'open her/his page': "
+        "2) Anything the user could do on a public website in a normal browser (searching, comparing, reading pages, "
+        "checking live prices, schedules or availability, profiles, 'just check', 'look up', 'open her/his page'): "
         "open the computer browser even if a marketplace app exists. If that app is not in list_connections, do not ask to connect it for a lookup. "
         "browser_navigate Google or the named site so the computer screen shows the page. "
         "Do not search_tools for Instagram/Twitter/Facebook unless list_connections already shows that app.\n"
@@ -2533,11 +2537,17 @@ def system_prompt(
         "End-to-end web work: browser_navigate, browser_snapshot for refs (e0, e1), then browser_act — click, fill, type, select, check, press, scroll. "
         "Fill whole forms from the snapshot: one fill per field, then click submit. "
         "If a page tool returns fallback computer_act, call computer_observe then computer_act (click x,y / type / key / scroll). "
-        "Prefer the destination site (put dates and filters in that site's URL when the user gave them) over a Google Search results page for live inventory, bookings, fares, or forms — Google Search often returns a verification wall to the cloud browser. "
+        "Prefer the destination site (put dates and filters in that site's URL when the user gave them) over a Google Search results page for live results, prices, availability, or forms — Google Search often returns a verification wall to the cloud browser. "
         "Cite only what is visible on the snapshot. If the page has no prices, times, or results yet, say so. Never treat a generic landing page as a confirmed result. "
         "If the page is a CAPTCHA, unusual-traffic, or verification wall (bot_wall): request_takeover immediately, tell the user to finish it on the live screen, and do not invent numbers. "
         "Login, 2FA, captcha, payment, or anything you cannot complete: request_takeover (same as browser_handoff) with a short instruction so the user takes control of that same screen. After they finish, snapshot and continue. "
         "Never attach page.png in chat; the computer screen already shows the tab. "
+        "Every agent has the computer: when a task needs a website without an API, use it and carry the task through "
+        "step by step (navigate, search, click, type, read, repeat) instead of describing how the user could do it. "
+        "The computer boots on demand; the first call may take a minute. If a computer tool returns an error, try once "
+        "more if it looks transient, then tell the user that exact error (for example an invalid E2B key, a quota limit "
+        "or a boot timeout). Never say the computer or browser is unavailable unless a computer tool returned that error "
+        "in this turn. "
         "Memory: remember (or save_memory) only when the user asked to remember something or stated a lasting preference. "
         "recall_memory to look it up, forget_memory to delete it, save_shared_memory for facts every agent should know. "
         "Do not dump the whole chat into memory. search_history / read_history for this chat's messages.\n"
@@ -2781,6 +2791,35 @@ def _progress_callbacks(ctx: RunContext, conns: list, query: str) -> list:
     return [ProgressCallback(ctx.progress, query=query, connector_names=names, agent_names=agents)]
 
 
+async def with_computer(db: AsyncSession, user, conns: list) -> list:
+    """Every agent gets the user's computer whenever a computer backend (E2B or Daytona) is configured.
+
+    ``user_connectors`` drops rows whose health is not ok/pending (an old Daytona failure could leave the computer
+    row 'down'), which used to make browser tools answer "the computer is not available for this agent" even though
+    the desktop boots on demand. The computer's own boot reports real errors (invalid key, quota, timeout) instead.
+    """
+    from app.agent.coding import COMPUTER_SLUG
+    from app.config import get_settings
+
+    if db is None or not get_settings().computer_backend:
+        return conns
+    if any(getattr(c, "slug", "") == COMPUTER_SLUG for c in conns):
+        return conns
+    try:
+        row = (
+            await db.execute(select(Connector).where(Connector.user_id == user.id, Connector.slug == COMPUTER_SLUG))
+        ).scalar_one_or_none()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("computer connector lookup failed: %s", exc)
+        return conns
+    if row is None:
+        return conns
+    log.info(
+        "computer connector added for this run (enabled=%s health=%s)", getattr(row, "enabled", None), getattr(row, "health", None)
+    )
+    return [*conns, row]
+
+
 async def run_deep_agent(
     db: AsyncSession,
     user,
@@ -2805,7 +2844,7 @@ async def run_deep_agent(
     _dbg_start("C", "deep.py:run_deep_agent", "agent start", {"query": (query or "")[:80], "n_history": len(history or [])})
     # #endregion
     await ensure_platform_connectors(db, user)
-    conns = await user_connectors(db, user.id)
+    conns = await with_computer(db, user, await user_connectors(db, user.id))
     assignments = await connector_assignment_map(db, user)
     toolkits = await toolkit_assignment_map(db, user) if db is not None else {}
     teammate_ids = [getattr(peer, "id", None) for peer in (teammates or [])]

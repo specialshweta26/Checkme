@@ -239,7 +239,7 @@ async def test_sandbox_shell_says_what_is_missing_without_a_computer():
     ctx = _ctx(_agent(focus="coding"), {})
     tool = next(t for t in harness_tools(ctx) if t.name == "sandbox_shell")
     out = json.loads(await tool.ainvoke({"command": "ls"}))
-    assert "Daytona" in out["error"]
+    assert "E2B_API_KEY" in out["error"]
 
 
 def _conn(slug, name, provider="", tags=()):
@@ -269,7 +269,7 @@ def test_readiness_names_exactly_what_is_missing():
     out = coding.readiness({})
     joined = " ".join(out["missing"])
     assert out["computer"] == "missing"
-    assert "Daytona" in joined
+    assert "E2B_API_KEY" in joined
     # GitHub and deploy access are never "missing": the CLI sign-in link covers them.
     assert "GitHub" not in joined and "deploy" not in joined
     assert any("GitHub CLI" in c for c in out["can"]) and any("deploy with the platform CLI" in c for c in out["can"])

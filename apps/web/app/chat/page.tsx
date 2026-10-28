@@ -114,6 +114,8 @@ export default function ChatPage() {
   const [uploads, setUploads] = useState<UploadedFile[]>([]);
   const [uploadError, setUploadError] = useState("");
   const [watching, setWatching] = useState(false);
+  // True once the running turn has called a computer tool (so the screen rail may boot the desktop).
+  const [computerTurn, setComputerTurn] = useState(false);
   const [controlling, setControlling] = useState(false);
   const [teaching, setTeaching] = useState(false);
   const [screenOpen, setScreenOpen] = useState(false);
@@ -175,6 +177,7 @@ export default function ChatPage() {
     setNotice("");
     setUploads([]);
     setWatching(false);
+    setComputerTurn(false);
     setControlling(false);
     setScreenOpen(false);
     if (key && !inflightRef.current.has(key)) {
@@ -260,6 +263,7 @@ export default function ChatPage() {
         // Open the live computer once per turn when the agent starts using it (the user can close it again).
         if (screenShown || scopeRef.current !== key || !usesComputer(tools)) return;
         screenShown = true;
+        setComputerTurn(true);
         setScreenOpen(true);
       },
     );
@@ -347,7 +351,10 @@ export default function ChatPage() {
       });
       inflightRef.current.delete(key);
       setBusyScopes((keys) => keys.filter((k) => k !== key));
-      if (scopeRef.current === key) setWatching(false);
+      if (scopeRef.current === key) {
+        setWatching(false);
+        setComputerTurn(false);
+      }
     }
   }
 
@@ -367,7 +374,10 @@ export default function ChatPage() {
       delete progressStopsRef.current[key];
       inflightRef.current.delete(key);
       setBusyScopes((keys) => keys.filter((item) => item !== key));
-      if (scopeRef.current === key) setWatching(false);
+      if (scopeRef.current === key) {
+        setWatching(false);
+        setComputerTurn(false);
+      }
     }
     if (scopeRef.current === key) showView(view);
   }
@@ -452,6 +462,7 @@ export default function ChatPage() {
     persistView(scopeKey(agentId, groupId));
     setControlling(false);
     setWatching(false);
+    setComputerTurn(false);
     setAgentId(id);
     setGroupId(null);
     rememberScope(id, null);
@@ -471,6 +482,7 @@ export default function ChatPage() {
     persistView(scopeKey(agentId, groupId));
     setControlling(false);
     setWatching(false);
+    setComputerTurn(false);
     setGroupId(id);
     setAgentId(null);
     rememberScope(null, id);
@@ -904,7 +916,10 @@ export default function ChatPage() {
           <button type="button" className="screen-scrim" aria-label="Close computer" onClick={() => setScreenOpen(false)} />
           <ScreenRail
             session={computer}
-            watching={Boolean((busyHere && watching) || controlling || computer?.live)}
+            // Only a running turn counts as "operating": an old message that once used the browser must not
+            // leave the rail stuck on "Starting computer…" with nothing booting.
+            watching={Boolean(busyHere && watching)}
+            autoBoot={Boolean(busyHere && watching && computerTurn)}
             controlling={controlling}
             agentName={screenName}
             status={busyHere ? "working" : controlling ? "you have control" : ""}
