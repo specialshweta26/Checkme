@@ -27,6 +27,11 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 SCRIPT_PATH = "/tmp/checkme_teach.py"
+# pkill -f matches full command lines, including the shell that runs pkill itself ("bash -c 'pkill -f
+# /tmp/checkme_teach.py; ...'"), which then kills its own shell (exit 143). A bracket pattern still matches
+# the real process but never its own command line.
+KILL_CAPTURE = "pkill -f '/tmp/[c]heckme_teach.py'; pkill -f '[x]input test-xi2'; true"
+CAPTURE_ATTEMPTS = 3
 EVENTS_PATH = "/tmp/checkme_teach.jsonl"
 SNAPSHOT_EVERY = 5.0
 MAX_FRAMES = 30
@@ -146,6 +151,8 @@ class Recorder:
     frames: list[dict] = field(default_factory=list)
     last_hash: int | None = None
     notes: list[str] = field(default_factory=list)
+    capture_attempts: int = 0
+    events_text: str = ""  # latest copy of the in-sandbox capture file (read without stopping it)
 
 
 _RECORDERS: dict[str, Recorder] = {}
@@ -201,7 +208,7 @@ async def _start_capture(rec: Recorder, box) -> None:
 
     def launch() -> None:
         sbx.files.write(SCRIPT_PATH, CAPTURE_SCRIPT.encode())
-        sbx.commands.run(f"pkill -f {SCRIPT_PATH}; rm -f {EVENTS_PATH}; true", timeout=10)
+        sbx.commands.run(f"{KILL_CAPTURE}; rm -f {EVENTS_PATH}; true", timeout=10)
         sbx.commands.run(
             f"python3 {SCRIPT_PATH} {EVENTS_PATH} > /tmp/checkme_teach.err 2>&1",
             background=True,
@@ -259,12 +266,17 @@ async def _loop(rec: Recorder, limit: float) -> None:
     while elapsed(rec.started) < limit:
         if rec.sandbox is None:
             rec.sandbox = await _live_sandbox(rec)
-            if rec.sandbox is not None and rec.capture_offset is None:
-                try:
-                    await _start_capture(rec, rec.sandbox)
-                except Exception as exc:  # noqa: BLE001
+        if rec.sandbox is not None and rec.capture_offset is None and rec.capture_attempts < CAPTURE_ATTEMPTS:
+            rec.capture_attempts += 1
+            try:
+                await _start_capture(rec, rec.sandbox)
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "teach: capture start failed user=%s attempt=%d: %s: %s",
+                    rec.user_key, rec.capture_attempts, type(exc).__name__, str(exc)[:200],
+                )  # fmt: skip
+                if rec.capture_attempts >= CAPTURE_ATTEMPTS:
                     rec.notes.append("input capture could not start in the sandbox")
-                    log.warning("teach: capture start failed user=%s: %s", rec.user_key, type(exc).__name__)
         if rec.sandbox is not None:
             try:
                 e2b_box._keepalive(rec.sandbox._live)  # the user is driving noVNC directly, not via our API
@@ -272,6 +284,11 @@ async def _loop(rec: Recorder, limit: float) -> None:
             except Exception as exc:  # noqa: BLE001
                 log.info("teach: snapshot failed user=%s: %s", rec.user_key, type(exc).__name__)
                 rec.sandbox = None
+        if rec.sandbox is not None and rec.capture_offset is not None:
+            try:
+                rec.events_text = await asyncio.wait_for(asyncio.to_thread(_peek_events, rec.sandbox._live.sbx), timeout=10)
+            except Exception as exc:  # noqa: BLE001 - the next tick or stop() reads it again
+                log.info("teach: reading capture failed user=%s: %s", rec.user_key, type(exc).__name__)
         await asyncio.sleep(SNAPSHOT_EVERY)
 
 
@@ -289,13 +306,20 @@ def start(user_key: str, started: float, limit: float) -> None:
     _RECORDERS[user_key] = rec
 
 
-def _read_events(sbx) -> str:
-    sbx.commands.run(f"pkill -f {SCRIPT_PATH}; pkill -f 'xinput test-xi2'; true", timeout=10)
+def _peek_events(sbx) -> str:
     try:
         data = sbx.files.read(EVENTS_PATH)
-    except Exception:  # noqa: BLE001 - no events file means nothing was captured
+    except Exception:  # noqa: BLE001 - no events file means nothing was captured yet
         return ""
     return data.decode("utf-8", "replace") if isinstance(data, (bytes, bytearray)) else str(data or "")
+
+
+def _read_events(sbx) -> str:
+    try:
+        sbx.commands.run(KILL_CAPTURE, timeout=10)
+    except Exception as exc:  # noqa: BLE001 - still read whatever was written
+        log.info("teach: stopping capture failed: %s", type(exc).__name__)
+    return _peek_events(sbx)
 
 
 def parse_capture(text: str, offset: float) -> tuple[list[dict], list[str]]:
@@ -370,16 +394,31 @@ async def stop(user_key: str) -> dict:
         except Exception:  # noqa: BLE001
             pass
     if box is not None and rec.capture_offset is not None:
+        text = rec.events_text
         try:
-            text = await asyncio.wait_for(asyncio.to_thread(_read_events, box._live.sbx), timeout=20)
-            events, more = parse_capture(text, rec.capture_offset)
-            notes.extend(more)
-        except Exception as exc:  # noqa: BLE001
-            notes.append("could not read the recorded clicks and keys from the computer")
+            text = await asyncio.wait_for(asyncio.to_thread(_read_events, box._live.sbx), timeout=20) or text
+        except Exception as exc:  # noqa: BLE001 - fall back to the last copy read while recording
             log.warning("teach: reading capture failed user=%s: %s", user_key, type(exc).__name__)
-    elif rec.capture_offset is None:
-        notes.append("the computer was not running, so on-screen clicks were not captured")
+            if not text:
+                notes.append("could not read the recorded clicks and keys from the computer")
+        events, more = parse_capture(text, rec.capture_offset)
+        notes.extend(more)
+    elif rec.capture_offset is None and not any("capture" in n for n in notes):
+        notes.append("on-screen clicks were not captured (the computer was not running or capture did not start)")
     return {"events": events, "frames": rec.frames, "notes": notes}
+
+
+def peek(user_key: str) -> dict:
+    """What has been recorded so far, without stopping: {"events", "frames", "notes"}."""
+    rec = _RECORDERS.get(user_key)
+    if rec is None:
+        return {"events": [], "frames": [], "notes": []}
+    events: list[dict] = []
+    notes = list(rec.notes)
+    if rec.capture_offset is not None and rec.events_text:
+        events, more = parse_capture(rec.events_text, rec.capture_offset)
+        notes.extend(more)
+    return {"events": events, "frames": list(rec.frames), "notes": notes}
 
 
 def active(user_key: str) -> bool:

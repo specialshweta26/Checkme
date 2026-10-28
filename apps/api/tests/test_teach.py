@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import stat
@@ -172,9 +171,8 @@ def test_rail_typing_deduped_against_screen_capture():
     assert [e["t"] for e in kept] == [30]
 
 
-async def test_full_teach_session_with_narration(monkeypatch):
+async def test_full_teach_session_with_narration(monkeypatch, skill_store):
     user = SimpleNamespace(id="00000000-0000-0000-0000-0000000000aa")
-    saved = {}
 
     async def fake_stop(key):
         return {"events": [{"t": 3.0, "kind": "click", "x": 10, "y": 20, "window": "Chromium", "source": "screen"}], "frames": [], "notes": []}
@@ -183,41 +181,38 @@ async def test_full_teach_session_with_narration(monkeypatch):
         assert ext == "mp4"
         return [{"start": 0.5, "end": 2.0, "text": "Click the search box"}]
 
-    async def fake_save(db, u, **kw):
-        saved.update(kw)
-        return SimpleNamespace(id="s1", created_at=None, **kw)
-
-    improved = []
-
-    async def fake_improve(*args):
-        improved.append(args)
+    async def fake_writer(actions, frames, name_hint, transcript=None):
+        assert name_hint == "Search flights"
+        return {"name": "ignored", "instruction": "1. Open flights. 2. Search."}
 
     monkeypatch.setattr(service.recorder, "stop", fake_stop)
     monkeypatch.setattr(service.recorder, "start", lambda *a: None)
     monkeypatch.setattr(service.narration, "transcribe", fake_transcribe)
-    monkeypatch.setattr(service, "save_skill", fake_save)
-    monkeypatch.setattr(service, "_improve_skill", fake_improve)
+    monkeypatch.setattr(service, "_write_skill", fake_writer)
     fake_settings = SimpleNamespace(teach_max_seconds=600, openai_api_key="k", teach_audio_max_bytes=1000)
     monkeypatch.setattr(service, "get_settings", lambda: fake_settings)
     monkeypatch.setattr(narration, "get_settings", lambda: fake_settings)
 
-    started = service.start_teaching(user, None)
-    assert started["max_seconds"] == 600
+    started = await service.start_teaching(user, None)
+    assert started["max_seconds"] == 600 and started["skill_id"]
     assert service.teaching_status(user)["teaching"] is True
     service.record_user_input(user.id, "input", text="Goa")
     await service.add_narration(user, b"audio-bytes", "audio/mp4", "narration.mp4", offset_ms=2000)
     with pytest.raises(service.SkillError):
         await service.add_narration(user, b"x" * 2000, "audio/mp4", "big.mp4", 0)
     out = await service.stop_teaching(None, user, "Search flights")
-    await asyncio.sleep(0)
-    assert out["kind"] == "taught" and out["narrated"] is True
+    assert out["kind"] == "taught" and out["narrated"] is True and out["status"] == "writing"
+    await skill_store.settle()
+    saved = skill_store.rows[out["id"]]
     steps = saved["steps"]
     kinds = [s["kind"] for s in steps]
     assert "say" in kinds and "click" in kinds and "input" in kinds
     click = next(s for s in steps if s["kind"] == "click")
     assert click["said"] == "Click the search box"
-    assert "Click the search box" in saved["instruction"]
-    assert improved, "the skill writer runs in the background"
+    assert saved["transcript"][0]["text"] == "Click the search box"
+    assert saved["status"] == "ready" and saved["error"] == ""
+    assert saved["instruction"] == "1. Open flights. 2. Search."
+    assert saved["name"] == "Search flights"
     assert service.teaching_status(user)["teaching"] is False
     with pytest.raises(service.SkillError):
         await service.stop_teaching(None, user, "again")

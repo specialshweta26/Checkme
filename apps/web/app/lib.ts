@@ -45,15 +45,59 @@ export type AgentGroup = {
   updated_at?: string;
 };
 
+export type SkillStatus = "recording" | "writing" | "ready";
+
+export type SkillStep = {
+  t?: number;
+  kind?: string;
+  text?: string;
+  window?: string;
+  key?: string;
+  x?: number;
+  y?: number;
+  tool?: string;
+  said?: string;
+  masked?: boolean;
+  [key: string]: unknown;
+};
+
 export type AgentSkill = {
   id: string;
   agent_id?: string | null;
   name: string;
   kind: string;
+  status?: SkillStatus | string;
+  error?: string;
   instruction?: string;
-  steps?: unknown[];
+  steps?: SkillStep[];
   duration_ms?: number;
+  created_at?: string;
+  updated_at?: string;
+  step_count?: number;
+  frame_count?: number;
+  has_transcript?: boolean;
+  transcript?: { t?: number; text?: string }[];
+  notes?: string[];
+  frames?: { index: number; t?: number }[];
 };
+
+export function skillBusy(skill: Pick<AgentSkill, "status"> | null | undefined) {
+  return skill?.status === "recording" || skill?.status === "writing";
+}
+
+/** One recorded step as a short line (mirrors the API's narration.describe). */
+export function describeSkillStep(step: SkillStep) {
+  const kind = String(step.kind || "");
+  const where = step.window ? ` in “${step.window}”` : "";
+  if (kind === "say") return `said “${step.text || ""}”`;
+  if (kind === "click") return `clicked${typeof step.x === "number" ? ` at (${step.x}, ${step.y})` : ""}${where}`;
+  if (kind === "type" || kind === "input") return `typed “${step.text || ""}”${where}`;
+  if (kind === "key") return `pressed ${step.key || step.text || "a key"}${where}`;
+  if (kind === "scroll") return `scrolled${where}`;
+  if (kind === "window") return `switched to “${step.window || step.text || "a window"}”`;
+  if (kind === "tool") return `ran ${step.tool || "a tool"}`;
+  return `${kind || "step"}${step.text ? ` “${step.text}”` : ""}${where}`;
+}
 
 export type WorkspaceRoster = {
   agents: WorkspaceAgent[];
@@ -236,14 +280,38 @@ export async function saveSkill(body: { name: string; agent_id?: string; instruc
   return agentAction("/api/skills", "POST", body) as Promise<AgentSkill>;
 }
 
-export type TeachStart = { ok?: boolean; teaching?: boolean; max_seconds?: number; elapsed?: number; audio_optional?: boolean };
+export async function getSkill(id: string) {
+  const res = await fetch(`/api/skills/${encodeURIComponent(id)}`, { credentials: "include", cache: "no-store" });
+  const data = await res.json().catch(() => ({}));
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(apiError(data, "Could not load the skill"));
+  return data as AgentSkill;
+}
+
+export async function updateSkill(id: string, body: { name?: string; instruction?: string }) {
+  return agentAction(`/api/skills/${encodeURIComponent(id)}`, "PATCH", body) as Promise<AgentSkill>;
+}
+
+export async function deleteSkill(id: string) {
+  return agentAction(`/api/skills/${encodeURIComponent(id)}`, "DELETE") as Promise<{ ok: boolean }>;
+}
+
+export async function rewriteSkill(id: string) {
+  return agentAction(`/api/skills/${encodeURIComponent(id)}/rewrite`, "POST") as Promise<AgentSkill>;
+}
+
+export function skillFrameUrl(id: string, index: number) {
+  return `/api/skills/${encodeURIComponent(id)}/frames/${index}`;
+}
+
+export type TeachStart = { ok?: boolean; teaching?: boolean; max_seconds?: number; elapsed?: number; audio_optional?: boolean; skill_id?: string | null };
 
 export async function startTeaching(agentId?: string) {
   return agentAction("/api/skills/teach/start", "POST", { agent_id: agentId }) as Promise<TeachStart>;
 }
 
 export async function stopTeaching(name?: string) {
-  return agentAction("/api/skills/teach/stop", "POST", { name: name || "" }) as Promise<AgentSkill & { writing?: boolean; narrated?: boolean }>;
+  return agentAction("/api/skills/teach/stop", "POST", { name: name || "" }) as Promise<AgentSkill & { writing?: boolean; narrated?: boolean; recovered?: boolean }>;
 }
 
 export async function teachingStatus() {

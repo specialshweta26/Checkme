@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,6 +24,7 @@ class SkillIn(BaseModel):
 
 class TeachIn(BaseModel):
     agent_id: uuid.UUID | None = None
+    name: str = ""
 
 
 class TeachStopIn(BaseModel):
@@ -64,7 +65,7 @@ async def create_skill(body: SkillIn, user: User = Depends(current_user), db: As
 
 @router.post("/teach/start")
 async def teach_start(body: TeachIn, user: User = Depends(current_user)):
-    return service.start_teaching(user, body.agent_id)
+    return await service.start_teaching(user, body.agent_id, body.name)
 
 
 @router.get("/teach/status")
@@ -93,6 +94,34 @@ async def teach_stop(body: TeachStopIn, user: User = Depends(current_user), db: 
         return await service.stop_teaching(db, user, body.name)
     except service.SkillError as vis_exc:
         raise _err(vis_exc) from vis_exc
+
+
+@router.get("/{skill_id}")
+async def read_skill(skill_id: uuid.UUID, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """One skill in full: instructions, steps, narration transcript, notes and screenshot indexes."""
+    row = await service.get_skill(db, user, str(skill_id))
+    if row is None:
+        raise HTTPException(404, "Unknown skill.")
+    return service.serialize_skill(row, full=True)
+
+
+@router.get("/{skill_id}/frames/{index}")
+async def skill_frame(
+    skill_id: uuid.UUID, index: int, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)
+):
+    data = await service.frame_bytes(db, user, str(skill_id), index)
+    if not data:
+        raise HTTPException(404, "No such screenshot.")
+    return Response(content=data, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=3600"})
+
+
+@router.post("/{skill_id}/rewrite")
+async def rewrite_skill(skill_id: uuid.UUID, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Re-run the AI write-up from the recorded steps (Retry)."""
+    try:
+        return await service.rewrite_skill(db, user, str(skill_id))
+    except service.SkillError as exc:
+        raise _err(exc) from exc
 
 
 class SkillPatch(BaseModel):

@@ -128,10 +128,13 @@ def test_handoff_prompt_is_first_person():
     assert "one8" not in lowered
 
 
-def test_teaching_is_ten_minutes_with_optional_narration():
+async def test_teaching_is_ten_minutes_with_optional_narration(skill_store, monkeypatch):
+    from app.skills import recorder
+
+    monkeypatch.setattr(recorder, "start", lambda *a: None)
     assert TEACH_MAX_SECONDS == 600
-    user = SimpleNamespace(id="u1")
-    row = start_teaching(user, None)
+    user = SimpleNamespace(id="00000000-0000-0000-0000-0000000000b1")
+    row = await start_teaching(user, None)
     assert row["max_seconds"] == 600
     # Narration is opt-in from the browser; nothing is recorded from a microphone by default.
     assert row["records_audio"] is False

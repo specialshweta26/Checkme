@@ -997,9 +997,15 @@ export default function ChatPage() {
               return started;
             }}
             onTeachStop={async (name) => {
-              const saved = await stopTeaching(name);
-              setTeaching(false);
-              return saved;
+              try {
+                const saved = await stopTeaching(name);
+                setTeaching(false);
+                return saved;
+              } catch (err: any) {
+                // The session was lost (e.g. a deploy restarted the API): leave teaching mode instead of sticking.
+                if (String(err?.message || "").includes("No teaching session")) setTeaching(false);
+                throw err;
+              }
             }}
             onRelease={() => {
               const handoff = pending.filter((p) => p.kind === "handoff" || p.preview?.kind === "handoff");

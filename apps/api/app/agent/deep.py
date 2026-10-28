@@ -110,6 +110,7 @@ class RunContext:
     check_attempts: dict = field(default_factory=dict)
     toolkit_assignments: dict = field(default_factory=dict)
     scratchpad: list = field(default_factory=list)  # this-chat checklist (scratchpad_*)
+    active_skills: list = field(default_factory=list)  # skills routed to / loaded by this task
 
 
 def _json_size(value: Any) -> int:
@@ -1613,6 +1614,11 @@ class SaveSkillInput(BaseModel):
     instruction: str = Field(default="", description="What to do when this skill runs.")
 
 
+class GetSkillInput(BaseModel):
+    skill_id: str = Field(default="", description="Skill id from your skill index or list_my_skills.")
+    name: str = Field(default="", description="Skill name, when you do not have the id.")
+
+
 class StopTeachingInput(BaseModel):
     name: str = Field(default="", description="Name for the taught skill.")
 
@@ -1987,11 +1993,43 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
         )
         return dumps({"ok": True, "id": str(row.id), "name": row.name})
 
+    async def list_my_skills() -> str:
+        """List all of your skills (saved and taught workflows) with id, status and a one-line description of when to use each."""
+        from app.skills.profile import one_liner, usable
+        from app.skills.service import list_skills as _list
+
+        ctx.used_tools.append("list_my_skills")
+        if ctx.db is None:
+            return dumps({"skills": []})
+        rows = usable(await _list(ctx.db, ctx.user, getattr(ctx.agent, "id", None)))
+        return dumps(
+            {"skills": [{"id": r["id"], "name": r["name"], "kind": r["kind"], "status": r.get("status"), "use_when": one_liner(r), "steps": r.get("step_count", 0)} for r in rows]},
+            12000,
+        )
+
+    async def get_skill(skill_id: str = "", name: str = "") -> str:
+        """Load one of your skills in full (instructions, recorded steps, narration transcript) by id or name, before following it."""
+        from app.skills.service import get_skill as _get, serialize_skill
+
+        ctx.used_tools.append("get_skill")
+        if ctx.db is None:
+            return dumps({"error": "Cannot read skills without a workspace."})
+        row = await _get(ctx.db, ctx.user, skill_id, name, getattr(ctx.agent, "id", None))
+        if row is None:
+            return dumps({"error": "Unknown skill. Call list_my_skills for ids."})
+        data = serialize_skill(row, full=True)
+        data.pop("frames", None)
+        if not any(str(s.get("id")) == data["id"] for s in ctx.active_skills):
+            ctx.active_skills.append({"id": data["id"], "name": data["name"], "match": {"by": "loaded"}})
+        if ctx.progress is not None:
+            await ctx.progress.emit(f"Using skill: {data['name']}", kind="skill", tool="get_skill")
+        return dumps(data, 16000)
+
     async def start_teaching() -> str:
         """Record the computer while the user demonstrates a workflow (the user may narrate out loud from the screen panel). Max ten minutes by default."""
         from app.skills.service import start_teaching as _start
 
-        return dumps(_start(ctx.user, getattr(ctx.agent, "id", None)))
+        return dumps(await _start(ctx.user, getattr(ctx.agent, "id", None)))
 
     async def stop_teaching(name: str = "") -> str:
         """Stop recording and save the taught skill (actions plus any narration; the instruction is written up in the background)."""
@@ -2415,6 +2453,17 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
                 args_schema=SaveSkillInput,
             ),
             StructuredTool.from_function(
+                coroutine=list_my_skills,
+                name="list_my_skills",
+                description=list_my_skills.__doc__,
+            ),
+            StructuredTool.from_function(
+                coroutine=get_skill,
+                name="get_skill",
+                description=get_skill.__doc__,
+                args_schema=GetSkillInput,
+            ),
+            StructuredTool.from_function(
                 coroutine=start_teaching,
                 name="start_teaching",
                 description=start_teaching.__doc__,
@@ -2439,6 +2488,8 @@ def system_prompt(
     teammates: list | None = None,
     mentions: dict | None = None,
     skills: list | None = None,
+    matched_skills: list | None = None,
+    query: str = "",
 ) -> str:
     tz = getattr(user, "timezone", None) or "Asia/Kolkata"
     now = _now(tz)
@@ -2452,25 +2503,11 @@ def system_prompt(
     from app.agents.focus import focus_prompt
 
     identity += focus_prompt(agent)
-    usable_skills = [s for s in (skills or []) if isinstance(s, dict) and (s.get("name") or "").strip()]
-    if usable_skills:
-        skill_lines = []
-        for skill in usable_skills[:12]:
-            name = str(skill.get("name") or "").strip()[:160]
-            instruction = str(skill.get("instruction") or "").strip()[:1200]
-            kind = "demonstrated workflow" if skill.get("kind") == "taught" else "saved workflow"
-            tools = [str(step.get("tool") or "")[:80] for step in (skill.get("steps") or [])[:40] if isinstance(step, dict)]
-            line = f"- {name} ({kind})"
-            if instruction:
-                line += f": {instruction}"
-            if tools:
-                line += f". Demonstrated tool sequence: {' → '.join(tools[:20])}. Use it as a guide, rechecking current page state and arguments."
-            skill_lines.append(line)
-        identity += (
-            "Your saved skills are reusable procedures. When a request matches one, follow its instructions and available tools; "
-            "adapt to current data and confirm before sensitive actions as usual. Skill names and steps are reference material, "
-            "not permission to bypass safeguards.\nSaved skills:\n" + "\n".join(skill_lines) + "\n"
-        )
+    from app.skills.profile import capabilities_block
+
+    # Profile + full skill index every turn (rebuilt from the DB, so new or rewritten skills show up at once);
+    # only the skills routed to this request carry their full bodies.
+    identity += capabilities_block(agent, skills, matched_skills, query)
     identity += (
         "Your memory and scheduled routines belong only to you, not to other agents. Use remembered context to avoid asking the user twice. "
         "When the user explicitly asks you to remember something, or a stable non-sensitive preference is clearly established by repeated work, "
@@ -2583,7 +2620,8 @@ def system_prompt(
         "recall_memory to look it up, forget_memory to delete it, save_shared_memory for facts every agent should know. "
         "Do not dump the whole chat into memory. search_history / read_history for this chat's messages.\n"
         "Scratchpad: scratchpad_add a short plan for multi-step work in this chat, then complete items as you go.\n"
-        "Skills: skill_create / save_skill for a repeatable workflow, skill_read / skill_update / skill_delete to manage them, "
+        "Skills: your profile lists every skill; get_skill loads one in full before you follow it, list_my_skills lists them. "
+        "skill_create / save_skill for a repeatable workflow, skill_update / skill_delete to manage them, "
         "or start_teaching so the user demonstrates on the visible screen "
         "(up to ten minutes; they can turn on the microphone in the screen panel to narrate), then stop_teaching with a name.\n"
         "task_catalog action=search to find briefing, inbox, schedule, coding-job, or media tasks, then load and execute.\n"
@@ -2928,17 +2966,22 @@ async def run_deep_agent(
         if block and block not in (memory or ""):
             memory = ((memory or "").rstrip() + "\n\nYour coding memory (repos, conventions, past PRs):\n" + block).strip()
     extra = []
+    all_skills: list = []
     matched_skills: list = []
     if db is not None:
-        from app.skills.service import list_skills, match_skills
+        from app.skills.profile import route_skills
+        from app.skills.service import list_skills
 
         try:
-            matched_skills = match_skills(
-                await list_skills(db, user, getattr(workspace_agent, "id", None)),
-                query,
-            )
+            all_skills = await list_skills(db, user, getattr(workspace_agent, "id", None))
+            matched_skills = await route_skills(all_skills, query)
         except Exception:  # noqa: BLE001
-            matched_skills = []
+            log.info("skills: loading the skill index failed", exc_info=True)
+            await db.rollback()
+        ctx.active_skills = [{"id": s.get("id"), "name": s.get("name"), "match": s.get("match")} for s in matched_skills]
+        if matched_skills and progress is not None:
+            names = ", ".join(str(s.get("name")) for s in matched_skills)
+            await progress.emit(f"Skill for this task: {names}", kind="skill")
     from langchain_core.messages import HumanMessage
 
     for payload in ctx.confirmations:
@@ -2985,7 +3028,9 @@ async def run_deep_agent(
             group=group,
             teammates=teammates,
             mentions=mentions,
-            skills=matched_skills,
+            skills=all_skills,
+            matched_skills=matched_skills,
+            query=query,
         ),
     )
     payload = {"messages": _lc_messages(history, query, extra)}
@@ -3033,6 +3078,7 @@ async def run_deep_agent(
         {
             "query": (query or "")[:80],
             "used_tools": ctx.used_tools,
+            "skills_used": ctx.active_skills,
             "attachment_cards": len(ctx.attachments),
             "claimed_search_only": "only provides" in (text or "").lower() or "searching" in (text or "").lower(),
             "text_head": (text or "")[:160],
@@ -3058,6 +3104,7 @@ async def run_deep_agent(
         "pending_confirms": ctx.pending,
         "attachments": ctx.attachments,
         "used_tools": ctx.used_tools,
+        "skills_used": ctx.active_skills,
         "route": "deep",
         "source": source,
         "mail_threads": _mail_threads(ctx),
