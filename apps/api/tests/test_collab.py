@@ -128,10 +128,12 @@ def test_handoff_prompt_is_first_person():
     assert "one8" not in lowered
 
 
-def test_teaching_is_ten_minutes_and_silent():
+def test_teaching_is_ten_minutes_with_optional_narration():
     assert TEACH_MAX_SECONDS == 600
     user = SimpleNamespace(id="u1")
     row = start_teaching(user, None)
     assert row["max_seconds"] == 600
+    # Narration is opt-in from the browser; nothing is recorded from a microphone by default.
     assert row["records_audio"] is False
+    assert row["audio_optional"] is True
     assert row["teaching"] is True

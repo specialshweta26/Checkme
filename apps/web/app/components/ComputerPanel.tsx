@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState, type MouseEvent } from "react";
+import { teachingStatus, uploadNarration, type TeachStart } from "../lib";
+import { useNarration } from "./useNarration";
 
 export type ComputerSession = {
   live?: boolean;
@@ -305,8 +307,8 @@ export function ScreenRail({
   teaching?: boolean;
   onTakeControl?: () => void;
   onRelease?: () => void;
-  onTeachStart?: () => Promise<void>;
-  onTeachStop?: (name: string) => Promise<void>;
+  onTeachStart?: () => Promise<TeachStart | void>;
+  onTeachStop?: (name: string) => Promise<{ writing?: boolean; narrated?: boolean } | void>;
   onClose?: () => void;
 }) {
   const still = useCredentialedImage(session?.preview_url || session?.download_url);
@@ -323,8 +325,9 @@ export function ScreenRail({
   const [now, setNow] = useState(() => Date.now());
   const autoBooted = useRef(false);
   const liveActive = Boolean(watching || controlling || machine === "running");
-  // Teaching records clicks through our own control endpoint, so it keeps the frame view.
-  const streaming = Boolean(stream.view) && machine === "running" && !teaching;
+  // Teaching uses the same live noVNC stream as "Take control"; the server records input inside the desktop.
+  const streaming = Boolean(stream.view) && machine === "running";
+  const interactive = controlling || teaching;
   const framesSupported = provider !== "" && provider !== "e2b" && provider !== "none";
   const liveScreen = useLiveScreen(liveActive && !streaming && framesSupported);
   const bootSeconds = machine === "booting" && bootStarted ? Math.max(0, Math.round((now - bootStarted) / 1000)) : 0;
@@ -340,6 +343,42 @@ export function ScreenRail({
   const waking = useRef(false);
   const [teachingBusy, setTeachingBusy] = useState(false);
   const [notice, setNotice] = useState("");
+  // Teaching clock: when the session started (ms epoch) and how long it may run.
+  const [teachStarted, setTeachStarted] = useState(0);
+  const [teachLimit, setTeachLimit] = useState(600);
+  const [teachNow, setTeachNow] = useState(() => Date.now());
+  const autoStopped = useRef(false);
+  const narration = useNarration(teachStarted);
+  const teachLeft = teaching && teachStarted ? Math.max(0, Math.ceil(teachLimit - (teachNow - teachStarted) / 1000)) : 0;
+  useEffect(() => {
+    if (!teaching) {
+      autoStopped.current = false;
+      setTeachStarted(0);
+      narration.reset();
+      return;
+    }
+    // Reopened while a session is running (or the parent started it): pick up the server's clock.
+    if (!teachStarted) {
+      void teachingStatus().then((data) => {
+        if (!data?.teaching) return;
+        const limit = Number(data.max_seconds) || 600;
+        setTeachLimit(limit);
+        setTeachStarted((prev) => prev || Date.now() - Number(data.elapsed || 0) * 1000);
+      });
+    }
+    const timer = window.setInterval(() => setTeachNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [teaching]);
+  useEffect(() => {
+    if (!teaching || !teachStarted || teachingBusy || autoStopped.current) return;
+    if (teachLeft === 60) setNotice("One minute of teaching left. It stops and saves automatically.");
+    if (teachLeft <= 0) {
+      autoStopped.current = true;
+      void finishTeaching(true);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [teachLeft, teaching, teachStarted, teachingBusy]);
   useEffect(() => {
     if (controlling) previewRef.current?.focus();
   }, [controlling]);
@@ -391,7 +430,7 @@ export function ScreenRail({
       autoBooted.current = false;
       return;
     }
-    if (autoBooted.current || provider !== "e2b" || controlling || teaching) return;
+    if (autoBooted.current || provider !== "e2b" || controlling) return;
     if (machine !== "stopped" && machine !== "suspended") return;
     autoBooted.current = true;
     void wake();
@@ -409,7 +448,9 @@ export function ScreenRail({
     host = "loading the page…";
   }
   const label = teaching
-    ? "recording task"
+    ? teachStarted
+      ? `recording task · ${clock(teachLeft)} left`
+      : "recording task"
     : controlling
       ? "you have control"
       : machine === "booting"
@@ -483,7 +524,11 @@ export function ScreenRail({
     setTeachingBusy(true);
     try {
       if (machine !== "running" && !(await wake())) return;
-      await onTeachStart();
+      const started = await onTeachStart();
+      setTeachLimit(Number(started && started.max_seconds) || 600);
+      setTeachStarted(Date.now() - Number((started && started.elapsed) || 0) * 1000);
+      setTeachNow(Date.now());
+      setNotice("Recording. Use the screen as usual; tap Mic to narrate what you are doing.");
     } catch (err: any) {
       setNotice(err?.message || "Could not start teaching");
     } finally {
@@ -491,20 +536,45 @@ export function ScreenRail({
     }
   }
 
-  async function finishTeaching() {
+  async function finishTeaching(auto = false) {
     if (!onTeachStop || teachingBusy) return;
-    const name = window.prompt("Name this skill", "Taught workflow");
+    // At the time limit there is nobody to answer a prompt: save with the default name (the write-up renames it).
+    const name = auto ? "Taught workflow" : window.prompt("Name this skill", "Taught workflow");
     if (name === null) return;
     setTeachingBusy(true);
     try {
-      await onTeachStop(name.trim() || "Taught workflow");
-      setNotice("Skill saved. Your agent can reuse this task.");
+      const clips = await narration.collect();
+      let uploaded = 0;
+      for (const [index, clip] of clips.entries()) {
+        try {
+          await uploadNarration(clip.blob, clip.offsetMs, index);
+          uploaded += 1;
+        } catch (err: any) {
+          setNotice(err?.message || "Could not upload the narration");
+        }
+      }
+      const saved = await onTeachStop(name.trim() || "Taught workflow");
+      const prefix = auto ? "Time limit reached. " : "";
+      setNotice(
+        saved && saved.writing
+          ? `${prefix}Skill saved. Writing it up from your demonstration${uploaded ? " and narration" : ""}…`
+          : `${prefix}Skill saved. Your agent can reuse this task.`,
+      );
       onRelease?.();
     } catch (err: any) {
       setNotice(err?.message || "Could not save the skill");
     } finally {
       setTeachingBusy(false);
     }
+  }
+
+  async function toggleMic() {
+    if (narration.on) {
+      await narration.stop();
+      return;
+    }
+    // Called straight from the tap so iOS Safari treats it as a user gesture.
+    await narration.start();
   }
 
   function flushType() {
@@ -529,6 +599,18 @@ export function ScreenRail({
           </button>
         ) : null}
         {teaching ? (
+          <button
+            type="button"
+            className={`screen-control-btn screen-mic${narration.on ? " on" : ""}`}
+            disabled={teachingBusy}
+            aria-pressed={narration.on}
+            aria-label={narration.on ? "Stop narrating" : "Narrate with microphone"}
+            onClick={() => void toggleMic()}
+          >
+            {narration.on ? `● Mic ${clock(narration.seconds)}` : "Mic"}
+          </button>
+        ) : null}
+        {teaching ? (
           <button type="button" className="screen-control-btn primary" disabled={teachingBusy} onClick={() => void finishTeaching()}>
             {teachingBusy ? "Saving…" : "Stop & save skill"}
           </button>
@@ -538,7 +620,7 @@ export function ScreenRail({
             Open
           </button>
         ) : null}
-        {onTakeControl && !controlling && (Boolean(frame) || streaming || machine === "running") ? (
+        {onTakeControl && !interactive && (Boolean(frame) || streaming || machine === "running") ? (
           <button type="button" className="screen-control-btn" onClick={onTakeControl}>
             Take control
           </button>
@@ -598,13 +680,13 @@ export function ScreenRail({
         {streaming ? (
           <iframe
             // View-only until the user takes control; noVNC then forwards mouse and keyboard to the desktop.
-            key={controlling ? "control" : "view"}
-            src={controlling ? stream.control : stream.view}
+            key={interactive ? "control" : "view"}
+            src={interactive ? stream.control : stream.view}
             title={`${agentName}'s live desktop`}
             className="screen-stream"
             allow="clipboard-read; clipboard-write; fullscreen"
             referrerPolicy="no-referrer"
-            style={{ width: "100%", height: "100%", border: 0, display: "block", background: "#111", pointerEvents: controlling ? "auto" : "none" }}
+            style={{ width: "100%", height: "100%", border: 0, display: "block", background: "#111", pointerEvents: interactive ? "auto" : "none" }}
           />
         ) : frame ? (
           <img
@@ -643,15 +725,23 @@ export function ScreenRail({
       </div>
       <p className="screen-caption">
         {teaching
-          ? "Recording your clicks, typing, and scrolling. No audio is recorded."
+          ? narration.on
+            ? "Recording your clicks, typing, scrolling, and your voice. Explain what you are doing as you go."
+            : "Recording your clicks, typing, and scrolling. Tap Mic to add spoken instructions (optional)."
           : controlling
             ? session?.handoff_reason || "Click, type, and scroll on this screen."
             : streaming
               ? `${agentName}'s screen (live, view only). Take control to use it.`
             : `${agentName}'s screen`}
       </p>
+      {teaching && narration.error ? <p className="screen-notice">{narration.error}</p> : null}
       {notice ? <p className="screen-notice">{notice}</p> : null}
-      {!teaching && (controlling || streaming || machine === "running") ? <ComputerInputBar /> : null}
+      {interactive || streaming || machine === "running" ? <ComputerInputBar /> : null}
     </aside>
   );
+}
+
+function clock(seconds: number) {
+  const total = Math.max(0, Math.floor(seconds));
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
 }

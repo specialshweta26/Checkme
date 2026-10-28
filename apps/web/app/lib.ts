@@ -236,12 +236,42 @@ export async function saveSkill(body: { name: string; agent_id?: string; instruc
   return agentAction("/api/skills", "POST", body) as Promise<AgentSkill>;
 }
 
+export type TeachStart = { ok?: boolean; teaching?: boolean; max_seconds?: number; elapsed?: number; audio_optional?: boolean };
+
 export async function startTeaching(agentId?: string) {
-  return agentAction("/api/skills/teach/start", "POST", { agent_id: agentId });
+  return agentAction("/api/skills/teach/start", "POST", { agent_id: agentId }) as Promise<TeachStart>;
 }
 
 export async function stopTeaching(name?: string) {
-  return agentAction("/api/skills/teach/stop", "POST", { name: name || "" }) as Promise<AgentSkill>;
+  return agentAction("/api/skills/teach/stop", "POST", { name: name || "" }) as Promise<AgentSkill & { writing?: boolean; narrated?: boolean }>;
+}
+
+export async function teachingStatus() {
+  const res = await fetch("/api/skills/teach/status", { credentials: "include", cache: "no-store" });
+  if (!res.ok) return { teaching: false } as { teaching: boolean; max_seconds?: number; elapsed?: number; remaining?: number };
+  return res.json() as Promise<{ teaching: boolean; max_seconds?: number; elapsed?: number; remaining?: number }>;
+}
+
+/** File extension the API (and OpenAI transcription) accepts for a MediaRecorder blob type. */
+export function audioExtension(type: string) {
+  const base = (type || "").split(";")[0].trim().toLowerCase();
+  if (base.endsWith("/webm")) return "webm";
+  if (base.endsWith("/ogg")) return "ogg";
+  if (base === "audio/aac" || base === "audio/x-m4a") return "m4a";
+  if (base.endsWith("/mpeg")) return "mp3";
+  if (base.endsWith("/wav")) return "wav";
+  return "mp4"; // iOS Safari records audio/mp4 (AAC)
+}
+
+/** Upload one narration clip recorded while teaching. offsetMs = when the clip started, since teaching began. */
+export async function uploadNarration(blob: Blob, offsetMs: number, index = 0) {
+  const form = new FormData();
+  form.append("audio", blob, `narration-${index}.${audioExtension(blob.type)}`);
+  form.append("offset_ms", String(Math.max(0, Math.round(offsetMs))));
+  const res = await fetch("/api/skills/teach/audio", { method: "POST", credentials: "include", body: form });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(apiError(data, "Could not upload the narration"));
+  return data as { ok: boolean; clips: number };
 }
 
 export async function deleteGroup(id: string) {

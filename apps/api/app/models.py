@@ -466,7 +466,7 @@ class MemoryPassage(Base):
 
 
 class AgentSkill(Base):
-    """A saved or taught workflow for one bot. Teaching watches the screen, never a microphone."""
+    """A saved or taught workflow for one bot. Teaching records the screen plus optional, user-started narration."""
 
     __tablename__ = "agent_skills"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)

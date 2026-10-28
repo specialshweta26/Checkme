@@ -98,6 +98,12 @@ class Settings(BaseSettings):
     computer_provider: str = ""
     e2b_api_key: str = ""
     e2b_template: str = ""  # empty = E2B's public "desktop" template
+    # Teach-by-demonstration: one session lasts at most this long (seconds); the UI counts down and auto-saves.
+    teach_max_seconds: int = 600
+    # Spoken narration recorded while teaching is transcribed with this OpenAI model (segment timestamps
+    # need whisper-1's verbose_json; other models fall back to one untimed segment).
+    openai_transcribe_model: str = "whisper-1"
+    teach_audio_max_bytes: int = 24 * 1024 * 1024
     # Seconds of inactivity before the sandbox pauses (Hobby plan max 3600, Pro max 86400). Each tool call extends it.
     e2b_sandbox_timeout: int = 3600
     # Web search order (comma list of stages or provider names). Default: keyless engines (brave, duckduckgo,
