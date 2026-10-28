@@ -711,20 +711,34 @@ def decode_screen_b64(raw: str) -> bytes:
 
 
 async def _pull_screen(proc, fs=None) -> bytes:
-    # The file is rewritten by Chromium after each action. Always read it so live
-    # screen polling advances instead of pinning the first cached frame forever.
+    # Ask the browser daemon to capture a new frame over its dedicated screen
+    # endpoint first. This avoids relying on Daytona file downloads for live video.
+    try:
+        response = await _exec(
+            proc,
+            "bash -o pipefail -c 'curl -fsS --max-time 12 http://127.0.0.1:18765/screen | base64 -w0'",
+            20,
+        )
+        raw = decode_screen_b64(_out(response))
+        remember_screen(raw)
+        return raw
+    except Exception as capture_exc:  # noqa: BLE001
+        log.warning("Live screen endpoint capture failed: %s", _clip(str(capture_exc), 300))
+
+    # Keep the sandbox file as a fallback if the daemon's screenshot endpoint is
+    # briefly unavailable, then fall back to this user's last good frame.
     try:
         raw = await _file_bytes(fs, proc, "/tmp/checkme-browser.png")
-    except Exception:
+    except Exception as file_exc:  # noqa: BLE001
         cached = live_screen_png()
         if cached:
             return cached
-        raise
+        raise ToolError("Could not capture the live computer screen.") from file_exc
     if not isinstance(raw, (bytes, bytearray)) or len(raw) < 32 or not raw.startswith(b"\x89PNG"):
         cached = live_screen_png()
         if cached:
             return cached
-        raise ToolError("No live computer screen yet. Wake the computer first.")
+        raise ToolError("The computer returned an invalid screen image.")
     remember_screen(raw)
     return bytes(raw)
 
@@ -1109,7 +1123,8 @@ async def _invoke_daytona(row, name: str, args: dict[str, Any]) -> Any:
         except Exception as vis_exc:  # noqa: BLE001
             if name == "status":
                 return {"state": "suspended", "screenAvailable": False, "url": "", "title": "", "screen_agent": live_screen_agent()}
-            raise ToolError("No live computer screen yet. Wake the computer first.") from vis_exc
+            log.warning("Screen capture failed for user %s: %s", getattr(row, "user_id", "unknown"), vis_exc, exc_info=True)
+            raise ToolError(f"Live computer screen capture failed ({type(vis_exc).__name__}). Try reconnecting the computer.") from vis_exc
         finally:
             close = getattr(_client_obj, "close", None)
             if callable(close):

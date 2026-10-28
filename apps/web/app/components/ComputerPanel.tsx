@@ -668,7 +668,7 @@ export function ScreenRail({
         ) : null}
         {!controlling && !frame && !streaming && (machine !== "booting" || bootSlow) ? (
           <button type="button" className="screen-control-btn primary" onClick={() => void wake()}>
-            Open
+            {liveScreen.error ? "Reconnect" : "Open"}
           </button>
         ) : null}
         {onTakeControl && !interactive && (Boolean(frame) || streaming || machine === "running") ? (
