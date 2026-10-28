@@ -137,8 +137,9 @@ DAYTONA_TOOLS = [
         name="browser_navigate",
         description=(
             "Open an http(s) URL in the live Chromium tab on this user's computer. "
-            "Same visible browser the chat screen shows. For current events, open a Google search URL "
-            "such as https://www.google.com/search?q=the+user+query then open result links. "
+            "Same visible browser the chat screen shows. Prefer the destination site over a Google Search URL "
+            "when the user needs a live product page (bookings, inventory, forms). "
+            "If the page is a CAPTCHA or verification wall, stop and hand off — do not invent results. "
             "If a site fails, try another source — do not stop after one error."
         ),
         input_schema={
@@ -601,16 +602,20 @@ async def _computer_status(proc) -> dict:
 
 
 async def _open_in_browser(proc, fs, url: str, wait_ms: int = 1200) -> dict:
+    from app.connectors.computer_daemon import annotate_page
     from app.connectors.web_fetch import browser_failed, fetch_public_page
 
     data = await _browser_cmd(proc, {"action": "goto", "url": url, "wait_ms": wait_ms}, 180, fs)
+    annotate_page(data)
+    if data.get("bot_wall"):
+        return data
     if not browser_failed(data, url):
         return data
     try:
         page = await fetch_public_page(url)
     except Exception as vis_exc:  # noqa: BLE001
         data["error"] = (data.get("error") or str(vis_exc))[:500]
-        data["hint"] = "Open https://www.google.com/search?q= plus the user's words, then open result links."
+        data["hint"] = "Try another source URL, or request_takeover if a CAPTCHA is showing. Do not invent results."
         return data
     shown = await _browser_rpc(
         proc, {"command": "load_html", "html": page.get("html") or "", "url": page.get("url") or url}, 60, fs

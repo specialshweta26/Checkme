@@ -516,6 +516,10 @@ def test_system_prompt_has_no_product_recipes():
     assert "task_catalog" in lowered
     assert "skill_create" in lowered
     assert "request_takeover" in lowered
+    assert "bot_wall" in lowered
+    assert "do not invent" in lowered
+    assert "destination site" in lowered
+    assert "search_flights" not in lowered
     assert "start_teaching" in lowered
     assert "ten minutes" in lowered
     assert "microphone" in lowered
@@ -633,6 +637,24 @@ async def test_request_takeover_is_browser_handoff():
     data = json.loads(await tool.coroutine(reason="Log in to the site."))
     assert data["handoff"] is True
     assert ctx.pending[0]["kind"] == "handoff"
+
+
+async def test_bot_wall_auto_handoff_on_navigate():
+    async def fake_call(slug, tool, args):
+        return {
+            "ok": True,
+            "url": "https://www.google.com/sorry/index",
+            "title": "Sorry",
+            "text": "Our systems have detected unusual traffic from your computer.",
+        }
+
+    computer = _conn(slug="computer", provider="daytona", kind="builtin", name="Computer", alias="computer")
+    ctx = _ctx([computer], call_impl=fake_call)
+    nav = next(tool for tool in harness_tools(ctx) if tool.name == "browser_navigate")
+    data = json.loads(await nav.coroutine(url="https://www.google.com/search?q=news"))
+    assert data["bot_wall"] is True
+    assert data.get("handoff") is True
+    assert any(isinstance(p, dict) and p.get("kind") == "handoff" for p in ctx.pending)
 
 
 def test_last_text_skips_tool_calls():

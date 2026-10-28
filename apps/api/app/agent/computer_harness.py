@@ -50,11 +50,36 @@ def computer_missing() -> dict:
 
 async def run_computer(ctx, tool_name: str, args: dict | None = None) -> Any:
     from app.agent.deep import call_user_tool
+    from app.connectors.computer_daemon import annotate_page
 
     slug = computer_slug(ctx)
     if not slug:
         return computer_missing()
-    return await call_user_tool(ctx, slug, tool_name, args or {})
+    result = await call_user_tool(ctx, slug, tool_name, args or {})
+    if not isinstance(result, dict):
+        return result
+    annotate_page(result)
+    if tool_name in {"browser_handoff", "computer_handoff"}:
+        return result
+    if result.get("bot_wall"):
+        return await _handoff_wall(ctx, result)
+    return result
+
+
+async def _handoff_wall(ctx, result: dict) -> dict:
+    if any(isinstance(p, dict) and p.get("kind") == "handoff" for p in (ctx.pending or [])):
+        result["note"] = "The live screen is already waiting for you. Do not invent results from this page."
+        return result
+    handoff = await request_takeover(
+        ctx,
+        str(result.get("reason") or "This site is blocking the cloud browser (CAPTCHA or verification)."),
+        "Complete the CAPTCHA or verification on this screen, then tell Lumio to continue.",
+    )
+    if isinstance(handoff, dict):
+        result.update(handoff)
+    result["bot_wall"] = True
+    result["note"] = "The live screen is waiting for you. Do not invent results. End your turn."
+    return result
 
 
 async def shell(ctx, command: str, cwd: str | None = None, timeout: int = 60) -> Any:

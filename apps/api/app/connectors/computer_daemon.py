@@ -9,7 +9,7 @@ from pathlib import Path
 
 HOST = "127.0.0.1"
 PORT = 18765
-VERSION = "9"
+VERSION = "10"
 SHOT = "/tmp/checkme-browser.png"
 PROFILE = "/tmp/checkme-browser-profile"
 LAST = "/tmp/checkme-browser-last.json"
@@ -36,6 +36,78 @@ _browser_page = None
 _browser_context = None
 _elements: list[dict] = []
 
+_BOT_URL = (
+    "/sorry",
+    "recaptcha",
+    "hcaptcha",
+    "cf-challenge",
+    "challenges.cloudflare",
+    "geo.captcha",
+    "px-captcha",
+    "datadome",
+)
+_BOT_TEXT = (
+    "unusual traffic",
+    "unusual activity",
+    "automated queries",
+    "our systems have detected",
+    "verify you are human",
+    "are you a robot",
+    "i'm not a robot",
+    "enable javascript and cookies",
+    "checking your browser",
+    "attention required",
+    "please complete the security check",
+    "please verify you are",
+    "select all images",
+)
+_SETTLING = ("loading", "please wait", "just a moment", "searching")
+
+
+def page_is_thin(text: str) -> bool:
+    body = (text or "").strip()
+    if len(body) < 180:
+        return True
+    low = body.lower()
+    return any(token in low for token in _SETTLING) and len(body) < 1200
+
+
+def bot_wall(url: str = "", title: str = "", text: str = "") -> dict | None:
+    blob = " ".join([url or "", title or "", (text or "")[:4000]]).lower()
+    if "before you continue" in blob:
+        return None
+    if any(token in blob for token in _BOT_URL) or any(token in blob for token in _BOT_TEXT):
+        kind = "captcha" if "robot" in blob or "select all images" in blob else "verification"
+        return {
+            "bot_wall": True,
+            "bot_wall_kind": kind,
+            "handoff": True,
+            "reason": "This site is blocking the cloud browser (CAPTCHA or verification).",
+        }
+    return None
+
+
+def annotate_page(data: dict | None) -> dict:
+    row = data if isinstance(data, dict) else {}
+    wall = bot_wall(str(row.get("url") or ""), str(row.get("title") or ""), str(row.get("text") or ""))
+    if wall:
+        row.update(wall)
+        row["ok"] = False
+        row["content_ready"] = False
+        row["hint"] = (
+            "Do not invent results. The user must finish verification on this screen "
+            "(request_takeover / browser_handoff). After they finish, snapshot and continue."
+        )
+    elif page_is_thin(str(row.get("text") or "")):
+        row["content_ready"] = False
+        row["hint"] = (
+            "The page has not finished loading. Do not invent facts, prices, or results from this snapshot. "
+            "Wait, snapshot again, or request_takeover if a challenge is showing."
+        )
+    else:
+        row.setdefault("content_ready", True)
+    return row
+
 
 def _dump(page):
     page.screenshot(path=SHOT, full_page=False)
@@ -46,15 +118,17 @@ def _dump(page):
     Path(LAST).write_text(
         json.dumps({"url": page.url, "title": page.title(), "viewport": {"width": VIEW_W, "height": VIEW_H}})
     )
-    return {
-        "ok": True,
-        "url": page.url,
-        "title": page.title(),
-        "text": (text or "")[:12000],
-        "viewport": {"width": VIEW_W, "height": VIEW_H},
-        "screenshot_path": SHOT,
-        "screenshot_name": "page.png",
-    }
+    return annotate_page(
+        {
+            "ok": True,
+            "url": page.url,
+            "title": page.title(),
+            "text": (text or "")[:12000],
+            "viewport": {"width": VIEW_W, "height": VIEW_H},
+            "screenshot_path": SHOT,
+            "screenshot_name": "page.png",
+        }
+    )
 
 
 def _snapshot(page):
@@ -84,7 +158,7 @@ def _snapshot(page):
     data = _dump(page)
     data["tree"] = tree
     data["elements"] = _elements
-    return data
+    return annotate_page(data)
 
 
 def _find(ref: str):
@@ -313,8 +387,18 @@ def handle(cmd: dict) -> dict:
             data["ok"] = False
             data["error"] = str(vis_exc)[:500]
             data["fallback"] = "computer_act"
-            return data
-        return _snapshot(page)
+            return annotate_page(data)
+        data = _snapshot(page)
+        for _ in range(2):
+            if data.get("bot_wall") or not page_is_thin(str(data.get("text") or "")):
+                break
+            try:
+                page.mouse.wheel(0, 900)
+                page.wait_for_timeout(3000)
+            except Exception:
+                break
+            data = _snapshot(page)
+        return data
     if command == "snapshot":
         return _snapshot(page)
     if command == "act":
