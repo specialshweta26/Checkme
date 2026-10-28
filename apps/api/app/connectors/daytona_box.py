@@ -15,11 +15,12 @@ from app.config import get_settings
 from app.security import decrypt_json, encrypt
 
 log = logging.getLogger(__name__)
-_LIVE_PNG = b""
-_LIVE_AT = 0.0
-_LIVE_AGENT = ""
+_LIVE_PNG: dict[str, bytes] = {}
+_LIVE_AT: dict[str, float] = {}
+_LIVE_AGENT: dict[str, str] = {}
 _COMPUTER_BUSY: dict[str, str] = {}
 _COMPUTER_AGENT: ContextVar[tuple[str, str]] = ContextVar("computer_agent", default=("", ""))
+_SCREEN_USER: ContextVar[str] = ContextVar("computer_screen_user", default="")
 _COMPUTER_USE = {
     "exec",
     "boot",
@@ -39,16 +40,20 @@ def set_computer_agent(agent_id: str, agent_name: str = "") -> None:
     _COMPUTER_AGENT.set((agent_id or "", agent_name or ""))
 
 
-def remember_screen(raw: bytes) -> None:
+def remember_screen(raw: bytes, user_id: str | None = None) -> None:
     """Keep the latest Chromium PNG so the chat rail does not wait on Daytona."""
-    global _LIVE_PNG, _LIVE_AT
     if isinstance(raw, (bytes, bytearray)) and len(raw) >= 32 and raw.startswith(b"\x89PNG"):
-        _LIVE_PNG = bytes(raw)
-        _LIVE_AT = time.monotonic()
+        user_key = str(user_id or _SCREEN_USER.get() or "default")
+        _LIVE_PNG[user_key] = bytes(raw)
+        _LIVE_AT[user_key] = time.monotonic()
 
 
-def live_screen_png() -> bytes:
-    return _LIVE_PNG
+def live_screen_png(user_id: str | None = None) -> bytes:
+    return _LIVE_PNG.get(str(user_id or _SCREEN_USER.get() or "default"), b"")
+
+
+def live_screen_agent(user_id: str | None = None) -> str:
+    return _LIVE_AGENT.get(str(user_id or _SCREEN_USER.get() or "default"), "")
 
 DAYTONA_TOOLS = [
     ToolSpec(
@@ -550,15 +555,22 @@ def decode_screen_b64(raw: str) -> bytes:
 
 
 async def _pull_screen(proc, fs=None) -> bytes:
-    cached = live_screen_png()
-    if cached:
-        return cached
-    raw = await _file_bytes(fs, proc, "/tmp/checkme-browser.png")
-    remember_screen(raw)
-    cached = live_screen_png()
-    if not cached:
+    # The file is rewritten by Chromium after each action. Always read it so live
+    # screen polling advances instead of pinning the first cached frame forever.
+    try:
+        raw = await _file_bytes(fs, proc, "/tmp/checkme-browser.png")
+    except Exception:
+        cached = live_screen_png()
+        if cached:
+            return cached
+        raise
+    if not isinstance(raw, (bytes, bytearray)) or len(raw) < 32 or not raw.startswith(b"\x89PNG"):
+        cached = live_screen_png()
+        if cached:
+            return cached
         raise ToolError("No live computer screen yet. Wake the computer first.")
-    return cached
+    remember_screen(raw)
+    return bytes(raw)
 
 
 async def _boot_computer(proc, fs=None) -> dict:
@@ -573,7 +585,7 @@ async def _computer_status(proc) -> dict:
     ping = await _exec(proc, "curl -sf http://127.0.0.1:18765/health || echo DOWN", 8)
     raw = _out(ping).strip()
     if "DOWN" in raw or '"version"' not in raw:
-        return {"state": "suspended", "screenAvailable": False, "url": "", "title": "", "screen_agent": _LIVE_AGENT}
+        return {"state": "suspended", "screenAvailable": False, "url": "", "title": "", "screen_agent": live_screen_agent()}
     try:
         health = json.loads(raw.splitlines()[-1])
     except Exception:  # noqa: BLE001
@@ -584,7 +596,7 @@ async def _computer_status(proc) -> dict:
         "url": health.get("url") or "",
         "title": health.get("title") or "",
         "version": health.get("version") or "",
-        "screen_agent": _LIVE_AGENT,
+        "screen_agent": live_screen_agent(),
     }
 
 
@@ -692,9 +704,8 @@ async def call_daytona(row, name: str, args: dict[str, Any]) -> Any:
         from app.skills.service import record_computer_step
 
         record_computer_step(getattr(row, "user_id", None), name, args)
-        global _LIVE_AGENT
         if agent_id:
-            _LIVE_AGENT = agent_name or agent_id
+            _LIVE_AGENT[user_key or "default"] = agent_name or agent_id
         if user_key:
             holder = _COMPUTER_BUSY.get(user_key)
             if holder and holder != (agent_id or "shared"):
@@ -702,9 +713,11 @@ async def call_daytona(row, name: str, args: dict[str, Any]) -> Any:
             if not holder:
                 _COMPUTER_BUSY[user_key] = agent_id or "shared"
                 acquired = True
+    screen_user_token = _SCREEN_USER.set(user_key or "default")
     try:
         return await _invoke_daytona(row, name, args)
     finally:
+        _SCREEN_USER.reset(screen_user_token)
         if acquired and user_key:
             _COMPUTER_BUSY.pop(user_key, None)
 
@@ -718,17 +731,17 @@ async def _invoke_daytona(row, name: str, args: dict[str, Any]) -> Any:
         _client_obj, sandbox = await _existing_sandbox(row)
         if sandbox is None:
             if name == "status":
-                return {"state": "stopped", "screenAvailable": False, "url": "", "title": "", "screen_agent": _LIVE_AGENT}
+                return {"state": "stopped", "screenAvailable": False, "url": "", "title": "", "screen_agent": live_screen_agent()}
             raise ToolError("No live computer screen yet. Wake the computer first.")
         try:
             if name == "status":
                 data = await _computer_status(sandbox.process)
-                data["screen_agent"] = _LIVE_AGENT
+                data["screen_agent"] = live_screen_agent()
                 return data
             return await _pull_screen(sandbox.process, getattr(sandbox, "fs", None))
         except Exception as vis_exc:  # noqa: BLE001
             if name == "status":
-                return {"state": "suspended", "screenAvailable": False, "url": "", "title": "", "screen_agent": _LIVE_AGENT}
+                return {"state": "suspended", "screenAvailable": False, "url": "", "title": "", "screen_agent": live_screen_agent()}
             raise ToolError("No live computer screen yet. Wake the computer first.") from vis_exc
         finally:
             close = getattr(_client_obj, "close", None)

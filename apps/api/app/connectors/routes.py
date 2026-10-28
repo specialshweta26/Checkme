@@ -35,9 +35,7 @@ from app.models import Connector, ServerCard, User
 from app.security import decrypt_json, encrypt, pkce_pair
 
 log = logging.getLogger(__name__)
-_screen_lock = asyncio.Lock()
-_screen_last = b""
-_screen_at = 0.0
+_screen_locks: dict[str, asyncio.Lock] = {}
 router = APIRouter(prefix="/connectors", tags=["connectors"])
 
 
@@ -184,34 +182,31 @@ async def _computer_row(db: AsyncSession, user: User, provision: bool = True):
 
 @router.get("/computer/screen")
 async def computer_screen(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
-    """Latest live Chromium frame. Prefer the PNG captured during browse so polls do not wipe the page."""
-    global _screen_last, _screen_at
-    from app.connectors.daytona_box import call_daytona, live_screen_png, remember_screen
+    """Capture the current Chromium frame, using a user-scoped cache on capture failure."""
+    from app.connectors.daytona_box import call_daytona, live_screen_png
 
-    cached = live_screen_png()
-    if cached:
-        _screen_last = cached
-        _screen_at = time.monotonic()
-        return Response(content=cached, media_type="image/png", headers={"Cache-Control": "no-store"})
-    if _screen_last:
-        return Response(content=_screen_last, media_type="image/png", headers={"Cache-Control": "no-store"})
-    if _screen_lock.locked():
-        raise HTTPException(404, "No live screen yet")
     row = await _computer_row(db, user, provision=False)
-    async with _screen_lock:
-        cached = live_screen_png() or _screen_last
+    user_key = str(user.id)
+    lock = _screen_locks.setdefault(user_key, asyncio.Lock())
+    if lock.locked():
+        cached = live_screen_png(user_key)
         if cached:
-            return Response(content=cached, media_type="image/png", headers={"Cache-Control": "no-store"})
+            return Response(content=cached, media_type="image/png", headers={"Cache-Control": "no-store", "X-Screen-Stale": "true"})
+        raise HTTPException(404, "No live screen yet")
+    async with lock:
         try:
-            data = await asyncio.wait_for(call_daytona(row, "screen_png", {}), timeout=6)
+            data = await asyncio.wait_for(call_daytona(row, "screen_png", {}), timeout=10)
         except Exception as vis_exc:  # noqa: BLE001
+            cached = live_screen_png(user_key)
+            if cached:
+                return Response(content=cached, media_type="image/png", headers={"Cache-Control": "no-store", "X-Screen-Stale": "true"})
             raise HTTPException(404, str(vis_exc)[:200]) from vis_exc
-        if not isinstance(data, (bytes, bytearray)) or not data:
+        if not isinstance(data, (bytes, bytearray)) or len(data) < 32 or not bytes(data).startswith(b"\x89PNG"):
+            cached = live_screen_png(user_key)
+            if cached:
+                return Response(content=cached, media_type="image/png", headers={"Cache-Control": "no-store", "X-Screen-Stale": "true"})
             raise HTTPException(404, "No live screen yet")
-        remember_screen(bytes(data))
-        _screen_last = bytes(data)
-        _screen_at = time.monotonic()
-        return Response(content=_screen_last, media_type="image/png", headers={"Cache-Control": "no-store"})
+        return Response(content=bytes(data), media_type="image/png", headers={"Cache-Control": "no-store"})
 
 
 @router.get("/computer/status")

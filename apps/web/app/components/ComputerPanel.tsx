@@ -56,36 +56,45 @@ function useLiveScreen(active: boolean) {
   const held = useRef("");
   useEffect(() => {
     if (!active) return;
-    let timer = 0;
     const ac = new AbortController();
+    let timer = 0;
     const tick = async () => {
+      const request = new AbortController();
+      const abortRequest = () => request.abort();
+      const timeout = window.setTimeout(() => request.abort(), 12000);
+      ac.signal.addEventListener("abort", abortRequest, { once: true });
       try {
         const res = await fetch("/api/connectors/computer/screen", {
           credentials: "include",
           cache: "no-store",
-          signal: ac.signal,
+          signal: request.signal,
         });
-        if (!res.ok) return;
+        if (!res.ok) throw new Error("screen capture unavailable");
         const blob = await res.blob();
-        if (blob.size < 32) return;
+        if (blob.size < 32) throw new Error("empty screen frame");
         const head = new Uint8Array(await blob.slice(0, 8).arrayBuffer());
         const png = head[0] === 0x89 && head[1] === 0x50 && head[2] === 0x4e && head[3] === 0x47;
         const jpeg = head[0] === 0xff && head[1] === 0xd8;
         const kind = blob.type || res.headers.get("content-type") || "";
-        if (!png && !jpeg && kind && !kind.startsWith("image/")) return;
-        if (held.current) URL.revokeObjectURL(held.current);
+        if (!png && !jpeg && !kind.startsWith("image/")) throw new Error("invalid screen frame");
+        if (ac.signal.aborted) return;
         const objectUrl = URL.createObjectURL(blob);
+        const previous = held.current;
         held.current = objectUrl;
         setUrl(objectUrl);
+        if (previous) URL.revokeObjectURL(previous);
       } catch {
         /* keep last frame */
+      } finally {
+        ac.signal.removeEventListener("abort", abortRequest);
+        window.clearTimeout(timeout);
+        if (!ac.signal.aborted) timer = window.setTimeout(tick, 1200);
       }
     };
-    tick();
-    timer = window.setInterval(tick, 1500);
+    void tick();
     return () => {
       ac.abort();
-      window.clearInterval(timer);
+      window.clearTimeout(timer);
     };
   }, [active]);
   useEffect(
@@ -163,8 +172,11 @@ export function ScreenRail({
   controlling = false,
   agentName = "Chief",
   status = "",
+  teaching = false,
   onTakeControl,
   onRelease,
+  onTeachStart,
+  onTeachStop,
   onClose,
 }: {
   session?: ComputerSession | null;
@@ -172,8 +184,11 @@ export function ScreenRail({
   controlling?: boolean;
   agentName?: string;
   status?: string;
+  teaching?: boolean;
   onTakeControl?: () => void;
   onRelease?: () => void;
+  onTeachStart?: () => Promise<void>;
+  onTeachStop?: (name: string) => Promise<void>;
   onClose?: () => void;
 }) {
   const still = useCredentialedImage(session?.preview_url || session?.download_url);
@@ -188,7 +203,9 @@ export function ScreenRail({
   const previewRef = useRef<HTMLDivElement>(null);
   const typing = useRef("");
   const typeTimer = useRef(0);
+  const actionQueue = useRef<Promise<void>>(Promise.resolve());
   const waking = useRef(false);
+  const [teachingBusy, setTeachingBusy] = useState(false);
   const [notice, setNotice] = useState("");
   useEffect(() => {
     if (controlling) previewRef.current?.focus();
@@ -228,20 +245,22 @@ export function ScreenRail({
   if (/chromewebdata|chrome-error/i.test(href) || host === "chromewebdata") {
     host = "loading the page…";
   }
-  const label = controlling
-    ? "you have control"
-    : machine === "booting"
-      ? "Booting live desktop…"
-      : watching
-        ? status || "Operating the computer"
-        : machine === "running"
-          ? host || "live"
-          : asleep
-            ? "suspended"
-            : host || status || "idle";
+  const label = teaching
+    ? "recording task"
+    : controlling
+      ? "you have control"
+      : machine === "booting"
+        ? "Booting live desktop…"
+        : watching
+          ? status || "Operating the computer"
+          : machine === "running"
+            ? host || "live"
+            : asleep
+              ? "suspended"
+              : host || status || "idle";
 
   async function wake() {
-    if (waking.current) return;
+    if (waking.current) return false;
     waking.current = true;
     setNotice("");
     setMachine("booting");
@@ -252,9 +271,11 @@ export function ScreenRail({
       setMachine("running");
       if (data.url) setPageUrl(data.url);
       if (data.title) setPageTitle(data.title);
+      return true;
     } catch (err: any) {
       setMachine("suspended");
       setNotice(err?.message || "Could not wake the computer");
+      return false;
     } finally {
       waking.current = false;
     }
@@ -263,10 +284,39 @@ export function ScreenRail({
 
   async function act(payload: Record<string, unknown>) {
     setNotice("");
-    try {
-      await sendControl(payload);
-    } catch (err: any) {
+    const queued = actionQueue.current.then(() => sendControl(payload));
+    actionQueue.current = queued.catch((err: any) => {
       setNotice(err?.message || "Control failed");
+    });
+    await actionQueue.current;
+  }
+
+  async function beginTeaching() {
+    if (!onTeachStart || teachingBusy) return;
+    setTeachingBusy(true);
+    try {
+      if (machine !== "running" && !(await wake())) return;
+      await onTeachStart();
+    } catch (err: any) {
+      setNotice(err?.message || "Could not start teaching");
+    } finally {
+      setTeachingBusy(false);
+    }
+  }
+
+  async function finishTeaching() {
+    if (!onTeachStop || teachingBusy) return;
+    const name = window.prompt("Name this skill", "Taught workflow");
+    if (name === null) return;
+    setTeachingBusy(true);
+    try {
+      await onTeachStop(name.trim() || "Taught workflow");
+      setNotice("Skill saved. Your agent can reuse this task.");
+      onRelease?.();
+    } catch (err: any) {
+      setNotice(err?.message || "Could not save the skill");
+    } finally {
+      setTeachingBusy(false);
     }
   }
 
@@ -283,9 +333,19 @@ export function ScreenRail({
       <div className="screen-rail-head">
         <div className="screen-rail-copy">
           <span className="screen-bot">{`${screenAgent || agentName}'s screen`}</span>
-          <span className={`screen-state${controlling ? " control" : watching ? " live" : asleep ? " asleep" : ""}`}>{label}</span>
+          <span className={`screen-state${controlling || teaching ? " control" : watching ? " live" : asleep ? " asleep" : ""}`}>{label}</span>
         </div>
         <div className="screen-rail-actions">
+        {onTeachStart && !teaching ? (
+          <button type="button" className="screen-control-btn" disabled={teachingBusy} onClick={() => void beginTeaching()}>
+            {teachingBusy ? "Starting…" : "Teach a task"}
+          </button>
+        ) : null}
+        {teaching ? (
+          <button type="button" className="screen-control-btn primary" disabled={teachingBusy} onClick={() => void finishTeaching()}>
+            {teachingBusy ? "Saving…" : "Stop & save skill"}
+          </button>
+        ) : null}
         {!controlling && !frame && machine !== "booting" ? (
           <button type="button" className="screen-control-btn primary" onClick={() => void wake()}>
             Open
@@ -296,12 +356,12 @@ export function ScreenRail({
             Take control
           </button>
         ) : null}
-        {controlling && onRelease ? (
+        {controlling && onRelease && !teaching ? (
           <button type="button" className="screen-control-btn primary" onClick={onRelease}>
             Done
           </button>
         ) : null}
-        {onClose ? (
+        {onClose && !teaching ? (
           <button type="button" className="screen-control-btn" onClick={onClose} aria-label="Close computer">
             Close
           </button>
@@ -374,7 +434,11 @@ export function ScreenRail({
         )}
       </div>
       <p className="screen-caption">
-        {controlling ? session?.handoff_reason || "Click, type, and scroll on this screen." : `${agentName}'s screen`}
+        {teaching
+          ? "Recording your clicks, typing, and scrolling. No audio is recorded."
+          : controlling
+            ? session?.handoff_reason || "Click, type, and scroll on this screen."
+            : `${agentName}'s screen`}
       </p>
       {notice ? <p className="screen-notice">{notice}</p> : null}
     </aside>

@@ -11,7 +11,7 @@ import { dismissFocusCard, focusCardDismissed, FocusOnboarding, type FocusOption
 import { JobTimeline } from "../components/JobTimeline";
 import { formatPreview } from "../components/preview";
 import { Thinking } from "../components/Thinking";
-import { announceWorkspaceChanged, chatHref, updateAgent, deleteSession, getMe, listSessions, loadSession, rememberScope, uploadFiles, type ChatSessionRow, type Me, type UploadedFile, type WorkspaceRoster } from "../lib";
+import { announceWorkspaceChanged, chatHref, updateAgent, deleteSession, getMe, listSessions, loadSession, rememberScope, uploadFiles, startTeaching, stopTeaching, type ChatSessionRow, type Me, type UploadedFile, type WorkspaceRoster } from "../lib";
 
 const STORE = "assistant.session";
 
@@ -100,6 +100,7 @@ export default function ChatPage() {
   const [uploadError, setUploadError] = useState("");
   const [watching, setWatching] = useState(false);
   const [controlling, setControlling] = useState(false);
+  const [teaching, setTeaching] = useState(false);
   const [screenOpen, setScreenOpen] = useState(false);
   const [agentId, setAgentId] = useState<string | null>(null);
   const [groupId, setGroupId] = useState<string | null>(null);
@@ -884,6 +885,18 @@ export default function ChatPage() {
             status={busyHere ? "working" : controlling ? "you have control" : ""}
             onClose={() => setScreenOpen(false)}
             onTakeControl={() => setControlling(true)}
+            teaching={teaching}
+            onTeachStart={async () => {
+              const group = roster.groups.find((row) => row.id === groupId);
+              const skillAgentId = agentId || group?.owner_id || group?.members[0]?.id;
+              await startTeaching(skillAgentId || undefined);
+              setTeaching(true);
+              setControlling(true);
+            }}
+            onTeachStop={async (name) => {
+              await stopTeaching(name);
+              setTeaching(false);
+            }}
             onRelease={() => {
               const handoff = pending.filter((p) => p.kind === "handoff" || p.preview?.kind === "handoff");
               setControlling(false);
