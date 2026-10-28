@@ -394,6 +394,25 @@ Why: mobile Safari fails a `fetch` with "Load failed" after about 60 s without a
 - **Browser RPC.** Each command writes its own `/tmp/checkme_cmd_<token>.json` (it used to be one shared file, so parallel calls swapped commands), and the file is removed after curl. Commands are serialized per user, and the whole RPC is capped at timeout + 30 s. A command that provably never reached the daemon (upload failed, curl exit 7 or 26) is retried once after re-checking the daemon. Anything that may have run is not retried, so clicks never double.
 - **Exact targets (daemon v12).** A snapshot tags each visible interactive element with `data-checkme-ref="eN"`, in-view elements first, up to 150. A ref resolves only to that attribute, then to an exact role and name, and never to fuzzy text. Fuzzy text once turned Google's "Search" box into the footer link "How Search works". A ref from an older page is rejected with "take a new browser_snapshot". A failed step returns `ok=false`, the error, the completed steps and a fresh snapshot, so the agent can keep its observe-act loop going.
 
+### 7.5 Research crawl and browser tabs
+
+**Research crawl (`app/agent/research.py`; tools `research_crawl`, `research_notes`, `browser_rank_links`).** This is for tasks that read many pages, such as research or building a wiki, without blowing up the context.
+- **Seeds and dedupe.** Start from URLs or up to 5 `web_search` queries. URLs are deduped by canonical form: https, no `www.`, no fragment, tracking params stripped, sorted query, no trailing slash.
+- **Fetching.** Pages are fetched over plain HTTP in parallel (`concurrency` 6, at most 2 per host, 30 s each). Private-network URLs are refused (`safe_http_url`).
+- **Best-first.** Links are extracted from each page (honouring `<base>`, skipping assets) and scored against the goal. The score combines goal-term overlap in the anchor text and URL path, a bit of the parent page's relevance, and a penalty for login, legal or share areas. Links go into a priority queue.
+- **Budgets and stop.** `max_pages` (≤300), `max_depth` (≤5), a time budget per call, the follow threshold, and an optional "enough relevant pages" condition.
+- **Map step.** Every page becomes a note: an extractive summary of the sentences with the most goal terms (about 900 chars) and a relevance score. The tool returns the best notes, and `research_notes` re-ranks them for a narrower question. The model synthesizes from these notes (the reduce step).
+- **Checkpoints.** State (frontier, seen, notes) is saved in Redis (`research:{user}:{crawl_id}`, 7-day TTL) after every batch. `crawl_id` plus `more_pages` resumes the crawl after a timeout, a restart or a new turn.
+- **Browser fallback.** Thin JS shells, bot walls and failed fetches are listed under `needs_browser` for the computer tools. In the browser, `browser_rank_links(goal)` scores the current page's link refs, so the agent clicks the best ones or opens several in background tabs.
+- **Long runs.** These belong in `start_background_task` (worker brief, §7.4), and the deliverable is written as linked markdown pages with sources.
+
+**Tabs (daemon v13).**
+- **Tracking.** The daemon keeps `t1, t2, …` for the pages of its one persistent context, up to 12. Pages opened by `target=_blank` or `window.open` are registered automatically.
+- **Tools.** `browser_tabs`, `browser_new_tab(url, background)`, `browser_switch_tab(tab)` and `browser_close_tab(tab)`. `browser_navigate`, `browser_snapshot`, `browser_act` and `computer_observe` accept `tab=` to work on a tab without switching the screen.
+- **Per-tab state.** Each tab keeps its own refs. The active tab is the one brought to the front and shown on the live screen (and in `/screen`).
+- **Concurrency.** Commands are serialized by the daemon lock (Playwright sync), so concurrent work across tabs interleaves per command. Truly parallel page reading belongs on the HTTP crawl path.
+- **Last tab.** The last tab is cleared instead of closed.
+
 ### 7.3 Web search (`app/agent/web_tools.py`)
 
 `web_search(query)` tries providers in order and returns `{query, results:[{title,url,snippet}], source, fallback_from?}` from the first that has results, or `{results: [], error, tried}`. It never invents results.

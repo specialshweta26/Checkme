@@ -30,6 +30,10 @@ _COMPUTER_USE = {
     "web_fetch",
     "browser_snapshot",
     "browser_act",
+    "browser_tabs",
+    "browser_new_tab",
+    "browser_switch_tab",
+    "browser_close_tab",
     "computer_observe",
     "computer_act",
     "computer_control",
@@ -148,6 +152,7 @@ DAYTONA_TOOLS = [
             "properties": {
                 "url": {"type": "string", "description": "http or https URL to open."},
                 "wait_ms": {"type": "integer", "description": "Extra wait after load. Default 1200."},
+                "tab": {"type": "string", "description": "Optional tab id (t1, t2 from browser_tabs). Works on that tab without switching the screen; default is the active tab."},
             },
             "required": ["url"],
         },
@@ -163,7 +168,7 @@ DAYTONA_TOOLS = [
             "return a fresh snapshot, so call this only when you need to re-read. If it returns fallback computer_act, "
             "observe the screen instead."
         ),
-        input_schema={"type": "object", "properties": {}},
+        input_schema={"type": "object", "properties": {"tab": {"type": "string", "description": "Optional tab id (t1, t2 from browser_tabs). Works on that tab without switching the screen; default is the active tab."},}},
         group="computer",
         tags=("computer", "browser"),
     ),
@@ -181,10 +186,52 @@ DAYTONA_TOOLS = [
                 "actions": {
                     "type": "array",
                     "description": "Ordered steps, e.g. [{kind: click, ref: e3}].",
-                }
+                },
+                "tab": {"type": "string", "description": "Optional tab id (t1, t2 from browser_tabs). Works on that tab without switching the screen; default is the active tab."},
             },
             "required": ["actions"],
         },
+        group="computer",
+        read_only=False,
+        tags=("computer", "browser"),
+    ),
+    ToolSpec(
+        name="browser_tabs",
+        description="List the computer browser's open tabs: tab id (t1, t2), URL, title, and which one is active (shown on the live screen).",
+        input_schema={"type": "object", "properties": {}},
+        group="computer",
+        tags=("computer", "browser"),
+    ),
+    ToolSpec(
+        name="browser_new_tab",
+        description=(
+            "Open a new browser tab, optionally at a URL, and return its tab id and snapshot. Use tabs to keep several "
+            "pages open at once (e.g. the same search on different sites) and come back to each with its state intact. "
+            "background=true opens it without switching the live screen. Links that open a new window also become tabs."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "Optional http(s) URL."},
+                "background": {"type": "boolean", "description": "Open without making it the active tab."},
+            },
+        },
+        group="computer",
+        read_only=False,
+        tags=("computer", "browser"),
+    ),
+    ToolSpec(
+        name="browser_switch_tab",
+        description="Make a tab active (shown on the live screen) and return its snapshot.",
+        input_schema={"type": "object", "properties": {"tab": {"type": "string", "description": "Tab id from browser_tabs."}}, "required": ["tab"]},
+        group="computer",
+        read_only=False,
+        tags=("computer", "browser"),
+    ),
+    ToolSpec(
+        name="browser_close_tab",
+        description="Close a tab (default: the active one). The last tab is cleared instead of closed.",
+        input_schema={"type": "object", "properties": {"tab": {"type": "string", "description": "Tab id from browser_tabs."}}},
         group="computer",
         read_only=False,
         tags=("computer", "browser"),
@@ -706,11 +753,11 @@ async def _computer_status(proc) -> dict:
     }
 
 
-async def _open_in_browser(proc, fs, url: str, wait_ms: int = 1200) -> dict:
+async def _open_in_browser(proc, fs, url: str, wait_ms: int = 1200, tab: str = "") -> dict:
     from app.connectors.computer_daemon import annotate_page
     from app.connectors.web_fetch import browser_failed, fetch_public_page
 
-    data = await _browser_cmd(proc, {"action": "goto", "url": url, "wait_ms": wait_ms}, 180, fs)
+    data = await _browser_cmd(proc, {"action": "goto", "url": url, "wait_ms": wait_ms, "tab": tab}, 180, fs)
     annotate_page(data)
     if data.get("bot_wall"):
         return data
@@ -723,7 +770,7 @@ async def _open_in_browser(proc, fs, url: str, wait_ms: int = 1200) -> dict:
         data["hint"] = "Try another source URL, or request_takeover if a CAPTCHA is showing. Do not invent results."
         return data
     shown = await _browser_rpc(
-        proc, {"command": "load_html", "html": page.get("html") or "", "url": page.get("url") or url}, 60, fs
+        proc, {"command": "load_html", "html": page.get("html") or "", "url": page.get("url") or url, "tab": tab}, 60, fs
     )
     shown["ok"] = True
     shown["url"] = page.get("url") or url
@@ -738,7 +785,12 @@ async def _open_in_browser(proc, fs, url: str, wait_ms: int = 1200) -> dict:
 async def _browser_cmd(proc, payload: dict, timeout: int = 90, fs=None) -> dict:
     action = str(payload.get("action") or "goto")
     if action == "goto":
-        return await _browser_rpc(proc, {"command": "navigate", "url": payload.get("url"), "wait_ms": payload.get("wait_ms")}, timeout, fs)
+        return await _browser_rpc(
+            proc,
+            {"command": "navigate", "url": payload.get("url"), "wait_ms": payload.get("wait_ms"), "tab": payload.get("tab") or ""},
+            timeout,
+            fs,
+        )
     if action == "screenshot":
         return await _browser_rpc(proc, {"command": "observe"}, timeout, fs)
     kind = action
@@ -979,8 +1031,21 @@ async def _invoke_daytona(row, name: str, args: dict[str, Any]) -> Any:
                 "exit_code": getattr(response, "exit_code", None),
                 "stdout": _clip(getattr(response, "result", None) or getattr(response, "stdout", "") or ""),
             }
+        tab = str(args.get("tab") or "").strip()
         if name in {"browse_open", "browser_navigate"}:
-            return await _open_in_browser(proc, fs, safe_http_url(args.get("url") or ""), int(args.get("wait_ms") or 1200))
+            return await _open_in_browser(proc, fs, safe_http_url(args.get("url") or ""), int(args.get("wait_ms") or 1200), tab)
+        if name == "browser_tabs":
+            return await _browser_rpc(proc, {"command": "tabs"}, 20, fs)
+        if name == "browser_new_tab":
+            url = str(args.get("url") or "").strip()
+            payload = {"command": "new_tab", "url": safe_http_url(url) if url else "", "background": bool(args.get("background"))}
+            return await _browser_rpc(proc, payload, 180, fs)
+        if name == "browser_switch_tab":
+            if not tab:
+                raise ToolError("browser_switch_tab requires tab (see browser_tabs)")
+            return await _browser_rpc(proc, {"command": "switch_tab", "tab": tab}, 60, fs)
+        if name == "browser_close_tab":
+            return await _browser_rpc(proc, {"command": "close_tab", "tab": tab}, 30, fs)
         if name == "web_fetch":
             from app.connectors.web_fetch import fetch_public_page
 
@@ -1003,16 +1068,16 @@ async def _invoke_daytona(row, name: str, args: dict[str, Any]) -> Any:
             shown["fetched_via"] = "network"
             return shown
         if name == "browser_snapshot":
-            return await _browser_rpc(proc, {"command": "snapshot"}, 60, fs)
+            return await _browser_rpc(proc, {"command": "snapshot", "tab": tab}, 60, fs)
         if name == "browser_act":
             actions = args.get("actions")
             if isinstance(actions, str):
                 actions = json.loads(actions)
             if not isinstance(actions, list) or not actions:
                 raise ToolError("browser_act requires actions")
-            return await _browser_rpc(proc, {"command": "act", "actions": actions}, 90, fs)
+            return await _browser_rpc(proc, {"command": "act", "actions": actions, "tab": tab}, 90, fs)
         if name == "computer_observe":
-            return await _browser_rpc(proc, {"command": "observe"}, 60, fs)
+            return await _browser_rpc(proc, {"command": "observe", "tab": tab}, 60, fs)
         if name in {"computer_act", "computer_control"}:
             actions = args.get("actions")
             if isinstance(actions, str):

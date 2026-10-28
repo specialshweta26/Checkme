@@ -11,7 +11,7 @@ from pathlib import Path
 
 HOST = "127.0.0.1"
 PORT = 18765
-VERSION = "12"
+VERSION = "13"
 SHOT = "/tmp/checkme-browser.png"
 PROFILE = "/tmp/checkme-browser-profile"
 LAST = "/tmp/checkme-browser-last.json"
@@ -38,6 +38,11 @@ _browser_page = None
 _browser_context = None
 _elements: list[dict] = []
 _elements_url = ""
+# Tabs: id -> Page, the active tab (what the live screen shows), and each tab's last snapshot (refs are per tab).
+_tabs: dict = {}
+_active_tab = ""
+_tab_seq = 0
+_tab_refs: dict = {}
 
 _BOT_URL = (
     "/sorry",
@@ -173,6 +178,7 @@ def _snapshot(page):
     global _elements, _elements_url
     _elements = nodes if isinstance(nodes, list) else []
     _elements_url = page.url
+    _tab_refs[id(page)] = (_elements, _elements_url)
     tree = "\n".join(f"- {n.get('ref')} {n.get('role')} {n.get('name') or ''}".strip() for n in _elements)
     data = _dump(page)
     data["tree"] = tree
@@ -455,14 +461,138 @@ def _ensure_page():
         ],
     )
     _browser_page = _browser_context.pages[0] if _browser_context.pages else _browser_context.new_page()
+    _register_tab(_browser_page, activate=True)
+    # Links with target=_blank and window.open become tabs the agent can list and switch to.
+    _browser_context.on("page", lambda pg: _register_tab(pg, activate=False))
     if _needs_desktop(_browser_page):
         _paint_desktop(_browser_page)
     return _browser_page
 
 
+def _register_tab(page, activate: bool) -> str:
+    global _tab_seq, _active_tab
+    for tid, pg in _tabs.items():
+        if pg is page:
+            return tid
+    _tab_seq += 1
+    tid = f"t{_tab_seq}"
+    _tabs[tid] = page
+
+    def _closed(*_):
+        global _active_tab, _browser_page
+        _tabs.pop(tid, None)
+        _tab_refs.pop(id(page), None)
+        if _active_tab == tid:
+            _active_tab = next(reversed(_tabs), "") if _tabs else ""
+            _browser_page = _tabs.get(_active_tab)
+
+    try:
+        page.on("close", _closed)
+    except Exception:
+        pass
+    if activate or not _active_tab:
+        _active_tab = tid
+    return tid
+
+
+def _activate(tid: str):
+    global _active_tab, _browser_page
+    page = _tabs[tid]
+    _active_tab = tid
+    _browser_page = page
+    try:
+        page.bring_to_front()
+    except Exception:
+        pass
+    return page
+
+
+def _tab_list() -> list:
+    rows = []
+    for tid, pg in list(_tabs.items()):
+        try:
+            title = pg.title()
+        except Exception:
+            title = ""
+        rows.append({"tab": tid, "url": getattr(pg, "url", ""), "title": title[:120], "active": tid == _active_tab})
+    return rows
+
+
+def _page_for(cmd: dict):
+    """The tab a command targets: cmd["tab"] when given (without switching the screen), else the active tab."""
+    global _elements, _elements_url
+    _ensure_page()
+    tid = str(cmd.get("tab") or "").strip() or _active_tab
+    if tid not in _tabs:
+        raise RuntimeError(f"no tab {tid}; open tabs: {', '.join(_tabs) or 'none'} (use browser_tabs)")
+    page = _tabs[tid]
+    _elements, _elements_url = _tab_refs.get(id(page), ([], ""))
+    return tid, page
+
+
+def _with_tab(data: dict, tid: str) -> dict:
+    data["tab"] = tid
+    data["tabs"] = len(_tabs)
+    return data
+
+
+def _tab_command(command: str, cmd: dict) -> dict:
+    _ensure_page()
+    if command == "tabs":
+        return {"ok": True, "active": _active_tab, "tabs": _tab_list()}
+    if command == "new_tab":
+        if len(_tabs) >= MAX_TABS:
+            raise RuntimeError(f"at most {MAX_TABS} tabs; close one with browser_close_tab first")
+        page = _browser_context.new_page()
+        tid = _register_tab(page, activate=False)
+        if not cmd.get("background"):
+            _activate(tid)
+        url = str(cmd.get("url") or "").strip()
+        if url:
+            page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            page.wait_for_timeout(int(cmd.get("wait_ms") or 1200))
+            return _with_tab(_snapshot(page), tid)
+        return {"ok": True, "tab": tid, "active": _active_tab, "tabs": _tab_list()}
+    if command == "switch_tab":
+        tid = str(cmd.get("tab") or "").strip()
+        if tid not in _tabs:
+            raise RuntimeError(f"no tab {tid}; open tabs: {', '.join(_tabs) or 'none'}")
+        page = _activate(tid)
+        return _with_tab(_snapshot(page), tid)
+    if command == "close_tab":
+        tid = str(cmd.get("tab") or "").strip() or _active_tab
+        if tid not in _tabs:
+            raise RuntimeError(f"no tab {tid}; open tabs: {', '.join(_tabs) or 'none'}")
+        if len(_tabs) == 1:
+            # Keep one tab so the screen and the browser stay alive.
+            _tabs[tid].goto("about:blank")
+            return {"ok": True, "closed": tid, "note": "last tab cleared instead of closed", "tabs": _tab_list()}
+        page = _tabs[tid]
+        page.close()
+        _tabs.pop(tid, None)
+        _tab_refs.pop(id(page), None)
+        if _active_tab == tid or _active_tab not in _tabs:
+            _activate(next(reversed(_tabs)))
+        return {"ok": True, "closed": tid, "active": _active_tab, "tabs": _tab_list()}
+    raise RuntimeError(f"unknown tab command {command}")
+
+
+MAX_TABS = 12
+TAB_COMMANDS = {"tabs", "new_tab", "switch_tab", "close_tab"}
+
+
 def handle(cmd: dict) -> dict:
     command = str(cmd.get("command") or "").strip()
-    page = _ensure_page()
+    if command in TAB_COMMANDS:
+        return _tab_command(command, cmd)
+    if command in {"navigate", "goto", "snapshot", "act", "observe", "screenshot", "load_html"}:
+        tid, page = _page_for(cmd)
+        data = _handle_page(command, cmd, page)
+        return _with_tab(data, tid) if isinstance(data, dict) else data
+    return _handle_page(command, cmd, _ensure_page())
+
+
+def _handle_page(command: str, cmd: dict, page) -> dict:
     wait = int(cmd.get("wait_ms") or 1200)
     if command in {"navigate", "goto"}:
         try:

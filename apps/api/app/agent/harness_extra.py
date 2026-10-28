@@ -24,12 +24,23 @@ def _dumps(value: Any, limit: int = 60000) -> str:
 class UrlInput(BaseModel):
     url: str = Field(description="http or https URL.")
     wait_ms: int = Field(default=0, description="Extra wait after load in ms. 0 = default.")
+    tab: str = Field(default="", description="Optional tab id (t1, t2 from browser_tabs); works on that tab without switching the screen. Default: active tab.")
 
 
 class BrowserActInput(BaseModel):
     actions: list[dict[str, Any]] = Field(
         description="Ordered steps, e.g. [{kind: click, ref: e3}]. kind: click, fill, type, select, check, press, scroll, wait, reload, back."
     )
+    tab: str = Field(default="", description="Optional tab id (t1, t2 from browser_tabs); works on that tab without switching the screen. Default: active tab.")
+
+
+class TabInput(BaseModel):
+    tab: str = Field(default="", description="Optional tab id (t1, t2 from browser_tabs); works on that tab without switching the screen. Default: active tab.")
+
+
+class NewTabInput(BaseModel):
+    url: str = Field(default="", description="Optional http(s) URL to open in the new tab.")
+    background: bool = Field(default=False, description="Open without switching the live screen to it.")
 
 
 class ComputerActInput(BaseModel):
@@ -70,6 +81,29 @@ class TakeoverInput(BaseModel):
 class WebSearchInput(BaseModel):
     query: str = Field(description="Search query. Use the user's words, not a capability phrase.")
     count: int = Field(default=8, description="How many results (1-12).")
+
+
+class ResearchInput(BaseModel):
+    goal: str = Field(default="", description="What you are trying to find out; links are scored against it.")
+    seeds: list[str] = Field(default_factory=list, description="Start URLs.")
+    queries: list[str] = Field(default_factory=list, description="Web searches whose results become start URLs (up to 5).")
+    max_pages: int = Field(default=30, description="Page budget (max 300).")
+    max_depth: int = Field(default=2, description="How many links deep to follow from a start URL (max 5).")
+    same_site: bool = Field(default=False, description="Only follow links on the start sites.")
+    crawl_id: str = Field(default="", description="Resume an earlier crawl instead of starting one.")
+    more_pages: int = Field(default=0, description="When resuming: extra pages to read.")
+
+
+class RankLinksInput(BaseModel):
+    goal: str = Field(description="What you are looking for on this site.")
+    tab: str = Field(default="", description="Optional tab id; default the active tab.")
+    top: int = Field(default=12, description="How many links.")
+
+
+class ResearchNotesInput(BaseModel):
+    crawl_id: str
+    query: str = Field(default="", description="Rank notes by this narrower question.")
+    top: int = Field(default=15, description="How many notes (max 60).")
 
 
 class FetchInput(BaseModel):
@@ -173,23 +207,48 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         ctx.used_tools.append("computer_act")
         return _dumps(await computer.run_computer(ctx, "computer_act", {"actions": actions}))
 
-    async def browser_navigate(url: str, wait_ms: int = 0) -> str:
-        """Open an http(s) URL in the live computer browser (the same screen the chat shows). Prefer the destination site over a Google Search URL. If the page is a CAPTCHA or verification wall, request_takeover — do not invent results."""
+    async def browser_navigate(url: str, wait_ms: int = 0, tab: str = "") -> str:
+        """Open an http(s) URL in the live computer browser (the same screen the chat shows) and return its snapshot. Prefer the destination site over a Google Search URL. If the page is a CAPTCHA or verification wall, request_takeover — do not invent results."""
         ctx.used_tools.append("browser_navigate")
         args: dict[str, Any] = {"url": url}
         if wait_ms:
             args["wait_ms"] = wait_ms
+        if tab:
+            args["tab"] = tab
         return _dumps(await computer.run_computer(ctx, "browser_navigate", args))
 
-    async def browser_snapshot() -> str:
-        """Read the live computer browser: URL, title, page text, and interactive refs (e0, e1). Call this before browser_act."""
+    async def browser_snapshot(tab: str = "") -> str:
+        """Re-read the live computer browser: URL, title, page text, and interactive refs (e0, e1). browser_navigate and browser_act already return one."""
         ctx.used_tools.append("browser_snapshot")
-        return _dumps(await computer.run_computer(ctx, "browser_snapshot", {}))
+        return _dumps(await computer.run_computer(ctx, "browser_snapshot", {"tab": tab} if tab else {}))
 
-    async def browser_act(actions: list[dict[str, Any]]) -> str:
-        """Act on the live computer browser using snapshot refs (e0, e1). kind: click, fill, type, select, check, press, scroll, wait, reload, back."""
+    async def browser_act(actions: list[dict[str, Any]], tab: str = "") -> str:
+        """Act on the live computer browser using snapshot refs (e0, e1). kind: click, fill, type, select, check, press, scroll, wait, reload, back. Returns a fresh snapshot."""
         ctx.used_tools.append("browser_act")
-        return _dumps(await computer.run_computer(ctx, "browser_act", {"actions": actions}))
+        args: dict[str, Any] = {"actions": actions}
+        if tab:
+            args["tab"] = tab
+        return _dumps(await computer.run_computer(ctx, "browser_act", args))
+
+    async def browser_tabs() -> str:
+        """List open browser tabs (t1, t2): URL, title, and which is active on the live screen."""
+        ctx.used_tools.append("browser_tabs")
+        return _dumps(await computer.run_computer(ctx, "browser_tabs", {}))
+
+    async def browser_new_tab(url: str = "", background: bool = False) -> str:
+        """Open a new tab (optionally at a URL) and return its tab id and snapshot. Keep several pages open, e.g. the same search on different sites, and work each by passing tab= to browser_navigate / browser_snapshot / browser_act."""
+        ctx.used_tools.append("browser_new_tab")
+        return _dumps(await computer.run_computer(ctx, "browser_new_tab", {"url": url, "background": background}))
+
+    async def browser_switch_tab(tab: str = "") -> str:
+        """Show a tab on the live screen (make it active) and return its snapshot."""
+        ctx.used_tools.append("browser_switch_tab")
+        return _dumps(await computer.run_computer(ctx, "browser_switch_tab", {"tab": tab}))
+
+    async def browser_close_tab(tab: str = "") -> str:
+        """Close a tab (default: the active one)."""
+        ctx.used_tools.append("browser_close_tab")
+        return _dumps(await computer.run_computer(ctx, "browser_close_tab", {"tab": tab}))
 
     async def shell(command: str, cwd: str | None = None, timeout: int = 60) -> str:
         """Run a bash command on this user's cloud computer (sandbox). Not the user's real laptop — use user_computer_shell for that."""
@@ -245,6 +304,44 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         """Fetch a public http(s) page. Paints it onto the computer screen when the sandbox is available; otherwise returns page text."""
         ctx.used_tools.append("web_fetch")
         return _dumps(await web_tools.web_fetch(ctx, url), 32000)
+
+    async def research_crawl(
+        goal: str = "",
+        seeds: list[str] | None = None,
+        queries: list[str] | None = None,
+        max_pages: int = 30,
+        max_depth: int = 2,
+        same_site: bool = False,
+        crawl_id: str = "",
+        more_pages: int = 0,
+    ) -> str:
+        """Read many pages toward a goal without filling your context: fetches start URLs (or search results) in parallel over HTTP, follows the links most relevant to the goal (best-first, deduped, page/depth budgets), and returns short per-page notes ranked by relevance plus pages that need the real browser. Checkpointed: resume with crawl_id and more_pages. Use for research across many sources; for one page use web_fetch."""
+        from app.agent import research
+
+        ctx.used_tools.append("research_crawl")
+        return _dumps(
+            await research.run_research_tool(
+                ctx, goal, seeds, queries, max_pages, max_depth, same_site, crawl_id, more_pages
+            ),
+            40000,
+        )
+
+    async def browser_rank_links(goal: str, tab: str = "", top: int = 12) -> str:
+        """Rank the links on the current browser page (or tab) by relevance to a goal; returns refs and URLs to click or open in new tabs. Use to go deeper on a site without guessing."""
+        from app.agent import research
+
+        ctx.used_tools.append("browser_rank_links")
+        snap = await computer.run_computer(ctx, "browser_snapshot", {"tab": tab} if tab else {})
+        if not isinstance(snap, dict) or snap.get("ok") is False:
+            return _dumps(snap)
+        return _dumps(research.rank_snapshot_links(goal, snap, top))
+
+    async def research_notes(crawl_id: str, query: str = "", top: int = 15) -> str:
+        """Read more notes from a research_crawl, optionally ranked by a narrower question (map step for synthesis)."""
+        from app.agent import research
+
+        ctx.used_tools.append("research_notes")
+        return _dumps(await research.research_notes_tool(ctx, crawl_id, query, top), 40000)
 
     async def render_plot(title: str, labels: list[str], values: list[float], chart_type: str = "bar", series_name: str = "") -> str:
         """Build a downloadable chart (line/bar/pie) on the computer and return download_url. Pass labels and numeric values."""
@@ -393,8 +490,12 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         StructuredTool.from_function(coroutine=computer_observe, name="computer_observe", description=computer_observe.__doc__),
         StructuredTool.from_function(coroutine=computer_act, name="computer_act", description=computer_act.__doc__, args_schema=ComputerActInput),
         StructuredTool.from_function(coroutine=browser_navigate, name="browser_navigate", description=browser_navigate.__doc__, args_schema=UrlInput),
-        StructuredTool.from_function(coroutine=browser_snapshot, name="browser_snapshot", description=browser_snapshot.__doc__),
+        StructuredTool.from_function(coroutine=browser_snapshot, name="browser_snapshot", description=browser_snapshot.__doc__, args_schema=TabInput),
         StructuredTool.from_function(coroutine=browser_act, name="browser_act", description=browser_act.__doc__, args_schema=BrowserActInput),
+        StructuredTool.from_function(coroutine=browser_tabs, name="browser_tabs", description=browser_tabs.__doc__),
+        StructuredTool.from_function(coroutine=browser_new_tab, name="browser_new_tab", description=browser_new_tab.__doc__, args_schema=NewTabInput),
+        StructuredTool.from_function(coroutine=browser_switch_tab, name="browser_switch_tab", description=browser_switch_tab.__doc__, args_schema=TabInput),
+        StructuredTool.from_function(coroutine=browser_close_tab, name="browser_close_tab", description=browser_close_tab.__doc__, args_schema=TabInput),
         StructuredTool.from_function(coroutine=shell, name="shell", description=shell.__doc__, args_schema=ShellInput),
         StructuredTool.from_function(coroutine=user_computer_shell, name="user_computer_shell", description=user_computer_shell.__doc__, args_schema=ShellInput),
         StructuredTool.from_function(coroutine=list_files, name="list_files", description=list_files.__doc__, args_schema=PathInput),
@@ -406,6 +507,9 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         StructuredTool.from_function(coroutine=request_takeover, name="request_takeover", description=request_takeover.__doc__, args_schema=TakeoverInput),
         StructuredTool.from_function(coroutine=web_search, name="web_search", description=web_search.__doc__, args_schema=WebSearchInput),
         StructuredTool.from_function(coroutine=web_fetch, name="web_fetch", description=web_fetch.__doc__, args_schema=FetchInput),
+        StructuredTool.from_function(coroutine=research_crawl, name="research_crawl", description=research_crawl.__doc__, args_schema=ResearchInput),
+        StructuredTool.from_function(coroutine=browser_rank_links, name="browser_rank_links", description=browser_rank_links.__doc__, args_schema=RankLinksInput),
+        StructuredTool.from_function(coroutine=research_notes, name="research_notes", description=research_notes.__doc__, args_schema=ResearchNotesInput),
         StructuredTool.from_function(coroutine=render_plot, name="render_plot", description=render_plot.__doc__, args_schema=PlotInput),
         StructuredTool.from_function(coroutine=generate_image, name="generate_image", description=generate_image.__doc__, args_schema=ImageInput),
         StructuredTool.from_function(coroutine=generate_video, name="generate_video", description=generate_video.__doc__, args_schema=VideoInput),

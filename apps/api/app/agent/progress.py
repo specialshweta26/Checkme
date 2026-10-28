@@ -246,6 +246,18 @@ def describe_tool(name: str, args: dict | None, connector_names: dict[str, str] 
         return f"Running `{_clip(a.get('command'), 70)}` on the computer"
     if n == "user_computer_shell":
         return f"Running `{_clip(a.get('command'), 70)}` on your computer"
+    if n == "research_crawl":
+        return f"Researching: {_clip(a.get('goal'), 60)}" if a.get("goal") else "Continuing the research crawl"
+    if n == "research_notes":
+        return "Reading research notes"
+    if n == "browser_new_tab":
+        return f"Opening a new tab: {_host(a.get('url'))}" if a.get("url") else "Opening a new browser tab"
+    if n == "browser_switch_tab":
+        return f"Switching to tab {_clip(a.get('tab'), 8)}"
+    if n == "browser_close_tab":
+        return "Closing a browser tab"
+    if n == "browser_tabs":
+        return "Checking open browser tabs"
     if n == "browser_navigate":
         return f"Opening {_host(a.get('url'))} in the browser" if a.get("url") else "Opening a page in the browser"
     if n == "browser_snapshot":
