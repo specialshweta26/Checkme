@@ -34,6 +34,9 @@ async def tick() -> None:
                 .where(ScheduledTask.status == "active", ScheduledTask.next_run_at <= now)
                 .order_by(ScheduledTask.next_run_at)
                 .limit(BATCH)
+                # The API may run more than one replica. Lock due rows while we
+                # reserve them so only one scheduler instance can claim each run.
+                .with_for_update(skip_locked=True)
             )
         ).scalars().all()
         ids = [row.id for row in rows]

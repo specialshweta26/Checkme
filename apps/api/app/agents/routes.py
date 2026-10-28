@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents import service
+from app.agent.memory import list_agent_memory
 from app.db import get_db
 from app.deps import current_user
 from app.models import User
@@ -68,6 +69,14 @@ def _err(exc: Exception) -> HTTPException:
 @router.get("")
 async def list_agents(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     return await service.list_workspace(db, user)
+
+
+@router.get("/{agent_id}/memory")
+async def get_agent_memory(agent_id: uuid.UUID, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    try:
+        return await list_agent_memory(db, user, agent_id)
+    except service.AgentError as exc:
+        raise HTTPException(404, str(exc)) from exc
 
 
 @router.post("")

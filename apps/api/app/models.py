@@ -351,10 +351,24 @@ class Automation(Base):
     )
     name: Mapped[str] = mapped_column(String(200))
     trigger: Mapped[str] = mapped_column(Text)
+    trigger_type: Mapped[str] = mapped_column(String(20), default="schedule")
+    webhook_secret_hash: Mapped[str | None] = mapped_column(String(64))
     condition: Mapped[str] = mapped_column(Text, default="")
     action: Mapped[str] = mapped_column(Text)
     requires_approval: Mapped[bool] = mapped_column(Boolean, default=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class WebhookDelivery(Base):
+    """Idempotency record connecting an inbound webhook delivery to its agent job."""
+
+    __tablename__ = "webhook_deliveries"
+    __table_args__ = (UniqueConstraint("automation_id", "event_id"),)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    automation_id: Mapped[int] = mapped_column(ForeignKey("automations.id", ondelete="CASCADE"), index=True)
+    event_id: Mapped[str] = mapped_column(String(255))
+    job_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("agent_jobs.id", ondelete="CASCADE"), unique=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 

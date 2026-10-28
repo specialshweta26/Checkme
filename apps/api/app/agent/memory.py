@@ -6,7 +6,7 @@ import time
 import uuid
 
 import httpx
-from sqlalchemy import select, text
+from sqlalchemy import desc, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -19,6 +19,7 @@ log = logging.getLogger(__name__)
 _LETTA_TIMEOUT = httpx.Timeout(2.5, connect=0.8)
 _letta_skip_until = 0.0
 _LABEL = re.compile(r"^[A-Za-z0-9_-]{1,50}$")
+_SECRET_LANGUAGE = re.compile(r"\b(password|passphrase|api[ _-]?key|access[ _-]?token|refresh[ _-]?token|secret|private key|recovery code)\b", re.I)
 
 
 def _letta_down() -> bool:
@@ -393,3 +394,55 @@ async def upsert_core(db: AsyncSession, user_id: uuid.UUID, label: str, value: s
     await _ensure_saved_letta(db, user, owner)
     await db.commit()
     await _write_letta_block(owner, label, value[:800])
+
+
+async def learn_for_agent(db: AsyncSession, user: User, agent, category: str, fact: str) -> dict:
+    """Store a short, durable preference in this agent's own memory block."""
+    if db is None or agent is None or getattr(agent, "user_id", None) != user.id:
+        return {"saved": False, "error": "Choose one of your agents first."}
+    clean_fact = " ".join((fact or "").split())[:400]
+    clean_category = re.sub(r"[^a-z0-9_-]", "", (category or "preference").lower())[:30] or "preference"
+    if not clean_fact:
+        return {"saved": False, "error": "Add a specific preference or working detail to remember."}
+    if _SECRET_LANGUAGE.search(clean_fact):
+        return {"saved": False, "error": "I can’t store passwords, keys, tokens, or recovery codes in memory."}
+    prior = await read_core(db, user, "learned", agent)
+    line = f"- {clean_category}: {clean_fact}"
+    lines = [part for part in (prior or "").splitlines() if part.strip()]
+    if line.casefold() not in {part.casefold() for part in lines}:
+        lines.append(line)
+    value = "\n".join(lines[-12:])[:780]
+    await upsert_core(db, user.id, "learned", value, agent.id)
+    return {"saved": True, "agent": agent.name, "memory": value}
+
+
+async def list_agent_memory(db: AsyncSession, user: User, agent_id: uuid.UUID) -> dict:
+    """Return only the selected user's selected agent memory for review."""
+    from app.agents.service import get_agent
+
+    agent = await get_agent(db, user, agent_id)
+    blocks = (
+        await db.execute(
+            select(MemoryBlock).where(
+                MemoryBlock.user_id == user.id,
+                MemoryBlock.agent_id == agent.id,
+            ).order_by(MemoryBlock.label)
+        )
+    ).scalars().all()
+    passages = (
+        await db.execute(
+            select(MemoryPassage)
+            .where(MemoryPassage.user_id == user.id, MemoryPassage.agent_id == agent.id)
+            .order_by(desc(MemoryPassage.id))
+            .limit(50)
+        )
+    ).scalars().all()
+    return {
+        "agent_id": str(agent.id),
+        "agent_name": agent.name,
+        "core": [{"label": row.label, "value": row.value} for row in blocks],
+        "recent_work": [
+            {"id": row.id, "kind": row.kind, "text": row.text, "created_at": row.created_at.isoformat()}
+            for row in passages
+        ],
+    }

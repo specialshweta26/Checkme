@@ -6,7 +6,7 @@ from datetime import timedelta
 from app.llm import chat_complete
 from connector_core.calendar import as_local, format_local, now_local
 
-KINDS = {"once", "daily", "weekly"}
+KINDS = {"once", "daily", "weekdays", "weekly"}
 
 
 async def parse_schedule(prompt: str, tz: str) -> dict:
@@ -19,13 +19,14 @@ async def parse_schedule(prompt: str, tz: str) -> dict:
         "{"
         '"title":"short title",'
         '"instruction":"what the assistant should do when the task fires (no schedule wording)",'
-        '"schedule_kind":"once|daily|weekly",'
+        '"schedule_kind":"once|daily|weekdays|weekly",'
         '"next_run_at":"ISO-8601 datetime with offset",'
         '"schedule_label":"human schedule such as Every day · 10:00 AM",'
         '"timed":true'
         "}\n"
         "Rules: timed=false only when there is no clock or interval (for example 'when I get an email'). "
-        "Use daily for every day/morning/evening/weekday. Use weekly for every week or a weekday name. "
+        "Use daily for every day/morning/evening. Use weekdays for every weekday or Monday through Friday. "
+        "Use weekly for every week or a specific weekday name (for example every Monday). "
         "Otherwise once. If they say in N minutes/hours, set next_run_at to that instant. "
         "If the computed time is already past for a repeating task, use the next future occurrence. "
         "Keep instruction complete: recipients, subject, and what to fetch or write.\n\n"
@@ -79,13 +80,16 @@ def _when(value, tz: str, kind: str):
         dt = as_local(value, tz)
     except Exception:
         dt = now + timedelta(minutes=5)
-    if dt <= now:
-        if kind == "daily":
-            dt = dt + timedelta(days=1)
-        elif kind == "weekly":
-            dt = dt + timedelta(days=7)
+    if kind == "once" and dt <= now:
+        return now + timedelta(minutes=5)
+    while dt <= now:
+        if kind == "weekly":
+            dt += timedelta(days=7)
         else:
-            dt = now + timedelta(minutes=5)
+            dt += timedelta(days=1)
+            if kind == "weekdays":
+                while dt.weekday() >= 5:
+                    dt += timedelta(days=1)
     return dt
 
 
@@ -94,6 +98,8 @@ def _label(kind: str, dt, tz: str) -> str:
     clock = local.strftime("%I:%M %p").lstrip("0")
     if kind == "daily":
         return f"Every day · {clock}"
+    if kind == "weekdays":
+        return f"Weekdays · {clock}"
     if kind == "weekly":
         return f"Every {local.strftime('%A')} · {clock}"
     mins = int((local - now_local(tz)).total_seconds() // 60)

@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.agents.routes import router as agents_router
+from app.automations.routes import router as automations_router, webhook_router
 from app.auth.routes import me_router, router as auth_router
 from app.chat.routes import router as chat_router
 from app.config import get_settings
@@ -101,6 +102,8 @@ app.include_router(github_router, prefix="/api")
 app.include_router(deploy_router, prefix="/api")
 app.include_router(connectors_router, prefix="/api")
 app.include_router(tasks_router, prefix="/api")
+app.include_router(automations_router, prefix="/api")
+app.include_router(webhook_router, prefix="/api")
 app.include_router(jobs_router, prefix="/api")
 app.include_router(skills_router, prefix="/api")
 app.include_router(inbox_router, prefix="/api")

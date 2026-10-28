@@ -372,14 +372,13 @@ export default function ChatPage() {
     if (!activeAgent) return;
     const id = activeAgent.id;
     try {
-      await updateAgent(id, { focus: option.key });
-      setRoster((r) => ({ ...r, agents: r.agents.map((a) => (a.id === id ? { ...a, focus: option.key, focus_label: option.label } : a)) }));
+      const updated = await updateAgent(id, { focus: option.key });
+      setRoster((r) => ({ ...r, agents: r.agents.map((a) => (a.id === id ? updated : a)) }));
       announceWorkspaceChanged();
     } catch {
       // The agent can still set its own focus from the answer (set_my_focus).
     }
     hideFocusCard(id);
-    void send(option.answer);
   }
   const scopedSessions = sessions.filter((s) => sessionInScopeRow(s, agentId, groupId));
   const computer = [...messages].reverse().map((m) => computerFromMeta(m.meta)).find(Boolean) || null;
@@ -568,13 +567,22 @@ export default function ChatPage() {
                     <p>
                       {activeGroup
                         ? `${firstName(me)} set this group up. The kickoff owner introduces proposed roles, then each bot replies as itself. @ one bot, or @everyone, and they talk to each other in this thread.`
-                        : "Here's what's happening today — brief the inbox, ask a connected system, or schedule a send."}
+                        : activeAgent?.suggested_tasks?.length
+                          ? `${activeAgent.name} is ready to work. Pick a useful first task, or describe a different one below.`
+                          : "Here's what's happening today — brief the inbox, ask a connected system, or schedule a send."}
                     </p>
                   </>
                 )}
                 <div className="hero-cards">
                   {activeGroup ? (
                     <>
+                      {activeGroup.outcome ? (
+                        <button className="hero-card" onClick={() => send(activeGroup.outcome || "")}>
+                          <span className="mark" />
+                          <strong>Start the group’s outcome</strong>
+                          <span>{activeGroup.outcome} The kickoff owner can hand work to teammates and coordinate their replies here.</span>
+                        </button>
+                      ) : null}
                       <button
                         className="hero-card"
                         onClick={() =>
@@ -594,6 +602,14 @@ export default function ChatPage() {
                         <span>Each responsible bot replies in its own bubble. They can hand work to each other.</span>
                       </button>
                     </>
+                  ) : activeAgent?.suggested_tasks?.length ? (
+                    activeAgent.suggested_tasks.map((task) => (
+                      <button key={task.title} className="hero-card" onClick={() => send(task.prompt)}>
+                        <span className="mark" />
+                        <strong>{task.title}</strong>
+                        <span>{task.prompt}</span>
+                      </button>
+                    ))
                   ) : (
                     <>
                       <button className="hero-card" onClick={() => send("What matters today? Give me my chief of staff briefing.")}>

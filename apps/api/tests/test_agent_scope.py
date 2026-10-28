@@ -179,6 +179,23 @@ async def test_fallback_memory_is_isolated_between_agents():
 
 
 @pytest.mark.asyncio
+async def test_chat_learning_is_agent_scoped_and_rejects_credentials():
+    user = _user()
+    home = _agent(user, "Home")
+    dev = _agent(user, "Dev")
+    db = _MemoryDB(user, [home, dev])
+
+    saved = await memory.learn_for_agent(db, user, home, "routine", "Remind me about rent on the first.")
+    denied = await memory.learn_for_agent(db, user, home, "private", "Remember my password: abc123")
+    home_mem = await memory.load_memory(db, user, "rent", home)
+    dev_mem = await memory.load_memory(db, user, "rent", dev)
+
+    assert saved["saved"] is True and denied["saved"] is False
+    assert "Remind me about rent" in home_mem
+    assert "Remind me about rent" not in dev_mem
+
+
+@pytest.mark.asyncio
 async def test_letta_memory_reads_and_writes_only_that_agent(monkeypatch):
     user = _user()
     home = _agent(user, "Home", letta_id="letta-home")

@@ -23,6 +23,7 @@ export type WorkspaceAgent = {
   instructions?: string;
   focus?: string;
   focus_label?: string;
+  suggested_tasks?: { title: string; prompt: string }[];
   color: string;
   kind?: string;
   pinned?: boolean;

@@ -192,17 +192,24 @@ async def apps_from_used(db: AsyncSession, user: User, used_tools: list[str] | N
     return out
 
 
-def advance(task: ScheduledTask) -> None:
+def advance(task: ScheduledTask, tz: str = "UTC") -> None:
     if task.schedule_kind == "once":
         task.status = "completed"
         task.next_run_at = None
         return
-    step = timedelta(days=7 if task.schedule_kind == "weekly" else 1)
-    nxt = task.next_run_at or datetime.now(timezone.utc)
-    now = datetime.now(timezone.utc)
+    # Advance in the user's timezone so recurring work stays at its chosen
+    # wall-clock time across daylight-saving changes.
+    nxt = as_local(task.next_run_at or datetime.now(timezone.utc), tz)
+    now = as_local(datetime.now(timezone.utc), tz)
     while nxt <= now:
-        nxt = nxt + step
-    task.next_run_at = nxt
+        if task.schedule_kind == "weekly":
+            nxt += timedelta(days=7)
+        else:
+            nxt += timedelta(days=1)
+            if task.schedule_kind == "weekdays":
+                while nxt.weekday() >= 5:
+                    nxt += timedelta(days=1)
+    task.next_run_at = nxt.astimezone(timezone.utc)
     task.status = "active"
 
 
@@ -284,7 +291,7 @@ async def execute_task(db: AsyncSession, user: User, task: ScheduledTask, *, fro
             )
         )
         if from_scheduler:
-            advance(task)
+            advance(task, user.timezone or "Asia/Kolkata")
         elif task.schedule_kind == "once":
             task.status = "completed"
             task.next_run_at = None
@@ -304,7 +311,7 @@ async def execute_task(db: AsyncSession, user: User, task: ScheduledTask, *, fro
         task.last_error = str(exc)[:800]
         task.last_run_at = datetime.now(timezone.utc)
         if from_scheduler:
-            advance(task)
+            advance(task, user.timezone or "Asia/Kolkata")
         elif prev_status == "paused":
             task.status = "paused"
         else:

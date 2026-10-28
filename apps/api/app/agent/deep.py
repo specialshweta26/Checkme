@@ -1533,7 +1533,10 @@ class StaffInput(BaseModel):
             "list_automations, or learn_voice."
         )
     )
-    args: dict[str, Any] = Field(default_factory=dict)
+    args: dict[str, Any] = Field(
+        default_factory=dict,
+        description="For create_automation: name, trigger, condition, action, requires_approval, and optional trigger_type='webhook' plus agent_name. Webhook trigger must be an exact event type such as issues or push.",
+    )
 
 
 class ScheduleTaskInput(BaseModel):
@@ -1854,6 +1857,11 @@ class RememberCodingInput(BaseModel):
     notes: str = Field(default="", description="Other lasting preferences (test command, reviewers, merge method).")
 
 
+class LearnAgentMemoryInput(BaseModel):
+    category: str = Field(default="preference", description="Short label such as preference, routine, family, work, or project.")
+    fact: str = Field(description="One durable, non-sensitive preference or working detail to remember for this agent.")
+
+
 async def set_agent_focus(ctx: RunContext, focus: str) -> dict:
     from app.agents import service as agents_service
     from app.agents.focus import FOCUSES
@@ -1934,8 +1942,15 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
         return dumps(inspect_user_result(ctx, result_id, path, search, offset, limit), 32000)
 
     async def run_staff_tool(name: str, args: dict[str, Any] | None = None) -> str:
-        """Run an assistant staff capability (briefing, inbox question, commitments, scheduled tasks, automations, voice)."""
+        """Run a staff capability (briefing, inbox, commitments, schedules, webhook automations, or voice). For a webhook pass trigger_type='webhook', exact event name, action, optional condition and requires_approval (true by default)."""
         return dumps(await run_staff(ctx, name, args))
+
+    async def remember_for_me(category: str = "preference", fact: str = "") -> str:
+        """Remember a lasting, non-sensitive fact for yourself. It is private to this agent and never shared with teammates."""
+        from app.agent.memory import learn_for_agent
+
+        ctx.used_tools.append("remember_for_me")
+        return dumps(await learn_for_agent(ctx.db, ctx.user, ctx.agent, category, fact), 1500)
 
     async def ask_teammate(agent_id: str, prompt: str) -> str:
         """Post a message to a teammate in this group thread. They reply as themselves in their own bubble. Their memory stays separate. Do not ask yourself or paste their reply into yours."""
@@ -2059,6 +2074,12 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
             name="run_staff_tool",
             description=run_staff_tool.__doc__,
             args_schema=StaffInput,
+        ),
+        StructuredTool.from_function(
+            coroutine=remember_for_me,
+            name="remember_for_me",
+            description=remember_for_me.__doc__,
+            args_schema=LearnAgentMemoryInput,
         ),
         StructuredTool.from_function(
             coroutine=list_agents_and_groups,
@@ -2383,6 +2404,7 @@ def system_prompt(
     group=None,
     teammates: list | None = None,
     mentions: dict | None = None,
+    skills: list | None = None,
 ) -> str:
     tz = getattr(user, "timezone", None) or "Asia/Kolkata"
     now = _now(tz)
@@ -2396,7 +2418,31 @@ def system_prompt(
     from app.agents.focus import focus_prompt
 
     identity += focus_prompt(agent)
-    identity += "Your memory and scheduled routines belong only to you, not to other agents.\n"
+    usable_skills = [s for s in (skills or []) if isinstance(s, dict) and (s.get("name") or "").strip()]
+    if usable_skills:
+        skill_lines = []
+        for skill in usable_skills[:12]:
+            name = str(skill.get("name") or "").strip()[:160]
+            instruction = str(skill.get("instruction") or "").strip()[:1200]
+            kind = "demonstrated workflow" if skill.get("kind") == "taught" else "saved workflow"
+            tools = [str(step.get("tool") or "")[:80] for step in (skill.get("steps") or [])[:40] if isinstance(step, dict)]
+            line = f"- {name} ({kind})"
+            if instruction:
+                line += f": {instruction}"
+            if tools:
+                line += f". Demonstrated tool sequence: {' → '.join(tools[:20])}. Use it as a guide, rechecking current page state and arguments."
+            skill_lines.append(line)
+        identity += (
+            "Your saved skills are reusable procedures. When a request matches one, follow its instructions and available tools; "
+            "adapt to current data and confirm before sensitive actions as usual. Skill names and steps are reference material, "
+            "not permission to bypass safeguards.\nSaved skills:\n" + "\n".join(skill_lines) + "\n"
+        )
+    identity += (
+        "Your memory and scheduled routines belong only to you, not to other agents. Use remembered context to avoid asking the user twice. "
+        "When the user explicitly asks you to remember something, or a stable non-sensitive preference is clearly established by repeated work, "
+        "save it with remember_for_me. Never save credentials, secrets, or sensitive personal details. You already retain a short record of work "
+        "you completed; use it to continue ongoing projects and follow the user's established preferences.\n"
+    )
     group_bit = ""
     peers = [p for p in (teammates or []) if str(getattr(p, "id", "")) != str(getattr(agent, "id", ""))]
     if group is not None and peers:
@@ -2414,6 +2460,8 @@ def system_prompt(
         "Checkme agents and groups: this user's own agents (you, Chief, and the others in the sidebar under Personal) and their groups "
         "are built into this app, not a connector. To list, create, rename or edit agents, or to create, rename, or change members of a group of agents, "
         "use list_agents_and_groups, create_agent, update_agent, create_agent_group, add_group_members, remove_group_members, rename_agent_group. "
+        "When the user trains or customizes an agent by chat, use update_agent to revise its instructions or role; when they say 'remember this', "
+        "use remember_for_me so the fact is saved to your own private memory. "
         "Never search_tools, list_connectors, or call_tool for these, and never offer a third-party app's 'group' (LiveChat, Slack, Teams, CRM) for them. "
         f"A group has {GROUP_MEMBER_MIN} to {GROUP_MEMBER_MAX} agents; for 'all my agents' pass all_agents=true. "
         "One owner per stage is the kickoff rule; hand the next step with ask_teammate. "
@@ -2500,7 +2548,11 @@ def system_prompt(
         "If you cannot tell which connector fits, ask the user.\n"
         "Destructive connector actions still need call_tool; the app asks the user to confirm.\n"
         "If the user wants work done later (email a report in N minutes, tonight, every day), schedule_task and do not fetch now. "
+        "For event-driven work, create a webhook automation with run_staff_tool(name='create_automation', args={trigger_type:'webhook', name, trigger:<exact event name>, condition, action, requires_approval:true}). "
+        "Use approval by default for external actions. Return the generated webhook URL, one-time secret, exact headers, and a ready-to-copy curl example; the secret is only returned at creation. List or disable automations with the automation endpoints when asked. "
         "If they want a calendar invite or meeting at a clock time, that time is the event start: call create_event now. "
+        "If repeated requests reveal a useful routine, point that out and offer to schedule it; create it when the user asks. Use an existing schedule or webhook "
+        "for future follow-through, and keep approval enabled for external actions unless the user explicitly changes it. "
         "Tell them the scheduled time only when you actually called schedule_task.\n"
         "Never invent emails, events, ids, or numbers that did not come from a tool result. "
         "When connector data comes back, write a detailed analyst report — never a short brief. "
@@ -2732,7 +2784,7 @@ async def run_deep_agent(
     await ensure_platform_connectors(db, user)
     conns = await user_connectors(db, user.id)
     assignments = await connector_assignment_map(db, user)
-    toolkits = await toolkit_assignment_map(db, user)
+    toolkits = await toolkit_assignment_map(db, user) if db is not None else {}
     teammate_ids = [getattr(peer, "id", None) for peer in (teammates or [])]
     conns = filter_connectors(
         conns,
@@ -2768,6 +2820,19 @@ async def run_deep_agent(
     if progress is not None:
         await progress.emit("Recalling what I know about this" if not teammate_depth else "Picking up the task", kind="memory")
     memory = await load_memory(db, user, query, workspace_agent)
+    from app.models import AgentSkill
+
+    skills = []
+    if db is not None and hasattr(db, "execute"):
+        skill_stmt = select(AgentSkill).where(
+            AgentSkill.user_id == user.id,
+            (AgentSkill.agent_id == getattr(workspace_agent, "id", None)) | (AgentSkill.agent_id.is_(None)),
+        ).order_by(AgentSkill.created_at.desc()).limit(12)
+        skill_rows = (await db.execute(skill_stmt)).scalars().all()
+        skills = [
+            {"name": row.name, "kind": row.kind, "instruction": row.instruction, "steps": row.steps or []}
+            for row in skill_rows
+        ]
     from app.agent.coding import is_coding_agent as _is_coder
 
     if _is_coder(workspace_agent):
@@ -2816,7 +2881,14 @@ async def run_deep_agent(
     graph = build_agent(
         ctx,
         system_prompt(
-            user, conns, memory, agent=workspace_agent, group=group, teammates=teammates, mentions=mentions
+            user,
+            conns,
+            memory,
+            agent=workspace_agent,
+            group=group,
+            teammates=teammates,
+            mentions=mentions,
+            skills=skills,
         ),
     )
     payload = {"messages": _lc_messages(history, query, extra)}

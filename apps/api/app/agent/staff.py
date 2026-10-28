@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.llm import chat_complete
 from app.models import AdminItem, Automation, Commitment, ScheduledTask
 from connector_core.text import clip
@@ -291,12 +292,47 @@ async def _routine_owner(db, user, agent):
 
 
 async def create_automation(db, user, args: dict, agent=None) -> dict:
+    trigger_type = str(args.get("trigger_type") or "schedule").strip().lower()
+    if trigger_type == "webhook":
+        from app.automations.service import create_webhook
+
+        owner = agent
+        agent_name = (args.get("agent_name") or "").strip()
+        if agent_name:
+            from app.agents.service import find_agent_by_name
+
+            owner = await find_agent_by_name(db, user, agent_name)
+            if owner is None:
+                return {"error": f"No agent named {agent_name}."}
+        try:
+            hook = await create_webhook(
+                db,
+                user,
+                name=args.get("name") or "Webhook automation",
+                trigger=args.get("trigger") or args.get("event_name") or "",
+                condition=args.get("condition") or "",
+                action=args.get("action") or "",
+                agent_id=getattr(owner, "id", None) if owner is not None else None,
+                requires_approval=bool(args.get("requires_approval", True)),
+            )
+        except ValueError as exc:
+            return {"error": str(exc)}
+        return {
+            "created": True,
+            "trigger_type": "webhook",
+            "automation": {k: v for k, v in hook.items() if k not in {"secret"}},
+            "secret": hook["secret"],
+            "note": "Copy the secret now; it is shown only once. Send it in the X-Checkme-Secret header. The event name must match X-Event-Type. Include a stable Idempotency-Key to avoid duplicate runs.",
+        }
+    if trigger_type != "schedule":
+        return {"error": "trigger_type must be 'schedule' or 'webhook'."}
     owner = await _routine_owner(db, user, agent)
     row = Automation(
         user_id=user.id,
         agent_id=owner.id,
         name=(args.get("name") or "Untitled")[:200],
         trigger=args.get("trigger") or "",
+        trigger_type="schedule",
         condition=args.get("condition") or "",
         action=args.get("action") or "",
         requires_approval=bool(args.get("requires_approval", True)),
@@ -336,11 +372,17 @@ async def list_automations(db, user_id, agent_id=None) -> dict:
                 "id": r.id,
                 "name": r.name,
                 "trigger": r.trigger,
+                "trigger_type": getattr(r, "trigger_type", "schedule") or "schedule",
                 "condition": r.condition,
                 "action": r.action,
                 "requires_approval": r.requires_approval,
                 "enabled": r.enabled,
                 "agent_id": str(r.agent_id) if r.agent_id else None,
+                "webhook_url": (
+                    f"{get_settings().public_web_url}/api/webhooks/{r.id}"
+                    if getattr(r, "trigger_type", "") == "webhook"
+                    else None
+                ),
             }
             for r in rows
         ]
