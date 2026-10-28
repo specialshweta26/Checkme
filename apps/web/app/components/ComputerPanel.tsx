@@ -51,6 +51,9 @@ function useCredentialedImage(src: string | undefined) {
   return url;
 }
 
+// Matches the API's boot timeout (routes.BOOT_TIMEOUT).
+const BOOT_TIMEOUT_S = 90;
+
 function useLiveScreen(active: boolean) {
   const [url, setUrl] = useState("");
   const [error, setError] = useState("");
@@ -174,6 +177,7 @@ export function ComputerIcon() {
 export function ScreenRail({
   session,
   watching = false,
+  autoBoot = false,
   controlling = false,
   agentName = "Chief",
   status = "",
@@ -186,6 +190,7 @@ export function ScreenRail({
 }: {
   session?: ComputerSession | null;
   watching?: boolean;
+  autoBoot?: boolean;
   controlling?: boolean;
   agentName?: string;
   status?: string;
@@ -203,10 +208,19 @@ export function ScreenRail({
   const [screenAgent, setScreenAgent] = useState("");
   // E2B desktops expose a live noVNC stream (view-only URL + a control URL). Daytona has none: poll PNG frames.
   const [stream, setStream] = useState<{ view: string; control: string }>({ view: "", control: "" });
+  // "" until the first status reply; "e2b" streams over noVNC and never serves PNG frames.
+  const [provider, setProvider] = useState("");
+  const [bootError, setBootError] = useState("");
+  const [bootStarted, setBootStarted] = useState(0);
+  const [now, setNow] = useState(() => Date.now());
+  const autoBooted = useRef(false);
   const liveActive = Boolean(watching || controlling || machine === "running");
   // Teaching records clicks through our own control endpoint, so it keeps the frame view.
   const streaming = Boolean(stream.view) && machine === "running" && !teaching;
-  const liveScreen = useLiveScreen(liveActive && !streaming);
+  const framesSupported = provider !== "" && provider !== "e2b" && provider !== "none";
+  const liveScreen = useLiveScreen(liveActive && !streaming && framesSupported);
+  const bootSeconds = machine === "booting" && bootStarted ? Math.max(0, Math.round((now - bootStarted) / 1000)) : 0;
+  const bootSlow = bootSeconds >= BOOT_TIMEOUT_S;
   // A saved task preview can be stale or blank; only use it before a live session starts.
   const frame = streaming ? "" : liveScreen.url || (!liveActive ? still : "");
   const href = session?.url || pageUrl || "";
@@ -229,7 +243,17 @@ export function ScreenRail({
     const ac = new AbortController();
     const apply = (data: any) => {
       if (!data?.state) return;
-      if (!waking.current) setMachine(data.state);
+      if (typeof data.provider === "string") setProvider(data.provider);
+      if (!waking.current) {
+        setMachine(data.state);
+        if (data.state === "booting") {
+          const since = Date.now() - Number(data.booting_for || 0) * 1000;
+          setBootStarted((prev) => prev || since);
+        } else {
+          setBootStarted(0);
+        }
+        setBootError(data.state !== "running" && typeof data.error === "string" ? data.error : "");
+      }
       applyStream(data);
       if (data.url) setPageUrl(data.url);
       if (data.title) setPageTitle(data.title);
@@ -248,6 +272,23 @@ export function ScreenRail({
       window.clearInterval(timer);
     };
   }, []);
+  useEffect(() => {
+    if (machine !== "booting") return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [machine]);
+  useEffect(() => {
+    // The agent is using the computer in this turn but no desktop is up yet: boot it once.
+    if (!autoBoot) {
+      autoBooted.current = false;
+      return;
+    }
+    if (autoBooted.current || provider !== "e2b" || controlling || teaching) return;
+    if (machine !== "stopped" && machine !== "suspended") return;
+    autoBooted.current = true;
+    void wake();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoBoot, provider, machine, controlling, teaching]);
   let host = "";
   try {
     if (href) host = new URL(href).hostname;
@@ -265,8 +306,10 @@ export function ScreenRail({
       ? "you have control"
       : machine === "booting"
         ? "Starting computer…"
-        : watching
+        : watching && machine === "running"
           ? status || "Operating the computer"
+          : watching
+            ? status || "working"
           : machine === "running"
             ? host || "live"
             : asleep
@@ -284,11 +327,23 @@ export function ScreenRail({
     if (waking.current) return false;
     waking.current = true;
     setNotice("");
+    setBootError("");
     setMachine("booting");
+    setBootStarted(Date.now());
+    setNow(Date.now());
+    const ac = new AbortController();
+    const timer = window.setTimeout(() => ac.abort(), (BOOT_TIMEOUT_S + 5) * 1000);
     try {
-      const res = await fetch("/api/connectors/computer/boot", { method: "POST", credentials: "include" });
+      let res: Response;
+      try {
+        res = await fetch("/api/connectors/computer/boot", { method: "POST", credentials: "include", signal: ac.signal });
+      } catch (err: any) {
+        if (ac.signal.aborted) throw new Error(`The computer did not start within ${BOOT_TIMEOUT_S} seconds. Try again.`);
+        throw err;
+      }
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : "Could not wake the computer");
+      if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : `Could not wake the computer (${res.status})`);
+      if (typeof data.provider === "string") setProvider(data.provider);
       setMachine("running");
       applyStream(data);
       if (data.url) setPageUrl(data.url);
@@ -296,9 +351,11 @@ export function ScreenRail({
       return true;
     } catch (err: any) {
       setMachine("suspended");
-      setNotice(err?.message || "Could not wake the computer");
+      setBootError(err?.message || "Could not wake the computer");
       return false;
     } finally {
+      window.clearTimeout(timer);
+      setBootStarted(0);
       waking.current = false;
     }
   }
@@ -368,7 +425,7 @@ export function ScreenRail({
             {teachingBusy ? "Saving…" : "Stop & save skill"}
           </button>
         ) : null}
-        {!controlling && !frame && !streaming && machine !== "booting" ? (
+        {!controlling && !frame && !streaming && (machine !== "booting" || bootSlow) ? (
           <button type="button" className="screen-control-btn primary" onClick={() => void wake()}>
             Open
           </button>
@@ -458,15 +515,21 @@ export function ScreenRail({
           />
         ) : (
           <p className="screen-placeholder">
-            {machine === "booting"
-              ? "Starting computer…"
-              : watching && machine !== "running"
-                ? "Starting computer… The screen appears as soon as the desktop is up."
-                : watching || controlling || machine === "running"
+            {bootError && machine !== "running" && machine !== "booting"
+              ? `Computer failed to start: ${bootError}`
+              : machine === "booting"
+                ? bootSlow
+                  ? `Still starting after ${bootSeconds}s. The desktop provider is slow or stuck; it may still come up, or click Open to retry.`
+                  : `Starting computer… ${bootSeconds ? `${bootSeconds}s` : ""} The screen appears as soon as the desktop is up.`
+                : machine === "running"
                   ? liveScreen.error && !watching
                     ? `Live screen unavailable. Retrying… ${liveScreen.error}`
                     : "Connecting to the live desktop…"
-                  : "Computer is asleep. Open it to wake."}
+                  : controlling
+                    ? "Connecting to the live desktop…"
+                    : watching
+                      ? `${agentName} has not opened the computer in this task. Click Open to start it.`
+                      : "Computer is asleep. Open it to wake."}
           </p>
         )}
       </div>

@@ -57,6 +57,10 @@ class _Live:
 _LIVE: dict[str, _Live] = {}
 _LOCKS: dict[str, asyncio.Lock] = {}
 _STATUS: dict[str, tuple[float, dict]] = {}
+# Per user: when a boot started (monotonic), and the last boot failure shown to the UI.
+_BOOTING: dict[str, float] = {}
+_LAST_ERROR: dict[str, str] = {}
+BOOT_TIMEOUT = 90.0
 
 
 def enabled() -> bool:
@@ -268,7 +272,7 @@ def _ensure_stream(sbx: Any, key: str) -> str:
     if key and vnc_up and web_up:
         return key
     key = _new_key()
-    _ok(sbx, "pkill -x x11vnc; pkill -f novnc_proxy; true")
+    _ok(sbx, "pkill -x x11vnc; pkill -f '[n]ovnc_proxy'; true")
     sbx.commands.run(f"mkdir -p ~/.vnc && x11vnc -storepasswd {key} ~/.vnc/passwd >/dev/null 2>&1", timeout=20)
     sbx.commands.run(
         f"x11vnc -bg -display {DISPLAY} -forever -wait 50 -shared -rfbport {VNC_PORT} -usepw 2>/tmp/x11vnc_stderr.log",
@@ -280,7 +284,14 @@ def _ensure_stream(sbx: Any, key: str) -> str:
         timeout=0,
     )
     if not _wait(sbx, f"(ss -ltn 2>/dev/null || netstat -tln) | grep -q ':{STREAM_PORT} '", 20):
-        raise ToolError("The E2B desktop stream did not start.")
+        tail = ""
+        try:
+            res = sbx.commands.run("tail -n 8 /tmp/novnc.log /tmp/x11vnc_stderr.log 2>&1", timeout=10)
+            tail = " ".join(str(getattr(res, "stdout", "") or "").split())[-300:]
+        except Exception:  # noqa: BLE001
+            pass
+        log.warning("e2b: noVNC did not open port %s: %s", STREAM_PORT, _scrub(tail) or "(no log)")
+        raise ToolError("E2B: the desktop stream (noVNC) did not start.")
     return key
 
 
@@ -296,6 +307,7 @@ def _create(user_key: str) -> Any:
     }
     if (s.e2b_template or "").strip():
         kwargs["template"] = s.e2b_template.strip()
+    log.info("e2b: creating desktop sandbox user=%s template=%s", user_key, kwargs.get("template") or "desktop")
     try:
         # Pause instead of delete on idle timeout so files, logins and running processes come back.
         return sdk.Sandbox.create(lifecycle={"on_timeout": "pause", "auto_resume": False}, **kwargs)
@@ -309,14 +321,19 @@ def _create(user_key: str) -> Any:
 def _connect(sandbox_id: str) -> Any | None:
     """Reconnect (resuming a paused sandbox). None when it no longer exists."""
     sdk = _sdk()
+    log.info("e2b: connecting to sandbox %s", sandbox_id)
     try:
-        return sdk.Sandbox.connect(sandbox_id, timeout=_timeout(), api_key=_api_key())
+        sbx = sdk.Sandbox.connect(sandbox_id, timeout=_timeout(), api_key=_api_key())
     except sdk.NotFoundException:
+        log.info("e2b: sandbox %s not found", sandbox_id)
         return None
     except sdk.SandboxException as exc:
         if "not found" in str(exc).lower() or "404" in str(exc):
+            log.info("e2b: sandbox %s not found", sandbox_id)
             return None
         raise
+    sbx._display = DISPLAY  # connect() skips Sandbox.create's desktop setup, which is where _display is set
+    return sbx
 
 
 def _find_by_metadata(user_key: str) -> str:
@@ -342,7 +359,7 @@ def _info_state(sandbox_id: str) -> str:
     except sdk.NotFoundException:
         return ""
     except Exception as exc:  # noqa: BLE001
-        log.info("e2b get_info failed: %s", type(exc).__name__)
+        log.warning("e2b: get_info %s failed: %s", sandbox_id, describe_error(exc))
         return "unknown"
     state = getattr(info, "state", "")
     return str(getattr(state, "value", state) or "").lower()
@@ -374,16 +391,22 @@ def _open(user_key: str, creds: dict) -> tuple[_Live, bool]:
             _keepalive(cached)
             return cached, False
         _LIVE.pop(user_key, None)
+    started = time.monotonic()
     sandbox_id = str(creds.get(CREDS_ID) or "") or _find_by_metadata(user_key)
     sbx = _connect(sandbox_id) if sandbox_id else None
     if sbx is None:
         if sandbox_id:
-            log.warning("stored e2b sandbox is gone; creating a new one")
+            log.warning("e2b: stored sandbox %s is gone; creating a new one", sandbox_id)
         sbx = _create(user_key)
         creds.pop(CREDS_STREAM, None)
+        log.info("e2b: sandbox %s created in %.1fs", getattr(sbx, "sandbox_id", "?"), time.monotonic() - started)
+    else:
+        log.info("e2b: reconnected to sandbox %s in %.1fs", sandbox_id, time.monotonic() - started)
     _ensure_desktop(sbx)
+    log.info("e2b: desktop ready on %s", DISPLAY)
     key = _ensure_stream(sbx, str(creds.get(CREDS_STREAM) or ""))
     new_id = str(getattr(sbx, "sandbox_id", "") or "")
+    log.info("e2b: stream ready for sandbox %s after %.1fs", new_id, time.monotonic() - started)
     changed = creds.get(CREDS_ID) != new_id or creds.get(CREDS_STREAM) != key
     creds[CREDS_ID] = new_id
     creds[CREDS_STREAM] = key
@@ -405,7 +428,43 @@ async def _persist(row) -> None:
             await session.execute(update(Connector).where(Connector.id == row.id).values(credentials_enc=row.credentials_enc))
             await session.commit()
     except Exception as exc:  # noqa: BLE001 - the caller's session still carries the change
-        log.info("could not persist e2b sandbox id: %s", type(exc).__name__)
+        log.warning("e2b: could not persist sandbox id: %s", type(exc).__name__)
+
+
+def _scrub(text: str) -> str:
+    key = (get_settings().e2b_api_key or "").strip()
+    text = str(text or "")
+    if key and len(key) > 6:
+        text = text.replace(key, "***")
+    return re.sub(r"e2b_[A-Za-z0-9]{16,}", "***", text)
+
+
+def describe_error(exc: BaseException) -> str:
+    """A short, user-facing reason a boot failed (never contains the API key)."""
+    if isinstance(exc, ToolError):
+        return _scrub(str(exc))[:300]
+    name = type(exc).__name__
+    msg = _scrub(str(exc)).strip()
+    low = msg.lower()
+    if "Authentication" in name or "401" in low or "invalid api key" in low or "unauthorized" in low:
+        return "E2B: invalid API key (E2B_API_KEY was rejected)."
+    if "RateLimit" in name or "429" in low or "concurrent" in low:
+        return "E2B: quota exceeded (rate limit or concurrent sandbox limit reached). Try again shortly."
+    if any(word in low for word in ("quota", "billing", "credit", "insufficient", "payment", "blocked")):
+        return f"E2B: quota exceeded ({msg[:160]})."
+    if "Timeout" in name or isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+        return "E2B: timed out starting the desktop."
+    return f"E2B: could not start the computer ({name}: {msg[:200]})."
+
+
+def booting(row) -> float:
+    """Seconds since a boot started for this user, or 0 when none is running."""
+    since = _BOOTING.get(_user_key(row))
+    return (time.monotonic() - since) if since else 0.0
+
+
+def last_error(row) -> str:
+    return _LAST_ERROR.get(_user_key(row), "")
 
 
 async def ensure_sandbox(row) -> E2BComputer:
@@ -413,17 +472,22 @@ async def ensure_sandbox(row) -> E2BComputer:
     lock = _LOCKS.setdefault(user_key, asyncio.Lock())
     async with lock:
         creds = decrypt_json(row.credentials_enc) if getattr(row, "credentials_enc", None) else {}
+        fresh = user_key not in _LIVE
+        if fresh:
+            _BOOTING[user_key] = time.monotonic()
+            _STATUS.pop(user_key, None)
+            log.info("e2b: boot requested user=%s stored_sandbox=%s", user_key, creds.get(CREDS_ID) or "-")
         try:
             live, changed = await asyncio.to_thread(_open, user_key, creds)
-        except ToolError:
-            raise
         except Exception as exc:  # noqa: BLE001
-            name = type(exc).__name__
-            if "Authentication" in name:
-                raise ToolError("E2B rejected the API key (E2B_API_KEY).") from exc
-            if "RateLimit" in name:
-                raise ToolError("E2B rate limit or concurrent sandbox limit reached. Try again shortly.") from exc
-            raise ToolError(f"Could not start the E2B computer ({name}: {str(exc)[:200]}).") from exc
+            reason = describe_error(exc)
+            _LAST_ERROR[user_key] = reason
+            _STATUS.pop(user_key, None)
+            log.warning("e2b: boot failed user=%s: %s (%s)", user_key, reason, type(exc).__name__)
+            raise ToolError(reason) from exc
+        finally:
+            _BOOTING.pop(user_key, None)
+        _LAST_ERROR.pop(user_key, None)
         if changed:
             row.credentials_enc = encrypt(creds)
             await _persist(row)
@@ -447,7 +511,11 @@ async def status(row) -> dict:
     live = _LIVE.get(user_key)
     creds = decrypt_json(row.credentials_enc) if getattr(row, "credentials_enc", None) else {}
     sandbox_id = (live.sandbox_id if live else "") or str(creds.get(CREDS_ID) or "")
-    if not sandbox_id:
+    since = _BOOTING.get(user_key)
+    if live is None and since:
+        # A boot (from the agent's first computer tool or the Open button) is in flight.
+        data = {"state": "booting", "screenAvailable": False, "booting_for": round(time.monotonic() - since, 1)}
+    elif not sandbox_id:
         data = {"state": "stopped", "screenAvailable": False}
     else:
         state = await asyncio.to_thread(_info_state, sandbox_id)
@@ -459,7 +527,8 @@ async def status(row) -> dict:
                     sbx._display = DISPLAY
                     live = _Live(sbx=sbx, sandbox_id=sandbox_id, stream_key=str(creds[CREDS_STREAM]), kept_alive=time.monotonic())
                     _LIVE[user_key] = live
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                log.warning("e2b: reattach to running sandbox %s failed: %s", sandbox_id, type(exc).__name__)
                 live = None
         if state == "running" and live is not None:
             data = {"state": "running", "screenAvailable": True, **stream_urls(live.sbx, live.stream_key)}
@@ -475,6 +544,8 @@ async def status(row) -> dict:
             data = {"state": "stopped", "screenAvailable": False}
     data["provider"] = "e2b"
     data["sandbox_id"] = sandbox_id
+    if data.get("state") != "running" and _LAST_ERROR.get(user_key):
+        data["error"] = _LAST_ERROR[user_key]
     _STATUS[user_key] = (time.monotonic(), dict(data))
     return data
 

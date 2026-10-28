@@ -375,6 +375,13 @@ Files: `app/connectors/daytona_box.py` (all computer tools, `call_daytona`), `ap
 - **Daemon version.** `_daemon_up` compares the health JSON with `computer_daemon.VERSION`; a stale daemon is restarted once, a current one is reused (a hard-coded `"9"` after the bump to `"10"` restarted Chromium on every call and lost the page).
 - **UI.** `ScreenRail` embeds `stream_url` in an iframe (pointer events off) and switches to `control_url` on Take control; it falls back to polled PNG frames for Daytona and while teaching (teaching records clicks through `/computer/control`). While the computer starts it shows "Starting computer…". The chat opens the rail automatically once per turn when a computer tool (`browser_*`, `browse_*`, `computer_*`, `launch_app`, `open_path`, `request_takeover`, `web_fetch`) shows up in the live progress. No CSP is set; if one is added, `frame-src` must allow `https://*.e2b.app` / `https://*.e2b.dev`.
 
+Boot and diagnostics:
+- `/computer/status` returns `provider`, `state` (`stopped`/`booting`/`running`/`suspended`), `booting_for`, the stream URLs when running, and `error` (the last boot failure, e.g. "E2B: invalid API key", "E2B: quota exceeded") instead of failing silently. With no backend configured it says so.
+- `/computer/boot` waits at most 90 s (504 with a clear message after that; a slow boot still finishes in the background). On E2B it returns as soon as the desktop and stream are up and starts the browser in the background.
+- The rail only shows "Operating the computer" while a turn is running. It boots the desktop itself once the agent calls a computer tool in that turn, counts boot seconds, shows the real error, and never polls `/computer/screen` (PNG) on E2B.
+- Every E2B lifecycle step logs an `e2b:` line (boot requested, create/connect, desktop ready, stream ready, failures), and startup logs the selected computer backend.
+- `python scripts/e2b_smoke.py` (in `apps/api`, or in a Render shell where E2B_API_KEY is set) runs the production boot path against real E2B and kills the sandbox after; `--mock [--fail auth|quota|stream]` runs it offline.
+
 ### 7.3 Web search (`app/agent/web_tools.py`)
 
 `web_search(query)` tries providers in order and returns `{query, results:[{title,url,snippet}], source, fallback_from?}` from the first that has results, or `{results: [], error, tried}`. It never invents results.

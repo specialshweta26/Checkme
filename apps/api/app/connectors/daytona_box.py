@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import shlex
@@ -503,7 +504,18 @@ def daemon_current(health_output: str) -> bool:
     return "OK" in health_output and f'"version": "{VERSION}"' in health_output
 
 
+_DAEMON_LOCKS: dict[str, asyncio.Lock] = {}
+
+
 async def _ensure_daemon(proc, fs=None) -> None:
+    # One install/start at a time per user: the E2B boot warms the browser in the background while the
+    # agent's first browser tool may ask for it too.
+    lock = _DAEMON_LOCKS.setdefault(_SCREEN_USER.get() or "default", asyncio.Lock())
+    async with lock:
+        await _ensure_daemon_locked(proc, fs)
+
+
+async def _ensure_daemon_locked(proc, fs=None) -> None:
     await _ensure_playwright(proc)
     if await _daemon_up(proc):
         return
@@ -590,6 +602,22 @@ async def _pull_screen(proc, fs=None) -> bytes:
         raise ToolError("No live computer screen yet. Wake the computer first.")
     remember_screen(raw)
     return bytes(raw)
+
+
+_WARMING: set = set()
+
+
+def _warm_browser_later(proc, fs=None) -> None:
+    async def run() -> None:
+        try:
+            await _boot_computer(proc, fs)
+            log.info("e2b: browser ready on the desktop")
+        except Exception as exc:  # noqa: BLE001 - the agent's next browser tool retries and reports
+            log.warning("e2b: background browser start failed: %s: %s", type(exc).__name__, str(exc)[:300])
+
+    task = asyncio.get_running_loop().create_task(run())
+    _WARMING.add(task)
+    task.add_done_callback(_WARMING.discard)
 
 
 async def _boot_computer(proc, fs=None) -> dict:
@@ -823,6 +851,15 @@ async def _invoke_daytona(row, name: str, args: dict[str, Any]) -> Any:
     try:
         proc = sandbox.process
         fs = getattr(sandbox, "fs", None)
+        if name == "boot" and getattr(sandbox, "provider", "") == "e2b":
+            # The desktop and its stream are up: answer now so the UI can show the screen, and start the
+            # browser (first run installs Playwright, which can take minutes) in the background.
+            _warm_browser_later(proc, fs)
+            data = {"ok": True, "state": "running", "screenAvailable": True, "url": "", "title": "Computer"}
+            data["sandbox_id"] = getattr(sandbox, "id", None)
+            data["provider"] = "e2b"
+            data.update(sandbox.stream_urls())
+            return data
         if name == "boot":
             data = await _boot_computer(proc, fs)
             data["sandbox_id"] = getattr(sandbox, "id", None)

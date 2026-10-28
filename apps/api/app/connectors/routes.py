@@ -211,26 +211,36 @@ async def computer_screen(user: User = Depends(current_user), db: AsyncSession =
 @router.get("/computer/status")
 async def computer_status(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     """Whether the live computer is stopped, asleep, or running."""
+    backend = get_settings().computer_backend
+    stopped = {"state": "stopped", "screenAvailable": False, "url": "", "title": "", "screen_agent": "", "provider": backend or "none"}
+    if not backend:
+        return {**stopped, "error": "No computer is configured on the server (set E2B_API_KEY)."}
     try:
         row = await _computer_row(db, user, provision=False)
     except HTTPException:
-        return {"state": "stopped", "screenAvailable": False, "url": "", "title": "", "screen_agent": ""}
+        return stopped
     from app.connectors.daytona_box import call_daytona
 
     try:
         data = await call_daytona(row, "status", {})
-    except Exception:  # noqa: BLE001
-        return {"state": "stopped", "screenAvailable": False, "url": "", "title": "", "screen_agent": ""}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("computer status failed (%s): %s: %s", backend, type(exc).__name__, str(exc)[:200])
+        return {**stopped, "error": str(exc)[:240]}
     if not isinstance(data, dict):
-        return {"state": "stopped", "screenAvailable": False, "url": "", "title": "", "screen_agent": ""}
+        return stopped
     return {
         "state": data.get("state") or "stopped",
         "screenAvailable": bool(data.get("screenAvailable")),
         "url": data.get("url") or "",
         "title": data.get("title") or "",
         "screen_agent": data.get("screen_agent") or "",
+        **({"error": str(data["error"])[:300]} if data.get("error") else {}),
+        **({"booting_for": data["booting_for"]} if data.get("booting_for") else {}),
         **_stream_fields(data),
     }
+
+
+BOOT_TIMEOUT = 90.0
 
 
 def _stream_fields(data: dict) -> dict:
@@ -249,9 +259,21 @@ async def computer_boot(user: User = Depends(current_user), db: AsyncSession = D
     row = await _computer_row(db, user, provision=True)
     from app.connectors.daytona_box import call_daytona
 
+    backend = get_settings().computer_backend
+    if not backend:
+        raise HTTPException(503, "No computer is configured on the server (set E2B_API_KEY).")
+    log.info("computer boot requested user=%s provider=%s", user.id, backend)
     try:
-        data = await call_daytona(row, "boot", {})
+        # E2B work runs in a thread, so a timeout here only stops waiting; a slow boot still finishes and
+        # the status poll picks the stream up.
+        data = await asyncio.wait_for(asyncio.shield(call_daytona(row, "boot", {})), timeout=BOOT_TIMEOUT)
+    except asyncio.TimeoutError as vis_exc:
+        log.warning("computer boot timed out after %.0fs user=%s provider=%s", BOOT_TIMEOUT, user.id, backend)
+        raise HTTPException(
+            504, f"The computer did not start within {int(BOOT_TIMEOUT)} seconds. It may still come up; check again shortly."
+        ) from vis_exc
     except Exception as vis_exc:  # noqa: BLE001
+        log.warning("computer boot failed user=%s provider=%s: %s", user.id, backend, str(vis_exc)[:240])
         raise HTTPException(400, str(vis_exc)[:240]) from vis_exc
     await db.commit()  # keeps a newly created sandbox id
     if not isinstance(data, dict):

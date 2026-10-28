@@ -325,3 +325,104 @@ def test_daemon_version_check_matches_current_daemon():
     assert daytona_box.daemon_current(f'{{"ok": true, "version": "{VERSION}"}}\nOK')
     assert not daytona_box.daemon_current('{"ok": true, "version": "9"}\nOK')
     assert not daytona_box.daemon_current("DOWN")
+
+
+class AuthenticationException(SandboxException):
+    pass
+
+
+class RateLimitException(SandboxException):
+    pass
+
+
+async def test_boot_failure_is_reported_not_swallowed(sdk, caplog):
+    from connector_core import ToolError
+
+    def refuse(**_):
+        raise AuthenticationException("401: Invalid API key test-key")
+
+    sdk.Sandbox.create = staticmethod(refuse)
+    row = _row({})
+    with caplog.at_level("INFO", logger="app.connectors.e2b_box"):
+        with pytest.raises(ToolError) as err:
+            await e2b_box.ensure_sandbox(row)
+    assert str(err.value) == "E2B: invalid API key (E2B_API_KEY was rejected)."
+    logs = caplog.text
+    assert "e2b: boot requested" in logs and "e2b: creating desktop sandbox" in logs and "e2b: boot failed" in logs
+    assert "test-key" not in logs, "the API key is never logged"
+    data = await e2b_box.status(row)
+    assert data["state"] == "stopped" and data["error"].startswith("E2B: invalid API key")
+    assert e2b_box.booting(row) == 0
+
+
+def test_describe_error_maps_quota_and_scrubs_the_key(sdk):
+    assert e2b_box.describe_error(RateLimitException("429 too many")).startswith("E2B: quota exceeded")
+    msg = e2b_box.describe_error(SandboxException("team test-key has exhausted its credits"))
+    assert msg.startswith("E2B: quota exceeded") and "test-key" not in msg
+    assert "test-key" not in e2b_box.describe_error(RuntimeError("boom test-key"))
+
+
+async def test_status_reports_booting_while_a_boot_is_in_flight(sdk):
+    import time
+
+    row = _row({})
+    e2b_box._BOOTING["u1"] = time.monotonic() - 12
+    data = await e2b_box.status(row)
+    assert data["state"] == "booting" and data["booting_for"] >= 12 and data["provider"] == "e2b"
+
+
+async def test_success_clears_previous_error_and_status_streams(sdk):
+    row = _row({})
+    e2b_box._LAST_ERROR["u1"] = "E2B: old failure"
+    box = await e2b_box.ensure_sandbox(row)
+    sdk.info[box.id] = "running"
+    data = await e2b_box.status(row)
+    assert data["state"] == "running" and "error" not in data and data["stream_url"].startswith("https://")
+
+
+async def test_e2b_boot_returns_stream_without_waiting_for_the_browser(sdk, monkeypatch):
+    import asyncio
+
+    started = asyncio.Event()
+
+    async def slow_boot(proc, fs=None):
+        started.set()
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(daytona_box, "_boot_computer", slow_boot)
+    data = await asyncio.wait_for(daytona_box.call_daytona(_row({}), "boot", {}), timeout=5)
+    assert data["provider"] == "e2b" and data["state"] == "running"
+    assert data["stream_url"].startswith("https://6080-new-1.e2b.app/")
+    await asyncio.wait_for(started.wait(), timeout=2)
+    for task in list(daytona_box._WARMING):
+        task.cancel()
+
+
+async def test_status_route_explains_missing_backend(monkeypatch):
+    from app.connectors import routes
+
+    monkeypatch.setattr(routes, "get_settings", lambda: SimpleNamespace(computer_backend=""))
+    data = await routes.computer_status(user=SimpleNamespace(id="u1"), db=None)
+    assert data["state"] == "stopped" and data["provider"] == "none" and "E2B_API_KEY" in data["error"]
+
+
+async def test_boot_route_times_out_with_a_clear_message(monkeypatch):
+    import asyncio
+
+    from fastapi import HTTPException
+
+    from app.connectors import routes
+
+    async def row_for(db, user, provision=False):
+        return _row({})
+
+    async def hang(row, name, args):
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(routes, "get_settings", lambda: SimpleNamespace(computer_backend="e2b"))
+    monkeypatch.setattr(routes, "_computer_row", row_for)
+    monkeypatch.setattr(routes, "BOOT_TIMEOUT", 0.05)
+    monkeypatch.setattr(daytona_box, "call_daytona", hang)
+    with pytest.raises(HTTPException) as err:
+        await routes.computer_boot(user=SimpleNamespace(id="u1"), db=None)
+    assert err.value.status_code == 504 and "did not start within" in err.value.detail
