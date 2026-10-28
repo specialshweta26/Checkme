@@ -165,6 +165,10 @@ async def chat(
         background.add_task(seed_letta, user.id)
 
     request_id = random_token(12)
+    public_uploads = [
+        {k: item.get(k) for k in ("key", "filename", "content_type", "kind", "download_url", "preview_url", "previewable", "size") if item.get(k) is not None}
+        for item in uploads
+    ]
     history_rows = (
         await db.execute(
             select(ChatMessage)
@@ -217,6 +221,17 @@ async def chat(
     if routed is not None:
         return routed
     progress = ProgressReporter(user.id, body.progress_id) if valid_progress_id(body.progress_id) else None
+    working_message = await _start_turn(
+        db,
+        sess,
+        user.id,
+        request_id,
+        text,
+        user_meta={"uploads": public_uploads} if public_uploads else None,
+        progress_id=body.progress_id if progress is not None else None,
+        agent=workspace_agent,
+        group=group,
+    )
     try:
         result = await run_deep_agent(
             db,
@@ -249,6 +264,9 @@ async def chat(
         # #region agent log
         dbg("C", "chat/routes.py:chat", "agent exception", {"error": str(exc)[:200], "ms": int((time.time() - t0) * 1000)})
         # #endregion
+        working_message.content = "I couldn't finish that request. You can retry or continue in this chat."
+        working_message.meta = {**(working_message.meta or {}), "in_progress": False, "failed": True}
+        await db.commit()
         raise HTTPException(502, str(exc)[:400]) from exc
     finally:
         if progress is not None:
@@ -283,10 +301,6 @@ async def chat(
         if isinstance(result.get("question"), dict) and result["question"].get("options"):
             # ask_user in a chat turn: the web shows the options as buttons that send the option text.
             meta["choices"] = {"question": result["question"].get("question"), "options": result["question"]["options"][:5]}
-        public_uploads = [
-            {k: item.get(k) for k in ("key", "filename", "content_type", "kind", "download_url", "preview_url", "previewable", "size") if item.get(k) is not None}
-            for item in uploads
-        ]
         await _store(
             db,
             sess,
@@ -297,6 +311,7 @@ async def chat(
             meta,
             user_meta={"uploads": public_uploads} if public_uploads else None,
             thread=result.get("thread"),
+            working_message=working_message,
         )
         return {"session_id": str(sess.id), **result, "request_id": request_id, "uploads": public_uploads}
     except Exception as exc:  # noqa: BLE001
@@ -461,9 +476,41 @@ async def _last_event_id(db, job) -> int:
         return 0
 
 
-async def _store(db, sess, user_id, request_id, user_text, assistant_text, meta, user_meta=None, thread=None) -> None:
+async def _start_turn(db, sess, user_id, request_id, user_text, user_meta=None, progress_id=None, agent=None, group=None):
+    """Commit a user turn and visible working marker before a long agent run starts."""
+    from app.models import ChatMessage
+
+    agent_id = getattr(agent, "id", None)
+    agent_name = getattr(agent, "name", None)
+    shared_meta = {
+        "agent_id": str(agent_id) if agent_id else None,
+        "agent_name": agent_name,
+        "group_id": str(getattr(group, "id", "")) if group is not None else None,
+    }
     db.add(ChatMessage(session_id=sess.id, user_id=user_id, role="user", content=user_text, meta=user_meta or {}, request_id=request_id))
-    db.add(ChatMessage(session_id=sess.id, user_id=user_id, role="assistant", content=assistant_text, meta=meta, request_id=request_id))
+    working = ChatMessage(
+        session_id=sess.id,
+        user_id=user_id,
+        role="assistant",
+        content=f"{agent_name or 'Your agent'} is working on this…",
+        meta={**shared_meta, "request_id": request_id, "in_progress": True, "progress_id": progress_id},
+        request_id=request_id,
+    )
+    db.add(working)
+    if not sess.title or sess.title == "New chat":
+        sess.title = user_text[:80]
+    sess.updated_at = datetime.now(timezone.utc)
+    await db.commit()
+    return working
+
+
+async def _store(db, sess, user_id, request_id, user_text, assistant_text, meta, user_meta=None, thread=None, working_message=None) -> None:
+    if working_message is None:
+        db.add(ChatMessage(session_id=sess.id, user_id=user_id, role="user", content=user_text, meta=user_meta or {}, request_id=request_id))
+        db.add(ChatMessage(session_id=sess.id, user_id=user_id, role="assistant", content=assistant_text, meta=meta, request_id=request_id))
+    else:
+        working_message.content = assistant_text
+        working_message.meta = {**(working_message.meta or {}), **meta, "in_progress": False}
     for item in thread or []:
         if not isinstance(item, dict):
             continue
