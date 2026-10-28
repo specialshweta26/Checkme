@@ -337,6 +337,57 @@ async def computer_control(body: ComputerControlBody, user: User = Depends(curre
     }
 
 
+def _playwright_key(raw: str) -> str:
+    """'ctrl+a' / 'Cmd+V' / 'Left' -> Playwright names ('Control+A', 'ArrowLeft') for the Daytona browser."""
+    names = {"ctrl": "Control", "control": "Control", "cmd": "Meta", "meta": "Meta", "shift": "Shift", "alt": "Alt",
+             "left": "ArrowLeft", "right": "ArrowRight", "up": "ArrowUp", "down": "ArrowDown", "esc": "Escape",
+             "escape": "Escape", "enter": "Enter", "tab": "Tab", "backspace": "Backspace"}  # fmt: skip
+    parts = [p.strip() for p in raw.split("+") if p.strip()]
+    return "+".join(names.get(p.lower(), p.upper() if len(p) == 1 else p) for p in parts)
+
+
+class ComputerInputBody(BaseModel):
+    text: str | None = Field(default=None, max_length=2000)
+    key: str | None = Field(default=None, max_length=40)
+
+
+@router.post("/computer/input")
+async def computer_input(body: ComputerInputBody, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Type text and/or press a key on the live computer. Used by the rail's input bar (phones cannot type into
+    the noVNC iframe). E2B: the desktop SDK's write/press (xdotool on the whole desktop). Daytona: the browser's
+    keyboard via computer_act."""
+    if not (body.text or body.key):
+        raise HTTPException(400, "Send text or a key.")
+    backend = get_settings().computer_backend
+    if not backend:
+        raise HTTPException(503, "No computer is configured on the server (set E2B_API_KEY).")
+    row = await _computer_row(db, user)
+    from connector_core import ToolError
+
+    try:
+        if backend == "e2b":
+            from app.connectors import e2b_box
+
+            data = await e2b_box.send_input(row, body.text, body.key)
+            await db.commit()
+            return data
+        from app.connectors.daytona_box import call_daytona
+
+        steps = []
+        if body.text:
+            steps.append({"kind": "type", "text": body.text})
+        if body.key:
+            steps.append({"kind": "key", "key": _playwright_key(body.key)})
+        data = await call_daytona(row, "computer_act", {"actions": steps})
+    except ToolError as vis_exc:
+        raise HTTPException(400, str(vis_exc)[:240]) from vis_exc
+    except Exception as vis_exc:  # noqa: BLE001
+        log.warning("computer input failed: %s: %s", type(vis_exc).__name__, str(vis_exc)[:200])
+        raise HTTPException(400, str(vis_exc)[:240]) from vis_exc
+    error = data.get("error") if isinstance(data, dict) else ""
+    return {"ok": not error, "error": error or ""}
+
+
 @router.get("")
 async def list_connectors(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     await ensure_platform_connectors(db, user)

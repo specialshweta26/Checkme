@@ -40,12 +40,20 @@ def local_slug(ctx) -> str | None:
 
 
 def computer_missing() -> dict:
-    return {
-        "error": (
-            "The computer (cloud sandbox) is not available for this agent. "
-            "It needs E2B_API_KEY (or DAYTONA_API_KEY) on the server, or the computer connector assigned to this agent."
+    """Only reached when the server has no computer backend, or the user's computer row could not be loaded."""
+    from app.config import get_settings
+
+    if not get_settings().computer_backend:
+        reason = (
+            "No cloud computer is configured on the server: E2B_API_KEY (or DAYTONA_API_KEY) is not set. "
+            "Tell the user exactly this so the operator can add the key."
         )
-    }
+    else:
+        reason = (
+            "The cloud computer is configured on the server, but this user's computer connector could not be loaded "
+            "for this run. Tell the user this exact reason and suggest opening the Computer panel once to set it up."
+        )
+    return {"error": reason, "computer_unavailable": True}
 
 
 async def run_computer(ctx, tool_name: str, args: dict | None = None) -> Any:

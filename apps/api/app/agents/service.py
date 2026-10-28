@@ -696,6 +696,13 @@ async def grant_toolkit_agent(db: AsyncSession, user: User, toolkit: str, agent_
     return assigned
 
 
+def is_shared_computer(conn) -> bool:
+    """The built-in computer (E2B Desktop or Daytona): slug ``computer``, provider ``daytona``."""
+    return getattr(conn, "kind", "builtin") == "builtin" and (
+        getattr(conn, "slug", "") == "computer" or getattr(conn, "provider", "") == "daytona"
+    )
+
+
 def filter_connectors(connectors: list, agent_id=None, teammate_ids: list | None = None, assignments: dict | None = None):
     """Keep connectors this agent (or any teammate) is allowed to use."""
     mapping = assignments or {}
@@ -706,7 +713,9 @@ def filter_connectors(connectors: list, agent_id=None, teammate_ids: list | None
         return list(connectors)
     kept = []
     for conn in connectors:
-        if getattr(conn, "provider", "") == "composio":
+        if getattr(conn, "provider", "") == "composio" or is_shared_computer(conn):
+            # The marketplace and the user's computer are shared by every agent; assigning them to some agents
+            # must never take them away from the rest (e.g. Chief).
             kept.append(conn)
             continue
         cid = str(getattr(conn, "id", "") or "")

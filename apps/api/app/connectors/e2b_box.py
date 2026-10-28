@@ -571,3 +571,71 @@ def forget(user_key: str | None = None) -> None:
     else:
         _LIVE.pop(user_key, None)
         _STATUS.pop(user_key, None)
+
+
+# ---------------------------------------------------------------------------
+# Typing from the UI (phones cannot type into the noVNC iframe)
+# ---------------------------------------------------------------------------
+
+MAX_INPUT_TEXT = 2000
+_NAMED_KEYS = {
+    "enter", "tab", "backspace", "escape", "esc", "delete", "del", "space", "home", "end",
+    "page_up", "page_down", "up", "down", "left", "right", "insert",
+    *(f"f{n}" for n in range(1, 13)),
+}  # fmt: skip
+_MODIFIERS = {"ctrl": "ctrl", "control": "ctrl", "cmd": "ctrl", "meta": "ctrl", "command": "ctrl", "shift": "shift", "alt": "alt"}
+_KEY_ALIASES = {"return": "enter", "pageup": "page_up", "pagedown": "page_down", "arrowup": "up", "arrowdown": "down",
+                "arrowleft": "left", "arrowright": "right", "escape": "esc"}  # fmt: skip
+
+
+def parse_key(raw: str) -> list[str]:
+    """'Enter', 'ctrl+a', 'Cmd+V', 'ArrowUp' -> SDK key names. Cmd/Meta map to Ctrl (the desktop is Linux).
+
+    Strict allowlist: the SDK passes key names to a shell command unquoted.
+    """
+    parts = [p.strip().lower() for p in str(raw or "").split("+") if p.strip()]
+    if not parts or len(parts) > 4:
+        raise ToolError("Unsupported key.")
+    out: list[str] = []
+    for i, part in enumerate(parts):
+        last = i == len(parts) - 1
+        if not last:
+            if part not in _MODIFIERS:
+                raise ToolError(f"Unsupported modifier: {part[:20]}")
+            out.append(_MODIFIERS[part])
+            continue
+        part = _KEY_ALIASES.get(part, part)
+        if part in _NAMED_KEYS or re.fullmatch(r"[a-z0-9]", part):
+            out.append(part)
+        else:
+            raise ToolError(f"Unsupported key: {part[:20]}")
+    return out
+
+
+async def send_input(row, text: str | None = None, key: str | None = None) -> dict:
+    """Type text and/or press a key on the E2B desktop (whatever window has focus), via the SDK's write/press."""
+    text = text or ""
+    if len(text) > MAX_INPUT_TEXT:
+        raise ToolError(f"Text is too long (max {MAX_INPUT_TEXT} characters).")
+    keys = parse_key(key) if key else []
+    if not text and not keys:
+        raise ToolError("Nothing to type.")
+    box = await existing_sandbox(row)
+    if box is None:
+        box = await ensure_sandbox(row)  # reattaches to the running desktop (or reports the real boot error)
+    sbx = box._live.sbx
+
+    def run() -> None:
+        if text:
+            sbx.write(text, chunk_size=50, delay_in_ms=8)
+        if keys:
+            sbx.press(keys if len(keys) > 1 else keys[0])
+
+    try:
+        await asyncio.to_thread(run)
+    except Exception as exc:  # noqa: BLE001
+        reason = describe_error(exc)
+        log.warning("e2b: input failed: %s", reason)
+        raise ToolError(reason) from exc
+    _keepalive(box._live)
+    return {"ok": True, "typed": len(text), "key": "+".join(keys)}

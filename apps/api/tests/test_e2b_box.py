@@ -99,6 +99,12 @@ class FakeSandbox:
     def _start_xfce4(self):
         pass
 
+    def write(self, text, chunk_size=25, delay_in_ms=75):
+        self.typed = getattr(self, "typed", []) + [text]
+
+    def press(self, key):
+        self.pressed = getattr(self, "pressed", []) + [key]
+
 
 class FakeSDK:
     CommandExitException = CommandExitException
@@ -426,3 +432,115 @@ async def test_boot_route_times_out_with_a_clear_message(monkeypatch):
     with pytest.raises(HTTPException) as err:
         await routes.computer_boot(user=SimpleNamespace(id="u1"), db=None)
     assert err.value.status_code == 504 and "did not start within" in err.value.detail
+
+
+def test_parse_key_allowlist():
+    from connector_core import ToolError
+
+    assert e2b_box.parse_key("Enter") == ["enter"]
+    assert e2b_box.parse_key("ArrowUp") == ["up"]
+    assert e2b_box.parse_key("Cmd+V") == ["ctrl", "v"]
+    assert e2b_box.parse_key("ctrl+shift+t") == ["ctrl", "shift", "t"]
+    for bad in ("a; rm -rf /", "ctrl+$(id)", "x+a", "", "foo"):
+        with pytest.raises(ToolError):
+            e2b_box.parse_key(bad)
+
+
+async def test_send_input_types_and_presses_on_the_desktop(sdk):
+    row = _row({})
+    box = await e2b_box.ensure_sandbox(row)
+    sbx = sdk.existing[box.id]
+    out = await e2b_box.send_input(row, "hello world", "Enter")
+    assert out == {"ok": True, "typed": 11, "key": "enter"}
+    assert sbx.typed == ["hello world"] and sbx.pressed == ["enter"]
+    await e2b_box.send_input(row, None, "cmd+a")
+    assert sbx.pressed[-1] == ["ctrl", "a"]
+
+
+class _DB:
+    async def commit(self):
+        pass
+
+
+async def test_input_route_uses_e2b_sdk(sdk, monkeypatch):
+    from fastapi import HTTPException
+
+    from app.connectors import routes
+
+    row = _row({})
+    box = await e2b_box.ensure_sandbox(row)
+
+    async def row_for(db, user, provision=True):
+        return row
+
+    monkeypatch.setattr(routes, "get_settings", lambda: SimpleNamespace(computer_backend="e2b"))
+    monkeypatch.setattr(routes, "_computer_row", row_for)
+    out = await routes.computer_input(routes.ComputerInputBody(text="abc", key="Tab"), user=SimpleNamespace(id="u1"), db=_DB())
+    assert out["ok"] is True and sdk.existing[box.id].typed == ["abc"] and sdk.existing[box.id].pressed == ["tab"]
+    with pytest.raises(HTTPException) as err:
+        await routes.computer_input(routes.ComputerInputBody(key="rm -rf"), user=SimpleNamespace(id="u1"), db=_DB())
+    assert err.value.status_code == 400 and "Unsupported key" in err.value.detail
+    with pytest.raises(HTTPException):
+        await routes.computer_input(routes.ComputerInputBody(), user=SimpleNamespace(id="u1"), db=_DB())
+
+
+async def test_input_route_daytona_uses_computer_act(monkeypatch):
+    from app.connectors import routes
+
+    seen = {}
+
+    async def row_for(db, user, provision=True):
+        return _row({})
+
+    async def fake_call(row, name, args):
+        seen["name"], seen["args"] = name, args
+        return {"ok": True}
+
+    monkeypatch.setattr(routes, "get_settings", lambda: SimpleNamespace(computer_backend="daytona"))
+    monkeypatch.setattr(routes, "_computer_row", row_for)
+    monkeypatch.setattr(daytona_box, "call_daytona", fake_call)
+    out = await routes.computer_input(routes.ComputerInputBody(text="hi", key="Enter"), user=SimpleNamespace(id="u1"), db=_DB())
+    assert out == {"ok": True, "error": ""}
+    assert seen["name"] == "computer_act"
+    assert seen["args"]["actions"] == [{"kind": "type", "text": "hi"}, {"kind": "key", "key": "Enter"}]
+    assert routes._playwright_key("ctrl+a") == "Control+A" and routes._playwright_key("Left") == "ArrowLeft"
+
+
+def test_every_agent_keeps_the_computer_even_when_assigned_elsewhere():
+    from app.agents.service import filter_connectors
+
+    computer = SimpleNamespace(id="c-comp", slug="computer", provider="daytona", kind="builtin")
+    mail = SimpleNamespace(id="c-mail", slug="gmail", provider="gmail", kind="builtin")
+    assignments = {"c-comp": ["coder"], "c-mail": ["coder"]}
+    kept = filter_connectors([computer, mail], "chief", [], assignments)
+    assert computer in kept and mail not in kept
+
+
+async def test_run_adds_computer_row_dropped_by_health(monkeypatch):
+    from app.agent import deep
+
+    row = SimpleNamespace(slug="computer", enabled=True, health="down")
+
+    class Result:
+        def scalar_one_or_none(self):
+            return row
+
+    class DB:
+        async def execute(self, _stmt):
+            return Result()
+
+    monkeypatch.setattr("app.config.get_settings", lambda: SimpleNamespace(computer_backend="e2b"))
+    out = await deep.with_computer(DB(), SimpleNamespace(id="u1"), [SimpleNamespace(slug="gmail")])
+    assert row in out
+    monkeypatch.setattr("app.config.get_settings", lambda: SimpleNamespace(computer_backend=""))
+    assert row not in await deep.with_computer(DB(), SimpleNamespace(id="u1"), [])
+
+
+def test_computer_missing_gives_the_real_reason(monkeypatch):
+    from app.agent import computer_harness
+
+    monkeypatch.setattr("app.config.get_settings", lambda: SimpleNamespace(computer_backend=""))
+    assert "E2B_API_KEY" in computer_harness.computer_missing()["error"]
+    monkeypatch.setattr("app.config.get_settings", lambda: SimpleNamespace(computer_backend="e2b"))
+    msg = computer_harness.computer_missing()["error"]
+    assert "not available for this agent" not in msg and "configured" in msg

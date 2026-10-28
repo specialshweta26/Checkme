@@ -165,6 +165,114 @@ async function sendControl(payload: Record<string, unknown>) {
   }
 }
 
+async function sendInput(payload: { text?: string; key?: string }) {
+  const res = await fetch("/api/connectors/computer/input", {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = (await res.json().catch(() => ({}))) as { detail?: string; error?: string };
+  if (!res.ok || data.error) throw new Error(String(data.detail || data.error || `Typing failed (${res.status})`).slice(0, 180));
+}
+
+const QUICK_KEYS: Array<{ label: string; key: string; title: string }> = [
+  { label: "Enter", key: "Enter", title: "Press Enter" },
+  { label: "Tab", key: "Tab", title: "Press Tab" },
+  { label: "⌫", key: "Backspace", title: "Backspace" },
+  { label: "Esc", key: "Escape", title: "Escape" },
+  { label: "←", key: "Left", title: "Left arrow" },
+  { label: "↑", key: "Up", title: "Up arrow" },
+  { label: "↓", key: "Down", title: "Down arrow" },
+  { label: "→", key: "Right", title: "Right arrow" },
+  { label: "Ctrl+A", key: "ctrl+a", title: "Select all (Ctrl/Cmd+A)" },
+  { label: "Ctrl+C", key: "ctrl+c", title: "Copy (Ctrl/Cmd+C)" },
+  { label: "Ctrl+V", key: "ctrl+v", title: "Paste the desktop clipboard (Ctrl/Cmd+V)" },
+];
+
+/** Phones cannot raise the keyboard inside the noVNC iframe, so text and keys go through the API instead.
+ *  Never autofocuses, so desktop typing straight into the iframe keeps working. */
+export function ComputerInputBar({ onError }: { onError?: (message: string) => void }) {
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const run = async (payload: { text?: string; key?: string }) => {
+    setBusy(true);
+    setError("");
+    try {
+      await sendInput(payload);
+      return true;
+    } catch (exc) {
+      const message = exc instanceof Error ? exc.message : String(exc);
+      setError(message);
+      onError?.(message);
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  };
+  const submit = async (e?: { preventDefault: () => void }) => {
+    e?.preventDefault();
+    if (!text || busy) return;
+    if (await run({ text })) setText("");
+  };
+  return (
+    <form
+      className="screen-input-bar"
+      onSubmit={(e) => void submit(e)}
+      style={{
+        position: "sticky",
+        bottom: 0,
+        zIndex: 2,
+        display: "flex",
+        flexDirection: "column",
+        gap: 6,
+        padding: "8px 8px calc(8px + env(safe-area-inset-bottom))",
+        background: "var(--panel, #fff)",
+        borderTop: "1px solid var(--line, rgba(0,0,0,0.1))",
+      }}
+    >
+      <div style={{ display: "flex", gap: 6 }}>
+        <input
+          type="text"
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder="Type on the computer…"
+          aria-label="Type on the computer"
+          enterKeyHint="send"
+          autoCapitalize="off"
+          autoCorrect="off"
+          autoComplete="off"
+          spellCheck={false}
+          maxLength={2000}
+          style={{ flex: 1, minWidth: 0, fontSize: 16, padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line, #ccc)" }}
+        />
+        <button type="submit" className="btn" disabled={busy || !text} aria-label="Send text to the computer">
+          Send
+        </button>
+      </div>
+      <div style={{ display: "flex", gap: 4, overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
+        {QUICK_KEYS.map((k) => (
+          <button
+            key={k.key}
+            type="button"
+            className="screen-control-btn"
+            title={k.title}
+            aria-label={k.title}
+            disabled={busy}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => void run({ key: k.key })}
+            style={{ flex: "0 0 auto" }}
+          >
+            {k.label}
+          </button>
+        ))}
+      </div>
+      {error ? <p className="screen-notice" role="alert">{error}</p> : null}
+    </form>
+  );
+}
+
 export function ComputerIcon() {
   return (
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden>
@@ -543,6 +651,7 @@ export function ScreenRail({
             : `${agentName}'s screen`}
       </p>
       {notice ? <p className="screen-notice">{notice}</p> : null}
+      {!teaching && (controlling || streaming || machine === "running") ? <ComputerInputBar /> : null}
     </aside>
   );
 }
