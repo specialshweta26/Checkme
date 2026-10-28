@@ -201,10 +201,14 @@ export function ScreenRail({
   const [pageUrl, setPageUrl] = useState(session?.url || "");
   const [pageTitle, setPageTitle] = useState(session?.title || "");
   const [screenAgent, setScreenAgent] = useState("");
+  // E2B desktops expose a live noVNC stream (view-only URL + a control URL). Daytona has none: poll PNG frames.
+  const [stream, setStream] = useState<{ view: string; control: string }>({ view: "", control: "" });
   const liveActive = Boolean(watching || controlling || machine === "running");
-  const liveScreen = useLiveScreen(liveActive);
+  // Teaching records clicks through our own control endpoint, so it keeps the frame view.
+  const streaming = Boolean(stream.view) && machine === "running" && !teaching;
+  const liveScreen = useLiveScreen(liveActive && !streaming);
   // A saved task preview can be stale or blank; only use it before a live session starts.
-  const frame = liveScreen.url || (!liveActive ? still : "");
+  const frame = streaming ? "" : liveScreen.url || (!liveActive ? still : "");
   const href = session?.url || pageUrl || "";
   const asleep = machine !== "running" && machine !== "booting" && !watching && !controlling && !frame;
   const previewRef = useRef<HTMLDivElement>(null);
@@ -225,7 +229,8 @@ export function ScreenRail({
     const ac = new AbortController();
     const apply = (data: any) => {
       if (!data?.state) return;
-      setMachine(data.state);
+      if (!waking.current) setMachine(data.state);
+      applyStream(data);
       if (data.url) setPageUrl(data.url);
       if (data.title) setPageTitle(data.title);
       if (typeof data.screen_agent === "string") setScreenAgent(data.screen_agent);
@@ -259,7 +264,7 @@ export function ScreenRail({
     : controlling
       ? "you have control"
       : machine === "booting"
-        ? "Booting live desktop…"
+        ? "Starting computer…"
         : watching
           ? status || "Operating the computer"
           : machine === "running"
@@ -267,6 +272,13 @@ export function ScreenRail({
             : asleep
               ? "suspended"
               : host || status || "idle";
+
+  function applyStream(data: any) {
+    const view = typeof data?.stream_url === "string" && data.stream_url.startsWith("https://") ? data.stream_url : "";
+    const control = typeof data?.control_url === "string" && data.control_url.startsWith("https://") ? data.control_url : "";
+    if (view) setStream((prev) => (prev.view === view && prev.control === control ? prev : { view, control: control || view }));
+    else if (data?.state && data.state !== "running") setStream((prev) => (prev.view ? { view: "", control: "" } : prev));
+  }
 
   async function wake() {
     if (waking.current) return false;
@@ -278,6 +290,7 @@ export function ScreenRail({
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : "Could not wake the computer");
       setMachine("running");
+      applyStream(data);
       if (data.url) setPageUrl(data.url);
       if (data.title) setPageTitle(data.title);
       return true;
@@ -355,12 +368,12 @@ export function ScreenRail({
             {teachingBusy ? "Saving…" : "Stop & save skill"}
           </button>
         ) : null}
-        {!controlling && !frame && machine !== "booting" ? (
+        {!controlling && !frame && !streaming && machine !== "booting" ? (
           <button type="button" className="screen-control-btn primary" onClick={() => void wake()}>
             Open
           </button>
         ) : null}
-        {onTakeControl && !controlling && (Boolean(frame) || machine === "running") ? (
+        {onTakeControl && !controlling && (Boolean(frame) || streaming || machine === "running") ? (
           <button type="button" className="screen-control-btn" onClick={onTakeControl}>
             Take control
           </button>
@@ -379,10 +392,10 @@ export function ScreenRail({
       </div>
       <div
         ref={previewRef}
-        className={`screen-preview fullscreen${asleep ? " asleep" : ""}${controlling ? " controlling" : ""}`}
-        tabIndex={controlling ? 0 : -1}
+        className={`screen-preview fullscreen${asleep ? " asleep" : ""}${controlling ? " controlling" : ""}${streaming ? " streaming" : ""}`}
+        tabIndex={controlling && !streaming ? 0 : -1}
         onWheel={
-          controlling
+          controlling && !streaming
             ? (e) => {
                 e.preventDefault();
                 void act({ kind: "scroll", dx: Math.round(e.deltaX), dy: Math.round(e.deltaY) });
@@ -390,7 +403,7 @@ export function ScreenRail({
             : undefined
         }
         onKeyDown={
-          controlling
+          controlling && !streaming
             ? (e) => {
                 if (e.metaKey || e.ctrlKey) {
                   if (e.key === "a" || e.key === "A") {
@@ -417,7 +430,18 @@ export function ScreenRail({
             : undefined
         }
       >
-        {frame ? (
+        {streaming ? (
+          <iframe
+            // View-only until the user takes control; noVNC then forwards mouse and keyboard to the desktop.
+            key={controlling ? "control" : "view"}
+            src={controlling ? stream.control : stream.view}
+            title={`${agentName}'s live desktop`}
+            className="screen-stream"
+            allow="clipboard-read; clipboard-write; fullscreen"
+            referrerPolicy="no-referrer"
+            style={{ width: "100%", height: "100%", border: 0, display: "block", background: "#111", pointerEvents: controlling ? "auto" : "none" }}
+          />
+        ) : frame ? (
           <img
             src={frame}
             alt={`${agentName}'s screen`}
@@ -435,12 +459,14 @@ export function ScreenRail({
         ) : (
           <p className="screen-placeholder">
             {machine === "booting"
-              ? "Booting live desktop…"
-              : watching || controlling || machine === "running"
-                ? liveScreen.error
-                  ? `Live screen unavailable. Retrying… ${liveScreen.error}`
-                  : "Connecting to the live desktop…"
-                : "Computer is asleep. Open it to wake."}
+              ? "Starting computer…"
+              : watching && machine !== "running"
+                ? "Starting computer… The screen appears as soon as the desktop is up."
+                : watching || controlling || machine === "running"
+                  ? liveScreen.error && !watching
+                    ? `Live screen unavailable. Retrying… ${liveScreen.error}`
+                    : "Connecting to the live desktop…"
+                  : "Computer is asleep. Open it to wake."}
           </p>
         )}
       </div>
@@ -449,6 +475,8 @@ export function ScreenRail({
           ? "Recording your clicks, typing, and scrolling. No audio is recorded."
           : controlling
             ? session?.handoff_reason || "Click, type, and scroll on this screen."
+            : streaming
+              ? `${agentName}'s screen (live, view only). Take control to use it.`
             : `${agentName}'s screen`}
       </p>
       {notice ? <p className="screen-notice">{notice}</p> : null}

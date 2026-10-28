@@ -4,7 +4,6 @@ import asyncio
 import json
 import logging
 import secrets
-import time
 import uuid
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
@@ -230,12 +229,23 @@ async def computer_status(user: User = Depends(current_user), db: AsyncSession =
         "url": data.get("url") or "",
         "title": data.get("title") or "",
         "screen_agent": data.get("screen_agent") or "",
+        **_stream_fields(data),
     }
+
+
+def _stream_fields(data: dict) -> dict:
+    """Live desktop stream (E2B noVNC). Only for the signed-in owner: the URLs carry the stream password."""
+    out = {"provider": data.get("provider") or "daytona"}
+    for key in ("stream_url", "control_url"):
+        url = str(data.get(key) or "")
+        if url.startswith("https://"):
+            out[key] = url
+    return out
 
 
 @router.post("/computer/boot")
 async def computer_boot(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
-    """Wake the Daytona computer and Chromium tab so the right-rail screen can stream."""
+    """Wake the computer (E2B desktop or Daytona) and its Chromium so the right-rail screen can stream."""
     row = await _computer_row(db, user, provision=True)
     from app.connectors.daytona_box import call_daytona
 
@@ -243,9 +253,9 @@ async def computer_boot(user: User = Depends(current_user), db: AsyncSession = D
         data = await call_daytona(row, "boot", {})
     except Exception as vis_exc:  # noqa: BLE001
         raise HTTPException(400, str(vis_exc)[:240]) from vis_exc
+    await db.commit()  # keeps a newly created sandbox id
     if not isinstance(data, dict):
         return {"state": "running", "screenAvailable": True, "url": "", "title": ""}
-    await db.commit()
     return {
         "ok": data.get("ok", True),
         "state": data.get("state") or "running",
@@ -253,6 +263,7 @@ async def computer_boot(user: User = Depends(current_user), db: AsyncSession = D
         "url": data.get("url") or "",
         "title": data.get("title") or "Computer",
         "error": data.get("error") or "",
+        **_stream_fields(data),
     }
 
 

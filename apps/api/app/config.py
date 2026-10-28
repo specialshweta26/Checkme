@@ -77,9 +77,34 @@ class Settings(BaseSettings):
 
     allow_private_mcp_urls: bool = False
 
+    @property
+    def computer_backend(self) -> str:
+        """Which sandbox backs the agent's computer: "e2b", "daytona", or "" when neither is configured."""
+        wanted = (self.computer_provider or "").strip().lower()
+        if wanted == "daytona" and self.daytona_api_key:
+            return "daytona"
+        if wanted == "e2b" and self.e2b_api_key:
+            return "e2b"
+        if self.e2b_api_key:
+            return "e2b"
+        if self.daytona_api_key:
+            return "daytona"
+        return ""
+
     daytona_api_key: str = ""
     daytona_api_url: str = "https://app.daytona.io/api"
     daytona_target: str = "us"
+    # The agent's computer: "e2b" (E2B Desktop sandbox, default whenever E2B_API_KEY is set) or "daytona" (fallback).
+    computer_provider: str = ""
+    e2b_api_key: str = ""
+    e2b_template: str = ""  # empty = E2B's public "desktop" template
+    # Seconds of inactivity before the sandbox pauses (Hobby plan max 3600, Pro max 86400). Each tool call extends it.
+    e2b_sandbox_timeout: int = 3600
+    # Optional web search API keys. Tried in this order; with none set a keyless fallback is used.
+    tavily_api_key: str = ""
+    brave_search_api_key: str = ""
+    serper_api_key: str = ""
+    exa_api_key: str = ""
     composio_api_key: str = ""
 
     # Optional: pin the Composio GitHub auth config used for Connect GitHub (docs/GITHUB.md). Leave empty to use the

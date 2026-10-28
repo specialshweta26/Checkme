@@ -83,6 +83,22 @@ services:
         value: https://app.daytona.io/api
       - key: DAYTONA_TARGET
         value: us
+      # Agent computer: E2B Desktop (live desktop stream) when E2B_API_KEY is set; Daytona is the fallback.
+      - key: COMPUTER_PROVIDER
+        value: e2b
+      - key: E2B_API_KEY
+        sync: false
+      - key: E2B_SANDBOX_TIMEOUT
+        value: "3600"
+      # Optional web search APIs (tried first, in this order). Without any, a keyless fallback is used.
+      - key: TAVILY_API_KEY
+        sync: false
+      - key: BRAVE_SEARCH_API_KEY
+        sync: false
+      - key: SERPER_API_KEY
+        sync: false
+      - key: EXA_API_KEY
+        sync: false
       - key: COMPOSIO_API_KEY
         sync: false
       - key: COMPOSIO_GITHUB_AUTH_CONFIG_ID
@@ -144,6 +160,8 @@ envVarGroups:
       - key: ALLOW_PRIVATE_MCP_URLS
         value: "false"
       - key: DAYTONA_API_KEY
+        sync: false
+      - key: E2B_API_KEY
         sync: false
       - key: COMPOSIO_API_KEY
         sync: false
