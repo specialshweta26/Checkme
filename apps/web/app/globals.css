@@ -1278,6 +1278,17 @@ input.tasks-search { width: min(260px, 100%); }
   width: min(420px, 100vw);
   box-shadow: var(--shadow);
 }
+.screen-rail.overlay.fullscreen {
+  inset: 0;
+  width: 100vw;
+  height: 100dvh;
+  max-height: none;
+  box-sizing: border-box;
+  padding: clamp(12px, 2vw, 28px);
+  border: 0;
+  border-radius: 0;
+  gap: 14px;
+}
 .screen-rail-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; min-height: 24px; }
 .screen-rail-copy { display: grid; gap: 2px; min-width: 0; }
 .screen-bot { font-size: 12px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -1311,6 +1322,12 @@ input.tasks-search { width: min(260px, 100%); }
   overflow: hidden;
   display: grid;
   place-items: center;
+}
+.screen-preview.fullscreen {
+  flex: 1 1 auto;
+  min-height: 0;
+  aspect-ratio: auto;
+  border-radius: 10px;
 }
 .screen-preview.controlling {
   outline: 2px solid var(--accent);
