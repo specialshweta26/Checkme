@@ -414,7 +414,7 @@ class AgentJob(Base):
     )
     root_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
     depth: Mapped[int] = mapped_column(Integer, default=1)
-    role: Mapped[str] = mapped_column(String(20), default="coder")  # planner | coder | reviewer
+    role: Mapped[str] = mapped_column(String(20), default="coder")  # planner | coder | reviewer | worker
     kind: Mapped[str] = mapped_column(String(20), default="chat")  # chat | delegate | scheduled
     title: Mapped[str] = mapped_column(String(200), default="")
     prompt: Mapped[str] = mapped_column(Text, default="")

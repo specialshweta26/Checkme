@@ -238,7 +238,7 @@ def describe_tool(name: str, args: dict | None, connector_names: dict[str, str] 
         return f"Committing: {_clip(a.get('message'), 60)}"
     if n == "push_branch":
         return f"Asking to push {_clip(a.get('branch'), 40)} to {_clip(a.get('repo'), 40)}"
-    if n == "start_coding_job":
+    if n in {"start_coding_job", "start_background_task"}:
         return f"Starting a background job: {_clip(a.get('title') or a.get('task'), 60)}"
     if n == "delegate":
         return f"Handing off to a {_clip(a.get('role') or 'teammate', 12)}: {_clip(a.get('title') or a.get('task'), 60)}"
@@ -406,6 +406,33 @@ class ProgressReporter:
 
     async def finish(self) -> None:
         await self.emit("Done", kind="done")
+
+    async def set_session(self, session_id: Any) -> None:
+        """Remember which chat session this turn writes to, so a client whose POST dropped can recover it."""
+        if not self.enabled or not session_id:
+            return
+        try:
+            r = self._client()
+            await r.set(_key(self.user_id, self.progress_id) + ":session", str(session_id), ex=PROGRESS_TTL_S)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("progress session save failed: %s", exc)
+
+
+async def read_progress_session(user_id: Any, progress_id: str, redis_client: Any = None) -> str:
+    if not valid_progress_id(progress_id):
+        return ""
+    if redis_client is None:
+        from app.cache import get_redis
+
+        redis_client = get_redis()
+    try:
+        raw = await redis_client.get(_key(user_id, progress_id) + ":session")
+    except Exception as exc:  # noqa: BLE001
+        log.debug("progress session read failed: %s", exc)
+        return ""
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", "ignore")
+    return str(raw or "")
 
 
 async def read_progress(user_id: Any, progress_id: str, redis_client: Any = None) -> list[dict]:

@@ -41,6 +41,7 @@ WORKDIR = "/home/daytona"  # tools and prompts address the computer's home as /h
 STREAM_PORT = 6080
 VNC_PORT = 5900
 KEEPALIVE_EVERY = 60.0
+FILE_TIMEOUT = 45.0
 STATUS_TTL = 4.0
 CREDS_ID = "e2b_sandbox_id"
 CREDS_STREAM = "e2b_stream_key"
@@ -167,7 +168,10 @@ class E2BFiles:
         self._sbx = sbx
 
     async def download_file(self, path: str) -> bytes:
-        data = await asyncio.to_thread(self._sbx.files.read, path, format="bytes")
+        data = await asyncio.wait_for(
+            asyncio.to_thread(self._sbx.files.read, path, format="bytes", request_timeout=FILE_TIMEOUT),
+            timeout=FILE_TIMEOUT + 5,
+        )
         return bytes(data)
 
     async def upload_file(self, src: Any, dest: str) -> None:
@@ -177,10 +181,15 @@ class E2BFiles:
             from pathlib import Path
 
             data = Path(str(src)).read_bytes()
-        await asyncio.to_thread(self._sbx.files.write, dest, data)
+        await asyncio.wait_for(
+            asyncio.to_thread(self._sbx.files.write, dest, data, request_timeout=FILE_TIMEOUT),
+            timeout=FILE_TIMEOUT + 5,
+        )
 
     async def list_files(self, path: str) -> list[_Entry]:
-        items = await asyncio.to_thread(self._sbx.files.list, path)
+        items = await asyncio.wait_for(
+            asyncio.to_thread(self._sbx.files.list, path, request_timeout=FILE_TIMEOUT), timeout=FILE_TIMEOUT + 5
+        )
         return [_Entry(name=getattr(i, "name", str(i)), is_dir=str(getattr(i, "type", "")).endswith("dir")) for i in items or []]
 
 
@@ -207,7 +216,7 @@ class E2BComputer:
         return stream_urls(self._live.sbx, self._live.stream_key)
 
     async def screenshot(self) -> bytes:
-        return bytes(await asyncio.to_thread(self._live.sbx.screenshot))
+        return bytes(await asyncio.wait_for(asyncio.to_thread(self._live.sbx.screenshot), timeout=30))
 
 
 def stream_urls(sbx: Any, key: str) -> dict:

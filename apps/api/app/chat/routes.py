@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
 import uuid
 from datetime import datetime, timezone
 
+import anyio
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import StreamingResponse
 
 log = logging.getLogger(__name__)
 from pydantic import BaseModel
@@ -17,7 +21,7 @@ from app.agent.attachments import summarize_one
 from app.agent.confirm import read_confirm
 from app.agent.deep import run_deep_agent
 from app.agent.memory import seed_letta
-from app.agent.progress import ProgressReporter, read_progress, valid_progress_id
+from app.agent.progress import ProgressReporter, read_progress, read_progress_session, valid_progress_id
 from app.agents import service as agents_service
 from app.cache import rate_limited
 from app.config import get_settings
@@ -46,7 +50,8 @@ async def chat_progress(progress_id: str, user: User = Depends(current_user)):
     if not valid_progress_id(progress_id):
         raise HTTPException(400, "Bad progress id")
     steps = await read_progress(user.id, progress_id)
-    return {"steps": steps, "done": bool(steps and steps[-1].get("kind") == "done")}
+    session_id = await read_progress_session(user.id, progress_id)
+    return {"steps": steps, "done": bool(steps and steps[-1].get("kind") == "done"), "session_id": session_id or None}
 
 
 @router.get("/sessions")
@@ -232,91 +237,143 @@ async def chat(
         agent=workspace_agent,
         group=group,
     )
+    if progress is not None:
+        await progress.set_session(sess.id)
+
+    async def finish_turn() -> dict:
+        try:
+            result = await run_deep_agent(
+                db,
+                user,
+                sess.id,
+                request_id,
+                history,
+                agent_text,
+                confirms,
+                workspace_agent=workspace_agent,
+                group=group,
+                teammates=teammates,
+                mentions=mentions,
+                progress=progress,
+            )
+            # #region agent log
+            dbg(
+                "C",
+                "chat/routes.py:chat",
+                "agent returned",
+                {
+                    "ms": int((time.time() - t0) * 1000),
+                    "n_tools": len(result.get("used_tools") or []),
+                    "used_tools": (result.get("used_tools") or [])[:16],
+                },
+            )
+            # #endregion
+        except Exception as exc:  # noqa: BLE001
+            log.exception("chat agent failed")
+            # #region agent log
+            dbg("C", "chat/routes.py:chat", "agent exception", {"error": str(exc)[:200], "ms": int((time.time() - t0) * 1000)})
+            # #endregion
+            working_message.content = "I couldn't finish that request. You can retry or continue in this chat."
+            working_message.meta = {**(working_message.meta or {}), "in_progress": False, "failed": True}
+            try:
+                await db.commit()
+            finally:
+                if progress is not None:
+                    await progress.finish()
+            raise HTTPException(502, str(exc)[:400]) from exc
+        try:
+            if result.get("source"):
+                working["last_source"] = result["source"]
+            sess.state = {
+                **working,
+                "last_tools": result.get("used_tools") or [],
+            }
+            meta = {
+                "request_id": request_id,
+                "route": result.get("route"),
+                "used_tools": result.get("used_tools"),
+                "pending_confirms": result.get("pending_confirms"),
+                "attachments": result.get("attachments"),
+                "source": result.get("source"),
+                "mail_threads": result.get("mail_threads") or [],
+                "browser": result.get("browser") or [],
+                "computer": result.get("computer") or {},
+                "connect_cards": result.get("connect_cards") or [],
+                "speaker": result.get("speaker"),
+                "agent_id": (result.get("speaker") or {}).get("id") if result.get("speaker") else (str(workspace_agent.id) if workspace_agent else None),
+                "agent_name": (result.get("speaker") or {}).get("name"),
+                "agent_color": (result.get("speaker") or {}).get("color"),
+                "group_id": result.get("group_id"),
+                "steps": [s.get("text") for s in (progress.steps if progress else []) if s.get("kind") != "done"][:40],
+                "jobs": result.get("jobs_started") or [],
+                "job": (result.get("jobs_started") or [None])[0],
+            }
+            if isinstance(result.get("question"), dict) and result["question"].get("options"):
+                # ask_user in a chat turn: the web shows the options as buttons that send the option text.
+                meta["choices"] = {"question": result["question"].get("question"), "options": result["question"]["options"][:5]}
+            await _store(
+                db,
+                sess,
+                user.id,
+                request_id,
+                text,
+                result["text"],
+                meta,
+                user_meta={"uploads": public_uploads} if public_uploads else None,
+                thread=result.get("thread"),
+                working_message=working_message,
+            )
+            return {"session_id": str(sess.id), **result, "request_id": request_id, "uploads": public_uploads}
+        except Exception as exc:  # noqa: BLE001
+            log.exception("chat store failed")
+            raise HTTPException(500, str(exc)[:400]) from exc
+        finally:
+            # "Done" only after the reply is stored, so a client that lost its POST and polls progress
+            # finds the finished message (not the working placeholder) when it reloads the session.
+            if progress is not None:
+                await progress.finish()
+
+    # Long turns (computer use, research) can run for minutes. iOS Safari fails a fetch with "Load failed"
+    # when no byte arrives for ~60s, and proxies drop idle requests, so after a short wait the reply is
+    # streamed: JSON-insignificant spaces as heartbeats, then the same JSON body. The turn runs in its own
+    # task, so a dropped client never cancels it; the web app then recovers the stored reply.
+    task = asyncio.create_task(finish_turn())
     try:
-        result = await run_deep_agent(
-            db,
-            user,
-            sess.id,
-            request_id,
-            history,
-            agent_text,
-            confirms,
-            workspace_agent=workspace_agent,
-            group=group,
-            teammates=teammates,
-            mentions=mentions,
-            progress=progress,
-        )
-        # #region agent log
-        dbg(
-            "C",
-            "chat/routes.py:chat",
-            "agent returned",
-            {
-                "ms": int((time.time() - t0) * 1000),
-                "n_tools": len(result.get("used_tools") or []),
-                "used_tools": (result.get("used_tools") or [])[:16],
-            },
-        )
-        # #endregion
-    except Exception as exc:  # noqa: BLE001
-        log.exception("chat agent failed")
-        # #region agent log
-        dbg("C", "chat/routes.py:chat", "agent exception", {"error": str(exc)[:200], "ms": int((time.time() - t0) * 1000)})
-        # #endregion
-        working_message.content = "I couldn't finish that request. You can retry or continue in this chat."
-        working_message.meta = {**(working_message.meta or {}), "in_progress": False, "failed": True}
-        await db.commit()
-        raise HTTPException(502, str(exc)[:400]) from exc
+        return await asyncio.wait_for(asyncio.shield(task), timeout=HEARTBEAT_AFTER_S)
+    except asyncio.TimeoutError:
+        pass
+    return StreamingResponse(
+        _heartbeat_body(task),
+        media_type="application/json",
+        headers={"Cache-Control": "no-store, no-transform", "X-Accel-Buffering": "no"},
+    )
+
+
+HEARTBEAT_AFTER_S = 8.0
+HEARTBEAT_EVERY_S = 10.0
+
+
+async def _heartbeat_body(task: "asyncio.Task[dict]"):
+    """Yield a space every few seconds while ``task`` runs, then its JSON result (or a JSON error)."""
+    try:
+        while not task.done():
+            done, _ = await asyncio.wait({task}, timeout=HEARTBEAT_EVERY_S)
+            if done:
+                break
+            yield b" "
     finally:
-        if progress is not None:
-            await progress.finish()
+        if not task.done():
+            # The client went away. Keep this response (and its DB session) open until the turn has stored
+            # its reply, so the user finds it when they come back.
+            with anyio.CancelScope(shield=True):
+                await asyncio.wait({task})
     try:
-        if result.get("source"):
-            working["last_source"] = result["source"]
-        sess.state = {
-            **working,
-            "last_tools": result.get("used_tools") or [],
-        }
-        meta = {
-            "request_id": request_id,
-            "route": result.get("route"),
-            "used_tools": result.get("used_tools"),
-            "pending_confirms": result.get("pending_confirms"),
-            "attachments": result.get("attachments"),
-            "source": result.get("source"),
-            "mail_threads": result.get("mail_threads") or [],
-            "browser": result.get("browser") or [],
-            "computer": result.get("computer") or {},
-            "connect_cards": result.get("connect_cards") or [],
-            "speaker": result.get("speaker"),
-            "agent_id": (result.get("speaker") or {}).get("id") if result.get("speaker") else (str(workspace_agent.id) if workspace_agent else None),
-            "agent_name": (result.get("speaker") or {}).get("name"),
-            "agent_color": (result.get("speaker") or {}).get("color"),
-            "group_id": result.get("group_id"),
-            "steps": [s.get("text") for s in (progress.steps if progress else []) if s.get("kind") != "done"][:40],
-            "jobs": result.get("jobs_started") or [],
-            "job": (result.get("jobs_started") or [None])[0],
-        }
-        if isinstance(result.get("question"), dict) and result["question"].get("options"):
-            # ask_user in a chat turn: the web shows the options as buttons that send the option text.
-            meta["choices"] = {"question": result["question"].get("question"), "options": result["question"]["options"][:5]}
-        await _store(
-            db,
-            sess,
-            user.id,
-            request_id,
-            text,
-            result["text"],
-            meta,
-            user_meta={"uploads": public_uploads} if public_uploads else None,
-            thread=result.get("thread"),
-            working_message=working_message,
-        )
-        return {"session_id": str(sess.id), **result, "request_id": request_id, "uploads": public_uploads}
+        data: dict = task.result()
+    except HTTPException as exc:
+        data = {"detail": exc.detail, "status_code": exc.status_code, "stream_error": True}
     except Exception as exc:  # noqa: BLE001
-        log.exception("chat store failed")
-        raise HTTPException(500, str(exc)[:400]) from exc
+        data = {"detail": str(exc)[:400] or "Chat failed", "status_code": 500, "stream_error": True}
+    yield json.dumps(jsonable_encoder(data)).encode("utf-8")
 
 
 class SummarizeIn(BaseModel):

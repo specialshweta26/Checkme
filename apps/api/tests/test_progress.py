@@ -27,6 +27,15 @@ class FakeRedis:
     async def lrange(self, key, start, end):
         return list(self.data.get(key, []))
 
+    async def set(self, key, value, ex=None):
+        self.data[key] = value
+        if ex:
+            self.ttl[key] = ex
+
+    async def get(self, key):
+        value = self.data.get(key)
+        return value.encode() if isinstance(value, str) else value
+
 
 class BrokenRedis:
     async def rpush(self, *a):
@@ -291,7 +300,11 @@ def test_progress_route_returns_steps_and_done(monkeypatch):
     async def fake_read(user_id, progress_id):
         return await P.read_progress(user_id, progress_id, redis_client=r)
 
+    async def fake_session(user_id, progress_id):
+        return await P.read_progress_session(user_id, progress_id, redis_client=r)
+
     monkeypatch.setattr(routes, "read_progress", fake_read)
+    monkeypatch.setattr(routes, "read_progress_session", fake_session)
     app = FastAPI()
     app.include_router(routes.router)
     app.dependency_overrides[current_user] = lambda: SimpleNamespace(id=uid)
@@ -302,7 +315,19 @@ def test_progress_route_returns_steps_and_done(monkeypatch):
     rep = P.ProgressReporter(uid, "turn_12345678", redis_client=r)
     asyncio.run(rep.emit("Gmail: search messages for “invoice”"))
     body = client.get("/chat/progress/turn_12345678").json()
-    assert body == {"steps": [rep.steps[0]], "done": False}
+    assert body == {"steps": [rep.steps[0]], "done": False, "session_id": None}
+    asyncio.run(rep.set_session("sess-1"))
+    assert client.get("/chat/progress/turn_12345678").json()["session_id"] == "sess-1"
     asyncio.run(rep.finish())
     assert client.get("/chat/progress/turn_12345678").json()["done"] is True
     assert client.get("/chat/progress/bad").status_code == 400
+
+
+async def test_set_session_round_trips_and_ignores_missing_ids():
+    r = FakeRedis()
+    rep = P.ProgressReporter("u", "turn_12345678", redis_client=r)
+    await rep.set_session("abc")
+    assert await P.read_progress_session("u", "turn_12345678", redis_client=r) == "abc"
+    assert r.ttl["chatprog:u:turn_12345678:session"] == P.PROGRESS_TTL_S
+    await P.ProgressReporter("u", None, redis_client=r).set_session("zzz")
+    assert await P.read_progress_session("u", "bad id!", redis_client=r) == ""

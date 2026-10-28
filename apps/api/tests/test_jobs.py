@@ -323,3 +323,33 @@ async def test_chat_followup_continues_the_same_job(monkeypatch):
     job.meta["question"] = {"question": "Merge it? (a/b#3)", "options": ["Yes, merge it", "No, leave it open"], "pr": job.meta["prs"][0]}
     out = await routes._maybe_start_job(*args, "Yes, merge it", "y", [], "r3")
     assert job.status == "queued" and "check_merge" in job.meta["next_query"] and "merge_pull_request" in job.meta["next_query"]
+
+
+async def test_start_background_task_offered_to_every_agent_in_chat(monkeypatch):
+    from app.agent import deep
+    from app.agent.deep import RunContext, harness_tools
+    from app.jobs import runner
+    from app.jobs import service as jobs_service
+
+    user = SimpleNamespace(id=uuid.uuid4(), timezone="Asia/Kolkata")
+    chief = SimpleNamespace(id=uuid.uuid4(), name="Chief", focus="", kind="default")
+
+    def tools(**kw):
+        ctx = RunContext(db=kw.pop("db", object()), user=user, connectors={}, **kw)
+        return ctx, {t.name: t for t in harness_tools(ctx)}
+
+    assert "start_background_task" in tools(agent=chief)[1]
+    assert "start_background_task" not in tools(agent=chief, job=SimpleNamespace(id=uuid.uuid4()))[1]
+    assert "start_background_task" not in tools(agent=chief, db=None)[1]
+
+    seen = {}
+
+    async def fake_start(ctx, task, title="", role="planner"):
+        seen.update(task=task, role=role)
+        return {"started": True, "job_id": "j1"}
+
+    monkeypatch.setattr(deep, "start_coding_job", fake_start)
+    ctx, found = tools(agent=chief)
+    await found["start_background_task"].ainvoke({"task": "Compare prices on three sites", "title": "Compare"})
+    assert seen == {"task": "Compare prices on three sites", "role": "worker"}
+    assert "worker" in jobs_service.ROLES and "worker" in runner.ROLE_BRIEF
