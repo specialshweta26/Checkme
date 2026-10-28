@@ -53,6 +53,7 @@ function useCredentialedImage(src: string | undefined) {
 
 function useLiveScreen(active: boolean) {
   const [url, setUrl] = useState("");
+  const [error, setError] = useState("");
   const held = useRef("");
   useEffect(() => {
     if (!active) return;
@@ -69,7 +70,10 @@ function useLiveScreen(active: boolean) {
           cache: "no-store",
           signal: request.signal,
         });
-        if (!res.ok) throw new Error("screen capture unavailable");
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body?.detail || `Screen capture failed (${res.status})`);
+        }
         const blob = await res.blob();
         if (blob.size < 32) throw new Error("empty screen frame");
         const head = new Uint8Array(await blob.slice(0, 8).arrayBuffer());
@@ -82,9 +86,10 @@ function useLiveScreen(active: boolean) {
         const previous = held.current;
         held.current = objectUrl;
         setUrl(objectUrl);
+        setError("");
         if (previous) URL.revokeObjectURL(previous);
-      } catch {
-        /* keep last frame */
+      } catch (err: any) {
+        if (!ac.signal.aborted) setError(err?.message || "Waiting for a live screen frame");
       } finally {
         ac.signal.removeEventListener("abort", abortRequest);
         window.clearTimeout(timeout);
@@ -103,7 +108,7 @@ function useLiveScreen(active: boolean) {
     },
     [],
   );
-  return url;
+  return { url, error };
 }
 
 export function computerFromMeta(meta: any): ComputerSession | null {
@@ -196,8 +201,10 @@ export function ScreenRail({
   const [pageUrl, setPageUrl] = useState(session?.url || "");
   const [pageTitle, setPageTitle] = useState(session?.title || "");
   const [screenAgent, setScreenAgent] = useState("");
-  const liveFrame = useLiveScreen(Boolean(watching || controlling || machine === "running"));
-  const frame = liveFrame || still;
+  const liveActive = Boolean(watching || controlling || machine === "running");
+  const liveScreen = useLiveScreen(liveActive);
+  // A saved task preview can be stale or blank; only use it before a live session starts.
+  const frame = liveScreen.url || (!liveActive ? still : "");
   const href = session?.url || pageUrl || "";
   const asleep = machine !== "running" && machine !== "booting" && !watching && !controlling && !frame;
   const previewRef = useRef<HTMLDivElement>(null);
@@ -242,7 +249,9 @@ export function ScreenRail({
   } catch {
     host = session?.title || pageTitle || "";
   }
-  if (/chromewebdata|chrome-error/i.test(href) || host === "chromewebdata") {
+  if (/chrome-error/i.test(href)) {
+    host = "page failed to load";
+  } else if (/chromewebdata/i.test(href) || host === "chromewebdata") {
     host = "loading the page…";
   }
   const label = teaching
@@ -329,7 +338,7 @@ export function ScreenRail({
   }
 
   return (
-    <aside className="screen-rail overlay" aria-label={`${screenAgent || agentName}'s screen`}>
+    <aside className="screen-rail overlay fullscreen" role="dialog" aria-modal="true" aria-label={`${screenAgent || agentName}'s screen`}>
       <div className="screen-rail-head">
         <div className="screen-rail-copy">
           <span className="screen-bot">{`${screenAgent || agentName}'s screen`}</span>
@@ -370,7 +379,7 @@ export function ScreenRail({
       </div>
       <div
         ref={previewRef}
-        className={`screen-preview${asleep ? " asleep" : ""}${controlling ? " controlling" : ""}`}
+        className={`screen-preview fullscreen${asleep ? " asleep" : ""}${controlling ? " controlling" : ""}`}
         tabIndex={controlling ? 0 : -1}
         onWheel={
           controlling
@@ -428,7 +437,9 @@ export function ScreenRail({
             {machine === "booting"
               ? "Booting live desktop…"
               : watching || controlling || machine === "running"
-                ? "Opening the live desktop…"
+                ? liveScreen.error
+                  ? `Live screen unavailable. Retrying… ${liveScreen.error}`
+                  : "Connecting to the live desktop…"
                 : "Computer is asleep. Open it to wake."}
           </p>
         )}
