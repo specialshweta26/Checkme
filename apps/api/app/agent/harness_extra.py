@@ -174,7 +174,7 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         return _dumps(await computer.run_computer(ctx, "computer_act", {"actions": actions}))
 
     async def browser_navigate(url: str, wait_ms: int = 0) -> str:
-        """Open an http(s) URL in the live computer browser (the same screen the chat shows). Prefer web_search for facts; use this when the user should see the page or you must click/fill."""
+        """Open an http(s) URL in the live computer browser (the same screen the chat shows). Prefer the destination site over a Google Search URL. If the page is a CAPTCHA or verification wall, request_takeover — do not invent results."""
         ctx.used_tools.append("browser_navigate")
         args: dict[str, Any] = {"url": url}
         if wait_ms:
@@ -237,7 +237,7 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         return _dumps(await computer.request_takeover(ctx, reason, instruction))
 
     async def web_search(query: str, count: int = 8) -> str:
-        """Search the public web. Use for facts, news, and 'what is going on'. Then web_fetch or browser_navigate the best URLs. Do not search_tools for this."""
+        """Search the public web. Use for facts, news, and 'what is going on'. Then web_fetch or browser_navigate the best URLs. Do not search_tools for this. For live bookings, inventory, or forms, browser_navigate the site itself instead of a Google Search URL."""
         ctx.used_tools.append("web_search")
         return _dumps(await web_tools.web_search(query, count))
 

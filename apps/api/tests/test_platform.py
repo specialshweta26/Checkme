@@ -4,7 +4,14 @@ import pytest
 from connector_core import ToolError
 
 from app.connectors.composio_box import COMPOSIO_TOOLS, slim_tool
-from app.connectors.computer_daemon import VERSION as DAEMON_VERSION, page_is_empty, should_paint_desktop
+from app.connectors.computer_daemon import (
+    VERSION as DAEMON_VERSION,
+    annotate_page,
+    bot_wall,
+    page_is_empty,
+    page_is_thin,
+    should_paint_desktop,
+)
 from app.connectors.daytona_box import DAYTONA_TOOLS, decode_screen_b64, live_screen_png, remember_screen, safe_http_url
 from app.connectors.platform import PLATFORM
 from app.routing.describe import catalog_lines
@@ -110,7 +117,24 @@ def test_catalog_lines_label_computer_and_marketplace():
 
 
 def test_daemon_version_is_current():
-    assert DAEMON_VERSION == "9"
+    assert DAEMON_VERSION == "10"
+
+
+def test_bot_wall_detects_sorry_and_skips_cookie_consent():
+    sorry = bot_wall("https://www.google.com/sorry/index", "Sorry", "unusual traffic from your computer")
+    assert sorry and sorry["bot_wall"] is True
+    assert bot_wall("https://www.google.com/", "Google", "Before you continue to Google") is None
+    assert page_is_thin("Loading") is True
+    ready = annotate_page(
+        {
+            "url": "https://example.com/results",
+            "text": "Results\n" + ("Nonstop 6h 10m ₹12,450 departs 08:15 am\n" * 8),
+        }
+    )
+    assert ready["content_ready"] is True
+    wall = annotate_page({"url": "https://www.skyscanner.net/", "text": "Please verify you are a human. I'm not a robot."})
+    assert wall["bot_wall"] is True
+    assert wall["ok"] is False
 
 
 def test_blank_and_chrome_error_pages_count_as_empty():
