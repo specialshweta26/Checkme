@@ -390,6 +390,36 @@ Each task records which skill it is following and how far it has got. The state 
     - `ask_teammate`: the result comes back at the end of the nested run.
     - Delegated jobs: `jobs.service.after_terminal` calls `finish_job`, and then the parent job resumes as usual with the result in its state.
 
+### 6.12 WhatsApp channel (`app/channels/`)
+
+- `provider.py`: `ChannelProvider` protocol, with `MetaWhatsApp` (Graph `/{phone_number_id}/messages` and
+  `/{media_id}`) as the only implementation. Also: `check_signature` (HMAC-SHA256 of the raw body against
+  `X-Hub-Signature-256`), `parse` (text / interactive / button / media), and `e164`.
+- `routes.py`:
+  - public webhook: `GET /api/channels/whatsapp/webhook` (hub verify) and
+    `POST /api/channels/whatsapp/webhook` (signature, then claim the message ID in `channel_inbound`, then a
+    BackgroundTask);
+  - signed-in endpoints: `GET /api/channels/whatsapp`, `POST /link-code`, `DELETE /links/{id}`.
+- `service.py`:
+  - linking: `ChannelLinkCode` (6 chars, 15 minutes, single use) becomes a `ChannelLink`, with the address unique
+    per channel;
+  - commands: `parse`, plus fuzzy `match_name`;
+  - `route_message`:
+    - agent order: target, then sticky, then room lead, then default;
+    - thread: a `ChatSession` with `state.channel="whatsapp"`;
+    - job handling: `followup` / `answer` on the latest chat job when it is queued, running or waiting; otherwise
+      a new `kind=chat role=worker` job whose history comes from the previous job;
+    - `job.meta.channel = {link_id, address, inbound_at, show_name}`.
+  - approvals: buttons `wa:ap|dn|op:<job>:<i>` call `jobs.approve` / `decline` / `answer` after
+    `job.user_id == link.user_id`.
+- Runner hooks:
+  - `run_job` calls `_notify_channel` after it commits, which calls `after_run`. That uses `outcome_parts`
+    (answer chunks, approval buttons, question options, attachments as media) and `deliver`: send inside the 24h
+    window, otherwise outbox plus the optional template.
+  - `JobProgress._write` calls `progress` (plan/status only, rate-limited per job).
+- Formatting: `formatting.to_whatsapp` and `chunk(4096)`, which closes and reopens code fences across a split.
+- Tests: `tests/test_whatsapp.py` (pure) and `tests/test_whatsapp_db.py` (Postgres).
+
 ## 7. Connector runtime
 
 `RuntimeConnector.call(name, args)`:

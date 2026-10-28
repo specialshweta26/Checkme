@@ -107,6 +107,19 @@ services:
         sync: false
       - key: COMPOSIO_GITHUB_AUTH_CONFIG_ID
         sync: false
+      # WhatsApp channel (docs/WHATSAPP.md). Off until the first four are set.
+      - key: WHATSAPP_PHONE_NUMBER_ID
+        sync: false
+      - key: WHATSAPP_ACCESS_TOKEN
+        sync: false
+      - key: WHATSAPP_APP_SECRET
+        sync: false
+      - key: WHATSAPP_VERIFY_TOKEN
+        sync: false
+      - key: WHATSAPP_BUSINESS_NUMBER
+        sync: false
+      - key: WHATSAPP_TEMPLATE_NOTIFY
+        sync: false
       - fromGroup: checkme-secrets
 
   - type: pserv

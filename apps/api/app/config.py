@@ -128,6 +128,18 @@ class Settings(BaseSettings):
     # first enabled GitHub auth config (Composio creates a managed one if none exists).
     composio_github_auth_config_id: str = ""
 
+    # WhatsApp channel (Meta WhatsApp Business Cloud API, docs/WHATSAPP.md). The channel is off unless the phone
+    # number id, access token, app secret and verify token are all set.
+    whatsapp_phone_number_id: str = ""
+    whatsapp_access_token: str = ""
+    whatsapp_app_secret: str = ""
+    whatsapp_verify_token: str = ""
+    whatsapp_business_number: str = ""  # E.164 digits of the business number, used for the wa.me link
+    whatsapp_template_notify: str = ""  # approved template name for messages outside the 24h window
+    whatsapp_template_lang: str = "en"
+    whatsapp_graph_version: str = "v21.0"
+    whatsapp_rate_limit_per_minute: int = 20
+
     # Routing knobs, tuned by the routing eval.
     route_margin: float = 0.08
     max_tool_schemas: int = 12
