@@ -166,9 +166,11 @@ def test_research_focus_prompt_cites_sources():
     assert "Focus: Research and writing" in p and "Sources list" in p and "at least three" in p
 
 
-def test_unset_custom_agent_is_told_to_set_focus_from_a_free_answer():
+def test_unset_custom_agent_gets_role_specific_open_onboarding():
     p = system_prompt(_user(), [], "", agent=_agent())
-    assert "set_my_focus" in p and "Coding and deployments" in p
+    assert "Infer your role from your name, title" in p
+    assert "save_skill" in p and "schedule_task" in p
+    assert "set_my_focus" not in p and "Coding and deployments" not in p
 
 
 def test_chief_and_configured_agents_get_no_onboarding_prompt():
