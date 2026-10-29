@@ -561,3 +561,39 @@ export function errorFromQuery(search: string) {
   };
   return map[err] || err.replaceAll("_", " ");
 }
+
+export type WhatsAppLink = {
+  id: string;
+  channel: string;
+  address: string;
+  display_name: string;
+  sticky_agent: string | null;
+  linked_at: string;
+  last_inbound_at: string;
+  window_open: boolean;
+  queued: number;
+};
+
+export type WhatsAppStatus = { enabled: boolean; business_number: string; wa_link: string; links: WhatsAppLink[] };
+
+export type WhatsAppCode = { code: string; message: string; expires_at: string; wa_link: string; business_number: string };
+
+export async function whatsappStatus(): Promise<WhatsAppStatus | null> {
+  const res = await fetch("/api/channels/whatsapp", { credentials: "include", cache: "no-store" });
+  if (!res.ok) return null;
+  return res.json() as Promise<WhatsAppStatus>;
+}
+
+export async function whatsappLinkCode(): Promise<WhatsAppCode> {
+  const res = await fetch("/api/channels/whatsapp/link-code", { method: "POST", credentials: "include" });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(apiError(data, "Could not create a link code"));
+  return data as WhatsAppCode;
+}
+
+export async function whatsappUnlink(id: string) {
+  const res = await fetch(`/api/channels/whatsapp/links/${encodeURIComponent(id)}`, { method: "DELETE", credentials: "include" });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(apiError(data, "Could not disconnect WhatsApp"));
+  return true;
+}

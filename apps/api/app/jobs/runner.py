@@ -114,6 +114,13 @@ class JobProgress:
                 await db.commit()
         except Exception as exc:  # noqa: BLE001
             log.debug("job event write failed: %s", exc)
+        if (self.job.meta or {}).get("channel"):
+            try:
+                from app.channels.service import progress as channel_progress
+
+                await channel_progress(self.job, kind, text)
+            except Exception as exc:  # noqa: BLE001 - a channel update must never break the job
+                log.debug("channel progress failed: %s", exc)
 
     async def emit(self, text: str | None, kind: str = "step", tool: str = "") -> None:
         if not text:
@@ -201,6 +208,7 @@ async def run_job(job_id, session_factory: Callable | None = None, agent_impl: C
             db.add(service.fail(job, str(exc)[:500]))
             await service.after_terminal(db, job)
             await db.commit()
+            await _notify_channel(db, job)
             return job.status
         await db.refresh(job)  # picks up a cancel (and heartbeats) written by other sessions
         if job.status == "cancelled":
@@ -218,4 +226,19 @@ async def run_job(job_id, session_factory: Callable | None = None, agent_impl: C
                 if agent_row is not None:
                     agent_row.unread = True
         await db.commit()
+        await _notify_channel(db, job, result.get("attachments") if isinstance(result, dict) else None)
         return job.status
+
+
+async def _notify_channel(db, job: AgentJob, attachments: list | None = None) -> None:
+    """Jobs that came from WhatsApp send their answer, approval buttons or question back there."""
+    if not (job.meta or {}).get("channel"):
+        return
+    try:
+        from app.channels.service import after_run
+
+        await after_run(db, job, attachments)
+        await db.commit()  # the outbox, when the 24h window is closed
+    except Exception as exc:  # noqa: BLE001 - the job itself already finished
+        log.warning("channel notify for job %s failed: %s", job.id, type(exc).__name__)
+        await db.rollback()

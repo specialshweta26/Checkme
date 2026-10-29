@@ -577,3 +577,40 @@ class ResearchSummary(Base):
     sources: Mapped[list] = mapped_column(JSONB, default=list)
     embedding = mapped_column(Vector(DIMS), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
+
+
+class ChannelLink(Base):
+    """A messaging address (an E.164 WhatsApp number) linked to one user. See app/channels."""
+
+    __tablename__ = "channel_links"
+    __table_args__ = (UniqueConstraint("channel", "address", name="uq_channel_links_address"),)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    channel: Mapped[str] = mapped_column(String(20), default="whatsapp")
+    address: Mapped[str] = mapped_column(String(32))  # E.164 with a leading +
+    display_name: Mapped[str] = mapped_column(String(120), default="")
+    sticky_agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    room_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))  # an AgentGroup set with /room
+    last_inbound_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    outbox: Mapped[list] = mapped_column(JSONB, default=list)  # messages held until the 24h window reopens
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class ChannelLinkCode(Base):
+    """A short-lived one-time code the user sends from WhatsApp ("link CODE") to link their number."""
+
+    __tablename__ = "channel_link_codes"
+    code: Mapped[str] = mapped_column(String(16), primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    channel: Mapped[str] = mapped_column(String(20), default="whatsapp")
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class ChannelInbound(Base):
+    """Provider message ids already accepted, so webhook retries are processed once."""
+
+    __tablename__ = "channel_inbound"
+    message_id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    channel: Mapped[str] = mapped_column(String(20), default="whatsapp")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

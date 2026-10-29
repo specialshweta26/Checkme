@@ -107,6 +107,37 @@ services:
         sync: false
       - key: COMPOSIO_GITHUB_AUTH_CONFIG_ID
         sync: false
+      # WhatsApp channel (docs/WHATSAPP.md). Twilio when TWILIO_ACCOUNT_SID is set, else Meta (first four below).
+      - key: WHATSAPP_PROVIDER
+        sync: false
+      - key: WHATSAPP_PUBLIC_BASE_URL
+        sync: false
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_API_KEY_SID
+        sync: false
+      - key: TWILIO_API_KEY_SECRET
+        sync: false
+      - key: TWILIO_WHATSAPP_NUMBER
+        sync: false
+      - key: TWILIO_CONTENT_SID_APPROVAL
+        sync: false
+      - key: TWILIO_CONTENT_SID_NOTIFY
+        sync: false
+      - key: WHATSAPP_PHONE_NUMBER_ID
+        sync: false
+      - key: WHATSAPP_ACCESS_TOKEN
+        sync: false
+      - key: WHATSAPP_APP_SECRET
+        sync: false
+      - key: WHATSAPP_VERIFY_TOKEN
+        sync: false
+      - key: WHATSAPP_BUSINESS_NUMBER
+        sync: false
+      - key: WHATSAPP_TEMPLATE_NOTIFY
+        sync: false
       - fromGroup: checkme-secrets
 
   - type: pserv
