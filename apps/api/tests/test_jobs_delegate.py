@@ -75,7 +75,7 @@ def test_planner_brief_keeps_merge_manual():
     from app.jobs.runner import ROLE_BRIEF
 
     planner = ROLE_BRIEF["planner"]
-    assert "approval card" in planner and "Merge it?" in planner and "explicit yes" in planner and "check_merge" in planner
+    assert "conversationally before acting" in planner and "Merge it?" in planner and "explicit yes" in planner and "check_merge" in planner
     assert "never merge" in ROLE_BRIEF["reviewer"] and "review_pull_request" in ROLE_BRIEF["reviewer"]
     assert "explicitly says the user said yes" in ROLE_BRIEF["coder"] and "run_checks" in ROLE_BRIEF["coder"]
 

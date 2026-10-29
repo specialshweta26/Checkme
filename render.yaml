@@ -90,11 +90,11 @@ services:
         sync: false
       - key: E2B_SANDBOX_TIMEOUT
         value: "3600"
-      # Web search order: keyless engines, then the computer's browser, then paid APIs (Tavily first) as the
-      # last resort. Stage time budgets: SEARCH_FREE_TIMEOUT_S, SEARCH_BROWSER_TIMEOUT_S, SEARCH_PAID_TIMEOUT_S.
+      # Web search order: Tavily first, then the computer's browser, then keyless server engines.
+      # Stage time budgets: SEARCH_FREE_TIMEOUT_S, SEARCH_BROWSER_TIMEOUT_S, SEARCH_PAID_TIMEOUT_S.
       - key: SEARCH_ORDER
-        value: free,browser,paid
-      # Optional paid web search APIs, only used after the free and browser stages fail.
+        value: tavily,browser,free
+      # Optional web search APIs.
       - key: TAVILY_API_KEY
         sync: false
       - key: BRAVE_SEARCH_API_KEY

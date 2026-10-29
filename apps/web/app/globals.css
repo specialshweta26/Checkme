@@ -1992,6 +1992,7 @@ input.tasks-search { width: min(260px, 100%); }
   color: var(--muted);
 }
 .skill-list { margin: 0; padding-left: 18px; display: grid; gap: 4px; color: var(--text); }
+.chat-action-prompt { width: min(760px, 100%); margin: 0 auto 8px; color: var(--muted); font-size: 14px; line-height: 1.5; }
 .composer-hint {
   display: flex;
   flex-wrap: wrap;
@@ -2494,6 +2495,10 @@ input.tasks-search { width: min(260px, 100%); }
 .job-todo.in_progress { font-weight: 600; }
 .job-todo-mark { width: 14px; flex: none; text-align: center; }
 .job-choices { flex-wrap: wrap; }
+.job-conversation { margin-top: 8px; color: var(--muted); font-size: 14px; line-height: 1.5; }
+.job-conversation p { margin: 0 0 8px; }
+.job-conversation-reply { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.job-conversation-reply .input { min-width: 0; flex: 1; }
 .job-login { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 6px; }
 .job-login form { display: flex; gap: 6px; flex-wrap: wrap; }
 .btn.small { padding: 4px 10px; font-size: 12px; }
@@ -2519,7 +2524,7 @@ input.tasks-search { width: min(260px, 100%); }
 .skill-chip { font-size: 12px; padding: 1px 8px; border-radius: 999px; background: #eef2ff; color: #3730a3; }
 .skill-chip.busy { background: #fef9c3; color: #854d0e; }
 .skill-chip.warn { background: #fee2e2; color: #991b1b; }
-.skill-sheet { z-index: 80; align-items: start; overflow-y: auto; }
+.skill-sheet { z-index: 150; align-items: start; overflow-y: auto; }
 .skill-detail { width: min(720px, 100%); display: grid; gap: 12px; max-height: calc(100dvh - 40px); overflow-y: auto; }
 .skill-detail label { display: grid; gap: 6px; }
 .skill-detail-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }

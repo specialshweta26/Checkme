@@ -537,7 +537,7 @@ Why: mobile Safari fails a `fetch` with "Load failed" after about 60 s without a
 
 ### 7.3 Web search (`app/agent/web_tools.py`)
 
-`web_search(query)` runs stages in `SEARCH_ORDER` (default `free,browser,paid`) and returns `{query, results:[{title,url,snippet}], source, fallback_from?, took_s}` from the first that has results, or `{results: [], error, tried, order, search_api_configured, setup?, configure_one_of?}`. It never invents results.
+`web_search(query)` runs stages in `SEARCH_ORDER` (default `tavily,browser,free`) and returns `{query, results:[{title,url,snippet}], source, fallback_from?, took_s}` from the first that has results, or `{results: [], error, tried, order, search_api_configured, setup?, configure_one_of?}`. It never invents results.
 
 1. **free** (keyless, server-side): Brave HTML (`search.brave.com`, over HTTP/2), DuckDuckGo html/lite (HTTP 202 "anomaly" pages are a bot check, not "0 results"), Wikipedia (hits must share a word with the query; marked with a `note`). Each engine gets `SEARCH_PROVIDER_TIMEOUT_S` (8 s); all together `SEARCH_FREE_TIMEOUT_S` (15 s).
 2. **browser**: when a cloud computer is connected, `browser_search` runs the query in its real browser (Bing, DuckDuckGo, Google; background tab; results read from the DOM; CAPTCHA/verification/error pages are reported, never bypassed). Budget `SEARCH_BROWSER_TIMEOUT_S` (45 s) when the computer is running. If it is stopped, `SEARCH_BROWSER_BOOT=auto` skips the stage when a paid key is left (a cold boot is too slow for a search) and otherwise boots it within `SEARCH_BROWSER_COLD_TIMEOUT_S` (120 s); `always` / `never` force it.
@@ -709,7 +709,7 @@ See `.env.example`. Important knobs in `app/config.py`:
 | `E2B_SANDBOX_TIMEOUT` / `E2B_TEMPLATE` | Idle seconds before pause (Hobby ≤ 3600, Pro ≤ 86400) / custom template (default `desktop`) |
 | `DAYTONA_API_KEY` | Daytona computer (fallback) |
 | `TAVILY_API_KEY` / `BRAVE_SEARCH_API_KEY` / `SERPER_API_KEY` / `EXA_API_KEY` | Optional paid web search APIs, the last resort after the free and browser stages |
-| `SEARCH_ORDER` and `SEARCH_*_TIMEOUT_S`, `SEARCH_BROWSER_BOOT` | Web search stage order (default `free,browser,paid`) and time budgets (§7.3) |
+| `SEARCH_ORDER` and `SEARCH_*_TIMEOUT_S`, `SEARCH_BROWSER_BOOT` | Web search stage order (default `tavily,browser,free`) and time budgets (§7.3) |
 | `COMPOSIO_API_KEY` | Composio marketplace and the built-in GitHub connector (proxy, accounts) |
 | `COMPOSIO_GITHUB_AUTH_CONFIG_ID` | Optional: pin the GitHub auth config; a custom OAuth one with unmasked secrets enables real git clone/push |
 

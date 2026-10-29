@@ -271,7 +271,7 @@ async def execute_task(db: AsyncSession, user: User, task: ScheduledTask, *, fro
         used = result.get("used_tools") or []
         held = await hold_for_approval(db, user, task, agent, sess, instruction, text, result.get("pending_confirms") or [])
         if held is not None:
-            text = f"{text}\n\nWaiting for your approval: {held['pending_titles']}. Approve it in the task's chat."
+            text = f"{text}\n\nI’ve prepared {held['pending_titles']}. Would you like me to go ahead? Reply naturally in this agent chat."
         task.last_result = clip(text, 8000)
         task.last_error = ""
         task.last_run_at = datetime.now(timezone.utc)
@@ -308,7 +308,8 @@ async def execute_task(db: AsyncSession, user: User, task: ScheduledTask, *, fro
         )
     except Exception as exc:  # noqa: BLE001
         log.exception("scheduled task %s failed", task.id)
-        task.last_error = str(exc)[:800]
+        task.last_error = str(exc)[:800] or type(exc).__name__
+        task.last_result = f"I couldn’t complete “{task.title}” this time. {task.last_error}"[:8000]
         task.last_run_at = datetime.now(timezone.utc)
         if from_scheduler:
             advance(task, user.timezone or "Asia/Kolkata")
@@ -316,6 +317,18 @@ async def execute_task(db: AsyncSession, user: User, task: ScheduledTask, *, fro
             task.status = "paused"
         else:
             task.status = "active" if task.schedule_kind != "once" else "completed"
+        # Keep failures visible in the same agent-scoped conversation as successful scheduled runs.
+        if "sess" in locals():
+            db.add(ChatMessage(session_id=sess.id, user_id=user.id, role="user", content=instruction, request_id=request_id))
+            db.add(ChatMessage(
+                session_id=sess.id,
+                user_id=user.id,
+                role="assistant",
+                content=task.last_result,
+                meta={"scheduled": True, "scheduled_failed": True, "agent_id": str(agent.id)},
+                request_id=request_id,
+            ))
+            agent.unread = True
         await db.commit()
         raise
 

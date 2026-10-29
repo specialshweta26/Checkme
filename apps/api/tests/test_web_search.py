@@ -108,7 +108,7 @@ async def test_all_engines_fail_returns_clear_error_not_invented_results(http):
     out = await web_tools.web_search("anything")
     assert out["results"] == []
     assert "no results" in out["error"].lower() and "do not invent" in out["error"].lower()
-    assert len(out["tried"]) == 4 and out["tried"][-1] == "browser: skipped (no cloud computer connected)"
+    assert len(out["tried"]) == 4 and out["tried"][0] == "browser: skipped (no cloud computer connected)"
     # one retry per request on timeouts
     assert sum(1 for r in http.seen if r.url.host == "search.brave.com") == 2
 
@@ -125,8 +125,10 @@ async def test_retry_recovers_from_a_5xx(http):
     assert out["source"] == "brave" and calls["n"] == 2
 
 
-async def test_paid_providers_are_the_last_resort_in_order(http, monkeypatch):
-    monkeypatch.setattr(web_tools, "get_settings", lambda: _settings(tavily_api_key="tv", serper_api_key="sp"))
+async def test_tavily_then_configured_paid_fallbacks(http, monkeypatch):
+    cfg = _settings(tavily_api_key="tv", serper_api_key="sp")
+    cfg.search_order = "tavily,browser,free,serper"
+    monkeypatch.setattr(web_tools, "get_settings", lambda: cfg)
     http.routes["POST api.tavily.com/search"] = lambda r: httpx.Response(401, json={"detail": "bad key"})
 
     def serper(request):
@@ -138,9 +140,9 @@ async def test_paid_providers_are_the_last_resort_in_order(http, monkeypatch):
     out = await web_tools.web_search("fastapi")
     assert out["source"] == "serper"
     assert out["results"] == [{"title": "FastAPI", "url": "https://fastapi.tiangolo.com/", "snippet": "Docs"}]
-    assert [t.split(":")[0] for t in out["fallback_from"]] == ["brave", "duckduckgo", "wikipedia", "browser", "tavily"]
-    assert out["fallback_from"][-1].startswith("tavily: RuntimeError HTTP 401")
-    assert [name for name, _ in web_tools.search_providers()] == ["brave", "duckduckgo", "wikipedia", "tavily", "serper"]
+    assert [t.split(":")[0] for t in out["fallback_from"]] == ["tavily", "browser", "brave", "duckduckgo", "wikipedia"]
+    assert out["fallback_from"][0].startswith("tavily: RuntimeError HTTP 401")
+    assert [name for name, _ in web_tools.search_providers()] == ["tavily", "brave", "duckduckgo", "wikipedia", "serper"]
 
 
 async def test_tavily_brave_exa_parsers(http, monkeypatch):
@@ -149,13 +151,17 @@ async def test_tavily_brave_exa_parsers(http, monkeypatch):
         200, json={"results": [{"title": "T", "url": "https://t.example/", "content": "tc"}]}
     )
     assert (await web_tools.web_search("q"))["results"][0]["url"] == "https://t.example/"
-    monkeypatch.setattr(web_tools, "get_settings", lambda: _settings(brave_search_api_key="bk"))
+    cfg = _settings(brave_search_api_key="bk")
+    cfg.search_order = "brave_api"
+    monkeypatch.setattr(web_tools, "get_settings", lambda: cfg)
     http.routes["GET api.search.brave.com/res/v1/web/search"] = lambda r: httpx.Response(
         200, json={"web": {"results": [{"title": "<b>B</b>", "url": "https://b.example/", "description": "bd"}]}}
     )
     out = await web_tools.web_search("q")
     assert out["source"] == "brave_api" and out["results"][0]["title"] == "B"
-    monkeypatch.setattr(web_tools, "get_settings", lambda: _settings(exa_api_key="ek"))
+    cfg = _settings(exa_api_key="ek")
+    cfg.search_order = "exa"
+    monkeypatch.setattr(web_tools, "get_settings", lambda: cfg)
     http.routes["POST api.exa.ai/search"] = lambda r: httpx.Response(
         200, json={"results": [{"title": "E", "url": "https://e.example/", "text": "et"}]}
     )

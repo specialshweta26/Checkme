@@ -424,7 +424,7 @@ def approve(job: AgentJob, token: str) -> list[JobEvent]:
     )
     job.meta = meta
     job.status = "queued"
-    return [event(job, "status", f"Approved: {card.get('title') or 'action'}", {"status": "queued", "approved": True})]
+    return [event(job, "status", f"Okay, I’ll go ahead with {card.get('title') or 'that action'}.", {"status": "queued", "approved": True})]
 
 
 def decline(job: AgentJob, token: str) -> list[JobEvent]:
@@ -438,14 +438,40 @@ def decline(job: AgentJob, token: str) -> list[JobEvent]:
     meta["pending"] = [p for p in meta.get("pending") or [] if p.get("token") != token]
     if meta["pending"]:
         job.meta = meta
-        return [event(job, "status", f"Declined: {card.get('title') or 'action'}", {"declined": True})]
+        return [event(job, "status", f"Understood. I’ll leave {card.get('title') or 'that action'} as it is.", {"declined": True})]
     meta["next_query"] = (
         f"The user declined: {card.get('title') or 'the action'}. Do not retry it. "
         "Wrap up with a short summary of what was done and what is left."
     )
     job.meta = meta
     job.status = "queued"
-    return [event(job, "status", f"Declined: {card.get('title') or 'action'}", {"status": "queued", "declined": True})]
+    return [event(job, "status", f"Understood. I’ll leave {card.get('title') or 'that action'} as it is.", {"status": "queued", "declined": True})]
+
+
+def respond_to_approval(job: AgentJob, text: str, action_title: str | None = None, token: str | None = None) -> list[JobEvent]:
+    """Turn a clear conversational yes/no into the existing, token-bound approval transition."""
+    if job.status != "waiting_approval":
+        raise JobError("This job is not waiting for an action decision.")
+    pending = list((job.meta or {}).get("pending") or [])
+    if token:
+        pending = [p for p in pending if str(p.get("token") or "") == token]
+    elif action_title:
+        pending = [p for p in pending if str(p.get("title") or "") == action_title]
+    if len(pending) != 1:
+        raise JobError("There are several actions to decide. Please respond to each action separately.")
+    import re
+
+    normalized = " ".join((text or "").lower().strip().replace("’", "'").split())
+    normalized = re.sub(r"[.!?]+$", "", normalized)
+    negative = ("no", "don't", "do not", "i don't", "i do not", "please don't", "please do not", "leave it", "leave that", "cancel", "stop", "skip", "not now", "i decline")
+    affirmative = ("yes", "yeah", "yep", "sure", "absolutely", "of course", "ok", "okay", "go ahead", "please go ahead", "go for it", "do it", "please do it", "please do", "proceed", "please proceed", "continue", "that's fine", "that is fine", "sounds good", "approved", "i approve", "i want you to")
+    if any(normalized == phrase or normalized.startswith(phrase + ",") or normalized.startswith(phrase + " ") for phrase in negative):
+        return decline(job, str(pending[0].get("token") or ""))
+    if re.search(r"\b(but|unless|not|except)\b", normalized):
+        raise JobError("I didn’t catch that. Please say clearly whether you want me to go ahead or leave it.")
+    if any(normalized == phrase or normalized.startswith(phrase + ",") or normalized.startswith(phrase + " ") for phrase in affirmative):
+        return approve(job, str(pending[0].get("token") or ""))
+    raise JobError("I didn’t catch that. Please say something clear like “go ahead” or “leave it”.")
 
 
 def cancel(job: AgentJob) -> list[JobEvent]:
@@ -543,16 +569,17 @@ async def after_terminal(db: AsyncSession, job: AgentJob) -> None:
 
 
 async def post_to_chat(db: AsyncSession, job: AgentJob, text: str | None = None) -> None:
-    """The job's result (or its question, with option buttons) as one assistant message in the chat."""
+    """The job's result (or its question) as one assistant message in the agent chat."""
     if job.session_id is None:
         return
     body = text or (job.result if job.status in {"done", "waiting_input"} else f"The background job stopped: {job.error or job.status}.")
     meta: dict[str, Any] = {"job": serialize_job(job), "job_result": True, "agent_id": str(job.agent_id) if job.agent_id else None}
     q = (job.meta or {}).get("question") if job.status == "waiting_input" else None
     if q:
-        meta["choices"] = {"job_id": str(job.id), "question": q.get("question"), "options": list(q.get("options") or [])}
         if q.get("question") and q["question"] not in (body or ""):
             body = f"{body}\n\n{q['question']}" if body else q["question"]
+        if "reply in your own words" not in (body or "").lower():
+            body = f"{body}\n\nReply in your own words in this chat."
     db.add(
         ChatMessage(
             session_id=job.session_id,

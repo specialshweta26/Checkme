@@ -106,10 +106,9 @@ class Settings(BaseSettings):
     teach_audio_max_bytes: int = 24 * 1024 * 1024
     # Seconds of inactivity before the sandbox pauses (Hobby plan max 3600, Pro max 86400). Each tool call extends it.
     e2b_sandbox_timeout: int = 3600
-    # Web search order (comma list of stages or provider names). Default: keyless engines (brave, duckduckgo,
-    # wikipedia), then a search in the cloud computer's browser, then paid APIs (tavily, brave_api, serper, exa)
-    # as the last resort. Each stage has a time budget so a blocked engine can't stall a search.
-    search_order: str = "free,browser,paid"
+    # Web search order (comma list of stages or provider names). Default: Tavily, computer browser, then
+    # keyless server engines (Brave, DuckDuckGo, Wikipedia). Each stage has a time budget.
+    search_order: str = "tavily,browser,free"
     search_provider_timeout_s: float = 8.0  # each free engine
     search_free_timeout_s: float = 15.0  # all free engines together
     search_browser_timeout_s: float = 45.0  # browser stage when the computer is already running
@@ -117,7 +116,7 @@ class Settings(BaseSettings):
     # auto: boot a stopped computer for search only when no paid provider is left; always; never
     search_browser_boot: str = "auto"
     search_paid_timeout_s: float = 20.0  # all paid providers together
-    # Optional paid web search API keys (Tavily first). Only used after the free and browser stages fail.
+    # Optional paid web search API keys. Tavily is the first-choice provider when configured.
     tavily_api_key: str = ""
     brave_search_api_key: str = ""
     serper_api_key: str = ""

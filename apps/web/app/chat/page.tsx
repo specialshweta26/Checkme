@@ -9,7 +9,6 @@ import { EmailThreadButton, mailRefsFromMeta } from "../components/EmailThread";
 import { Markdown } from "../components/Markdown";
 import { dismissFocusCard, focusCardDismissed, FocusOnboarding, type FocusOption } from "../components/FocusCard";
 import { JobTimeline } from "../components/JobTimeline";
-import { formatPreview } from "../components/preview";
 import { Thinking } from "../components/Thinking";
 import { announceWorkspaceChanged, chatHref, updateAgent, deleteSession, getMe, listSessions, loadSession, rememberScope, uploadFiles, startTeaching, stopTeaching, type ChatSessionRow, type Me, type UploadedFile, type WorkspaceRoster } from "../lib";
 
@@ -470,9 +469,15 @@ export default function ChatPage() {
     await refreshSessions();
   }
 
+  function sendComposerMessage() {
+    const reply = text.trim().toLowerCase().replace(/[.!?]+$/g, "").replace(/\s+/g, " ");
+    const yes = /^(yes|yeah|yep|sure|absolutely|of course|ok|okay|go ahead|please go ahead|go for it|do it|please do it|please do|proceed|please proceed|continue|sounds good|approved|i approve|i want you to)(\b|,)/.test(reply);
+    send(text, pending.length > 0 && yes && !/\b(but|unless|not|except)\b/.test(reply) ? pending : []);
+  }
+
   function onSubmit(e: FormEvent) {
     e.preventDefault();
-    send(text);
+    sendComposerMessage();
   }
 
   const currentKey = scopeKey(agentId, groupId);
@@ -816,33 +821,6 @@ export default function ChatPage() {
                       onSettled={() => reloadSession(sessionId)}
                     />
                   ) : null}
-                  {m.meta?.choices?.options?.length && i === messages.length - 1 ? (
-                    <div className="chips choices" style={{ marginTop: 8 }}>
-                      {m.meta.choices.options.map((opt: string) => (
-                        <button
-                          key={opt}
-                          className="chip"
-                          disabled={busyHere}
-                          onClick={async () => {
-                            if (m.meta.choices.job_id) {
-                              // A background job asked: answer it directly, then show its timeline again.
-                              await fetch(`/api/jobs/${m.meta.choices.job_id}/answer`, {
-                                method: "POST",
-                                credentials: "include",
-                                headers: { "Content-Type": "application/json" },
-                                body: JSON.stringify({ text: opt }),
-                              }).catch(() => null);
-                              reloadSession(sessionId);
-                            } else {
-                              send(opt);
-                            }
-                          }}
-                        >
-                          {opt}
-                        </button>
-                      ))}
-                    </div>
-                  ) : null}
                   {sourceLabel(m.meta) ? <div className="source-chip">{sourceLabel(m.meta)}</div> : null}
                   <EmailThreadButton refs={mailRefsFromMeta(m.meta)} />
                   {chatAttachments(m.meta?.attachments).length ? <AttachmentWidget items={chatAttachments(m.meta.attachments)} /> : null}
@@ -864,47 +842,12 @@ export default function ChatPage() {
         </div>
         <div className="chat-footer">
         {pending.length ? (
-          <div className="approval">
-            {pending.map((p) => (
-              <div key={p.token}>
-                <h3>{p.title || "Approve this action"}</h3>
-                <p className="muted" style={{ margin: "0 0 8px" }}>
-                  {p.kind === "handoff" || p.preview?.kind === "handoff"
-                    ? "Take control on the computer screen, finish the step, then continue."
-                    : p.kind === "git_push" || p.preview?.repo
-                      ? "Review the repo, branch and commits, then approve. Nothing is pushed, opened or merged until you do."
-                      : "Review the recipient and preview, then confirm. Nothing sends until you do."}
-                </p>
-                <pre className="approval-preview">{formatPreview(p.preview)}</pre>
-                <div className="approval-actions">
-                  {p.kind === "handoff" || p.preview?.kind === "handoff" ? (
-                    <button className="btn" type="button" onClick={() => { setControlling(true); setScreenOpen(true); }}>
-                      Take control
-                    </button>
-                  ) : null}
-                  <button
-                    className="btn"
-                    disabled={busyHere}
-                    onClick={() => {
-                      setPending([]);
-                      setControlling(false);
-                      send(
-                        p.kind === "handoff" || p.preview?.kind === "handoff"
-                          ? "I finished on the computer. Continue."
-                          : "Confirmed. Continue.",
-                        pending,
-                      );
-                    }}
-                  >
-                    {p.kind === "handoff" || p.preview?.kind === "handoff" ? "Continue" : "Confirm"}
-                  </button>
-                  <button className="btn secondary" onClick={() => setPending([])}>
-                    Cancel
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
+          <p className="chat-action-prompt" role="status">
+            I’ve prepared {pending.map((p) => p.title || "an action").join(" and ")}. Reply in your own words if you’d like me to continue{pending.length > 1 ? " with these actions" : ""}; for example, “go ahead” or “leave it”.
+            {pending.some((p) => p.kind === "handoff" || p.preview?.kind === "handoff") ? (
+              <> <button className="btn secondary small" type="button" onClick={() => { setControlling(true); setScreenOpen(true); }}>Open the computer screen</button></>
+            ) : null}
+          </p>
         ) : null}
         <div className="composer-wrap">
           {uploadError ? <p className="err">{uploadError}</p> : null}
@@ -963,13 +906,15 @@ export default function ChatPage() {
               placeholder={
                 activeGroup
                   ? "Write normally, @ a bot, or @everyone…"
-                  : "Ask about sales, mail, or schedule work…"
+                  : pending.length
+                    ? "Reply to your agent…"
+                    : "Ask about sales, mail, or schedule work…"
               }
               rows={1}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
-                  send(text);
+                  sendComposerMessage();
                 }
               }}
             />

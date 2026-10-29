@@ -310,7 +310,7 @@ async def _search_wikipedia(q: str, limit: int) -> list[dict]:
 
 FREE_PROVIDERS = ("brave", "duckduckgo", "wikipedia")
 PAID_PROVIDERS = ("tavily", "brave_api", "serper", "exa")  # Tavily first among the paid ones
-DEFAULT_SEARCH_ORDER = "free,browser,paid"
+DEFAULT_SEARCH_ORDER = "tavily,browser,free"
 SEARCH_KEY_ENVS = ("TAVILY_API_KEY", "BRAVE_SEARCH_API_KEY", "SERPER_API_KEY", "EXA_API_KEY")
 _PAID_KEYS = {"tavily": "tavily_api_key", "brave_api": "brave_search_api_key", "serper": "serper_api_key", "exa": "exa_api_key"}
 _PAID_FNS = {"tavily": "_search_tavily", "brave_api": "_search_brave_api", "serper": "_search_serper", "exa": "_search_exa"}
@@ -329,7 +329,8 @@ def _key(name: str) -> str:
 
 def search_order() -> list[str]:
     """SEARCH_ORDER as stages: 'free', 'browser', 'paid', or single provider names (brave, duckduckgo, wikipedia,
-    tavily, brave_api, serper, exa). Default 'free,browser,paid': paid APIs are the last resort."""
+    tavily, brave_api, serper, exa). Default 'tavily,browser,free': Tavily first, then the computer browser,
+    then keyless server engines."""
     raw = str(_cfg("search_order", DEFAULT_SEARCH_ORDER))
     out: list[str] = []
     for token in (t.strip().lower() for t in raw.split(",")):
@@ -424,8 +425,8 @@ def _browser_plan(ctx, paid_left: bool) -> tuple[bool, float, str]:
 async def web_search(query: str, count: int = 8, ctx=None) -> dict:
     """Real results from the first stage that answers, or a clear error. Never invents results.
 
-    Default order (SEARCH_ORDER=free,browser,paid): keyless HTTP engines, then the same search in the cloud
-    computer's real browser, then paid APIs (Tavily first) as the last resort. Each stage has a time budget.
+    Default order (SEARCH_ORDER=tavily,browser,free): Tavily, then the same search in the cloud computer's
+    real browser, then keyless HTTP engines. Each stage has a time budget.
     Verification pages are reported, never bypassed.
     """
     import asyncio

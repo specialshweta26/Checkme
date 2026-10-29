@@ -1354,7 +1354,7 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
     if (destructive or git_write) and (git_write or not ctx.auto_confirm) and not _approved(
         ctx, conn, connector_slug, tool_name, args
     ):
-        # Background jobs wait for the user, so their approval cards live longer than chat ones.
+        # Background jobs wait for a conversational reply, so their signed confirmations live longer than chat ones.
         ttl = JOB_CONFIRM_TTL if (ctx.job is not None or ctx.auto_confirm) else 600
         token = sign_confirm("tool", {"slug": connector_slug, "tool": tool_name, "args": args}, ttl=ttl)
         pending = {
@@ -2116,12 +2116,12 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
         return dumps(await workspace_tools.rename_group(ctx, group, name))
 
     async def delete_agent(target: str) -> str:
-        """Ask to delete a Checkme agent. This only shows the user a confirmation card; it is deleted after they confirm. Chief cannot be deleted."""
+        """Ask to delete a Checkme agent. Explain the deletion in chat and wait for the user's clear reply before deleting. Chief cannot be deleted."""
         ctx.used_tools.append("delete_agent")
         return dumps(await workspace_tools.request_delete(ctx, "agent", target))
 
     async def delete_agent_group(target: str) -> str:
-        """Ask to delete a Checkme agent group. This only shows the user a confirmation card; it is deleted after they confirm. Member agents are kept."""
+        """Ask to delete a Checkme agent group. Explain the deletion in chat and wait for the user's clear reply before deleting. Member agents are kept."""
         ctx.used_tools.append("delete_agent_group")
         return dumps(await workspace_tools.request_delete(ctx, "group", target))
 
@@ -2280,7 +2280,7 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
             draft: bool = False,
             pr_number: int = 0,
         ) -> str:
-            """Push an agent/* branch to GitHub and (by default) open a pull request with a clear body (## Summary, ## Changes, ## Tests, ## Caveats; the latest run_checks table is added if the body has no Tests section). To update an existing PR the user named, pass pr_number and its head branch. Always shows the user an approval card first; tell them it is waiting for approval. Opening a PR never merges it. If GitHub access is missing it saves a patch and returns status=blocked with the install link."""
+            """Push an agent/* branch to GitHub and (by default) open a pull request with a clear body (## Summary, ## Changes, ## Tests, ## Caveats; the latest run_checks table is added if the body has no Tests section). To update an existing PR the user named, pass pr_number and its head branch. Explain the exact write in chat and wait for the user's clear reply before pushing. Opening a PR never merges it. If GitHub access is missing it saves a patch and returns status=blocked with the install link."""
             ctx.used_tools.append("push_branch")
             return dumps(await git_tools.push_branch(ctx, repo, branch, open_pr, title, body, base, draft, pr_number), 8000)
 
@@ -2370,12 +2370,12 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
             return dumps(await deploy_mod.detect_deploy_targets(ctx, repo), 8000)
 
         async def deploy_tool(repo: str, platform: str = "", params=None, cwd: str = ".", use_cli: bool = False) -> str:
-            """Deploy a repo to a platform, end to end: clones it if needed, installs the CLI, signs in (saved key, the CLI's session on the computer, or it starts the CLI's browser login and returns status=awaiting_user_login with the link: give the user just that link in one line and end the turn; the job resumes by itself), fills free-tier / India-region defaults, creates the service on first deploy (Render: from the GitHub repo), then shows ONE approval card (platform, service, repo/branch, region, cost). After approval it waits until live, probes the URL and returns live_url, or the failure output: fix and call again (bounded retries reuse the approval). Never tell the user to configure or connect anything."""
+            """Deploy a repo to a platform, end to end: clones it if needed, installs the CLI, signs in (saved key, the CLI's session on the computer, or it starts the CLI's browser login and returns status=awaiting_user_login with the link: give the user just that link in one line and end the turn; the job resumes by itself), fills free-tier / India-region defaults, creates the service on first deploy (Render: from the GitHub repo), then clearly describe the platform, service, repo/branch, region and cost in chat and wait for the user's clear reply. After they say to continue, it waits until live, probes the URL and returns live_url, or the failure output: fix and call again (bounded retries reuse the confirmation). Never tell the user to configure or connect anything."""
             ctx.used_tools.append("deploy")
             return dumps(await deploy_mod.request_action(ctx, "deploy", repo, platform, _params(params or DeployParams()), cwd, use_cli), 8000)
 
         async def rollback_tool(repo: str, platform: str = "", params=None, cwd: str = ".", use_cli: bool = False) -> str:
-            """Roll a deployment back to an earlier deploy / version / image. Always shows an approval card first. Find the target with deploy_status."""
+            """Roll a deployment back to an earlier deploy / version / image. Explain the target in chat and wait for the user's clear reply first. Find the target with deploy_status."""
             ctx.used_tools.append("deploy_rollback")
             return dumps(await deploy_mod.request_action(ctx, "rollback", repo, platform, _params(params or DeployParams()), cwd, use_cli), 8000)
 
@@ -2434,7 +2434,7 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
             # waiting for a sign-in) runs in the background instead of inline.
 
             async def start_job(task: str, title: str = "") -> str:
-                """Start a background coding job for multi-step work (code changes, fixes, features, reviews, merges, deploys). It runs on the computer without the chat timeout and shows a live timeline (todo list, steps, tests, PR links) with approval and answer buttons in this chat. Give a self-contained task: repo (owner/name), goal and acceptance criteria. Follow-ups in this chat continue the same job."""
+                """Start a background coding job for multi-step work (code changes, fixes, features, reviews, merges, deploys). It runs on the computer without the chat timeout and shows a live timeline (todo list, steps, tests, PR links). If user input is needed, ask in natural language and accept a conversational reply in this chat. Give a self-contained task: repo (owner/name), goal and acceptance criteria. Follow-ups in this chat continue the same job."""
                 ctx.used_tools.append("start_coding_job")
                 return dumps(await start_coding_job(ctx, task, title), 4000)
 
@@ -2586,7 +2586,7 @@ def system_prompt(
         "never tell the user to connect, install or configure a platform first. If the answer has a sign-in link, pass on just "
         "that link in one sentence. "
         "If a tool returns an error about the size, explain it and ask which agents to use. "
-        "delete_agent and delete_agent_group only show a confirmation card; say it is waiting for their confirmation. "
+        "For delete_agent and delete_agent_group, explain what will be removed in conversational language and wait for a clear reply. "
         "After creating or changing one, tell the user its name and that it is in the left sidebar under Personal, where they can open it.\n"
     )
     return (
@@ -2638,7 +2638,7 @@ def system_prompt(
         "(https://www.google.com/search?q=...) then open at least two result links. Search the acronym; do not ask what it means first. "
         "If navigate returns chrome-error, chromewebdata, or connection reset, web_fetch the same URL (or another source) and keep going. "
         "web_fetch shows the page on the same computer screen (JavaScript apps such as maps and listing sites are loaded in the real browser and given time to render); then browser_snapshot and browser_act on it. Do not wake the computer after a page is showing. "
-        "web_search already falls back to searching in the computer browser; browser_search does that directly. web_search tries free engines, then the computer browser, then a paid API (Tavily) last. If it returns `setup`, tell the user in one line which search key to configure (it names the env vars) and why, then keep going with browser_navigate on known sites. "
+        "web_search already falls back to searching in the computer browser; browser_search does that directly. web_search tries Tavily first, then the computer browser, then free server-side search engines. If it returns `setup`, tell the user in one line which search key to configure (it names the env vars) and why, then keep going with browser_navigate on known sites. "
         "Never stop after one failed page. Never say you cannot verify live updates until you have searched and opened at least one article.\n"
         "End-to-end web work: browser_navigate, browser_snapshot for refs (e0, e1), then browser_act — click, fill, type, select, check, press, scroll. "
         "Fill whole forms from the snapshot: one fill per field, then click submit. "
@@ -2697,7 +2697,7 @@ def system_prompt(
         "Destructive connector actions still need call_tool; the app asks the user to confirm.\n"
         "If the user wants work done later (email a report in N minutes, tonight, every day), schedule_task and do not fetch now. "
         "For event-driven work, create a webhook automation with run_staff_tool(name='create_automation', args={trigger_type:'webhook', name, trigger:<exact event name>, condition, action, requires_approval:true}). "
-        "Use approval by default for external actions. Return the generated webhook URL, one-time secret, exact headers, and a ready-to-copy curl example; the secret is only returned at creation. List or disable automations with the automation endpoints when asked. "
+        "Keep external actions gated on a clear user reply. When a tool says a confirmation is needed, tell the user in one natural sentence exactly what you prepared and ask whether they want you to go ahead; do not mention approval, approve, cards, or buttons, and wait for a clear reply. Return the generated webhook URL, one-time secret, exact headers, and a ready-to-copy curl example; the secret is only returned at creation. List or disable automations with the automation endpoints when asked. "
         "If they want a calendar invite or meeting at a clock time, that time is the event start: call create_event now. "
         "If repeated requests reveal a useful routine, point that out and offer to schedule it; create it when the user asks. Use an existing schedule or webhook "
         "for future follow-through, and keep approval enabled for external actions unless the user explicitly changes it. "
