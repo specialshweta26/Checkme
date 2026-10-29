@@ -186,7 +186,11 @@ async def test_stage_timeouts_keep_search_fast(monkeypatch):
 def test_search_order_is_configurable(monkeypatch):
     cfg = _settings(tavily_api_key="x", serper_api_key="y")
     monkeypatch.setattr(web_tools, "get_settings", lambda: cfg)
-    assert web_tools.search_order() == ["tavily", "browser", "brave", "duckduckgo", "wikipedia"]
+    # Default paid,browser,free: Tavily first among the paid APIs, then the computer browser, then keyless engines.
+    assert web_tools.search_order() == [
+        "tavily", "brave_api", "serper", "exa", "browser", "brave", "duckduckgo", "wikipedia",
+    ]
+    assert [n for n, _ in web_tools.search_providers()][:2] == ["tavily", "serper"]
     cfg.search_order = "paid, free"
     assert web_tools.search_order()[:2] == ["tavily", "brave_api"] and "browser" not in web_tools.search_order()
     cfg.search_order = "duckduckgo,browser,serper,bogus"

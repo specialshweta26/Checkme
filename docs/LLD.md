@@ -537,13 +537,22 @@ Why: mobile Safari fails a `fetch` with "Load failed" after about 60 s without a
 
 ### 7.3 Web search (`app/agent/web_tools.py`)
 
-`web_search(query)` runs stages in `SEARCH_ORDER` (default `tavily,browser,free`) and returns `{query, results:[{title,url,snippet}], source, fallback_from?, took_s}` from the first that has results, or `{results: [], error, tried, order, search_api_configured, setup?, configure_one_of?}`. It never invents results.
+`web_search(query)` runs stages in `SEARCH_ORDER` (default `paid,browser,free`) and returns `{query, results:[{title,url,snippet}], source, fallback_from?, took_s}` from the first that has results, or `{results: [], error, tried, order, search_api_configured, setup?, configure_one_of?}`. It never invents results.
 
-1. **free** (keyless, server-side): Brave HTML (`search.brave.com`, over HTTP/2), DuckDuckGo html/lite (HTTP 202 "anomaly" pages are a bot check, not "0 results"), Wikipedia (hits must share a word with the query; marked with a `note`). Each engine gets `SEARCH_PROVIDER_TIMEOUT_S` (8 s); all together `SEARCH_FREE_TIMEOUT_S` (15 s).
+1. **paid** (first, only when keyed): `TAVILY_API_KEY`, `BRAVE_SEARCH_API_KEY`, `SERPER_API_KEY`, `EXA_API_KEY`, in that order (Tavily first), within `SEARCH_PAID_TIMEOUT_S` (20 s). Tavily is asked for each result's page text (`include_raw_content`, `TAVILY_RAW_CONTENT=1`); the text is cached in memory for 15 minutes so `web_fetch` on a result answers instantly without touching the site (§7.6).
 2. **browser**: when a cloud computer is connected, `browser_search` runs the query in its real browser (Bing, DuckDuckGo, Google; background tab; results read from the DOM; CAPTCHA/verification/error pages are reported, never bypassed). Budget `SEARCH_BROWSER_TIMEOUT_S` (45 s) when the computer is running. If it is stopped, `SEARCH_BROWSER_BOOT=auto` skips the stage when a paid key is left (a cold boot is too slow for a search) and otherwise boots it within `SEARCH_BROWSER_COLD_TIMEOUT_S` (120 s); `always` / `never` force it.
-3. **paid** (last resort, only when keyed): `TAVILY_API_KEY`, `BRAVE_SEARCH_API_KEY`, `SERPER_API_KEY`, `EXA_API_KEY`, in that order, within `SEARCH_PAID_TIMEOUT_S` (20 s).
+3. **free** (keyless, server-side, last): Brave HTML (`search.brave.com`, over HTTP/2), DuckDuckGo html/lite (HTTP 202 "anomaly" pages are a bot check, not "0 results"), Wikipedia (hits must share a word with the query; marked with a `note`). Each engine gets `SEARCH_PROVIDER_TIMEOUT_S` (8 s); all together `SEARCH_FREE_TIMEOUT_S` (15 s).
 
-`SEARCH_ORDER` also accepts single provider names (e.g. `brave,browser,tavily`). With no paid key, failures carry `setup` naming the env vars to set. Each HTTP request has a 10 s timeout and one retry on timeouts, connection errors and 5xx. `web_fetch` returns `{ok: false, error}` instead of raising; on the computer, thin/JS/blocked pages load in the real browser (consent prompts dismissed, wait for content) instead of painting static HTML.
+`SEARCH_ORDER` also accepts single provider names (e.g. `tavily,browser,free` or `brave,browser,tavily`). With no paid key, failures carry `setup` naming the env vars to set. Each HTTP request has a 10 s timeout and one retry on timeouts, connection errors and 5xx. `web_fetch` returns `{ok: false, error}` instead of raising; on the computer, thin/JS/blocked pages load in the real browser (consent prompts dismissed, wait for content) instead of painting static HTML.
+
+### 7.6 Resilient browsing (`block_detect.py`, `browsing.py`, `computer_daemon.py`)
+
+Full design, providers and costs: [BROWSING.md](BROWSING.md).
+
+- **One detector.** `app/connectors/block_detect.py` (stdlib only; also uploaded next to the daemon as `/tmp/checkme_block_detect.py`) classifies a response as `captcha` (needs a person), `challenge` (passive JS check), `denied` (Akamai "Access Denied", 401/403/451), `rate_limited` (429) or `empty_shell`, with the vendor (Cloudflare, Akamai, PerimeterX, DataDome, Imperva, AWS WAF, Kasada, Google /sorry...). Text markers count only on short pages, HTML markers only on error statuses or short pages. `computer_daemon.bot_wall` / `annotate_page`, `web_fetch.needs_real_browser`, `research.needs_browser` and the ladder all use it. Only `captcha` sets `handoff=true`.
+- **Human-like computer browser.** The daemon (VERSION 16) runs every Playwright call on one dedicated thread (the sync API breaks when the per-request HTTP threads call it, which made every command after the first fail) and launches Chromium without `--enable-automation`, with its own user agent (UA, `sec-ch-ua` and `navigator.platform` agree), HTTP/2 + QUIC on (`BROWSER_HTTP2`), the user's locale and timezone (`BROWSER_LOCALE`, profile timezone or `BROWSER_TIMEZONE`), the normal window, optional `BROWSER_CHANNEL=chrome` and optional `BROWSER_PROXY_URL`. A passive challenge gets up to `BROWSER_CHALLENGE_WAIT_S` (15 s) with small mouse moves to clear. Settings reach the daemon in `/tmp/checkme_browser_config.json` (read once, deleted); `/health` reports their hash and `daemon_current` restarts a daemon whose settings changed. CAPTCHAs are never solved or clicked automatically.
+- **Escalation ladder** (`browsing.fetch_with_ladder`, per-step `BROWSE_STEP_TIMEOUT_S` 20 s, hosted browser `BROWSE_REMOTE_TIMEOUT_S` 60 s, total `BROWSE_TOTAL_TIMEOUT_S` 60 s): `cache` (Tavily text) → `server` (short header set, then a full Chrome header set; HTTP/2) → `proxy` → `tavily` (Tavily Extract) → `remote` (Steel scrape on the server, or a Browserbase session driven over CDP by the computer) → `alternates` (AMP / mobile version) → `reader` (`BROWSE_READER_URL`, r.jina.ai) → `archive` (Internet Archive, labelled with its date). Unconfigured steps are skipped silently. Paths: `web_fetch` without a computer = full ladder; `browser_navigate` / `web_fetch` on the computer = real browser first, then the ladder without `server` (painted with `load_html`, `read_only=true`, `live_site_blocked`); `research_crawl` = `cache, server, proxy, tavily` within 30 s. All failed: `{ok:false, blocked:true, blocked_source, attempts, hint}` and the prompt tells the agent to name the site and use equivalent sources.
+- **Persistent profile.** `browser_profiles` (user_id PK, Fernet-encrypted cookies, ≤ 256 KB): exported at most every 5 minutes after successful navigations, imported when a new daemon starts. Per user only; `BROWSER_PROFILE_PERSIST=0` disables it.
 
 ## 8. Inbox pipeline
 
@@ -708,8 +717,14 @@ See `.env.example`. Important knobs in `app/config.py`:
 | `COMPUTER_PROVIDER` | `e2b` or `daytona`; picks the backend when both keys are set |
 | `E2B_SANDBOX_TIMEOUT` / `E2B_TEMPLATE` | Idle seconds before pause (Hobby ≤ 3600, Pro ≤ 86400) / custom template (default `desktop`) |
 | `DAYTONA_API_KEY` | Daytona computer (fallback) |
-| `TAVILY_API_KEY` / `BRAVE_SEARCH_API_KEY` / `SERPER_API_KEY` / `EXA_API_KEY` | Optional paid web search APIs, the last resort after the free and browser stages |
-| `SEARCH_ORDER` and `SEARCH_*_TIMEOUT_S`, `SEARCH_BROWSER_BOOT` | Web search stage order (default `tavily,browser,free`) and time budgets (§7.3) |
+| `TAVILY_API_KEY` / `BRAVE_SEARCH_API_KEY` / `SERPER_API_KEY` / `EXA_API_KEY` | Optional paid web search APIs, tried first (Tavily first) before the browser and free stages |
+| `SEARCH_ORDER` and `SEARCH_*_TIMEOUT_S`, `SEARCH_BROWSER_BOOT` | Web search stage order (default `paid,browser,free`) and time budgets (§7.3) |
+| `TAVILY_RAW_CONTENT` / `TAVILY_EXTRACT` | Use Tavily's page text from search results and Tavily Extract in the browsing ladder (default on) |
+| `BROWSER_PROXY_URL`, `BROWSER_PROXY_FOR_FETCH` | Optional egress proxy for the computer browser and the server fetch (§7.6) |
+| `BROWSER_LOCALE` / `BROWSER_TIMEZONE` / `BROWSER_HTTP2` / `BROWSER_CHANNEL` / `BROWSER_CHALLENGE_WAIT_S` | Computer browser identity (defaults `en-IN`, profile timezone, on, Chromium, 15 s) |
+| `BROWSER_PROFILE_PERSIST` | Keep per-user browser cookies encrypted across computer restarts (default on) |
+| `REMOTE_BROWSER_PROVIDER` + `BROWSERBASE_API_KEY` / `BROWSERBASE_PROJECT_ID` or `STEEL_API_KEY`, `REMOTE_BROWSER_USE_PROXY` | Optional hosted browser step |
+| `BROWSE_ALTERNATES` / `BROWSE_READER_URL` / `JINA_API_KEY` / `BROWSE_ARCHIVE` / `BROWSE_*_TIMEOUT_S` | Read-only ladder steps and time limits (docs/BROWSING.md) |
 | `COMPOSIO_API_KEY` | Composio marketplace and the built-in GitHub connector (proxy, accounts) |
 | `COMPOSIO_GITHUB_AUTH_CONFIG_ID` | Optional: pin the GitHub auth config; a custom OAuth one with unmasked secrets enables real git clone/push |
 

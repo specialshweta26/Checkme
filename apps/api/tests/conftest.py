@@ -9,6 +9,20 @@ import uuid
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _offline_browsing_ladder(monkeypatch):
+    """Tests never reach the reader, archive, Tavily Extract, hosted browsers or m. sites over the network.
+    Ladder tests pass their own steps (``custom=``)."""
+    from app.connectors import browsing
+
+    async def _off(url, limit, state):
+        return None
+
+    for step in ("tavily", "remote", "alternates", "reader", "archive"):
+        monkeypatch.setitem(browsing._STEPS, step, _off)
+    browsing._CACHE.clear()
+
+
 class SkillStore:
     """In-memory stand-in for the skills persistence helpers (no database)."""
 

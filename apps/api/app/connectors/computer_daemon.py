@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import random
 import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -11,10 +13,14 @@ from pathlib import Path
 
 HOST = "127.0.0.1"
 PORT = 18765
-VERSION = "14"
+VERSION = "16"
 SHOT = "/tmp/checkme-browser.png"
 PROFILE = "/tmp/checkme-browser-profile"
 LAST = "/tmp/checkme-browser-last.json"
+# Written by the API before it starts the daemon (locale, timezone, proxy, channel...). Read once, then deleted so
+# proxy credentials do not sit on disk. See docs/BROWSING.md.
+CONFIG_PATH = "/tmp/checkme_browser_config.json"
+FRESH_MARK = "/tmp/checkme-browser-profile/.checkme-created"
 VIEW_W = 1280
 VIEW_H = 800
 GOOGLE_HOME = "https://www.google.com/"
@@ -34,6 +40,20 @@ READY_HTML = (
 )
 
 _lock = threading.Lock()
+# Playwright's sync API is bound to the thread that started it, and ThreadingHTTPServer answers every request on a
+# new thread: without this, every browser command after the first fails with "cannot switch to a different thread".
+# All browser work runs on this one long-lived thread, in arrival order.
+_browser_thread = None
+
+
+def on_browser_thread(fn, *args):
+    global _browser_thread
+    with _lock:
+        if _browser_thread is None:
+            from concurrent.futures import ThreadPoolExecutor
+
+            _browser_thread = ThreadPoolExecutor(max_workers=1, thread_name_prefix="checkme-browser")
+    return _browser_thread.submit(fn, *args).result()
 _browser_page = None
 _browser_context = None
 _elements: list[dict] = []
@@ -44,55 +64,53 @@ _active_tab = ""
 _tab_seq = 0
 _tab_refs: dict = {}
 
-_BOT_URL = (
-    "/sorry",
-    "recaptcha",
-    "hcaptcha",
-    "cf-challenge",
-    "challenges.cloudflare",
-    "geo.captcha",
-    "px-captcha",
-    "datadome",
-)
-_BOT_TEXT = (
-    "unusual traffic",
-    "unusual activity",
-    "automated queries",
-    "our systems have detected",
-    "verify you are human",
-    "are you a robot",
-    "i'm not a robot",
-    "enable javascript and cookies",
-    "checking your browser",
-    "attention required",
-    "please complete the security check",
-    "please verify you are",
-    "select all images",
-)
-_SETTLING = ("loading", "please wait", "just a moment", "searching")
+try:  # the API imports the package module; on the computer the same file sits next to this one
+    from app.connectors.block_detect import detect_block
+    from app.connectors.block_detect import page_is_thin as _thin
+except ImportError:  # pragma: no cover - exercised on the cloud computer
+    from checkme_block_detect import detect_block  # type: ignore
+    from checkme_block_detect import page_is_thin as _thin  # type: ignore
+
+
+def _load_config() -> dict:
+    try:
+        raw = json.loads(Path(CONFIG_PATH).read_text() or "{}")
+    except Exception:
+        return {}
+    try:
+        os.unlink(CONFIG_PATH)
+    except Exception:
+        pass
+    return raw if isinstance(raw, dict) else {}
+
+
+CONFIG: dict = _load_config() if __name__ == "__main__" else {}
+
+
+def config_hash(cfg: dict | None) -> str:
+    """Short fingerprint of a browser config (the API restarts the daemon when it changes). Never the secrets."""
+    blob = json.dumps(cfg or {}, sort_keys=True, default=str)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:12]
 
 
 def page_is_thin(text: str) -> bool:
-    body = (text or "").strip()
-    if len(body) < 180:
-        return True
-    low = body.lower()
-    return any(token in low for token in _SETTLING) and len(body) < 1200
+    return _thin(text)
 
 
-def bot_wall(url: str = "", title: str = "", text: str = "") -> dict | None:
-    blob = " ".join([url or "", title or "", (text or "")[:4000]]).lower()
-    if "before you continue" in blob:
+def bot_wall(url: str = "", title: str = "", text: str = "", html: str = "", status: int | None = None) -> dict | None:
+    """The page is a bot wall (CAPTCHA, JS check, access denied, rate limit), per the shared detector."""
+    block = detect_block(status, url, title, text, html)
+    if not block:
         return None
-    if any(token in blob for token in _BOT_URL) or any(token in blob for token in _BOT_TEXT):
-        kind = "captcha" if "robot" in blob or "select all images" in blob else "verification"
-        return {
-            "bot_wall": True,
-            "bot_wall_kind": kind,
-            "handoff": True,
-            "reason": "This site is blocking the cloud browser (CAPTCHA or verification).",
-        }
-    return None
+    kind = block["kind"]
+    return {
+        "bot_wall": True,
+        "bot_wall_kind": "captcha" if kind == "captcha" else ("verification" if kind == "challenge" else kind),
+        "block": block,
+        # Only a CAPTCHA needs a person. Denied / unclear checks go to the fallback ladder first.
+        "handoff": bool(block.get("interactive")),
+        "reason": block["reason"],
+    }
 
 
 def annotate_page(data: dict | None) -> dict:
@@ -102,10 +120,17 @@ def annotate_page(data: dict | None) -> dict:
         row.update(wall)
         row["ok"] = False
         row["content_ready"] = False
-        row["hint"] = (
-            "Do not invent results. The user must finish verification on this screen "
-            "(request_takeover / browser_handoff). After they finish, snapshot and continue."
-        )
+        if wall.get("handoff"):
+            row["hint"] = (
+                f"{wall['reason']} Do not invent results. Ask the user to solve it on the live screen "
+                "(request_takeover / browser_handoff), then snapshot and continue; meanwhile use other sites "
+                "that cover the same information."
+            )
+        else:
+            row["hint"] = (
+                f"{wall['reason']} Do not invent results. Use the read-only copy if one is attached, else try "
+                "other sites that cover the same information, and tell the user plainly which site blocked."
+            )
     elif page_is_thin(str(row.get("text") or "")):
         row["content_ready"] = False
         row["hint"] = (
@@ -444,7 +469,7 @@ def _type_into(page, loc, node, text: str, replace: bool) -> None:
                 loc.fill(text, timeout=8000)
             else:
                 loc.click(timeout=8000)
-                page.keyboard.type(text, delay=20)
+                page.keyboard.type(text, delay=random.randint(30, 70))
             return
         except Exception:
             # Not a plain input (custom combobox / contenteditable): click it and type like a person.
@@ -591,34 +616,132 @@ def browser_headed() -> bool:
     return os.environ.get("CHECKME_BROWSER_HEADED") == "1" and bool(os.environ.get("DISPLAY"))
 
 
+_DEFAULT_UA_PLATFORM = "X11; Linux x86_64"
+_pw = None
+
+
+def _proxy_option(cfg: dict) -> dict | None:
+    """Playwright proxy dict from cfg["proxy"] ({server, username, password, bypass}) or None."""
+    proxy = cfg.get("proxy") if isinstance(cfg.get("proxy"), dict) else None
+    if not proxy or not proxy.get("server"):
+        return None
+    out = {"server": str(proxy["server"])}
+    for key in ("username", "password", "bypass"):
+        if proxy.get(key):
+            out[key] = str(proxy[key])
+    return out
+
+
+def launch_options(headed: bool, cfg: dict | None = None, browser_version: str = "") -> dict:
+    """Options for a browser that looks like a person's Chrome, not an automation harness.
+
+    - no --enable-automation (no "controlled by automated software" bar, navigator.webdriver stays false);
+    - the browser's own user agent (headed) so the UA, client hints (sec-ch-ua) and navigator.platform agree;
+      headless only swaps "HeadlessChrome" for "Chrome" with the real version;
+    - HTTP/2 and QUIC on, like real Chrome (forcing HTTP/1.1 is a strong bot signal for CDNs);
+    - the user's locale and timezone, and optionally an egress proxy (BROWSER_PROXY_URL on the API).
+    """
+    cfg = cfg or {}
+    locale = str(cfg.get("locale") or "en-US")
+    args = [
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-blink-features=AutomationControlled",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--password-store=basic",
+        f"--lang={locale}",
+    ]
+    if cfg.get("http2") is False:
+        args += ["--disable-http2", "--disable-quic"]
+    if headed:
+        args += ["--window-position=0,0", f"--window-size={VIEW_W},{VIEW_H + 100}"]
+    opts: dict = {
+        "headless": not headed,
+        "viewport": {"width": VIEW_W, "height": VIEW_H},
+        "args": args,
+        "ignore_default_args": ["--enable-automation"],
+        "ignore_https_errors": True,
+        "locale": locale,
+    }
+    if cfg.get("timezone"):
+        opts["timezone_id"] = str(cfg["timezone"])
+    if cfg.get("channel") in {"chrome", "chrome-beta", "msedge"}:
+        opts["channel"] = cfg["channel"]
+    proxy = _proxy_option(cfg)
+    if proxy:
+        opts["proxy"] = proxy
+    ua = str(cfg.get("user_agent") or "")
+    if not ua and not headed and browser_version:
+        major = browser_version.split(".")[0]
+        ua = f"Mozilla/5.0 ({_DEFAULT_UA_PLATFORM}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36"
+    if ua:
+        opts["user_agent"] = ua
+    return opts
+
+
+def accept_language(locale: str) -> str:
+    """'en-IN' -> 'en-IN,en;q=0.9' (what Chrome sends for a one-language profile)."""
+    loc = (locale or "en-US").strip()
+    base = loc.split("-")[0]
+    return loc if base == loc else f"{loc},{base};q=0.9"
+
+
+# Only fixes a property when it gives automation away; patching values a real Chrome already has is itself a tell.
+_HARDEN_JS = """(() => {
+  try { if (navigator.webdriver) Object.defineProperty(Navigator.prototype, 'webdriver', {get: () => false}); } catch (e) {}
+  try { if (!window.chrome) Object.defineProperty(window, 'chrome', {value: {runtime: {}}, configurable: true}); } catch (e) {}
+})();"""
+
+
+def harden_context(ctx) -> None:
+    try:
+        ctx.add_init_script(_HARDEN_JS)
+    except Exception:
+        pass
+
+
+def _browser_version(pw, cfg: dict) -> str:
+    """The real Chromium version, for a headless UA without 'HeadlessChrome' (one short extra launch)."""
+    try:
+        kw = {"headless": True}
+        if cfg.get("channel") in {"chrome", "chrome-beta", "msedge"}:
+            kw["channel"] = cfg["channel"]
+        b = pw.chromium.launch(**kw)
+        version = b.version
+        b.close()
+        return version
+    except Exception:
+        return ""
+
+
 def _ensure_page():
-    global _browser_page, _browser_context
+    global _browser_page, _browser_context, _pw
     if _browser_page is not None:
         if _needs_desktop(_browser_page):
             _paint_desktop(_browser_page)
         return _browser_page
     from playwright.sync_api import sync_playwright
 
+    fresh = not Path(PROFILE).exists() or not any(Path(PROFILE).iterdir())
     Path(PROFILE).mkdir(parents=True, exist_ok=True)
-    pw = sync_playwright().start()
+    if fresh:
+        try:
+            Path(FRESH_MARK).write_text("1")
+        except Exception:
+            pass
+    _pw = sync_playwright().start()
     headed = browser_headed()
-    extra = ["--window-position=0,0", f"--window-size={VIEW_W},{VIEW_H + 100}", "--no-first-run", "--no-default-browser-check"] if headed else []
-    _browser_context = pw.chromium.launch_persistent_context(
-        PROFILE,
-        # On a real desktop (E2B) Chromium runs headed so it shows in the live stream; elsewhere it stays headless.
-        headless=not headed,
-        viewport={"width": VIEW_W, "height": VIEW_H},
-        user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
-        args=[
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-blink-features=AutomationControlled",
-            "--disable-http2",
-            "--disable-quic",
-            "--ignore-certificate-errors",
-            *extra,
-        ],
-    )
+    version = "" if headed else _browser_version(_pw, CONFIG)
+    opts = launch_options(headed, CONFIG, version)
+    try:
+        _browser_context = _pw.chromium.launch_persistent_context(PROFILE, **opts)
+    except Exception:
+        if "channel" not in opts:
+            raise
+        opts.pop("channel", None)  # Google Chrome not installed: the bundled Chromium still works
+        _browser_context = _pw.chromium.launch_persistent_context(PROFILE, **opts)
+    harden_context(_browser_context)
     _browser_page = _browser_context.pages[0] if _browser_context.pages else _browser_context.new_page()
     _register_tab(_browser_page, activate=True)
     # Links with target=_blank and window.open become tabs the agent can list and switch to.
@@ -626,6 +749,114 @@ def _ensure_page():
     if _needs_desktop(_browser_page):
         _paint_desktop(_browser_page)
     return _browser_page
+
+
+# Bot checks --------------------------------------------------------------------------------------------------
+def _page_state(page) -> tuple[str, str, str, str]:
+    try:
+        url = page.url or ""
+        title = page.title() or ""
+        text = page.inner_text("body")[:6000]
+    except Exception:
+        return "", "", "", ""
+    try:
+        html = page.evaluate("() => document.documentElement ? document.documentElement.outerHTML.slice(0, 60000) : ''") or ""
+    except Exception:
+        html = ""
+    return url, title, text, html
+
+
+def _human_pause(page, ms: int) -> None:
+    """Idle like a person reading: a couple of small mouse moves and a short wait."""
+    try:
+        for _ in range(2):
+            page.mouse.move(random.randint(200, VIEW_W - 200), random.randint(150, VIEW_H - 150), steps=random.randint(4, 9))
+            page.wait_for_timeout(random.randint(120, 260))
+        page.wait_for_timeout(max(0, ms))
+    except Exception:
+        pass
+
+
+def wait_out_challenge(page, max_s: float | None = None) -> dict | None:
+    """Give a passive JS bot check (Cloudflare 'Just a moment', Akamai, AWS WAF...) time to clear, as a person's
+    browser would. Returns the block that remains, or None once the real page shows. CAPTCHAs are never
+    clicked or solved here: they are returned at once so the user can solve them on the live screen."""
+    budget = float(CONFIG.get("challenge_wait_s", 15) if max_s is None else max_s)
+    url, title, text, html = _page_state(page)
+    block = detect_block(None, url, title, text, html)
+    waited = 0.0
+    while block and block.get("kind") == "challenge" and waited < budget:
+        _human_pause(page, 1000)
+        waited += 1.5
+        try:
+            page.wait_for_load_state("domcontentloaded", timeout=3000)
+        except Exception:
+            pass
+        url, title, text, html = _page_state(page)
+        block = detect_block(None, url, title, text, html)
+    return block
+
+
+def _export_state() -> dict:
+    """Cookies of this browser profile, so a new computer can start as a returning visitor."""
+    _ensure_page()
+    try:
+        cookies = _browser_context.cookies()
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)[:200]}
+    fresh = Path(FRESH_MARK).exists()
+    return {"ok": True, "cookies": cookies, "count": len(cookies), "fresh_profile": fresh}
+
+
+def _import_state(cmd: dict) -> dict:
+    _ensure_page()
+    cookies = [c for c in (cmd.get("cookies") or []) if isinstance(c, dict) and c.get("name") and c.get("domain")]
+    added = 0
+    for i in range(0, len(cookies), 50):
+        try:
+            _browser_context.add_cookies(cookies[i : i + 50])
+            added += len(cookies[i : i + 50])
+        except Exception:
+            for c in cookies[i : i + 50]:
+                try:
+                    _browser_context.add_cookies([c])
+                    added += 1
+                except Exception:
+                    continue
+    try:
+        Path(FRESH_MARK).unlink()
+    except Exception:
+        pass
+    return {"ok": True, "imported": added}
+
+
+def _remote_fetch(cmd: dict) -> dict:
+    """Read one page in a hosted browser (Browserbase/Steel) over CDP. The API creates the session and passes a
+    short-lived connect URL; the hosted browser has its own network and fingerprint. Read-only: text + HTML."""
+    cdp = str(cmd.get("cdp_url") or "")
+    url = str(cmd.get("url") or "")
+    if not cdp or not url:
+        raise RuntimeError("remote_fetch needs cdp_url and url")
+    _ensure_page()
+    browser = _pw.chromium.connect_over_cdp(cdp, timeout=30000)
+    try:
+        ctx = browser.contexts[0] if browser.contexts else browser.new_context()
+        page = ctx.pages[0] if ctx.pages else ctx.new_page()
+        page.goto(url, wait_until="domcontentloaded", timeout=45000)
+        _wait_content(page, int(cmd.get("settle_ms") or 6000))
+        block = wait_out_challenge(page, 12)
+        purl, title, text, html = _page_state(page)
+        try:
+            text = page.inner_text("body")[:12000]
+            html = page.content()[:400000]
+        except Exception:
+            pass
+        return {"ok": not block, "url": purl or url, "title": title, "text": text, "html": html, "block": block}
+    finally:
+        try:
+            browser.close()
+        except Exception:
+            pass
 
 
 def _register_tab(page, activate: bool) -> str:
@@ -744,6 +975,12 @@ def handle(cmd: dict) -> dict:
     command = str(cmd.get("command") or "").strip()
     if command == "serp":
         return _serp(cmd)
+    if command == "export_state":
+        return _export_state()
+    if command == "import_state":
+        return _import_state(cmd)
+    if command == "remote_fetch":
+        return _remote_fetch(cmd)
     if command in TAB_COMMANDS:
         return _tab_command(command, cmd)
     if command in {"navigate", "goto", "snapshot", "act", "observe", "screenshot", "load_html"}:
@@ -756,9 +993,12 @@ def handle(cmd: dict) -> dict:
 def _handle_page(command: str, cmd: dict, page) -> dict:
     wait = int(cmd.get("wait_ms") or 1200)
     if command in {"navigate", "goto"}:
+        status = None
         try:
-            page.goto(cmd["url"], wait_until="domcontentloaded", timeout=60000)
+            resp = page.goto(cmd["url"], wait_until="domcontentloaded", timeout=int(cmd.get("timeout_ms") or 60000))
+            status = resp.status if resp is not None else None
             page.wait_for_timeout(min(wait, 1500))
+            challenge = wait_out_challenge(page)
             consent = _dismiss_consent(page)
             _wait_content(page, int(cmd.get("settle_ms") if cmd.get("settle_ms") is not None else 8000))
         except Exception as vis_exc:
@@ -779,6 +1019,16 @@ def _handle_page(command: str, cmd: dict, page) -> dict:
             data = _snapshot(page)
         if consent:
             data["consent_dismissed"] = consent
+        if challenge and not data.get("bot_wall"):
+            data["challenge_cleared"] = True
+        if status:
+            data["status"] = status
+            if status in {401, 403, 429, 451, 503} and not data.get("bot_wall"):
+                wall = bot_wall(str(data.get("url") or ""), str(data.get("title") or ""), str(data.get("text") or ""), status=status)
+                if wall:
+                    data.update(wall)
+                    data["ok"] = False
+                    data["hint"] = f"{wall['reason']} Use the read-only copy if one is attached, else other sites."
         return data
     if command == "snapshot":
         return _snapshot(page)
@@ -821,6 +1071,13 @@ def _handle_page(command: str, cmd: dict, page) -> dict:
     raise RuntimeError(f"unknown command {command}")
 
 
+def _screen_shot():
+    page = _ensure_page()
+    if _needs_desktop(page):
+        _paint_desktop(page)
+    page.screenshot(path=SHOT, full_page=False)
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         return
@@ -849,15 +1106,11 @@ class Handler(BaseHTTPRequestHandler):
                     last = json.loads(Path(LAST).read_text() or "{}")
                 except Exception:
                     last = {}
-            self._send(200, {"ok": True, "version": VERSION, **last})
+            self._send(200, {"ok": True, "version": VERSION, "config": str(CONFIG.get("hash") or ""), **last})
             return
         if self.path.startswith("/screen"):
             try:
-                with _lock:
-                    page = _ensure_page()
-                    if _needs_desktop(page):
-                        _paint_desktop(page)
-                    page.screenshot(path=SHOT, full_page=False)
+                on_browser_thread(_screen_shot)
             except Exception:
                 pass
             if Path(SHOT).exists():
@@ -876,8 +1129,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(400, {"ok": False, "error": "invalid json", "fallback": "computer_act"})
             return
         try:
-            with _lock:
-                result = handle(cmd)
+            result = on_browser_thread(handle, cmd)
             self._send(200, result)
         except Exception as exc:
             self._send(

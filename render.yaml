@@ -90,10 +90,26 @@ services:
         sync: false
       - key: E2B_SANDBOX_TIMEOUT
         value: "3600"
-      # Web search order: Tavily first, then the computer's browser, then keyless server engines.
-      # Stage time budgets: SEARCH_FREE_TIMEOUT_S, SEARCH_BROWSER_TIMEOUT_S, SEARCH_PAID_TIMEOUT_S.
+      # Web search order: paid APIs (Tavily first; only keyed ones run), then the computer's browser, then keyless
+      # server engines. Stage time budgets: SEARCH_PAID_TIMEOUT_S, SEARCH_BROWSER_TIMEOUT_S, SEARCH_FREE_TIMEOUT_S.
       - key: SEARCH_ORDER
-        value: tavily,browser,free
+        value: paid,browser,free
+      # Resilient browsing (docs/BROWSING.md). All optional; defaults need no account.
+      # Residential/ISP proxy for the computer browser and the server fetch: http://user:pass@host:port
+      - key: BROWSER_PROXY_URL
+        sync: false
+      # Hosted browser fallback: browserbase or steel, with its key (and BROWSERBASE_PROJECT_ID).
+      - key: REMOTE_BROWSER_PROVIDER
+        sync: false
+      - key: BROWSERBASE_API_KEY
+        sync: false
+      - key: BROWSERBASE_PROJECT_ID
+        sync: false
+      - key: STEEL_API_KEY
+        sync: false
+      # Optional: higher rate limit for the r.jina.ai reader step.
+      - key: JINA_API_KEY
+        sync: false
       # Optional web search APIs.
       - key: TAVILY_API_KEY
         sync: false
