@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, useEffect, useRef, useState, type CSSProperties } from "react";
 import { AttachmentWidget } from "../AttachmentWidget";
 import { AppShell } from "../components/AppShell";
 import { chatAttachments, ComputerIcon, computerFromMeta, ScreenRail } from "../components/ComputerPanel";
@@ -779,19 +779,23 @@ export default function ChatPage() {
                 </div>
               ) : (
                 <div key={i} className={`turn assistant${m.meta?.agent_name ? " speaker" : ""}`}>
+                  {(() => {
+                    const responseColor = String(m.meta?.agent_color || activeAgent?.color || "#f97316");
+                    const tileStyle = { "--agent-response-color": responseColor } as CSSProperties;
+                    return (
+                      <>
                   {m.meta?.agent_name ? (
                     <div className="agent-chip">
-                      <AgentAvatar name={String(m.meta.agent_name)} color={m.meta.agent_color || "#f97316"} avatar={m.meta.agent_avatar} className="agent-avatar tiny" />
+                      <AgentAvatar name={String(m.meta.agent_name)} color={responseColor} avatar={m.meta.agent_avatar} className="agent-avatar tiny" />
                       {m.meta.agent_name}
                     </div>
                   ) : null}
-                  {m.meta?.agent_name ? (
-                    <div className="group-bubble">
+                    <div className="group-bubble" style={tileStyle}>
                       <Markdown text={m.content} />
                     </div>
-                  ) : (
-                    <Markdown text={m.content} />
-                  )}
+                      </>
+                    );
+                  })()}
                   <ConnectCards
                     meta={m.meta}
                     agentId={m.meta?.agent_id || agentId}

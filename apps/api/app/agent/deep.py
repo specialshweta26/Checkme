@@ -2541,6 +2541,7 @@ def system_prompt(
     title = (getattr(agent, "title", None) or "chief of staff").strip() or "chief of staff"
     extra = (getattr(agent, "instructions", None) or "").strip()
     identity = f"You are {name}, this user's {title}. You have mail, calendar, and connected MCP servers.\n"
+    identity += "Format chat replies in readable Markdown. Bold only the most useful keywords, names, dates, decisions, and action labels; keep ordinary prose unbolded.\n"
     if extra:
         identity += extra + "\n"
     from app.agents.focus import focus_prompt
