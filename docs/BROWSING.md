@@ -66,12 +66,15 @@ not stop the ladder. The result records `attempts` (step, status, block kind or 
 
 Where it is used:
 
-- **`browser_navigate` / `web_fetch` on the computer**: the real browser first (it is interactive and shows on
+- **`browser_navigate` on the computer**: the real browser first (it is interactive and shows on
   the live screen). If the site still blocks: the ladder without `server`; the copy that worked is painted into
   the tab and marked `read_only: true` with `live_site_blocked` and a note. A CAPTCHA gets a shorter ladder (35 s)
   and, if nothing worked, the usual take-control handoff. Other blocks never trigger a handoff: the agent gets
   `blocked_source` and is told to name the site and use equivalent sources.
-- **`web_fetch` without a computer**: the full ladder.
+- **`web_fetch` / `web_read`** (with or without a computer): server-side only, `LADDER_QUICK` = `cache, server,
+  proxy, tavily, alternates, reader` (12 s total, 6 s per step; `web_read` reads up to 5 pages in parallel). A page
+  that is still blocked uses the computer only when it is already running (`WEB_FETCH_BROWSER_FALLBACK=warm`);
+  otherwise the result hints `browser_navigate` if the page is essential. See LLD §7.7 Fast answers.
 - **`research_crawl`**: `cache, server, proxy, tavily` within 30 s per page; pages still blocked are listed under
   `needs_browser` with the blocked site.
 - **`web_search`**: unchanged stages, new order (below).

@@ -31,23 +31,31 @@ function newProgressId() {
   return `turn_${Date.now().toString(36)}${rand}`;
 }
 
-/** Tools that drive the computer: when one runs, the live screen opens so the user can watch. */
-const COMPUTER_TOOL = /^(browser_|browse_|computer_|launch_app$|open_path$|request_takeover$|web_fetch$)/;
+/**
+ * Tools that drive the computer: when one runs, the live screen opens so the user can watch. web_fetch and
+ * web_read read pages server-side, so they no longer open the screen.
+ */
+const COMPUTER_TOOL = /^(browser_|browse_|computer_|launch_app$|open_path$|request_takeover$)/;
 
 function usesComputer(tools: string[]) {
   return tools.some((name) => COMPUTER_TOOL.test(name));
 }
 
-/** Poll the API for live status lines of one in-flight chat turn. Returns a stop function. */
+/**
+ * Poll the API for live status lines (and the streaming reply draft) of one in-flight chat turn.
+ * Returns a stop function.
+ */
 function pollProgress(
   progressId: string,
   onSteps: (steps: string[]) => void,
-  everyMs = 1200,
+  everyMs = 700,
   onDone?: () => void,
   onTools?: (tools: string[]) => void,
+  onDraft?: (draft: string) => void,
 ) {
   let stopped = false;
   let last = 0;
+  let lastDraft = "";
   let timer: number | undefined;
   const tick = async () => {
     if (stopped) return;
@@ -62,6 +70,11 @@ function pollProgress(
           const tools: string[] = (data.steps || []).map((s: any) => String(s?.tool || "")).filter(Boolean);
           if (tools.length) onTools?.(tools);
         }
+        const draft = typeof data.draft === "string" ? data.draft : "";
+        if (!stopped && draft !== lastDraft) {
+          lastDraft = draft;
+          onDraft?.(draft);
+        }
         if (data.done) {
           onDone?.();
           return;
@@ -72,7 +85,7 @@ function pollProgress(
     }
     if (!stopped) timer = window.setTimeout(tick, everyMs);
   };
-  timer = window.setTimeout(tick, 600);
+  timer = window.setTimeout(tick, 300);
   return () => {
     stopped = true;
     if (timer) window.clearTimeout(timer);
@@ -143,7 +156,7 @@ export default function ChatPage() {
   const [sessions, setSessions] = useState<ChatSessionRow[]>([]);
   const [pending, setPending] = useState<Confirm[]>([]);
   const [busyScopes, setBusyScopes] = useState<string[]>([]);
-  const [progress, setProgress] = useState<Record<string, { steps: string[]; hint: string }>>({});
+  const [progress, setProgress] = useState<Record<string, { steps: string[]; hint: string; draft?: string }>>({});
   const viewsRef = useRef<Record<string, AgentView>>({});
   const scopeRef = useRef("");
   const inflightRef = useRef<Set<string>>(new Set());
@@ -298,7 +311,7 @@ export default function ChatPage() {
     const stopProgress = pollProgress(
       progressId,
       (steps) => setProgress((all) => (all[key] ? { ...all, [key]: { ...all[key], steps } } : all)),
-      1200,
+      700,
       undefined,
       (tools) => {
         // Open the live computer once per turn when the agent starts using it (the user can close it again).
@@ -307,6 +320,7 @@ export default function ChatPage() {
         setComputerTurn(true);
         setScreenOpen(true);
       },
+      (draft) => setProgress((all) => (all[key] ? { ...all, [key]: { ...all[key], draft } } : all)),
     );
     progressStopsRef.current[key] = stopProgress;
     try {
@@ -457,10 +471,12 @@ export default function ChatPage() {
     const stop = pollProgress(
       progressId,
       (steps) => setProgress((all) => (all[key] ? { ...all, [key]: { ...all[key], steps } } : all)),
-      1200,
+      700,
       () => {
         window.setTimeout(() => void reloadSession(id), 350);
       },
+      undefined,
+      (draft) => setProgress((all) => (all[key] ? { ...all, [key]: { ...all[key], draft } } : all)),
     );
     progressStopsRef.current[key] = stop;
   }
@@ -838,7 +854,11 @@ export default function ChatPage() {
                 </div>
               ),
             )}
-            {busyHere ? <Thinking steps={progress[currentKey]?.steps} hint={progress[currentKey]?.hint} /> : null}
+            {busyHere ? <Thinking
+                steps={progress[currentKey]?.steps}
+                hint={progress[currentKey]?.hint}
+                draft={progress[currentKey]?.draft}
+              /> : null}
             <div ref={end} />
           </div>
         </div>

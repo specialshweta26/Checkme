@@ -282,7 +282,7 @@ async def test_run_deep_agent_streams_live_steps(monkeypatch):
     )
     assert out["text"] == "Opened it."
     texts = [s["text"] for s in await P.read_progress("u1", "turn_12345678", redis_client=r)]
-    assert texts == ["Recalling what I know about this", "GitHub: create pull request: Fix status"]
+    assert texts == ["Reading your message", "Recalling what I know about this", "GitHub: create pull request: Fix status"]
 
 
 def test_progress_route_returns_steps_and_done(monkeypatch):
@@ -315,7 +315,7 @@ def test_progress_route_returns_steps_and_done(monkeypatch):
     rep = P.ProgressReporter(uid, "turn_12345678", redis_client=r)
     asyncio.run(rep.emit("Gmail: search messages for “invoice”"))
     body = client.get("/chat/progress/turn_12345678").json()
-    assert body == {"steps": [rep.steps[0]], "done": False, "session_id": None}
+    assert body == {"steps": [rep.steps[0]], "done": False, "session_id": None, "draft": ""}
     asyncio.run(rep.set_session("sess-1"))
     assert client.get("/chat/progress/turn_12345678").json()["session_id"] == "sess-1"
     asyncio.run(rep.finish())

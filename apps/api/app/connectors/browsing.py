@@ -52,6 +52,8 @@ _UA_MOBILE = (
 LADDER_READ = ("cache", "server", "proxy", "tavily", "remote", "alternates", "reader", "archive")
 LADDER_AFTER_BROWSER = ("cache", "proxy", "tavily", "remote", "alternates", "reader", "archive")
 LADDER_RESEARCH = ("cache", "server", "proxy", "tavily")
+# Quick answers: server-side copies only (no hosted/computer browser), each fast; see web_tools.web_fetch.
+LADDER_QUICK = ("cache", "server", "proxy", "tavily", "alternates", "reader")
 
 
 def _cfg(name: str, default: Any) -> Any:

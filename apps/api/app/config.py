@@ -122,6 +122,20 @@ class Settings(BaseSettings):
     # Ask Tavily search for each result's page text too (include_raw_content), cached briefly so opening a result
     # is instant; and use Tavily Extract as a read-only step of the browsing ladder. Both need TAVILY_API_KEY.
     tavily_raw_content: bool = True
+    # Fast answers (docs/LLD.md §7.7): quick web turns never wait on the cloud computer.
+    fast_path_enabled: bool = True
+    stream_tokens: bool = True  # stream model tokens into the chat's working bubble (progress draft)
+    tavily_include_answer: bool = True
+    tavily_search_timeout_s: float = 10.0
+    search_inline_pages: int = 3  # top web_search results that carry their page text
+    search_inline_chars: int = 2500
+    search_cache_ttl_s: float = 120.0  # identical searches within this window reuse the result
+    web_fetch_on_screen: bool = False  # true: paint every web_fetch on the live computer screen (old, slow)
+    web_fetch_browser_fallback: str = "warm"  # warm | always | never: blocked pages in the computer browser
+    web_fetch_quick_total_s: float = 12.0
+    web_fetch_quick_step_s: float = 6.0
+    web_read_max_pages: int = 5
+    web_read_page_timeout_s: float = 10.0
     tavily_extract: bool = True
     brave_search_api_key: str = ""
     serper_api_key: str = ""

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -2610,7 +2611,7 @@ def system_prompt(
         "connect_app returns redirect_url; the chat always shows the Composio connect card. Do not only paste the URL, and do not refuse to connect when composio is listed.\n"
         "Computer, browser, files, web search, memory, skills, and scratchpad are first-class tools. Call them directly. "
         "Do not search_tools or call_tool for browser_navigate, browser_snapshot, browser_act, computer_observe, computer_act, "
-        "shell, list_files, read_file, write_file, attach_file, open_path, launch_app, request_takeover, web_search, web_fetch, "
+        "shell, list_files, read_file, write_file, attach_file, open_path, launch_app, request_takeover, web_search, web_read, web_fetch, "
         "remember, recall_memory, or scratchpad_add.\n"
         "When the user asks for a chart, plot, HTML report, or downloadable file: fetch the data first, then "
         "render_plot or write_analytics_report with tables and charts, or write_file plus attach_file / publish_file. "
@@ -2634,12 +2635,16 @@ def system_prompt(
         "This user's computer is one shared live machine: shell/files, browser sessions, and logins. "
         "Each bot has its own screen on that machine. Only one computer-use task may run at a time. "
         "shell is the cloud sandbox. user_computer_shell is the user's real machine and is unavailable until a local computer is connected.\n"
-        "Public facts, news, and 'what is going on': web_search first, then web_fetch the best URLs. "
+        "Public facts, news, and 'what is going on': web_search first; its top results already include page text "
+        "(and often an `answer`), so answer from them. If you need more, read the best 2-3 URLs in ONE web_read call "
+        "(parallel, server-side). Quick questions never need the computer. "
         "If search is empty, browser_navigate a Google search URL with the user's words "
         "(https://www.google.com/search?q=...) then open at least two result links. Search the acronym; do not ask what it means first. "
         "If navigate returns chrome-error, chromewebdata, or connection reset, web_fetch the same URL (or another source) and keep going. "
-        "web_fetch shows the page on the same computer screen (JavaScript apps such as maps and listing sites are loaded in the real browser and given time to render); then browser_snapshot and browser_act on it. Do not wake the computer after a page is showing. "
-        "web_search already falls back to searching in the computer browser; browser_search does that directly. web_search tries Tavily (and any other configured search API) first, then the computer browser, then free server-side search engines; Tavily often returns each result's page text, so web_fetch on a result is instant. If it returns `setup`, tell the user in one line which search key to configure (it names the env vars) and why, then keep going with browser_navigate on known sites. "
+        "web_fetch and web_read read pages server-side and return text (they do not use or wake the computer). To show, "
+        "click or fill a page (JavaScript apps such as maps and listing sites, logins, forms), browser_navigate it on the "
+        "computer, then browser_snapshot and browser_act on it. "
+        "web_search already falls back to searching in the computer browser; browser_search does that directly. web_search tries Tavily (and any other configured search API) first, then the computer browser, then free server-side search engines; Tavily often returns each result's page text, so web_fetch or web_read on a result is instant. If it returns `setup`, tell the user in one line which search key to configure (it names the env vars) and why, then keep going with browser_navigate on known sites. "
         "Never stop after one failed page. Never say you cannot verify live updates until you have searched and opened at least one article.\n"
         "End-to-end web work: browser_navigate, browser_snapshot for refs (e0, e1), then browser_act — click, fill, type, select, check, press, scroll. "
         "Fill whole forms from the snapshot: one fill per field, then click submit. "
@@ -2720,6 +2725,9 @@ def _chat_model():
     effort = (s.openai_reasoning_effort or "").strip() or "none"
     reasoning = reasoning_payload()
     base = {"model": s.openai_model, "api_key": s.openai_api_key}
+    if bool(getattr(s, "stream_tokens", True)):
+        # Tokens reach the callbacks as they are generated (the chat shows the reply as it streams).
+        base["streaming"] = True
     attempts = [
         {"use_responses_api": True, "reasoning": reasoning, "verbosity": "medium", "service_tier": "default"},
         {"use_responses_api": True, "reasoning": reasoning, "verbosity": "medium"},
@@ -2905,6 +2913,17 @@ async def _ask_teammate(ctx: RunContext, agent_id: str, prompt: str) -> dict:
     return {"from": member.name, "agent_id": str(member.id), "reply": item["text"]}
 
 
+async def _route_and_confirm(all_skills: list, query: str) -> list:
+    """Skills that fit this request: routed (keywords + embeddings), then confirmed by a short LLM check."""
+    from app.skills import task_state as ts
+    from app.skills.profile import route_skills
+
+    matched = await route_skills(all_skills, query)
+    if matched:
+        matched = await ts.confirm_skills(query, matched)
+    return matched
+
+
 def _progress_callbacks(ctx: RunContext, conns: list, query: str) -> list:
     if ctx.progress is None:
         return []
@@ -3051,6 +3070,26 @@ async def run_deep_agent(
     # #region agent log
     _dbg_start("C", "deep.py:run_deep_agent", "agent start", {"query": (query or "")[:80], "n_history": len(history or [])})
     # #endregion
+    import time as _time
+
+    from app.agent import fast_path
+    from app.agent.coding import is_coding_agent as _coding_agent
+
+    timer = fast_path.TurnTimer()
+    plan = fast_path.classify_turn(
+        query,
+        has_uploads="attachment_key=" in (query or ""),
+        confirmations=bool(confirmations),
+        coding_agent=_coding_agent(workspace_agent),
+    )
+    if not getattr(get_settings(), "fast_path_enabled", True) or teammate_depth or job is not None:
+        plan = fast_path.TurnPlan(fast_path.DEEP, "fast path off for this run")
+    timer.kind = plan.kind
+    if progress is not None and not teammate_depth:
+        # Something visible right away, before connectors, memory and skills load.
+        await progress.emit("Looking this up on the web" if plan.kind == fast_path.QUICK_WEB else "Reading your message", kind="start")
+        timer.status()
+    _t = _time.monotonic()
     await ensure_platform_connectors(db, user)
     conns = await with_computer(db, user, await user_connectors(db, user.id))
     assignments = await connector_assignment_map(db, user)
@@ -3089,10 +3128,27 @@ async def run_deep_agent(
     from app.agent import scratchpad as pad
 
     await pad.load(ctx)
-    callbacks = _progress_callbacks(ctx, conns, query)
-    if progress is not None:
+    timer.mark("setup", _t)
+    callbacks = _progress_callbacks(ctx, conns, query) + [fast_path.TimingCallback(timer)]
+    all_skills: list = []
+    skills_task = None
+    if db is not None:
+        # Skill routing (embeddings + a confirm call) needs no DB once the index is loaded: run it while memory loads.
+        from app.skills.service import list_skills
+
+        _t = _time.monotonic()
+        try:
+            all_skills = await list_skills(db, user, getattr(workspace_agent, "id", None))
+        except Exception:  # noqa: BLE001
+            log.info("skills: loading the skill index failed", exc_info=True)
+            await db.rollback()
+        skills_task = asyncio.create_task(_route_and_confirm(all_skills, query))
+        timer.mark("skills_index", _t)
+    if progress is not None and plan.kind != fast_path.QUICK_WEB:
         await progress.emit("Recalling what I know about this" if not teammate_depth else "Picking up the task", kind="memory")
+    _t = _time.monotonic()
     memory = await load_memory(db, user, query, workspace_agent)
+    timer.mark("memory", _t)
     pad_bit = pad.as_prompt(ctx.scratchpad)
     if pad_bit:
         memory = ((memory or "").rstrip() + "\n\n" + pad_bit).strip()
@@ -3105,23 +3161,18 @@ async def run_deep_agent(
         if block and block not in (memory or ""):
             memory = ((memory or "").rstrip() + "\n\nYour coding memory (repos, conventions, past PRs):\n" + block).strip()
     extra = []
-    all_skills: list = []
     matched_skills: list = []
     if db is not None:
-        from app.skills.profile import route_skills
-        from app.skills.service import list_skills
-
+        _t = _time.monotonic()
         try:
-            all_skills = await list_skills(db, user, getattr(workspace_agent, "id", None))
-            matched_skills = await route_skills(all_skills, query)
+            matched_skills = await skills_task if skills_task is not None else []
         except Exception:  # noqa: BLE001
-            log.info("skills: loading the skill index failed", exc_info=True)
-            await db.rollback()
+            log.info("skills: routing failed", exc_info=True)
+            matched_skills = []
+        timer.mark("skills_route", _t)
         from app.skills import task_state as ts
         from app.skills.profile import is_meta_question
 
-        if matched_skills:
-            matched_skills = await ts.confirm_skills(query, matched_skills)
         ctx.active_skills = [{"id": s.get("id"), "name": s.get("name"), "match": s.get("match")} for s in matched_skills]
         ctx.task_key = task_key or ts.task_key_for(
             session_id=session_id, agent_id=getattr(workspace_agent, "id", None), job_id=getattr(job, "id", None)
@@ -3168,23 +3219,27 @@ async def run_deep_agent(
                 content=f"The user confirmed {tool} on {slug}. Result: {clip(dumps(result, 4000), 4000)}. Tell the user what happened."
             )
         )
-    graph = build_agent(
-        ctx,
-        system_prompt(
-            user,
-            conns,
-            memory,
-            agent=workspace_agent,
-            group=group,
-            teammates=teammates,
-            mentions=mentions,
-            skills=all_skills,
-            matched_skills=matched_skills,
-            query=query,
-            task_state=ctx.task_state,
-            task_resumed=ctx.task_resumed,
-        ),
+    _t = _time.monotonic()
+    prompt = system_prompt(
+        user,
+        conns,
+        memory,
+        agent=workspace_agent,
+        group=group,
+        teammates=teammates,
+        mentions=mentions,
+        skills=all_skills,
+        matched_skills=matched_skills,
+        query=query,
+        task_state=ctx.task_state,
+        task_resumed=ctx.task_resumed,
     )
+    if not matched_skills and not ctx.task_state:
+        # A saved skill's own steps win over the fast-path hint.
+        prompt += fast_path.prompt_hint(plan)
+    graph = build_agent(ctx, prompt)
+    timer.mark("build", _t)
+    _t = _time.monotonic()
     payload = {"messages": _lc_messages(history, query, extra)}
     limit = max(80, get_settings().max_agent_steps * 8)
     from app.agent.coding import is_coding_agent
@@ -3219,6 +3274,8 @@ async def run_deep_agent(
             log.exception("deep agent failed")
             text = f"I could not finish that request: {str(exc)[:240]}"
             break
+    timer.mark("agent", _t)
+    timer.log()
     source = ctx.sources[-1] if ctx.sources else None
     # #region agent log
     from app.debug_ndjson import dbg
@@ -3274,4 +3331,5 @@ async def run_deep_agent(
         "merged": ctx.merged,
         "repo": ctx.repo,
         "thread": list(ctx.thread),
+        "timing": timer.summary(),
     }
