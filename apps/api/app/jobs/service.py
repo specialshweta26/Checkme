@@ -631,3 +631,64 @@ async def user_has_running(db: AsyncSession, user_id) -> bool:
         await db.execute(select(AgentJob.id).where(AgentJob.user_id == user_id, AgentJob.status == "running").limit(1))
     ).first()
     return row is not None
+
+
+# ---------------------------------------------------------------- stopping (Stop button, WhatsApp /stop)
+
+
+async def cancel_tree(db: AsyncSession, job: AgentJob, *, note: str | None = "Cancelled the background job.") -> list[AgentJob]:
+    """Cancel ``job`` and everything under it, and stop any of them running in this process right away.
+
+    Pending approvals are cleared (``cancel``). Runs in other API processes stop via the worker's status watch."""
+    from app.agent import cancel as run_cancel
+
+    rows = (
+        await db.execute(select(AgentJob).where(AgentJob.user_id == job.user_id, AgentJob.root_id == (job.root_id or job.id)))
+    ).scalars().all()
+    by_parent: dict = {}
+    for row in rows:
+        by_parent.setdefault(row.parent_id, []).append(row)
+    stack, hit = [job], []
+    seen: set = set()
+    while stack:
+        cur = stack.pop()
+        if cur.id in seen:
+            continue
+        seen.add(cur.id)
+        hit.append(cur)
+        stack.extend(by_parent.get(cur.id, []))
+    changed = []
+    for row in hit:
+        evs = cancel(row)
+        for ev in evs:
+            db.add(ev)
+        if evs:
+            changed.append(row)
+        run_cancel.cancel_job(row.id)
+    if changed:
+        if job.parent_id is None:
+            if note:
+                await post_to_chat(db, job, note)
+        else:
+            await after_terminal(db, job)
+    return changed
+
+
+async def stop_chat_jobs(db: AsyncSession, user_id, session_id, agent_id=None, since: datetime | None = None) -> list[AgentJob]:
+    """Cancel the live root jobs of a chat (optionally one agent's, optionally only those started after ``since``)."""
+    if session_id is None:
+        return []
+    q = select(AgentJob).where(
+        AgentJob.user_id == user_id,
+        AgentJob.session_id == session_id,
+        AgentJob.parent_id.is_(None),
+        AgentJob.status.not_in(tuple(TERMINAL)),
+    )
+    if agent_id is not None:
+        q = q.where(AgentJob.agent_id == agent_id)
+    if since is not None:
+        q = q.where(AgentJob.created_at >= since)
+    out: list[AgentJob] = []
+    for job in (await db.execute(q)).scalars().all():
+        out.extend(await cancel_tree(db, job, note=None))
+    return out

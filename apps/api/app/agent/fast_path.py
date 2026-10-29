@@ -41,6 +41,13 @@ _COMPUTER = re.compile(
     r"compare (?:quotes|plans|policies)|get (?:a )?quote)\b",
     re.I,
 )
+# Commands and installs run on the cloud computer's shell (never a quick text answer telling the user to do it).
+_SHELL = re.compile(
+    r"\b(install(?:ing|ed)?|uninstall|npm|npx|pnpm|yarn|pip3?|brew|apt(?:-get)?|terminal|command line|bash|"
+    r"run (?:the |this |a |my )?(?:command|script|tests?|build)|"
+    r"(?:set ?up|setup) (?:the |my |all )?(?:requirements|environment|dev environment|dependencies)|requirements\.txt)\b",
+    re.I,
+)
 _DEEP = re.compile(
     r"\b(deep(?:ly)? research|in[- ]depth|thorough(?:ly)?|comprehensive|literature review|detailed report|"
     r"write (?:a |an )?(?:report|essay|article|paper)|analy[sz]e (?:all|every|the market)|across (?:many|all) (?:sites|sources)|"
@@ -114,6 +121,8 @@ def classify_turn(query: str, *, has_uploads: bool = False, confirmations: bool 
     first = q.split("\n\n", 1)[0]
     if _COMPUTER.search(first):
         return TurnPlan(COMPUTER, "needs a real browser session")
+    if _SHELL.search(first):
+        return TurnPlan(COMPUTER, "needs the cloud shell")
     if _DEEP.search(first) or len(first) > 600:
         return TurnPlan(DEEP, "long or multi-source work")
     recency, news = recency_for(first)

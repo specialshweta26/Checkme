@@ -2687,3 +2687,27 @@ input.tasks-search { width: min(260px, 100%); }
     transition-duration: 0.01ms !important;
   }
 }
+
+/* Stop / Continue (docs/LLD.md §7.9) */
+.send.stop { background: var(--text, #111); box-shadow: none; }
+.think-stop {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--line, rgba(0, 0, 0, 0.12));
+  background: var(--panel, #fff);
+  color: var(--text, #111);
+  font-size: 13px;
+  cursor: pointer;
+}
+.think-stop span { font-size: 10px; }
+.think-stop:disabled { opacity: 0.5; }
+.think-stalled { margin: 6px 0 0; font-size: 13px; color: var(--muted); }
+.turn-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+@media (max-width: 640px) {
+  .think-stop { min-height: 36px; padding: 6px 14px; }
+}

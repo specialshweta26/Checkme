@@ -140,6 +140,20 @@ function sessionInScopeRow(row: ChatSessionRow | undefined, agentId?: string | n
 }
 
 type Msg = { role: "user" | "assistant"; content: string; meta?: any };
+type RunningTurn = { gen: number; abort?: AbortController; progressId?: string; sessionId?: string | null; agentId?: string | null };
+
+/** No status line or draft for this long: the status row says so and points at Stop / redirect. */
+const STALL_MS = 120_000;
+
+function lastUserText(messages: Msg[], before: number): string {
+  for (let j = before - 1; j >= 0; j -= 1) {
+    if (messages[j].role === "user") {
+      const t = (messages[j].content || "").trim();
+      return t && t !== "Continue" ? t : "";
+    }
+  }
+  return "";
+}
 type Confirm = { token: string; title: string; preview: any; kind?: string };
 type AgentView = { sessionId: string | null; messages: Msg[]; pending: Confirm[] };
 
@@ -161,6 +175,10 @@ export default function ChatPage() {
   const scopeRef = useRef("");
   const inflightRef = useRef<Set<string>>(new Set());
   const progressStopsRef = useRef<Record<string, () => void>>({});
+  // The running turn per scope: lets Stop cancel it on the server, and a newer turn supersede an older one.
+  const turnsRef = useRef<Record<string, RunningTurn>>({});
+  const [stopping, setStopping] = useState<string[]>([]);
+  const [stalled, setStalled] = useState<Record<string, boolean>>({});
   const [notice, setNotice] = useState("");
   const end = useRef<HTMLDivElement>(null);
   const box = useRef<HTMLTextAreaElement>(null);
@@ -289,11 +307,33 @@ export default function ChatPage() {
     end.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, pending, busyScopes]);
 
-  async function send(message: string, confirmations: any[] = []) {
+  async function send(message: string, confirmations: any[] = [], opts: { resumeRequestId?: string } = {}) {
     const key = scopeKey(agentId, groupId);
-    if ((!message.trim() && !uploads.length) || !key || busyScopes.includes(key)) return;
+    if ((!message.trim() && !uploads.length) || !key) return;
     const sendAgent = agentId;
     const sendGroup = groupId;
+    // A message while a turn runs interrupts and redirects it (the server stops the old turn and hands its
+    // progress to the new one). Drop the old request here so only the newest turn updates this chat.
+    const previous = turnsRef.current[key];
+    if (busyScopes.includes(key) || previous?.abort) {
+      previous?.abort?.abort();
+      progressStopsRef.current[key]?.();
+      delete progressStopsRef.current[key];
+    }
+    const gen = (previous?.gen || 0) + 1;
+    const controller = new AbortController();
+    let scopedSession = sessionInScopeRow(sessions.find((s) => s.id === sessionId), sendAgent, sendGroup) ? sessionId : null;
+    if (!scopedSession && previous?.sessionId) scopedSession = previous.sessionId;
+    if (!scopedSession && previous?.progressId) {
+      // The first turn of a new chat is still running: redirect within its session, not a new one.
+      try {
+        const res = await fetch(`/api/chat/progress/${previous.progressId}`, { credentials: "include", cache: "no-store" });
+        const data = res.ok ? await res.json() : {};
+        if (data?.session_id) scopedSession = String(data.session_id);
+      } catch {
+        // Best effort.
+      }
+    }
     const pendingFiles = uploads;
     const userTurn: Msg = { role: "user", content: message || "Attached files", meta: pendingFiles.length ? { uploads: pendingFiles } : undefined };
     const nextMessages = [...messages, userTurn];
@@ -306,11 +346,24 @@ export default function ChatPage() {
     setUploads([]);
     setUploadError("");
     const progressId = newProgressId();
+    turnsRef.current[key] = { gen, abort: controller, progressId, sessionId: scopedSession, agentId: sendGroup ? null : sendAgent };
     setProgress((all) => ({ ...all, [key]: { steps: [], hint: message || "your files" } }));
+    setStalled((all) => ({ ...all, [key]: false }));
     let screenShown = false;
+    let lastChange = Date.now();
+    const touched = () => {
+      lastChange = Date.now();
+      setStalled((all) => (all[key] ? { ...all, [key]: false } : all));
+    };
+    const stallTimer = window.setInterval(() => {
+      if (Date.now() - lastChange > STALL_MS) setStalled((all) => (all[key] ? all : { ...all, [key]: true }));
+    }, 10_000);
     const stopProgress = pollProgress(
       progressId,
-      (steps) => setProgress((all) => (all[key] ? { ...all, [key]: { ...all[key], steps } } : all)),
+      (steps) => {
+        touched();
+        setProgress((all) => (all[key] ? { ...all, [key]: { ...all[key], steps } } : all));
+      },
       700,
       undefined,
       (tools) => {
@@ -320,17 +373,24 @@ export default function ChatPage() {
         setComputerTurn(true);
         setScreenOpen(true);
       },
-      (draft) => setProgress((all) => (all[key] ? { ...all, [key]: { ...all[key], draft } } : all)),
+      (draft) => {
+        touched();
+        setProgress((all) => (all[key] ? { ...all, [key]: { ...all[key], draft } } : all));
+      },
     );
     progressStopsRef.current[key] = stopProgress;
+    const superseded = () => turnsRef.current[key]?.gen !== gen;
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
         body: JSON.stringify({
           message,
-          session_id: sessionInScopeRow(sessions.find((s) => s.id === sessionId), sendAgent, sendGroup) ? sessionId : null,
+          mode: "interrupt",
+          resume_request_id: opts.resumeRequestId || null,
+          session_id: scopedSession,
           confirmations,
           attachments: pendingFiles,
           agent_id: sendGroup ? null : sendAgent,
@@ -352,6 +412,7 @@ export default function ChatPage() {
         const detail = typeof data.detail === "string" ? data.detail : data.detail?.[0]?.msg;
         throw new Error(detail || raw.slice(0, 280) || "Chat failed");
       }
+      if (superseded()) return;
       if (data.workspace_changed) announceWorkspaceChanged();
       const loaded = data.session_id ? await loadSession(data.session_id).catch(() => null) : null;
       const peerTurns: Msg[] = (data.thread || [])
@@ -393,10 +454,13 @@ export default function ChatPage() {
       }
       await refreshSessions();
     } catch (err: any) {
+      // Stopped by the user or replaced by a newer message: whoever did that updates the chat.
+      if (controller.signal.aborted || superseded()) return;
       // The connection dropped (e.g. mobile Safari's "Load failed"), but the server keeps working on the turn.
       // Follow it by progress id and show the stored reply instead of the raw network error.
       const inScope = sessionInScopeRow(sessions.find((s) => s.id === sessionId), sendAgent, sendGroup) ? sessionId : null;
       const recovered = lostInTransit(err) ? await recoverTurn(progressId, inScope) : null;
+      if (superseded()) return;
       if (recovered) {
         const msgs: Msg[] = recovered.loaded.messages
           .filter((m: Msg) => m.role === "user" || m.role === "assistant")
@@ -412,7 +476,7 @@ export default function ChatPage() {
           : err.message || "Something went wrong";
         const failView: AgentView = {
           sessionId,
-          messages: [...nextMessages, { role: "assistant", content }],
+          messages: [...nextMessages, { role: "assistant", content, meta: { failed: true, can_continue: lostInTransit(err) } }],
           pending: [],
         };
         viewsRef.current[key] = failView;
@@ -420,17 +484,23 @@ export default function ChatPage() {
       }
     } finally {
       stopProgress();
+      window.clearInterval(stallTimer);
       if (progressStopsRef.current[key] === stopProgress) delete progressStopsRef.current[key];
-      setProgress((all) => {
-        const next = { ...all };
-        delete next[key];
-        return next;
-      });
-      inflightRef.current.delete(key);
-      setBusyScopes((keys) => keys.filter((k) => k !== key));
-      if (scopeRef.current === key) {
-        setWatching(false);
-        setComputerTurn(false);
+      // A newer turn in this chat (redirect) or the Stop button owns the busy state now.
+      if (!superseded()) {
+        delete turnsRef.current[key];
+        setStalled((all) => ({ ...all, [key]: false }));
+        setProgress((all) => {
+          const next = { ...all };
+          delete next[key];
+          return next;
+        });
+        inflightRef.current.delete(key);
+        setBusyScopes((keys) => keys.filter((k) => k !== key));
+        if (scopeRef.current === key) {
+          setWatching(false);
+          setComputerTurn(false);
+        }
       }
     }
   }
@@ -459,10 +529,56 @@ export default function ChatPage() {
     if (scopeRef.current === key) showView(view);
   }
 
+  /** Stop button: cancel the running turn (and its jobs) on the server, keep its partial output, free the composer. */
+  async function stopTurn(key: string) {
+    const turn = turnsRef.current[key];
+    if (stopping.includes(key)) return;
+    setStopping((keys) => [...keys, key]);
+    const sid = turn?.sessionId || (scopeRef.current === key ? sessionId : null);
+    let stoppedSession: string | null = sid;
+    try {
+      const res = await fetch("/api/chat/cancel", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ progress_id: turn?.progressId || null, session_id: sid, agent_id: turn?.agentId || null }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (data?.session_id) stoppedSession = String(data.session_id);
+    } catch {
+      // Offline: still free the composer; the server turn stops when it sees the next message or the flag.
+    } finally {
+      turn?.abort?.abort();
+      progressStopsRef.current[key]?.();
+      delete progressStopsRef.current[key];
+      delete turnsRef.current[key];
+      inflightRef.current.delete(key);
+      setBusyScopes((keys) => keys.filter((k) => k !== key));
+      setProgress((all) => {
+        const next = { ...all };
+        delete next[key];
+        return next;
+      });
+      setStalled((all) => ({ ...all, [key]: false }));
+      if (scopeRef.current === key) {
+        setWatching(false);
+        setComputerTurn(false);
+      }
+      setStopping((keys) => keys.filter((k) => k !== key));
+    }
+    if (stoppedSession) {
+      const [agentPart, groupPart] = [turn?.agentId ?? agentId, groupId];
+      window.localStorage.setItem(scopeStore(agentPart, groupPart), stoppedSession);
+      await reloadSession(stoppedSession);
+      await refreshSessions().catch(() => null);
+    }
+  }
+
   function resumeProgress(key: string, id: string, loadedMessages: Msg[]) {
     const active = [...loadedMessages].reverse().find((m) => m.role === "assistant" && m.meta?.in_progress && m.meta?.progress_id);
     if (!active || progressStopsRef.current[key]) return;
     const progressId = String(active.meta.progress_id);
+    turnsRef.current[key] = { gen: (turnsRef.current[key]?.gen || 0) + 1, progressId, sessionId: id, agentId: active.meta?.agent_id || null };
     const hint = [...loadedMessages].reverse().find((m) => m.role === "user")?.content || "your request";
     inflightRef.current.add(key);
     setBusyScopes((keys) => (keys.includes(key) ? keys : [...keys, key]));
@@ -842,6 +958,24 @@ export default function ChatPage() {
                   {sourceLabel(m.meta) ? <div className="source-chip">{sourceLabel(m.meta)}</div> : null}
                   <EmailThreadButton refs={mailRefsFromMeta(m.meta)} />
                   {chatAttachments(m.meta?.attachments).length ? <AttachmentWidget items={chatAttachments(m.meta.attachments)} /> : null}
+                  {i === messages.length - 1 && !busyHere && (m.meta?.can_continue || m.meta?.failed) ? (
+                    <div className="turn-actions">
+                      {m.meta?.can_continue ? (
+                        <button
+                          className="btn secondary small"
+                          type="button"
+                          onClick={() => send("Continue", [], m.meta?.request_id ? { resumeRequestId: String(m.meta.request_id) } : {})}
+                        >
+                          Continue
+                        </button>
+                      ) : null}
+                      {lastUserText(messages, i) ? (
+                        <button className="btn secondary small" type="button" onClick={() => send(lastUserText(messages, i))}>
+                          Retry
+                        </button>
+                      ) : null}
+                    </div>
+                  ) : null}
                   {m.meta?.clarify?.length ? (
                     <div className="chips" style={{ marginTop: 8 }}>
                       {m.meta.clarify.map((c: any) => (
@@ -858,6 +992,9 @@ export default function ChatPage() {
                 steps={progress[currentKey]?.steps}
                 hint={progress[currentKey]?.hint}
                 draft={progress[currentKey]?.draft}
+                onStop={() => void stopTurn(currentKey)}
+                stopping={stopping.includes(currentKey)}
+                stalled={Boolean(stalled[currentKey])}
               /> : null}
             <div ref={end} />
           </div>
@@ -916,7 +1053,7 @@ export default function ChatPage() {
                 }
               }}
             />
-            <button className="attach-icon" type="button" aria-label="Attach files" disabled={busyHere} onClick={() => fileRef.current?.click()}>
+            <button className="attach-icon" type="button" aria-label="Attach files" onClick={() => fileRef.current?.click()}>
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden>
                 <path d="M16 7v8.5a4 4 0 0 1-8 0V7.8A2.8 2.8 0 0 1 13.6 7v7.2" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
               </svg>
@@ -928,7 +1065,9 @@ export default function ChatPage() {
               placeholder={
                 activeGroup
                   ? "Write normally, @ a bot, or @everyone…"
-                  : pending.length
+                  : busyHere
+                    ? "Send a message to redirect, or tap Stop…"
+                    : pending.length
                     ? "Reply to your agent…"
                     : "Ask about sales, mail, or schedule work…"
               }
@@ -940,11 +1079,31 @@ export default function ChatPage() {
                 }
               }}
             />
-            <button className="send" type="submit" disabled={busyHere || (!text.trim() && !uploads.length)} aria-label="Send">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
-                <path d="M12 19V5M12 5 6 11M12 5l6 6" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            </button>
+            {busyHere && !text.trim() && !uploads.length ? (
+              <button
+                className="send stop"
+                type="button"
+                onClick={() => void stopTurn(currentKey)}
+                disabled={stopping.includes(currentKey)}
+                aria-label="Stop the agent"
+                title="Stop"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden>
+                  <rect x="5" y="5" width="14" height="14" rx="2.5" fill="currentColor" />
+                </svg>
+              </button>
+            ) : (
+              <button
+                className="send"
+                type="submit"
+                disabled={!text.trim() && !uploads.length}
+                aria-label={busyHere ? "Send and redirect the agent" : "Send"}
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+                  <path d="M12 19V5M12 5 6 11M12 5l6 6" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </button>
+            )}
           </form>
         </div>
         </div>

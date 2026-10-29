@@ -3,7 +3,7 @@
 The Coder is a general-purpose software engineer: explore a repo, change code, test,
 commit, open/update/review PRs and merge (merge behind an approval card), and help with
 deploys. Everything runs through existing infrastructure: the `computer` connector
-(Daytona sandbox `exec`), GitHub through the user's Composio connection (or another GitHub
+(the cloud computer's `exec`: E2B, or Daytona), GitHub through the user's Composio connection (or another GitHub
 connector / gh on the computer), and any
 deploy connector (Render MCP, Vercel, ...).
 """
@@ -155,7 +155,7 @@ def is_coding_agent(agent) -> bool:
 # ---------------------------------------------------------------------------
 # Safe git tools (git_checkout, run_tests, git_diff, git_commit, push_branch).
 #
-# They run through Daytona exec like sandbox_shell, with three differences:
+# They run through the cloud computer's exec like sandbox_shell, with three differences:
 # * When Composio exposes the GitHub connection's token unmasked, it is fetched per
 #   command and passed as the CHECKME_GIT_TOKEN env var. A one-shot `-c
 #   credential.helper` reads it, so the token never appears in the command string,
@@ -187,7 +187,7 @@ GIT_AUTH = (
 )
 
 PRELUDE = (
-    'export PATH="$HOME/.local/bin:$PATH"; '
+    'export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.checkme/node/bin:$PATH"; '
     "for n in /usr/local/share/nvm/nvm.sh /usr/local/nvm/nvm.sh \"$HOME/.nvm/nvm.sh\"; do "
     '[ -s "$n" ] && . "$n" >/dev/null 2>&1 && break; done; '
     "export GIT_TERMINAL_PROMPT=0; "

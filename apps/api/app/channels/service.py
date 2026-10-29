@@ -59,6 +59,7 @@ HELP = (
     "• `/agents` lists your agents and their skills\n"
     "• `/room name` talks to a group room (`/room off` to leave)\n"
     "• `/new` starts a fresh conversation\n"
+    "• `stop` or `/stop` stops what the agent is doing (`continue` picks it up again)\n"
     "• `/unlink` disconnects this number\n"
     "Voice notes, photos and documents work too."
 )
@@ -228,9 +229,12 @@ async def claim_message(db: AsyncSession, message_id: str) -> bool:
 # ---------------------------------------------------------------- routing
 
 
+STOP_WORDS = {"stop", "/stop", "/cancel", "stop it", "stop now"}
+
+
 @dataclass
 class Command:
-    kind: str  # message | link | help | agents | use | room | new | unlink
+    kind: str  # message | link | help | agents | use | room | new | unlink | stop
     arg: str = ""
     body: str = ""
     target: str = ""
@@ -254,6 +258,8 @@ def parse(text: str) -> Command:
         return Command("new")
     if low == "/unlink":
         return Command("unlink")
+    if low.rstrip(".! ") in STOP_WORDS:
+        return Command("stop")
     m = re.fullmatch(r"/use(?:\s+(.+))?", raw, re.I | re.S)
     if m:
         return Command("use", (m.group(1) or "").strip())
@@ -434,6 +440,8 @@ async def _handle(db: AsyncSession, msg: Inbound) -> str:
         return await _use(db, user, link, cmd.arg)
     if cmd.kind == "room":
         return await _room(db, user, link, cmd.arg)
+    if cmd.kind == "stop":
+        return await stop_running(db, user, link)
     if cmd.kind == "unlink":
         await db.delete(link)
         await reply(msg.address, "WhatsApp is disconnected from Checkme. Link it again from Connectors any time.")
@@ -614,6 +622,66 @@ def _option_pick(job: AgentJob, text: str) -> str:
     return next((o for o in opts if o.lower() == t.lower()), t)
 
 
+async def _routed_agent(db: AsyncSession, user: User, link: ChannelLink) -> tuple[WorkspaceAgent, AgentGroup | None]:
+    """The agent a plain message goes to: sticky agent, else the room's lead, else the default agent."""
+    from app.agents.service import ensure_default_agent
+
+    chief = await ensure_default_agent(db, user)
+    agents = await _agents(db, user)
+    if link.sticky_agent_id:
+        agent = next((a for a in agents if a.id == link.sticky_agent_id and not getattr(a, "archived", False)), None)
+        if agent is not None:
+            return agent, None
+    if link.room_id:
+        group = await db.get(AgentGroup, link.room_id)
+        if group is not None and group.user_id == user.id:
+            from app.agents.collab import pick_owner
+            from app.agents.service import get_group
+
+            _, members = await get_group(db, user, group.id)
+            return pick_owner(members, group) or chief, group
+    return chief, None
+
+
+async def stop_running(db: AsyncSession, user: User, link: ChannelLink) -> str:
+    """"stop" / "/stop": cancel this user's running job (and its sub-jobs) for the routed agent. The computer stays up."""
+    from app.agent import cancel as run_cancel
+    from app.jobs import service as jobs
+
+    agent, group = await _routed_agent(db, user, link)
+    sess = await _thread(db, user, agent, group, fresh=False)
+    stopped = await jobs.stop_chat_jobs(db, user.id, sess.id, agent_id=None if group is not None else agent.id)
+    runs = run_cancel.cancel_runs(run_cancel.find(user.id, session_id=sess.id, kind="turn"), "stopped")
+    name = group.name if group is not None else agent.name
+    if stopped or runs:
+        db.add(
+            ChatMessage(
+                session_id=sess.id, user_id=user.id, role="assistant", content="⏹ Stopped.",
+                meta={"channel": CHANNEL, "stopped": True, "can_continue": True, "agent_id": str(agent.id), "agent_name": agent.name},
+                request_id=f"wa-stop-{secrets.token_hex(4)}",
+            )
+        )
+        await reply(link, f"⏹ Stopped **{name}**. Send *continue* to pick up where it left off, or just send a new message.")
+        return "stopped"
+    await reply(link, f"Nothing is running for **{name}** right now.")
+    return "stop_idle"
+
+
+CONTINUE_WORDS = {"continue", "resume", "go on", "carry on", "keep going"}
+
+
+async def _last_stopped_job(db: AsyncSession, user_id, session_id, agent_id) -> AgentJob | None:
+    row = (
+        await db.execute(
+            select(AgentJob)
+            .where(AgentJob.user_id == user_id, AgentJob.session_id == session_id, AgentJob.agent_id == agent_id, AgentJob.parent_id.is_(None))
+            .order_by(AgentJob.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    return row if row is not None and row.status == "cancelled" else None
+
+
 async def route_message(
     db: AsyncSession,
     user: User,
@@ -694,6 +762,14 @@ async def route_message(
             history = await _recent_history(db, sess)
             history = history[:-1] if history and history[-1].get("role") == "user" else history
         prompt = f"{CHANNEL_NOTE}\n\n{text}"
+        if text.strip().lower().rstrip(".! ") in CONTINUE_WORDS:
+            stopped = await _last_stopped_job(db, user.id, sess.id, agent.id)
+            if stopped is not None:
+                from app.agent.cancel import resume_prompt
+
+                original = (stopped.prompt or "").replace(CHANNEL_NOTE, "").strip()
+                prompt = f"{CHANNEL_NOTE}\n\n" + resume_prompt(original, stopped.result or "", [])
+                history = history or list((stopped.meta or {}).get("history") or [])
         try:
             job = await jobs.create_job(
                 db, user, agent=agent, prompt=prompt, title=shown[:120] or "WhatsApp message", role="worker", kind="chat",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from datetime import datetime, timezone
@@ -199,7 +200,20 @@ async def run_job(job_id, session_factory: Callable | None = None, agent_impl: C
                 progress=progress,
                 job=job,
             )
+        except asyncio.CancelledError:
+            from app.agent import cancel as run_cancel
+
+            if not run_cancel.is_cancelled():
+                raise  # the worker is shutting down: let the stale-job recovery requeue it
+            task = asyncio.current_task()
+            if task is not None and hasattr(task, "uncancel"):
+                task.uncancel()
+            return await _stopped(db, job)
         except Exception as exc:  # noqa: BLE001
+            from app.agent import cancel as run_cancel
+
+            if isinstance(exc, run_cancel.TurnCancelled) or run_cancel.is_cancelled():
+                return await _stopped(db, job)
             log.exception("job %s failed", job.id)
             await db.rollback()
             await db.refresh(job)
@@ -229,6 +243,17 @@ async def run_job(job_id, session_factory: Callable | None = None, agent_impl: C
         await db.commit()
         await _notify_channel(db, job, result.get("attachments") if isinstance(result, dict) else None)
         return job.status
+
+
+async def _stopped(db, job: AgentJob) -> str:
+    """The user stopped this job mid-run: keep it cancelled (approvals cleared), never failed."""
+    await db.rollback()
+    await db.refresh(job)
+    if job.status != "cancelled":
+        for ev in service.cancel(job):
+            db.add(ev)
+    await db.commit()
+    return job.status
 
 
 async def _notify_channel(db, job: AgentJob, attachments: list | None = None) -> None:
