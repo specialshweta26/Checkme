@@ -55,6 +55,16 @@ class ShellInput(BaseModel):
     timeout: int = Field(default=60, description="Seconds to wait (10-900).")
 
 
+class ToolchainInput(BaseModel):
+    tools: list[str] = Field(
+        default_factory=lambda: ["dev"],
+        description="Tools or groups to make sure are installed on the cloud computer: node (npm/npx), pnpm, yarn, "
+        "python3, pip, uv, git, gh, vercel, render, netlify, wrangler, firebase, tsc, jq, rg, curl, unzip; groups: "
+        "web, python, deploy, dev.",
+    )
+    force: bool = Field(default=False, description="Reinstall even when present.")
+
+
 class PathInput(BaseModel):
     path: str = Field(default="", description="Absolute or workspace-relative path.")
 
@@ -276,14 +286,19 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         return _dumps(await computer.run_computer(ctx, "browser_close_tab", {"tab": tab}))
 
     async def shell(command: str, cwd: str | None = None, timeout: int = 60) -> str:
-        """Run a bash command on this user's cloud computer (sandbox). Not the user's real laptop — use user_computer_shell for that."""
+        """Run a bash command on this user's cloud computer (E2B sandbox; home ~, work in ~/work). Use it for installs, CLIs, scripts and builds. npm -g, pip --user and ~/.local/bin are on PATH without sudo (sudo -n works when the image allows it). A missing known tool (node/npm, pnpm, yarn, python/pip, git, gh, vercel, render, uv) is installed automatically and the command retried once. Install anything else yourself; never tell the user to install things on their own machine. Never put secrets in a command. Returns exit_code and stdout."""
         ctx.used_tools.append("shell")
         return _dumps(await computer.shell(ctx, command, cwd, timeout), 40000)
 
     async def user_computer_shell(command: str, cwd: str | None = None, timeout: int = 60) -> str:
-        """Run a bash command on the user's trusted local computer. Never use this for the cloud sandbox. Requires a local computer connection and confirmation."""
+        """Run a bash command on the user's own connected computer (their laptop, through the Checkme local agent), after their confirmation. Only when the user explicitly asks for their own machine; everything else uses shell (the cloud computer)."""
         ctx.used_tools.append("user_computer_shell")
         return _dumps(await computer.user_computer_shell(ctx, command, cwd, timeout), 40000)
+
+    async def ensure_toolchain(tools: list[str] | None = None, force: bool = False) -> str:
+        """Make sure runtimes and CLIs are installed on the cloud computer before using them (idempotent; quick when already there): node+npm, pnpm, yarn, python3, pip, uv, git, gh, vercel, render, netlify... or groups web, python, deploy, dev. Installs non-interactively in user space. Returns present, installed and failed."""
+        ctx.used_tools.append("ensure_toolchain")
+        return _dumps(await computer.ensure_toolchain(ctx, tools, force), 8000)
 
     async def list_files(path: str = "") -> str:
         """List files and folders on the computer. Default is the workspace."""
@@ -540,7 +555,7 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
             return _dumps(await tasks.execute(ctx, name, args or {}))
         return _dumps({"error": "action must be search, load, or execute", "tasks": tasks.search("")})
 
-    return [
+    tools = [
         StructuredTool.from_function(coroutine=computer_observe, name="computer_observe", description=computer_observe.__doc__),
         StructuredTool.from_function(coroutine=computer_act, name="computer_act", description=computer_act.__doc__, args_schema=ComputerActInput),
         StructuredTool.from_function(coroutine=browser_navigate, name="browser_navigate", description=browser_navigate.__doc__, args_schema=UrlInput),
@@ -551,7 +566,7 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         StructuredTool.from_function(coroutine=browser_switch_tab, name="browser_switch_tab", description=browser_switch_tab.__doc__, args_schema=TabInput),
         StructuredTool.from_function(coroutine=browser_close_tab, name="browser_close_tab", description=browser_close_tab.__doc__, args_schema=TabInput),
         StructuredTool.from_function(coroutine=shell, name="shell", description=shell.__doc__, args_schema=ShellInput),
-        StructuredTool.from_function(coroutine=user_computer_shell, name="user_computer_shell", description=user_computer_shell.__doc__, args_schema=ShellInput),
+        StructuredTool.from_function(coroutine=ensure_toolchain, name="ensure_toolchain", description=ensure_toolchain.__doc__, args_schema=ToolchainInput),
         StructuredTool.from_function(coroutine=list_files, name="list_files", description=list_files.__doc__, args_schema=PathInput),
         StructuredTool.from_function(coroutine=read_file, name="read_file", description=read_file.__doc__, args_schema=PathInput),
         StructuredTool.from_function(coroutine=write_file, name="write_file", description=write_file.__doc__, args_schema=WriteFileInput),
@@ -589,3 +604,14 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         StructuredTool.from_function(coroutine=scratchpad_remove, name="scratchpad_remove", description=scratchpad_remove.__doc__, args_schema=ScratchIdInput),
         StructuredTool.from_function(coroutine=task_catalog, name="task_catalog", description=task_catalog.__doc__, args_schema=TaskCatalogInput),
     ]
+    if computer.local_slug(ctx):
+        # The user's own machine is offered only while a local computer is actually connected; otherwise the model
+        # would pick it for "install X" and fail with "not connected" instead of using the cloud shell.
+        at = next(i for i, t in enumerate(tools) if t.name == "shell") + 1
+        tools.insert(
+            at,
+            StructuredTool.from_function(
+                coroutine=user_computer_shell, name="user_computer_shell", description=user_computer_shell.__doc__, args_schema=ShellInput
+            ),
+        )
+    return tools

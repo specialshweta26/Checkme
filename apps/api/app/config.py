@@ -98,6 +98,18 @@ class Settings(BaseSettings):
     computer_provider: str = ""
     e2b_api_key: str = ""
     e2b_template: str = ""  # empty = E2B's public "desktop" template
+    # Cloud shell toolchain (docs/COMPUTER.md). Every agent's shell runs on the cloud computer; missing runtimes and
+    # CLIs (node/npm, pnpm, yarn, python/pip, git, gh, vercel, render, uv, ...) are installed on demand in user space.
+    computer_toolchain_env: bool = True  # PATH/npm prefix prelude on every cloud shell command (~/.npm-global, ~/.local)
+    computer_auto_install: bool = True  # exit 127 for a known tool: install it and retry the command once
+    computer_install_timeout_s: int = 600
+    computer_node_major: int = 22  # Node.js LTS line installed from nodejs.org when node is missing
+    # user_computer_shell (the user's own machine) is only offered when a local computer is connected. When it is
+    # called anyway without one, the command is re-run on the cloud computer (it never touches the user's machine).
+    local_shell_fallback_to_cloud: bool = True
+    # Stop / interrupt (docs/LLD.md §7.9): a running chat turn or background job can be cancelled from the UI,
+    # the API or WhatsApp "stop"; a new message while a turn runs interrupts it and redirects by default.
+    chat_interrupt_on_new_message: bool = True
     # Teach-by-demonstration: one session lasts at most this long (seconds); the UI counts down and auto-saves.
     teach_max_seconds: int = 600
     # Spoken narration recorded while teaching is transcribed with this OpenAI model (segment timestamps

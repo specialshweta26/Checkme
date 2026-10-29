@@ -124,25 +124,8 @@ async def answer(job_id: str, body: AnswerIn, user: User = Depends(current_user)
 
 @router.post("/{job_id}/cancel")
 async def cancel(job_id: str, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
-    """Cancel the job and everything under it in the tree."""
+    """Cancel the job and everything under it in the tree (running steps stop at once, approvals are cleared)."""
     job = await _owned(db, user, job_id)
-    rows = (
-        await db.execute(select(AgentJob).where(AgentJob.user_id == user.id, AgentJob.root_id == (job.root_id or job.id)))
-    ).scalars().all()
-    by_parent: dict = {}
-    for row in rows:
-        by_parent.setdefault(row.parent_id, []).append(row)
-    stack, hit = [job], []
-    while stack:
-        cur = stack.pop()
-        hit.append(cur)
-        stack.extend(by_parent.get(cur.id, []))
-    for row in hit:
-        for ev in service.cancel(row):
-            db.add(ev)
-    if job.parent_id is None:
-        await service.post_to_chat(db, job, "Cancelled the background job.")
-    else:
-        await service.after_terminal(db, job)
+    await service.cancel_tree(db, job)
     await db.commit()
     return service.serialize_job(job)

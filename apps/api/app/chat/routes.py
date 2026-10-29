@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent import cancel as run_cancel
 from app.agent.attachments import summarize_one
 from app.agent.confirm import read_confirm
 from app.agent.deep import run_deep_agent
@@ -42,6 +43,17 @@ class ChatIn(BaseModel):
     agent_id: uuid.UUID | None = None
     group_id: uuid.UUID | None = None
     progress_id: str | None = None
+    # While a turn runs in this chat: "interrupt" (stop it and handle this message, the default) or "queue" (wait).
+    mode: str | None = None
+    # Continue a stopped turn: the request_id of its "Stopped" message.
+    resume_request_id: str | None = None
+
+
+class CancelIn(BaseModel):
+    request_id: str | None = None
+    progress_id: str | None = None
+    session_id: uuid.UUID | None = None
+    agent_id: uuid.UUID | None = None
 
 
 @router.get("/progress/{progress_id}")
@@ -173,6 +185,18 @@ async def chat(
         db.add(sess)
         await db.flush()
 
+    interrupted = await _settle_running(user, sess, body.mode)
+    if interrupted:
+        agent_text = run_cancel.resume_prompt(
+            interrupted.get("text") or "", interrupted.get("partial") or "", interrupted.get("steps") or [], interrupted_by=text
+        ) + f"\n\nNew message from the user:\n{agent_text}"
+    if body.resume_request_id:
+        resumed = await _resume_context(db, sess, body.resume_request_id)
+        if resumed:
+            agent_text = run_cancel.resume_prompt(resumed["text"], resumed["partial"], resumed["steps"]) + (
+                f"\n\nThe user says: {text}" if text.strip().lower() not in {"continue", "continue."} else ""
+            )
+
     if not user.letta_agent_id:
         background.add_task(seed_letta, user.id)
 
@@ -247,7 +271,38 @@ async def chat(
     if progress is not None:
         await progress.set_session(sess.id)
 
+    run = run_cancel.register(
+        request_id,
+        user_id=user.id,
+        kind="turn",
+        session_id=sess.id,
+        agent_id=getattr(workspace_agent, "id", None),
+        request_id=request_id,
+        progress_id=body.progress_id if progress is not None else None,
+    )
+    run.extra = {"text": text}
+    turn_started = datetime.now(timezone.utc)
+
     async def finish_turn() -> dict:
+        token = run_cancel.current.set(run)
+        watcher = asyncio.create_task(run_cancel.watch(run))
+        try:
+            return await _run_turn()
+        except (asyncio.CancelledError, run_cancel.TurnCancelled):
+            if not run.cancelled:
+                raise
+            task = asyncio.current_task()
+            if task is not None and hasattr(task, "uncancel"):
+                task.uncancel()
+            return await _store_stopped(db, user, sess, working_message, progress, run, turn_started, public_uploads)
+        finally:
+            watcher.cancel()
+            run_cancel.unregister(request_id, run)
+            run_cancel.current.reset(token)
+            if run.cancelled:
+                await run_cancel.clear_remote(run)
+
+    async def _run_turn() -> dict:
         try:
             result = await run_deep_agent(
                 db,
@@ -276,6 +331,8 @@ async def chat(
             )
             # #endregion
         except Exception as exc:  # noqa: BLE001
+            if run.cancelled or isinstance(exc, run_cancel.TurnCancelled):
+                raise run_cancel.TurnCancelled("stopped") from exc
             log.exception("chat agent failed")
             # #region agent log
             dbg("C", "chat/routes.py:chat", "agent exception", {"error": str(exc)[:200], "ms": int((time.time() - t0) * 1000)})
@@ -288,6 +345,9 @@ async def chat(
                 if progress is not None:
                     await progress.finish()
             raise HTTPException(502, str(exc)[:400]) from exc
+        if run.cancelled:
+            raise run_cancel.TurnCancelled("stopped")
+        run_cancel.unregister(request_id, run)
         try:
             if result.get("source"):
                 working["last_source"] = result["source"]
@@ -348,6 +408,7 @@ async def chat(
     # streamed: JSON-insignificant spaces as heartbeats, then the same JSON body. The turn runs in its own
     # task, so a dropped client never cancels it; the web app then recovers the stored reply.
     task = asyncio.create_task(finish_turn())
+    run.task = task
     try:
         return await asyncio.wait_for(asyncio.shield(task), timeout=HEARTBEAT_AFTER_S)
     except asyncio.TimeoutError:
@@ -610,3 +671,168 @@ async def _store(db, sess, user_id, request_id, user_text, assistant_text, meta,
         sess.title = user_text[:80]
     sess.updated_at = datetime.now(timezone.utc)
     await db.commit()
+
+
+# ---------------------------------------------------------------- Stop / Continue / interrupt (docs/LLD.md §7.9)
+
+STOP_WAIT_S = 6.0
+QUEUE_WAIT_S = 900.0
+
+
+async def _wait_done(runs: list, timeout: float) -> None:
+    tasks = {r.task for r in runs if r.task is not None and not r.task.done()}
+    if tasks:
+        await asyncio.wait(tasks, timeout=timeout)
+
+
+async def _settle_running(user, sess, mode: str | None) -> dict | None:
+    """A new message while a turn runs in this chat: interrupt it (default) or wait for it ("queue").
+
+    Returns what the interrupted turn had done, for the new turn's context."""
+    runs = [r for r in run_cancel.find(user.id, session_id=sess.id, kind="turn") if not r.cancelled]
+    if not runs:
+        return None
+    interrupt = mode == "interrupt" or (mode != "queue" and get_settings().chat_interrupt_on_new_message)
+    if not interrupt:
+        await _wait_done(runs, QUEUE_WAIT_S)
+        return None
+    run_cancel.cancel_runs(runs, "interrupted")
+    await _wait_done(runs, STOP_WAIT_S)
+    last = runs[-1]
+    stopped = (getattr(last, "extra", None) or {}).get("stopped") or {}
+    return {"text": (getattr(last, "extra", None) or {}).get("text", ""), "partial": stopped.get("partial", ""), "steps": stopped.get("steps", [])}
+
+
+async def _store_stopped(db, user, sess, working_message, progress, run, since, uploads) -> dict:
+    """Persist the "Stopped" marker (keeping the partial reply), cancel jobs the turn started, clear approvals."""
+    from app.jobs import service as jobs
+
+    partial = (getattr(progress, "draft_text", "") or "") if progress is not None else ""
+    steps = [st.get("text") for st in (progress.steps if progress is not None else []) if st.get("kind") != "done" and st.get("text")][:40]
+    content = run_cancel.stopped_text(partial, steps)
+    run.extra = {**(getattr(run, "extra", None) or {}), "stopped": {"partial": partial, "steps": steps}}
+    try:
+        with anyio.CancelScope(shield=True):
+            await db.rollback()
+            await db.refresh(working_message)
+            working_message.content = content
+            working_message.meta = {
+                **(working_message.meta or {}),
+                "in_progress": False,
+                "stopped": True,
+                "can_continue": True,
+                "stopped_reason": run.reason or "stopped",
+                "steps": steps,
+                "pending_confirms": [],
+            }
+            sess.updated_at = datetime.now(timezone.utc)
+            await jobs.stop_chat_jobs(db, user.id, sess.id, since=since)
+            await db.commit()
+    except Exception:  # noqa: BLE001
+        log.exception("could not store the stopped marker")
+    finally:
+        if progress is not None:
+            await progress.finish()
+    return {
+        "session_id": str(sess.id),
+        "text": content,
+        "stopped": True,
+        "can_continue": True,
+        "route": "stopped",
+        "request_id": run.request_id,
+        "pending_confirms": [],
+        "used_tools": [],
+        "steps": steps,
+        "uploads": uploads,
+    }
+
+
+async def _resume_context(db, sess, request_id: str) -> dict | None:
+    rows = (
+        await db.execute(
+            select(ChatMessage).where(ChatMessage.session_id == sess.id, ChatMessage.request_id == str(request_id)[:64]).order_by(ChatMessage.id)
+        )
+    ).scalars().all()
+    asked = next((m for m in rows if m.role == "user"), None)
+    stopped = next((m for m in rows if m.role == "assistant" and (m.meta or {}).get("stopped")), None)
+    if asked is None or stopped is None:
+        return None
+    marker = "⏹ Stopped."
+    partial = (stopped.content or "").split(marker)[0].strip()
+    if partial.startswith("Progress before stopping:"):
+        partial = ""
+    return {"text": asked.content or "", "partial": partial, "steps": list((stopped.meta or {}).get("steps") or [])}
+
+
+@router.post("/cancel")
+async def cancel_turn(body: CancelIn, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Stop the running turn (and the jobs it started) in a chat. Partial output is kept; Continue resumes it."""
+    if not (body.request_id or body.progress_id or body.session_id):
+        raise HTTPException(400, "Say which turn to stop")
+    if body.progress_id and not valid_progress_id(body.progress_id):
+        raise HTTPException(400, "Bad progress id")
+    session_id = body.session_id
+    if session_id is None and body.progress_id:
+        found = await read_progress_session(user.id, body.progress_id)
+        session_id = uuid.UUID(found) if found else None
+    if session_id is not None:
+        sess = await db.get(ChatSession, session_id)
+        if sess is None or sess.user_id != user.id:
+            raise HTTPException(404, "Not found")
+    runs = run_cancel.find(
+        user.id, request_id=body.request_id, progress_id=body.progress_id, session_id=None if (body.request_id or body.progress_id) else session_id,
+        agent_id=body.agent_id, kind="turn",
+    )
+    run_cancel.cancel_runs(runs, "stopped")
+    remote = False
+    if not runs:
+        remote = await run_cancel.request_remote(user.id, [body.request_id, body.progress_id, str(session_id) if session_id else None])
+    await _wait_done(runs, STOP_WAIT_S)
+    from app.jobs import service as jobs
+
+    stopped_jobs = await jobs.stop_chat_jobs(db, user.id, session_id, agent_id=body.agent_id) if session_id is not None else []
+    recovered = 0
+    if not runs and session_id is not None:
+        # Nothing is running here: another process may own the turn (it sees the flag within seconds), or the turn
+        # died with its process. Either way the chat must not stay stuck on "working".
+        await asyncio.sleep(run_cancel.WATCH_EVERY_S * 2 if remote else 0)
+        recovered = await _unstick(db, user, session_id, body.request_id, body.progress_id)
+    await db.commit()
+    return {
+        "ok": True,
+        "stopped": len(runs) + recovered,
+        "jobs": [jobs.serialize_job(j) for j in stopped_jobs],
+        "session_id": str(session_id) if session_id else None,
+    }
+
+
+@router.post("/turns/{request_id}/cancel")
+async def cancel_turn_by_id(request_id: str, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    return await cancel_turn(CancelIn(request_id=request_id), user, db)
+
+
+async def _unstick(db, user, session_id, request_id=None, progress_id=None) -> int:
+    rows = (
+        await db.execute(
+            select(ChatMessage)
+            .where(ChatMessage.session_id == session_id, ChatMessage.user_id == user.id, ChatMessage.role == "assistant")
+            .order_by(ChatMessage.id.desc())
+            .limit(20)
+        )
+    ).scalars().all()
+    n = 0
+    for m in rows:
+        meta = m.meta or {}
+        if not meta.get("in_progress"):
+            continue
+        if request_id and m.request_id != request_id:
+            continue
+        if progress_id and meta.get("progress_id") != progress_id:
+            continue
+        await db.refresh(m)
+        if not (m.meta or {}).get("in_progress"):
+            continue  # finished meanwhile
+        m.content = run_cancel.stopped_text("", list(meta.get("steps") or []))
+        m.meta = {**meta, "in_progress": False, "stopped": True, "can_continue": True, "pending_confirms": []}
+        n += 1
+    return n

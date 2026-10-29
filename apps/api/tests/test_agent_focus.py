@@ -234,7 +234,12 @@ async def test_sandbox_shell_runs_exec_on_the_computer(monkeypatch):
     tool = next(t for t in harness_tools(ctx) if t.name == "sandbox_shell")
     out = json.loads(await tool.ainvoke({"command": "pytest -q", "cwd": "~/work/app", "timeout": 5000}))
     assert out["exit_code"] == 0
-    assert calls == [("computer", "exec", {"command": "pytest -q", "timeout": coding.SHELL_TIMEOUT_MAX, "cwd": "~/work/app"})]
+    assert len(calls) == 1
+    slug, tool_name, args = calls[0]
+    assert (slug, tool_name, args["timeout"], args["cwd"]) == ("computer", "exec", coding.SHELL_TIMEOUT_MAX, "~/work/app")
+    # Runs in bash with the toolchain PATH (npm -g prefix, ~/.local/bin), then the agent's own command.
+    assert args["command"].startswith("bash -c ") and "pytest -q' checkme-run-" in args["command"]
+    assert ".npm-global" in args["command"]
 
 
 async def test_sandbox_shell_says_what_is_missing_without_a_computer():

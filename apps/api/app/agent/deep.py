@@ -1301,6 +1301,9 @@ async def _track_github_writes(ctx: RunContext, conn, tool: str, args: dict, res
 
 
 async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, args: dict | None = None) -> Any:
+    from app.agent import cancel as run_cancel
+
+    run_cancel.check()  # the user pressed Stop: end at this step boundary
     args = as_dict(args)
     orig_tool = tool_name
     orig_args = dict(args)
@@ -1941,10 +1944,10 @@ async def sandbox_shell(ctx: RunContext, command: str, cwd: str | None = None, t
         return {"error": coding.readiness(ctx.connectors)["missing"][0]}
     if not (command or "").strip():
         return {"error": "command is required"}
-    args: dict[str, Any] = {"command": command, "timeout": coding.clamp_timeout(timeout)}
-    if cwd:
-        args["cwd"] = cwd
-    return await call_user_tool(ctx, coding.COMPUTER_SLUG, "exec", args)
+    from app.agent import computer_harness
+
+    # Same path as every agent's shell: toolchain PATH, and a missing known tool is installed and retried once.
+    return await computer_harness.cloud_exec(ctx, command, cwd, coding.clamp_timeout(timeout))
 
 
 def harness_tools(ctx: RunContext) -> list[StructuredTool]:
@@ -2244,7 +2247,7 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
             return dumps(await coding_workspace_status(ctx), 8000)
 
         async def shell(command: str, cwd: str | None = None, timeout: int = 300) -> str:
-            """Run a bash command on the user's computer (Daytona sandbox): read and edit files (rg, sed, cat, heredocs, python patches), install packages, run builds. For git use git_checkout, git_diff, git_commit and push_branch instead: they handle GitHub auth safely. Never put tokens or credentials in a command. Returns exit_code and output."""
+            """Run a bash command on the user's cloud computer (E2B sandbox, or Daytona when configured): read and edit files (rg, sed, cat, heredocs, python patches), install packages, run builds. For git use git_checkout, git_diff, git_commit and push_branch instead: they handle GitHub auth safely. Never put tokens or credentials in a command. Returns exit_code and output."""
             ctx.used_tools.append("sandbox_shell")
             return dumps(await sandbox_shell(ctx, command, cwd, timeout), 40000)
 
@@ -2521,6 +2524,38 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
     return tools
 
 
+def shell_routing_hint(connectors: list | None, agent=None) -> str:
+    """Prompt lines that route installs/commands to the cloud computer (docs/COMPUTER.md)."""
+    from app.agent.coding import is_coding_agent
+    from app.agent.computer_harness import LOCAL_PROVIDERS
+
+    local = any(getattr(c, "provider", "") in LOCAL_PROVIDERS for c in (connectors or []))
+    text = (
+        "Commands, installs and CLIs ('install X', 'run Y', 'set up the requirements') run on the cloud computer with "
+        "shell, which every agent has. If a runtime or CLI is missing (node/npm, pnpm, python/pip, gh, vercel, render, "
+        "...), install it yourself (ensure_toolchain, or shell: npm -g, pip --user, ~/.local/bin; shell also auto-installs "
+        "known tools on 'command not found') and carry on. Never tell the user to install something on their own "
+        "machine unless they asked you to use their own machine. "
+    )
+    if local:
+        text += (
+            "user_computer_shell runs on the user's own connected computer (with their confirmation): use it only when "
+            "the user explicitly asks for their own machine. "
+        )
+    else:
+        text += (
+            "No local computer is connected, so everything runs on the cloud computer; if the user explicitly wants "
+            "their own laptop, say it needs the Checkme local agent connected and offer to do it in the cloud now. "
+        )
+    if not is_coding_agent(agent):
+        text += (
+            "Repo changes, pull requests, merges and deploys belong to a coding agent: hand them over (ask_teammate a "
+            "coding teammate in a group, or delegate with role='coder' and agent_name of a coding agent inside a background job) instead of refusing; "
+            "merges and deploys always wait for the user's approval."
+        )
+    return text.strip()
+
+
 def system_prompt(
     user,
     connectors: list,
@@ -2634,7 +2669,7 @@ def system_prompt(
         "Use a connected data tool first only when list_connections shows that app is authorized.\n"
         "This user's computer is one shared live machine: shell/files, browser sessions, and logins. "
         "Each bot has its own screen on that machine. Only one computer-use task may run at a time. "
-        "shell is the cloud sandbox. user_computer_shell is the user's real machine and is unavailable until a local computer is connected.\n"
+        f"{shell_routing_hint(connectors, agent)}\n"
         "Public facts, news, and 'what is going on': web_search first; its top results already include page text "
         "(and often an `answer`), so answer from them. If you need more, read the best 2-3 URLs in ONE web_read call "
         "(parallel, server-side). Quick questions never need the computer. "
@@ -3129,7 +3164,11 @@ async def run_deep_agent(
 
     await pad.load(ctx)
     timer.mark("setup", _t)
+    from app.agent import cancel as run_cancel
+
     callbacks = _progress_callbacks(ctx, conns, query) + [fast_path.TimingCallback(timer)]
+    if run_cancel.current.get() is not None:
+        callbacks.append(run_cancel.callback())
     all_skills: list = []
     skills_task = None
     if db is not None:
@@ -3265,6 +3304,8 @@ async def run_deep_agent(
             text = last_text(result.get("messages") if isinstance(result, dict) else [])
             break
         except Exception as exc:  # noqa: BLE001
+            if isinstance(exc, run_cancel.TurnCancelled) or run_cancel.is_cancelled():
+                raise run_cancel.TurnCancelled("stopped") from exc
             if _is_recursion_limit(exc) and attempt < 2:
                 limit = min(limit + 40, 280 if coding else 200)
                 if progress is not None:

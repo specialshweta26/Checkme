@@ -117,11 +117,50 @@ async def _heartbeat(session_factory: Callable, job_id) -> None:
             log.debug("heartbeat failed: %s", exc)
 
 
-async def _run_one(session_factory: Callable, job_id) -> None:
+CANCEL_WATCH_S = 3
+
+
+async def _watch_cancel(session_factory: Callable, job_id, run) -> None:
+    """Cooperative stop for jobs cancelled from another process (or a DB-only cancel): poll the status."""
+    while not run.cancelled:
+        await asyncio.sleep(CANCEL_WATCH_S)
+        try:
+            async with session_factory() as db:
+                job = await db.get(AgentJob, job_id)
+                status = getattr(job, "status", None)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.debug("cancel watch failed: %s", exc)
+            continue
+        if status == "cancelled":
+            run.cancel("cancelled")
+            return
+        if status is None or status in service.TERMINAL:
+            return
+
+
+async def _run_one(session_factory: Callable, job_id, user_id=None) -> None:
+    from app.agent import cancel as run_cancel
+
     beat = asyncio.create_task(_heartbeat(session_factory, job_id))
+    run = run_cancel.register(run_cancel.job_key(job_id), user_id=user_id, kind="job", job_id=job_id)
+    token = run_cancel.current.set(run)
     try:
-        status = await run_job(job_id, session_factory)
+        inner = asyncio.create_task(run_job(job_id, session_factory), name=f"job-run-{job_id}")
+    finally:
+        run_cancel.current.reset(token)
+    run.task = inner
+    watch = asyncio.create_task(_watch_cancel(session_factory, job_id, run))
+    try:
+        try:
+            status = await inner
+        except asyncio.CancelledError:
+            inner.cancel()  # the worker itself is stopping
+            raise
         log.info("job %s -> %s", job_id, status)
+    except asyncio.CancelledError:
+        raise
     except Exception:  # noqa: BLE001
         log.exception("job %s crashed", job_id)
         try:
@@ -135,6 +174,8 @@ async def _run_one(session_factory: Callable, job_id) -> None:
             log.exception("could not mark job %s failed", job_id)
     finally:
         beat.cancel()
+        watch.cancel()
+        run_cancel.unregister(run.key, run)
         wake()  # a parent may have been requeued
 
 
@@ -158,7 +199,7 @@ async def worker_loop(session_factory: Callable | None = None) -> None:
                 active.pop(task, None)
             picked = await claim(session_factory, MAX_CONCURRENT - len(active), set(active.values()))
             for job_id, user_id in picked:
-                task = asyncio.create_task(_run_one(session_factory, job_id), name=f"job-{job_id}")
+                task = asyncio.create_task(_run_one(session_factory, job_id, user_id), name=f"job-{job_id}")
                 active[task] = user_id
         except asyncio.CancelledError:
             raise
