@@ -106,9 +106,10 @@ class Settings(BaseSettings):
     teach_audio_max_bytes: int = 24 * 1024 * 1024
     # Seconds of inactivity before the sandbox pauses (Hobby plan max 3600, Pro max 86400). Each tool call extends it.
     e2b_sandbox_timeout: int = 3600
-    # Web search order (comma list of stages or provider names). Default: Tavily, computer browser, then
-    # keyless server engines (Brave, DuckDuckGo, Wikipedia). Each stage has a time budget.
-    search_order: str = "tavily,browser,free"
+    # Web search order (comma list of stages or provider names). Default: paid APIs (Tavily first, then Brave API,
+    # Serper, Exa - only the keyed ones run), then the computer browser, then keyless server engines (Brave,
+    # DuckDuckGo, Wikipedia). Each stage has a time budget.
+    search_order: str = "paid,browser,free"
     search_provider_timeout_s: float = 8.0  # each free engine
     search_free_timeout_s: float = 15.0  # all free engines together
     search_browser_timeout_s: float = 45.0  # browser stage when the computer is already running
@@ -118,10 +119,41 @@ class Settings(BaseSettings):
     search_paid_timeout_s: float = 20.0  # all paid providers together
     # Optional paid web search API keys. Tavily is the first-choice provider when configured.
     tavily_api_key: str = ""
+    # Ask Tavily search for each result's page text too (include_raw_content), cached briefly so opening a result
+    # is instant; and use Tavily Extract as a read-only step of the browsing ladder. Both need TAVILY_API_KEY.
+    tavily_raw_content: bool = True
+    tavily_extract: bool = True
     brave_search_api_key: str = ""
     serper_api_key: str = ""
     exa_api_key: str = ""
     composio_api_key: str = ""
+
+    # Resilient browsing (docs/BROWSING.md). Everything is optional; the defaults need no account.
+    browser_locale: str = "en-IN"  # browser language (navigator.language, Accept-Language)
+    browser_timezone: str = ""  # empty = the user's profile timezone (default Asia/Kolkata)
+    browser_http2: bool = True  # real Chrome speaks HTTP/2; turning it off is a bot signal
+    browser_channel: str = ""  # "" = bundled Chromium; "chrome" = install and use Google Chrome
+    browser_challenge_wait_s: float = 15.0  # how long a passive JS bot check may take to clear by itself
+    # Egress proxy for the computer browser and the server fetch, e.g. a residential/ISP proxy:
+    # http://user:pass@host:port (also https:// or socks5://). Empty = direct.
+    browser_proxy_url: str = ""
+    browser_proxy_for_fetch: bool = True
+    # Keep each user's browser cookies (encrypted, per user) so a recycled computer is a returning visitor.
+    browser_profile_persist: bool = True
+    # Optional hosted browser used when the site blocks ours: "browserbase" or "steel" (+ its API key).
+    remote_browser_provider: str = ""
+    remote_browser_use_proxy: bool = False  # the provider's own proxies (paid plans)
+    browserbase_api_key: str = ""
+    browserbase_project_id: str = ""
+    steel_api_key: str = ""
+    # Read-only alternates when a site blocks: mobile / AMP versions, a reader service, a web archive copy.
+    browse_alternates: bool = True
+    browse_reader_url: str = "https://r.jina.ai/"  # empty disables the reader step
+    jina_api_key: str = ""  # optional, raises the reader's rate limit
+    browse_archive: bool = True
+    browse_step_timeout_s: float = 20.0  # each read-only ladder step
+    browse_total_timeout_s: float = 60.0  # the whole read-only ladder for one URL
+    browse_remote_timeout_s: float = 60.0  # one hosted-browser read
 
     # Optional: pin the Composio GitHub auth config used for Connect GitHub (docs/GITHUB.md). Leave empty to use the
     # first enabled GitHub auth config (Composio creates a managed one if none exists).

@@ -69,8 +69,14 @@ async def run_computer(ctx, tool_name: str, args: dict | None = None) -> Any:
     annotate_page(result)
     if tool_name in {"browser_handoff", "computer_handoff"}:
         return result
+    if result.get("bot_wall") and result.get("handoff", True) is not False:
+        return await _handoff_wall(ctx, result)  # a CAPTCHA only a person can solve
     if result.get("bot_wall"):
-        return await _handoff_wall(ctx, result)
+        host = result.get("blocked_source") or (result.get("block") or {}).get("host") or "This site"
+        result["note"] = (
+            f"{host} blocked automated access and no read-only copy worked. Say so plainly and continue with other "
+            "sources; do not invent what the page says."
+        )
     return result
 
 

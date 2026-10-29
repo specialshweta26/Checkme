@@ -46,6 +46,17 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
+class BrowserProfile(Base):
+    """One user's cloud-browser cookies, encrypted, so a recycled computer starts as a returning visitor.
+    Per user only; never shared or copied between users (docs/BROWSING.md)."""
+
+    __tablename__ = "browser_profiles"
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    state_enc: Mapped[str] = mapped_column(Text, default="")
+    cookie_count: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
 class Account(Base):
     """An OAuth identity (Google or Microsoft). Used for sign-in and for the built-in mail connector."""
 

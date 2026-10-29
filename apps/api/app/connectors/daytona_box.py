@@ -146,7 +146,10 @@ DAYTONA_TOOLS = [
             "Open an http(s) URL in the live Chromium tab on this user's computer. "
             "Same visible browser the chat screen shows. Prefer the destination site over a Google Search URL "
             "when the user needs a live product page (bookings, inventory, forms). "
-            "If the page is a CAPTCHA or verification wall, stop and hand off — do not invent results. "
+            "Waits out passive bot checks like a normal visitor. If the site still blocks, it tries other ways to read "
+            "the same page and shows a read-only copy (read_only=true), or reports blocked_source: tell the user that "
+            "site blocked automated access and use equivalent sources. A CAPTCHA only a person can solve "
+            "(handoff=true) goes to the user on the live screen — do not invent results. "
             "If a site fails, try another source — do not stop after one error."
         ),
         input_schema={
@@ -348,7 +351,8 @@ DAYTONA_TOOLS = [
         name="web_fetch",
         description=(
             "Fetch a public http(s) page over the network and show it on the computer screen. "
-            "Use for news and when browser_navigate returns chrome-error or connection reset."
+            "Use for news and when browser_navigate returns chrome-error or connection reset. Blocked sites go through "
+            "the same fallback ladder as browser_navigate (read-only copy or a plain blocked_source report)."
         ),
         input_schema={
             "type": "object",
@@ -505,14 +509,28 @@ PLAYWRIGHT_INSTALL_DESKTOP = (
 )
 
 
+# Optional (BROWSER_CHANNEL=chrome): Google Chrome stable instead of the bundled Chromium, for a browser whose
+# brand and version match what most visitors use. Best effort: the daemon falls back to Chromium.
+CHROME_INSTALL = (
+    "test -x /usr/bin/google-chrome || ((command -v wget >/dev/null || sudo apt-get install -y -q wget)"
+    " && wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb"
+    " && sudo apt-get install -y -q /tmp/chrome.deb; rm -f /tmp/chrome.deb); test -x /usr/bin/google-chrome"
+)
+
+
 async def _ensure_playwright(proc) -> None:
     marker = await _exec(proc, "test -f /tmp/checkme-pw-ready && echo ready || echo missing", 15)
-    if "ready" in _out(marker):
-        return
-    desktop = bool(getattr(proc, "browser_deps", False))
-    install = await _exec(proc, PLAYWRIGHT_INSTALL_DESKTOP if desktop else PLAYWRIGHT_INSTALL, 480 if desktop else 240)
-    if getattr(install, "exit_code", 1) not in {0, None}:
-        raise ToolError("Could not install a browser in the computer sandbox. " + _clip(_out(install), 400))
+    if "ready" not in _out(marker):
+        desktop = bool(getattr(proc, "browser_deps", False))
+        install = await _exec(proc, PLAYWRIGHT_INSTALL_DESKTOP if desktop else PLAYWRIGHT_INSTALL, 480 if desktop else 240)
+        if getattr(install, "exit_code", 1) not in {0, None}:
+            raise ToolError("Could not install a browser in the computer sandbox. " + _clip(_out(install), 400))
+    if str(getattr(get_settings(), "browser_channel", "") or "").strip().lower() == "chrome" and getattr(proc, "browser_deps", False):
+        ready = await _exec(proc, "test -f /tmp/checkme-chrome-tried && echo tried || echo no", 10)
+        if "tried" not in _out(ready):
+            got = await _exec(proc, CHROME_INSTALL + "; touch /tmp/checkme-chrome-tried", 300)
+            if getattr(got, "exit_code", 1) not in {0, None}:
+                log.info("computer: Google Chrome install failed; using bundled Chromium")
 
 
 async def _put_sandbox_file(proc, fs, dest: str, data: bytes) -> None:
@@ -551,25 +569,44 @@ async def _put_sandbox_file(proc, fs, dest: str, data: bytes) -> None:
         )
 
 
-async def _install_daemon(proc, fs=None) -> None:
+async def _install_daemon(proc, fs=None, config: dict | None = None) -> None:
     from pathlib import Path as FilePath
 
-    from app.connectors import computer_daemon
+    from app.connectors import block_detect, computer_daemon
 
+    await _put_sandbox_file(proc, fs, "/tmp/checkme_block_detect.py", FilePath(block_detect.__file__).read_bytes())
     await _put_sandbox_file(proc, fs, "/tmp/checkme_browser_daemon.py", FilePath(computer_daemon.__file__).read_bytes())
+    if config is not None:
+        # Read once by the daemon at start, then deleted (it may hold proxy credentials).
+        await _put_sandbox_file(proc, fs, "/tmp/checkme_browser_config.json", json.dumps(config).encode("utf-8"))
 
 
-async def _daemon_up(proc) -> bool:
+_USER_TZ: dict[str, str] = {}
+
+
+async def _daemon_config() -> dict:
+    from app.connectors.browsing import daemon_config, user_timezone
+
+    user = _SCREEN_USER.get() or ""
+    if user and user not in _USER_TZ:
+        _USER_TZ[user] = await user_timezone(user)
+    return daemon_config(_USER_TZ.get(user, ""))
+
+
+async def _daemon_up(proc, config_hash: str = "") -> bool:
     ping = await _exec(proc, "curl -sf http://127.0.0.1:18765/health && echo OK || echo DOWN", 8)
     out = _out(ping)
-    return daemon_current(out)
+    return daemon_current(out, config_hash)
 
 
-def daemon_current(health_output: str) -> bool:
-    """True when the running daemon is healthy and is this release (a stale one is restarted)."""
+def daemon_current(health_output: str, config_hash: str = "") -> bool:
+    """True when the running daemon is healthy, is this release and runs with the current browser settings
+    (a stale one is restarted)."""
     from app.connectors.computer_daemon import VERSION
 
-    return "OK" in health_output and f'"version": "{VERSION}"' in health_output
+    if "OK" not in health_output or f'"version": "{VERSION}"' not in health_output:
+        return False
+    return not config_hash or f'"config": "{config_hash}"' in health_output
 
 
 _DAEMON_LOCKS: dict[str, asyncio.Lock] = {}
@@ -585,10 +622,11 @@ async def _ensure_daemon(proc, fs=None) -> None:
 
 async def _ensure_daemon_locked(proc, fs=None) -> None:
     await _ensure_playwright(proc)
-    if await _daemon_up(proc):
+    config = await _daemon_config()
+    if await _daemon_up(proc, config.get("hash", "")):
         return
     await _exec(proc, "pkill -f checkme_browser_daemon.py >/dev/null 2>&1 || true", 8)
-    await _install_daemon(proc, fs)
+    await _install_daemon(proc, fs, config)
     present = await _exec(proc, "test -s /tmp/checkme_browser_daemon.py && echo HAS || echo MISSING", 8)
     if "HAS" not in _out(present):
         raise ToolError("Computer browser did not start. Daemon file missing in sandbox.")
@@ -604,6 +642,39 @@ async def _ensure_daemon_locked(proc, fs=None) -> None:
     )
     if getattr(boot, "exit_code", 1) not in {0, None} and not await _daemon_up(proc):
         raise ToolError("Computer browser did not start. " + _clip(_out(boot), 500))
+    await _restore_profile(proc, fs)
+
+
+async def _restore_profile(proc, fs=None) -> None:
+    """A new daemon on an empty profile gets this user's saved cookies back (browser_profile)."""
+    from app.connectors import browser_profile
+
+    user = _SCREEN_USER.get() or ""
+    if not browser_profile.enabled(user):
+        return
+    cookies = await browser_profile.load(user)
+    if not cookies:
+        return
+    try:
+        # Called under the daemon lock, so straight to the daemon (not _browser_rpc, which takes that lock).
+        out = await asyncio.wait_for(_browser_rpc_once(proc, {"command": "import_state", "cookies": cookies}, 60, fs), 70)
+        log.info("computer: restored %s browser cookies", (out or {}).get("imported"))
+    except Exception as exc:  # noqa: BLE001 - never block browsing on this
+        log.info("computer: cookie restore skipped: %s", type(exc).__name__)
+
+
+async def _save_profile(proc, fs=None) -> None:
+    from app.connectors import browser_profile
+
+    user = _SCREEN_USER.get() or ""
+    if not browser_profile.due(user):
+        return
+    try:
+        data = await _browser_rpc(proc, {"command": "export_state"}, 30, fs)
+        if isinstance(data, dict) and data.get("ok") and data.get("cookies"):
+            await browser_profile.save(user, data["cookies"])
+    except Exception as exc:  # noqa: BLE001
+        log.info("computer: cookie save skipped: %s", type(exc).__name__)
 
 
 _RPC_LOCKS: dict[str, asyncio.Lock] = {}
@@ -881,19 +952,36 @@ async def browser_search(proc, fs, query: str, count: int = 8, engines=None) -> 
 
 
 async def _open_in_browser(proc, fs, url: str, wait_ms: int = 1200, tab: str = "") -> dict:
+    """Open ``url`` in the computer's real browser; when the site blocks it or it fails to load, walk the
+    read-only ladder (docs/BROWSING.md) and paint the copy that worked, or report the blocked site plainly."""
+    from app.connectors.browsing import LADDER_AFTER_BROWSER, fetch_with_ladder, remote_provider
     from app.connectors.computer_daemon import annotate_page
-    from app.connectors.web_fetch import browser_failed, fetch_public_page
+    from app.connectors.web_fetch import browser_failed
 
     data = await _browser_cmd(proc, {"action": "goto", "url": url, "wait_ms": wait_ms, "tab": tab}, 180, fs)
     annotate_page(data)
-    if data.get("bot_wall"):
+    wall = data.get("block") if data.get("bot_wall") else None
+    if not data.get("bot_wall") and not browser_failed(data, url):
+        await _save_profile(proc, fs)
         return data
-    if not browser_failed(data, url):
-        return data
-    try:
-        page = await fetch_public_page(url)
-    except Exception as vis_exc:  # noqa: BLE001
-        data["error"] = (data.get("error") or str(vis_exc))[:500]
+    if data.get("bot_wall") and not wall:
+        wall = {"kind": data.get("bot_wall_kind") or "captcha", "interactive": bool(data.get("handoff")), "reason": data.get("reason") or ""}
+
+    hints: dict[str, Any] = {}
+    if remote_provider() == "browserbase":
+        hints["remote_cdp"] = lambda target, limit: _remote_cdp_fetch(proc, fs, target, limit)
+    steps = LADDER_AFTER_BROWSER if wall else ("server", *LADDER_AFTER_BROWSER)
+    total = 35.0 if (wall or {}).get("interactive") else None
+    page = await fetch_with_ladder(url, steps, hints=hints, total_s=total)
+    if not page.get("ok"):
+        data["attempts"] = page.get("attempts") or []
+        data["blocked_source"] = page.get("blocked_source")
+        if wall:
+            data["hint"] = page["hint"] + (
+                " The live screen shows the CAPTCHA if the user wants to solve it (take control)." if wall.get("interactive") else ""
+            )
+            return data
+        data["error"] = (str(data.get("error") or "") or page.get("error") or "")[:500]
         data["hint"] = "Try another source URL, or request_takeover if a CAPTCHA is showing. Do not invent results."
         return data
     shown = await _browser_rpc(
@@ -903,10 +991,37 @@ async def _open_in_browser(proc, fs, url: str, wait_ms: int = 1200, tab: str = "
     shown["url"] = page.get("url") or url
     shown["title"] = page.get("title") or shown.get("title") or ""
     shown["text"] = page.get("text") or shown.get("text") or ""
-    shown["fetched_via"] = "network"
-    shown.pop("error", None)
-    shown.pop("fallback", None)
+    via = str(page.get("fetched_via") or "network")
+    shown["fetched_via"] = "network" if via == "server" else via
+    shown["attempts"] = page.get("attempts") or []
+    shown["read_only"] = True
+    note = str(page.get("note") or "")
+    if wall:
+        shown["live_site_blocked"] = wall.get("reason") or "The site blocked the live browser."
+        note = (
+            f"{wall.get('reason') or 'The live site blocked the browser.'} Showing a read-only copy ({shown['fetched_via']}). "
+            + note
+            + " To log in, add to cart or fill forms on the real site, ask the user to take control."
+        ).strip()
+    if note:
+        shown["note"] = note
+    for key in ("error", "fallback", "bot_wall", "bot_wall_kind", "handoff", "reason", "block"):
+        shown.pop(key, None)
     return shown
+
+
+async def _remote_cdp_fetch(proc, fs, url: str, limit: float) -> dict | None:
+    """Browserbase: the API opens a session; the computer's Playwright reads the page over CDP."""
+    from app.connectors.browsing import _page, browserbase_session
+
+    cdp = await browserbase_session()
+    data = await _browser_rpc(proc, {"command": "remote_fetch", "cdp_url": cdp, "url": url}, int(max(20, limit)), fs)
+    if not isinstance(data, dict) or not (data.get("text") or data.get("html")):
+        raise RuntimeError(str((data or {}).get("error") or "hosted browser returned nothing")[:160])
+    page = _page(str(data.get("url") or url), str(data.get("title") or ""), str(data.get("text") or ""), str(data.get("html") or ""), 200, "remote:browserbase")
+    if data.get("block"):
+        page.update(ok=False, block=data["block"])
+    return page
 
 
 async def _browser_cmd(proc, payload: dict, timeout: int = 90, fs=None) -> dict:
@@ -1186,9 +1301,15 @@ async def _invoke_daytona(row, name: str, args: dict[str, Any]) -> Any:
         if name == "browser_close_tab":
             return await _browser_rpc(proc, {"command": "close_tab", "tab": tab}, 30, fs)
         if name == "web_fetch":
+            from app.connectors.browsing import cache_get
             from app.connectors.web_fetch import fetch_public_page, needs_real_browser
 
             url = safe_http_url(args.get("url") or "")
+            cached = cache_get(url)
+            if cached:
+                # Tavily already returned this page's text with the search results: no page load needed.
+                cached.pop("html", None)
+                return cached
             try:
                 page = await fetch_public_page(url)
             except Exception as fetch_exc:  # noqa: BLE001 - e.g. httpx.ReadTimeout; never crash the turn

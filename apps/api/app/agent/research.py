@@ -190,6 +190,8 @@ def needs_browser(page: dict) -> str:
     """Why a fetched page should be opened in the real browser instead ('' when the HTTP copy is fine)."""
     from app.connectors.computer_daemon import bot_wall, page_is_thin
 
+    if page.get("blocked"):
+        return f"blocked by {page.get('blocked_source') or 'the site'} (bot protection; tried {', '.join(a.get('step', '') for a in page.get('attempts') or [])})"
     if not page.get("ok"):
         return f"fetch failed ({page.get('status') or page.get('error') or 'error'})"
     if bot_wall(page.get("url") or "", page.get("title") or "", (page.get("text") or "")[:4000]):
@@ -485,10 +487,11 @@ async def load_state(user_id: Any, crawl_id: str, redis_client: Any = None) -> C
 
 
 async def http_fetch(url: str) -> dict:
-    """Plain HTTP fetch (no browser): readable text plus the raw HTML for links."""
-    from app.connectors.web_fetch import fetch_public_page
+    """HTTP fetch (no browser): readable text plus the raw HTML for links. A blocked page tries the short
+    read-only ladder (Tavily's cached text, the proxy, Tavily Extract) before it is handed to the browser."""
+    from app.connectors.browsing import LADDER_RESEARCH, fetch_with_ladder
 
-    page = await fetch_public_page(url)
+    page = await fetch_with_ladder(url, LADDER_RESEARCH, total_s=30.0, step_s=15.0)
     return page
 
 

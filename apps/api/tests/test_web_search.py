@@ -183,3 +183,27 @@ async def test_web_fetch_timeout_returns_error_instead_of_crashing(monkeypatch):
     monkeypatch.setattr(web_tools, "computer_slug", lambda ctx: "")
     out = await web_tools.web_fetch(SimpleNamespace(), "https://slow.example/")
     assert out["ok"] is False and "ReadTimeout" in out["error"]
+
+
+async def test_default_order_is_tavily_first_and_raw_content_is_cached(http, monkeypatch):
+    from app.connectors import browsing
+
+    monkeypatch.setattr(web_tools, "get_settings", lambda: _settings(tavily_api_key="tv"))
+    page = "Royal Enfield Classic 350 price in India starts at Rs 1.93 lakh. " * 10
+
+    def tavily(request):
+        body = json.loads(request.content)
+        assert body["include_raw_content"] == "markdown"
+        return httpx.Response(200, json={"results": [{"title": "Classic 350", "url": "https://www.bikewale.com/re/classic-350/", "content": "c", "raw_content": page}]})
+
+    http.routes["POST api.tavily.com/search"] = tavily
+    out = await web_tools.web_search("classic 350 price")
+    assert out["source"] == "tavily" and "fallback_from" not in out
+    assert web_tools.search_order()[0] == "tavily" and web_tools.search_order().index("browser") < web_tools.search_order().index("brave")
+    hit = browsing.cache_get("https://bikewale.com/re/classic-350")
+    assert hit and "Classic 350" in hit["text"]
+    # Opening the result reads the cached text: no request to the site.
+    monkeypatch.setattr(web_tools, "computer_slug", lambda ctx: "")
+    before = len(http.seen)
+    fetched = await web_tools.web_fetch(SimpleNamespace(), "https://www.bikewale.com/re/classic-350/")
+    assert fetched["ok"] and fetched["fetched_via"] == "tavily_cache" and len(http.seen) == before

@@ -5,14 +5,6 @@ from __future__ import annotations
 import re
 from html.parser import HTMLParser
 
-import httpx
-
-from connector_core.http import shared_client
-
-_UA = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"
-)
 
 
 class _Text(HTMLParser):
@@ -99,7 +91,7 @@ def needs_real_browser(page: dict | None) -> bool:
     from app.connectors.computer_daemon import bot_wall, page_is_thin
 
     page = page or {}
-    if page.get("ok") is False:
+    if page.get("ok") is False or page.get("block"):
         return True
     text = str(page.get("text") or "")
     if bot_wall(str(page.get("url") or ""), str(page.get("title") or ""), text):
@@ -108,25 +100,16 @@ def needs_real_browser(page: dict | None) -> bool:
 
 
 async def fetch_public_page(url: str) -> dict:
+    """One direct fetch with a full Chrome header set (HTTP/2, en-IN). ``block`` is set when the response is a
+    bot wall / access denied page (shared detector), and then ``ok`` is False."""
+    from app.connectors.browsing import http_get
     from app.connectors.daytona_box import safe_http_url
 
     target = safe_http_url(url)
-    resp = await shared_client().get(
-        target,
-        headers={"User-Agent": _UA, "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8"},
-        follow_redirects=True,
-        timeout=httpx.Timeout(15.0, connect=5.0),
-    )
-    html = resp.text or ""
-    title, text = html_to_text(html)
-    final = str(resp.url) if resp.url else target
-    if not title:
-        title = final
-    return {
-        "ok": resp.status_code < 400 and bool(text),
-        "url": final,
-        "title": title[:200],
-        "text": text,
-        "html": wrap_html(html[:400000], final),
-        "status": resp.status_code,
-    }
+    page = await http_get(target, timeout=15.0)
+    if page is None:  # pragma: no cover - the direct client always exists
+        raise RuntimeError("no HTTP client")
+    page.pop("raw_html", None)
+    if not page.get("text"):
+        page["ok"] = False
+    return page

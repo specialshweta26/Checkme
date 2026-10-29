@@ -154,16 +154,28 @@ def _http_error(resp) -> str:
 
 
 async def _search_tavily(q: str, limit: int, key: str) -> list[dict]:
+    body: dict[str, Any] = {"query": q, "max_results": limit, "search_depth": "basic"}
+    raw = bool(_cfg("tavily_raw_content", True))
+    if raw:
+        # Each result's page text comes back with the search (same credit cost on basic search). It is cached
+        # briefly so web_fetch on a result is instant and does not depend on the site letting us in.
+        body["include_raw_content"] = "markdown"
     resp = await _request(
         "POST",
         "https://api.tavily.com/search",
-        json={"query": q, "max_results": limit, "search_depth": "basic"},
+        json=body,
         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
         timeout=15.0,
     )
     if resp.status_code >= 400:
         raise RuntimeError(_http_error(resp))
     data = resp.json() or {}
+    if raw:
+        from app.connectors.browsing import cache_put
+
+        for r in data.get("results") or []:
+            if isinstance(r, dict) and r.get("url") and r.get("raw_content"):
+                cache_put(str(r["url"]), str(r.get("title") or ""), str(r["raw_content"]))
     return [
         {"title": str(r.get("title") or r.get("url") or "")[:200], "url": r.get("url") or "", "snippet": str(r.get("content") or "")[:400]}
         for r in data.get("results") or []
@@ -310,7 +322,7 @@ async def _search_wikipedia(q: str, limit: int) -> list[dict]:
 
 FREE_PROVIDERS = ("brave", "duckduckgo", "wikipedia")
 PAID_PROVIDERS = ("tavily", "brave_api", "serper", "exa")  # Tavily first among the paid ones
-DEFAULT_SEARCH_ORDER = "tavily,browser,free"
+DEFAULT_SEARCH_ORDER = "paid,browser,free"
 SEARCH_KEY_ENVS = ("TAVILY_API_KEY", "BRAVE_SEARCH_API_KEY", "SERPER_API_KEY", "EXA_API_KEY")
 _PAID_KEYS = {"tavily": "tavily_api_key", "brave_api": "brave_search_api_key", "serper": "serper_api_key", "exa": "exa_api_key"}
 _PAID_FNS = {"tavily": "_search_tavily", "brave_api": "_search_brave_api", "serper": "_search_serper", "exa": "_search_exa"}
@@ -329,8 +341,8 @@ def _key(name: str) -> str:
 
 def search_order() -> list[str]:
     """SEARCH_ORDER as stages: 'free', 'browser', 'paid', or single provider names (brave, duckduckgo, wikipedia,
-    tavily, brave_api, serper, exa). Default 'tavily,browser,free': Tavily first, then the computer browser,
-    then keyless server engines."""
+    tavily, brave_api, serper, exa). Default 'paid,browser,free': the keyed paid APIs (Tavily first), then the
+    computer browser, then keyless server engines."""
     raw = str(_cfg("search_order", DEFAULT_SEARCH_ORDER))
     out: list[str] = []
     for token in (t.strip().lower() for t in raw.split(",")):
@@ -361,10 +373,10 @@ def setup_hint() -> str:
     if search_api_configured():
         return ""
     return (
-        "No paid search API key is configured, so when the free engines (Brave, DuckDuckGo, Wikipedia) block or "
-        "rate-limit the cloud server and the computer's browser search also fails, there is nothing left to try. "
+        "No paid search API key is configured, so search depends on the computer's browser and the free engines "
+        "(Brave, DuckDuckGo, Wikipedia), which often block or rate-limit cloud servers. "
         "Set TAVILY_API_KEY (or BRAVE_SEARCH_API_KEY, SERPER_API_KEY, EXA_API_KEY) on the API service "
-        "(Render > checkme-api > Environment); it is only used as the last resort."
+        "(Render > checkme-api > Environment); it is tried first."
     )
 
 
@@ -425,8 +437,8 @@ def _browser_plan(ctx, paid_left: bool) -> tuple[bool, float, str]:
 async def web_search(query: str, count: int = 8, ctx=None) -> dict:
     """Real results from the first stage that answers, or a clear error. Never invents results.
 
-    Default order (SEARCH_ORDER=tavily,browser,free): Tavily, then the same search in the cloud computer's
-    real browser, then keyless HTTP engines. Each stage has a time budget.
+    Default order (SEARCH_ORDER=paid,browser,free): Tavily (then any other keyed paid API), then the same search
+    in the cloud computer's real browser, then keyless HTTP engines. Each stage has a time budget.
     Verification pages are reported, never bypassed.
     """
     import asyncio
@@ -543,10 +555,15 @@ async def web_fetch(ctx, url: str) -> Any:
             painted = {"error": str(exc)[:200]}
         if not (isinstance(painted, dict) and painted.get("error")):
             return painted
-    from app.connectors.web_fetch import fetch_public_page
+    from app.connectors.browsing import LADDER_READ, fetch_with_ladder
+    from app.connectors.daytona_box import safe_http_url
 
     try:
-        return await fetch_public_page(target)
+        target = safe_http_url(target)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "url": target, "error": str(exc)[:200]}
+    try:
+        page = await fetch_with_ladder(target, LADDER_READ)
     except Exception as exc:  # noqa: BLE001 - a slow or dead site must not fail the whole chat turn
         log.warning("web_fetch %s failed: %s", target[:200], type(exc).__name__)
         return {
@@ -554,6 +571,7 @@ async def web_fetch(ctx, url: str) -> Any:
             "url": target,
             "error": f"Could not fetch the page ({type(exc).__name__}: {str(exc)[:160]}). Try another source; do not invent its content.",
         }
+    return page
 
 
 async def generate_image(prompt: str, size: str = "1024x1024") -> dict:

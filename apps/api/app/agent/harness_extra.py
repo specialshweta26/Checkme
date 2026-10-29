@@ -309,7 +309,7 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         return _dumps(await computer.request_takeover(ctx, reason, instruction))
 
     async def web_search(query: str, count: int = 8) -> str:
-        """Search the public web. Use for facts, news, and 'what is going on'. Then web_fetch or browser_navigate the best URLs. Do not search_tools for this. For live bookings, inventory, or forms, browser_navigate the site itself instead of a Google Search URL. If it returns an error or no results, say so and never make results up. When the result has `setup`, tell the user which API key to configure."""
+        """Search the public web. Use for facts, news, and 'what is going on'. Then web_fetch or browser_navigate the best URLs. Do not search_tools for this. For live bookings, inventory, or forms, browser_navigate the site itself instead of a Google Search URL. If it returns an error or no results, say so and never make results up. When the result has `setup`, tell the user which API key to configure. Order: Tavily (and other configured search APIs), then the computer browser, then free engines."""
         ctx.used_tools.append("web_search")
         return _dumps(await web_tools.web_search(query, count, ctx))
 
@@ -320,7 +320,7 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         return _dumps(data if data is not None else computer.computer_missing())
 
     async def web_fetch(url: str) -> str:
-        """Fetch a public http(s) page. Paints it onto the computer screen when the sandbox is available; otherwise returns page text."""
+        """Fetch a public http(s) page. Paints it onto the computer screen when the sandbox is available; otherwise returns page text. If the site blocks automated access it tries other ways to read the same page (Tavily's copy, proxy/hosted browser when configured, mobile/AMP version, reader, archive) and marks the copy read_only; if everything fails it returns blocked_source: name that site to the user plainly and use other sources. Never invent page content."""
         ctx.used_tools.append("web_fetch")
         return _dumps(await web_tools.web_fetch(ctx, url), 32000)
 
