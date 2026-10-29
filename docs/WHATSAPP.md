@@ -1,22 +1,69 @@
 # WhatsApp channel
 
-Message your Checkme agents from WhatsApp. It uses the **Meta WhatsApp Business Cloud API** (Graph API)
-directly. `app/channels/provider.py` has a small `ChannelProvider` interface, so another provider (for example
-Twilio) can be added later without changing routing.
+Message your Checkme agents from WhatsApp. One shared business number serves every Checkme user: each person
+links their own phone number to their account with a one-time code, and messages are routed to that account's
+agents only.
 
-The channel stays **off** until `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_APP_SECRET` and
-`WHATSAPP_VERIFY_TOKEN` are all set. When it is off, the webhook returns 404 and Connectors shows "not set up".
+Two providers sit behind the same `ChannelProvider` interface (`app/channels/provider.py`), so routing, jobs,
+approvals and the 24-hour window behave the same with either:
 
-## Webhook URL
+| | Twilio (default when `TWILIO_ACCOUNT_SID` is set) | Meta Cloud API |
+|---|---|---|
+| Webhook | `POST {base}/api/channels/whatsapp/twilio` (form-encoded) | `GET/POST {base}/api/channels/whatsapp/webhook` (JSON) |
+| Signature | `X-Twilio-Signature` (HMAC-SHA1 of URL + sorted fields, auth token) | `X-Hub-Signature-256` (HMAC-SHA256 of body, app secret) |
+| Text limit | 1600 characters per message | 4096 |
+| Buttons | quick-reply Content template if `TWILIO_CONTENT_SID_APPROVAL` is set, otherwise "Reply YES or NO" / numbered list | native reply buttons |
+| Outside 24h | `TWILIO_CONTENT_SID_NOTIFY` Content template | `WHATSAPP_TEMPLATE_NOTIFY` template |
 
-The API (`checkme-api`) is a private service. Meta reaches it through the web app's `/api` proxy, which passes
-the raw body and the `X-Hub-Signature-256` header through unchanged:
+`WHATSAPP_PROVIDER=twilio|meta` forces one. When it is empty, Twilio is used if `TWILIO_ACCOUNT_SID` is set,
+otherwise Meta. Only the active provider's webhook answers; the other returns 404. The channel stays **off**
+(Connectors shows "not set up") until the active provider's required settings are present. Meta Embedded Signup
+(each business bringing its own number) can be added later as another provider without changing routing.
 
-```
-https://checkme-web-kw68.onrender.com/api/channels/whatsapp/webhook
-```
+The API (`checkme-api`) is a private service. Webhooks reach it through the web app's `/api` proxy, which passes
+the raw body and every header (including the signature headers) through unchanged.
 
-In general this is `{PUBLIC_WEB_URL}/api/channels/whatsapp/webhook`.
+## Twilio setup (one time)
+
+Required on `checkme-api`:
+
+| Variable | Value |
+|---|---|
+| `WHATSAPP_PROVIDER` | `twilio` (optional; implied by `TWILIO_ACCOUNT_SID`) |
+| `TWILIO_ACCOUNT_SID` | `AC...` |
+| `TWILIO_AUTH_TOKEN` | the account's auth token; validates `X-Twilio-Signature` and is the REST fallback credential |
+| `TWILIO_WHATSAPP_NUMBER` | the WhatsApp sender, `whatsapp:+14155238886` or `+14155238886` |
+| `TWILIO_API_KEY_SID` / `TWILIO_API_KEY_SECRET` | optional, preferred for the REST API (`SK...` + secret); falls back to SID + auth token |
+| `WHATSAPP_PUBLIC_BASE_URL` | the public web URL Twilio calls, e.g. `https://checkme-web-kw68.onrender.com` (defaults to `PUBLIC_WEB_URL`) |
+| `TWILIO_CONTENT_SID_APPROVAL` | optional quick-reply Content template for approvals (below) |
+| `TWILIO_CONTENT_SID_NOTIFY` | optional approved Content template used outside the 24-hour window (below) |
+| `TWILIO_STATUS_CALLBACK` | optional `true` to have Twilio post delivery status to `/api/channels/whatsapp/twilio/status` (failures are logged) |
+
+Steps in the Twilio console:
+
+1. **Sender.** Use an approved WhatsApp sender (*Messaging → Senders → WhatsApp senders*). The Twilio Sandbox
+   (`+14155238886`) works for testing, but each tester must first send the sandbox's `join <word>` code, and
+   sandbox sessions expire after 3 days.
+2. **Webhook.** On the sender (or, for the sandbox, *Messaging → Try it out → WhatsApp sandbox settings*) set
+   **When a message comes in** to
+
+   ```
+   https://checkme-web-kw68.onrender.com/api/channels/whatsapp/twilio
+   ```
+
+   with method **POST**. Twilio signs that exact URL, so it must match `WHATSAPP_PUBLIC_BASE_URL` +
+   `/api/channels/whatsapp/twilio` character for character (scheme, host, no trailing slash). The status
+   callback URL can stay empty.
+3. **Optional approval buttons.** In *Messaging → Content Template Builder* create a **Quick reply** template:
+   body `{{1}}`, two buttons with title `Approve` / id `{{2}}` and title `Deny` / id `{{3}}`. Inside the 24-hour
+   window it needs no WhatsApp approval. Put its `HX...` SID in `TWILIO_CONTENT_SID_APPROVAL`. Without it,
+   approvals arrive as text ending in "Reply YES to approve or NO to deny", and questions as a numbered list.
+4. **Optional out-of-window notice.** Create a **Text** template like `Checkme: {{1}} Reply here to see it.`,
+   submit it for WhatsApp approval (category *Utility*), and put its `HX...` SID in `TWILIO_CONTENT_SID_NOTIFY`.
+
+The webhook answers with an empty TwiML `<Response></Response>` at once; the message is deduplicated on
+`MessageSid` and handled in the background. Inbound media (`MediaUrl0`…) is downloaded with the account's basic
+auth, only from `api.twilio.com`.
 
 ## Meta setup (one time)
 
@@ -35,9 +82,10 @@ In general this is `{PUBLIC_WEB_URL}/api/channels/whatsapp/webhook`.
 5. **Set the verify token.** Pick any long random string and put it in `WHATSAPP_VERIFY_TOKEN`.
 6. **Set the business number.** Put the business number as digits, for example `15551234567`, in
    `WHATSAPP_BUSINESS_NUMBER`. It is used for the `wa.me` link in Connectors.
-7. **Deploy, then connect the webhook.** Deploy with the variables set. Open *WhatsApp → Configuration →
-   Webhook → Edit*:
-   - Callback URL: the webhook URL above
+7. **Deploy, then connect the webhook.** Deploy with the variables set (and `WHATSAPP_PROVIDER=meta` if any
+   `TWILIO_*` value is also set). Open *WhatsApp → Configuration → Webhook → Edit*:
+   - Callback URL: `https://checkme-web-kw68.onrender.com/api/channels/whatsapp/webhook` (in general
+     `{PUBLIC_WEB_URL}/api/channels/whatsapp/webhook`)
    - Verify token: the same value as `WHATSAPP_VERIFY_TOKEN`
    - Click *Verify and save*. Meta sends `GET ?hub.mode=subscribe&hub.verify_token=…&hub.challenge=…` and the
      API echoes the challenge.
@@ -74,7 +122,7 @@ once an hour. Link attempts are rate-limited per number.
 | `/new` | start a fresh conversation thread |
 | `/help` · `/unlink` | help · disconnect |
 | voice note | transcribed with `OPENAI_TRANSCRIBE_MODEL` (whisper-1), then handled as text |
-| photo / document | downloaded from Graph, stored like a chat upload, and passed to the agent with its `attachment_key` |
+| photo / document | downloaded from the provider, stored like a chat upload, and passed to the agent with its `attachment_key` |
 
 Each message becomes or continues a **background job** on the existing `agent_jobs` worker, so the agent has its
 full capabilities: skills, computer, memory and task state. It runs in a per (user, agent, WhatsApp) chat thread
@@ -86,11 +134,12 @@ Replies work like this:
 - a quick acknowledgement;
 - at most 4 progress updates per job, at least 90 seconds apart (plan and status milestones);
 - the final answer with markdown converted to WhatsApp formatting (`*bold*`, `_italic_`, `~strike~`, code
-  blocks), split into messages of at most 4096 characters;
+  blocks), split into messages of at most 4096 characters (1600 on Twilio);
 - files the agent attached, sent as media.
 
-**Approval cards** arrive as *Approve* / *Deny* reply buttons. **Questions** arrive as buttons when there are up
-to 3 options; otherwise they come as a numbered list, and you can reply with the number. A button is accepted only
+**Approval cards** arrive as *Approve* / *Deny* reply buttons (on Twilio without an approval template, as text:
+reply `yes` or `no`). **Questions** arrive as buttons when there are up to 3 options (numbered text on Twilio);
+otherwise they come as a numbered list, and you can reply with the number. A button is accepted only
 from a number linked to the job's own user.
 
 ## 24-hour window
@@ -99,13 +148,15 @@ WhatsApp allows free-form messages only within 24 hours of your last message. Ch
 inbound message for each number. Outside the window:
 
 - the reply is held in the link's outbox;
-- if `WHATSAPP_TEMPLATE_NOTIFY` is set, the template is sent so you know something is waiting;
+- if `WHATSAPP_TEMPLATE_NOTIFY` (Meta) or `TWILIO_CONTENT_SID_NOTIFY` (Twilio) is set, the template is sent so you know something is waiting;
 - the held messages go out as soon as you message again.
 
 ## Security notes
 
-- The `X-Hub-Signature-256` HMAC is checked over the raw body. A missing or bad signature gets 401.
-- Webhook retries are deduplicated by WhatsApp message ID (`channel_inbound` table). The webhook returns 200
+- Meta: the `X-Hub-Signature-256` HMAC is checked over the raw body; a missing or bad signature gets 401.
+- Twilio: `X-Twilio-Signature` is checked against the public URL and the form fields; a missing or bad
+  signature gets 403.
+- Webhook retries are deduplicated by message ID (WhatsApp message id or Twilio `MessageSid`) (`channel_inbound` table). The webhook returns 200
   right away and processes messages in the background.
 - Everything is scoped to the link's `user_id`. Agents, rooms and jobs are looked up only within that user.
 - Messages are rate-limited per number (`WHATSAPP_RATE_LIMIT_PER_MINUTE`, default 20), along with link attempts

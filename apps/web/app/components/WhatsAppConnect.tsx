@@ -70,7 +70,7 @@ export function WhatsAppConnect({ status, onChange }: { status: WhatsAppStatus |
       </p>
       {status && !status.enabled ? (
         <p className="muted" style={{ margin: 0 }}>
-          WhatsApp needs the WHATSAPP_* settings on this server (docs/WHATSAPP.md).
+          WhatsApp needs the TWILIO_* (or Meta WHATSAPP_*) settings on this server (docs/WHATSAPP.md).
         </p>
       ) : null}
       {links.map((link) => (

@@ -392,11 +392,19 @@ Each task records which skill it is following and how far it has got. The state 
 
 ### 6.12 WhatsApp channel (`app/channels/`)
 
-- `provider.py`: `ChannelProvider` protocol, with `MetaWhatsApp` (Graph `/{phone_number_id}/messages` and
-  `/{media_id}`) as the only implementation. Also: `check_signature` (HMAC-SHA256 of the raw body against
-  `X-Hub-Signature-256`), `parse` (text / interactive / button / media), and `e164`.
+- `provider.py`: `ChannelProvider` protocol with two implementations, chosen by `choose()` (`WHATSAPP_PROVIDER`,
+  else Twilio when `TWILIO_ACCOUNT_SID` is set, else Meta):
+  - `TwilioWhatsApp`: REST `Accounts/{sid}/Messages.json` (API key or SID + auth token basic auth), form-encoded
+    inbound `parse` (Body, ButtonPayload, MediaUrl0), `twilio_signature` / `validate` (HMAC-SHA1 of the public
+    URL + sorted fields), 1600-char split, quick-reply Content template or text fallback for buttons, Content
+    template for the out-of-window notice, media download from `api.twilio.com` only;
+  - `MetaWhatsApp`: Graph `/{phone_number_id}/messages` and `/{media_id}`, `check_signature` (HMAC-SHA256 of the
+    raw body against `X-Hub-Signature-256`), `parse` (text / interactive / button / media).
+  - Both expose `kind`, `text_max`, `business_number()` and `notify_template()`; plus `e164`.
 - `routes.py`:
-  - public webhook: `GET /api/channels/whatsapp/webhook` (hub verify) and
+  - Twilio webhook: `POST /api/channels/whatsapp/twilio` (signature over `WHATSAPP_PUBLIC_BASE_URL` + path, claim
+    `MessageSid`, BackgroundTask, empty TwiML) and `POST /twilio/status` (optional delivery status);
+  - Meta webhook: `GET /api/channels/whatsapp/webhook` (hub verify) and
     `POST /api/channels/whatsapp/webhook` (signature, then claim the message ID in `channel_inbound`, then a
     BackgroundTask);
   - signed-in endpoints: `GET /api/channels/whatsapp`, `POST /link-code`, `DELETE /links/{id}`.
@@ -417,8 +425,8 @@ Each task records which skill it is following and how far it has got. The state 
     (answer chunks, approval buttons, question options, attachments as media) and `deliver`: send inside the 24h
     window, otherwise outbox plus the optional template.
   - `JobProgress._write` calls `progress` (plan/status only, rate-limited per job).
-- Formatting: `formatting.to_whatsapp` and `chunk(4096)`, which closes and reopens code fences across a split.
-- Tests: `tests/test_whatsapp.py` (pure) and `tests/test_whatsapp_db.py` (Postgres).
+- Formatting: `formatting.to_whatsapp` and `chunk(provider.text_max)` (4096 Meta, 1600 Twilio), which closes and reopens code fences across a split.
+- Tests: `tests/test_whatsapp.py`, `tests/test_whatsapp_twilio.py` (pure) and `tests/test_whatsapp_db.py` (Postgres).
 
 ## 7. Connector runtime
 

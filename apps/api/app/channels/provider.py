@@ -1,13 +1,19 @@
-"""Channel providers: a small interface so another provider (e.g. Twilio) can be added next to Meta.
+"""Channel providers: one interface, two WhatsApp backends.
 
-Only MetaWhatsApp exists today. It talks to the WhatsApp Business Cloud API (graph.facebook.com) directly.
-Nothing here logs a token, the app secret or a message body."""
+- TwilioWhatsApp: Twilio's Messages API with a Twilio WhatsApp sender (form-encoded webhooks, X-Twilio-Signature).
+- MetaWhatsApp: the WhatsApp Business Cloud API (graph.facebook.com) directly (JSON webhooks, X-Hub-Signature-256).
+
+WHATSAPP_PROVIDER picks one (twilio | meta); empty means twilio when TWILIO_ACCOUNT_SID is set, else meta.
+Both serve one shared business number for every user. Nothing here logs a token, a secret or a message body."""
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
+import json
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -89,6 +95,8 @@ def button_title(text: str) -> str:
 
 class MetaWhatsApp:
     name = "whatsapp"
+    kind = "meta"
+    text_max = TEXT_MAX
 
     def __init__(self, settings=None, client: httpx.AsyncClient | None = None):
         self.s = settings or get_settings()
@@ -98,6 +106,12 @@ class MetaWhatsApp:
     def enabled(self) -> bool:
         s = self.s
         return bool(s.whatsapp_phone_number_id and s.whatsapp_access_token and s.whatsapp_app_secret and s.whatsapp_verify_token)
+
+    def business_number(self) -> str:
+        return e164(self.s.whatsapp_business_number)
+
+    def notify_template(self) -> str:
+        return str(self.s.whatsapp_template_notify or "").strip()
 
     @property
     def base(self) -> str:
@@ -246,13 +260,206 @@ class MetaWhatsApp:
             return resp.content, str(data.get("mime_type") or resp.headers.get("content-type") or "application/octet-stream")
 
 
+TWILIO_TEXT_MAX = 1600
+TWILIO_API = "https://api.twilio.com/2010-04-01"
+_MEDIA_HOSTS = ("https://api.twilio.com/", "https://media.twiliocdn.com/")
+
+
+def twilio_signature(auth_token: str, url: str, params) -> str:
+    """X-Twilio-Signature: base64(HMAC-SHA1(auth token, full URL + every POST key and value sorted by key))."""
+    items = params.items() if isinstance(params, dict) else params
+    data = url + "".join(f"{k}{v}" for k, v in sorted(((str(k), str(v)) for k, v in items), key=lambda kv: kv))
+    return base64.b64encode(hmac.new(auth_token.encode(), data.encode(), hashlib.sha1).digest()).decode()
+
+
+def check_twilio_signature(auth_token: str, url: str, params, header: str | None) -> bool:
+    if not auth_token or not header:
+        return False
+    return hmac.compare_digest(twilio_signature(auth_token, url, params), header.strip())
+
+
+def wa_address(raw: str) -> str:
+    """'whatsapp:+14155238886' / '+1 415 523 8886' -> 'whatsapp:+14155238886' ('' when not a number)."""
+    number = e164(str(raw or "").removeprefix("whatsapp:"))
+    return f"whatsapp:{number}" if number else ""
+
+
+def split_text(text: str, limit: int) -> list[str]:
+    from app.channels.formatting import chunk
+
+    return chunk(text, limit) or ([text] if text else [])
+
+
+class TwilioWhatsApp:
+    """WhatsApp through a Twilio sender. Inbound arrives form-encoded at /api/channels/whatsapp/twilio."""
+
+    name = "whatsapp"
+    kind = "twilio"
+    text_max = TWILIO_TEXT_MAX
+    webhook_path = "/api/channels/whatsapp/twilio"
+
+    def __init__(self, settings=None, client: httpx.AsyncClient | None = None):
+        self.s = settings or get_settings()
+        self._client = client
+
+    # ---- config ----
+    def enabled(self) -> bool:
+        s = self.s
+        return bool(s.twilio_account_sid and s.twilio_auth_token and wa_address(s.twilio_whatsapp_number))
+
+    def business_number(self) -> str:
+        return e164(str(self.s.twilio_whatsapp_number or "").removeprefix("whatsapp:"))
+
+    def notify_template(self) -> str:
+        return str(getattr(self.s, "twilio_content_sid_notify", "") or "").strip()
+
+    def public_base(self) -> str:
+        base = str(getattr(self.s, "whatsapp_public_base_url", "") or "").strip() or str(getattr(self.s, "public_web_url", "") or "")
+        return base.rstrip("/")
+
+    def webhook_url(self, path: str = "", query: str = "") -> str:
+        return self.public_base() + (path or self.webhook_path) + (f"?{query}" if query else "")
+
+    def _auth(self) -> tuple[str, str]:
+        s = self.s
+        if s.twilio_api_key_sid and s.twilio_api_key_secret:
+            return (s.twilio_api_key_sid, s.twilio_api_key_secret)
+        return (s.twilio_account_sid, s.twilio_auth_token)
+
+    # ---- inbound ----
+    def verify_signature(self, raw: bytes, header: str | None) -> bool:  # Meta-style raw-body check does not apply
+        return False
+
+    def validate(self, url: str, params, header: str | None) -> bool:
+        return check_twilio_signature(self.s.twilio_auth_token, url, params, header)
+
+    def parse(self, form) -> list[Inbound]:
+        """One Twilio webhook = one message. ``form`` is a dict (or pairs) of the POST fields."""
+        f = dict(form.items() if isinstance(form, dict) else form)
+        sid = str(f.get("MessageSid") or f.get("SmsMessageSid") or "")
+        address = e164(str(f.get("From") or "").removeprefix("whatsapp:"))
+        if not sid or not address or not str(f.get("From") or "").startswith("whatsapp:"):
+            return []
+        ours = self.business_number()
+        to = e164(str(f.get("To") or "").removeprefix("whatsapp:"))
+        if ours and to and to != ours:
+            return []  # another sender on the same account
+        base = {"message_id": sid[:160], "address": address, "name": str(f.get("ProfileName") or "")[:120], "raw_type": str(f.get("MessageType") or "")}
+        body = str(f.get("Body") or "")
+        payload = str(f.get("ButtonPayload") or "")
+        if payload:
+            return [Inbound(kind="button", button_id=payload, text=str(f.get("ButtonText") or body), **base)]
+        try:
+            num_media = int(f.get("NumMedia") or 0)
+        except (TypeError, ValueError):
+            num_media = 0
+        if num_media > 0 and f.get("MediaUrl0"):
+            mime = str(f.get("MediaContentType0") or "")
+            kind = "audio" if mime.startswith("audio/") else "image" if mime.startswith("image/") else "document"
+            extra = {"voice": kind == "audio"}
+            if num_media > 1:
+                extra["more_media"] = [str(f.get(f"MediaUrl{i}") or "") for i in range(1, min(num_media, 10))]
+            return [Inbound(kind=kind, media_id=str(f["MediaUrl0"]), mime_type=mime, text=body, extra=extra, **base)]
+        if body:
+            return [Inbound(kind="text", text=body, **base)]
+        return [Inbound(kind="other", **base)]
+
+    # ---- outbound ----
+    def message_payload(self, to: str, **fields) -> dict:
+        data = {"From": wa_address(self.s.twilio_whatsapp_number), "To": wa_address(to)}
+        if getattr(self.s, "twilio_status_callback", False) and self.public_base():
+            data["StatusCallback"] = self.webhook_url(self.webhook_path + "/status")
+        data.update({k: v for k, v in fields.items() if v not in (None, "")})
+        return data
+
+    async def _post(self, data: dict) -> str:
+        url = f"{TWILIO_API}/Accounts/{self.s.twilio_account_sid}/Messages.json"
+        try:
+            if self._client is not None:
+                resp = await self._client.post(url, data=data, auth=self._auth())
+            else:
+                async with httpx.AsyncClient(timeout=20) as client:
+                    resp = await client.post(url, data=data, auth=self._auth())
+        except httpx.HTTPError as exc:
+            raise SendError(f"Twilio send failed: {type(exc).__name__}") from exc
+        if resp.status_code >= 400:
+            code = ""
+            try:
+                code = str((resp.json() or {}).get("code") or "")
+            except ValueError:
+                pass
+            raise SendError(f"Twilio send failed: HTTP {resp.status_code} {code}".strip())
+        try:
+            return str((resp.json() or {}).get("sid") or "")
+        except ValueError:
+            return ""
+
+    async def send_text(self, to: str, text: str) -> str:
+        sid = ""
+        for part in split_text(text, TWILIO_TEXT_MAX):
+            sid = await self._post(self.message_payload(to, Body=part))
+        return sid
+
+    async def send_buttons(self, to: str, body: str, buttons: list[tuple[str, str]]) -> str:
+        """Approvals use the quick-reply Content template when configured; otherwise (and for option lists) the
+        choices go as text and the reply ("yes", "no", "2", or the option's name) is parsed by the service."""
+        buttons = list(buttons)[:10]
+        ids = [str(b[0]) for b in buttons]
+        approval = len(ids) == 2 and ids[0].startswith("wa:ap:") and ids[1].startswith("wa:dn:")
+        template = str(getattr(self.s, "twilio_content_sid_approval", "") or "").strip()
+        if approval and template:
+            variables = {"1": body[:INTERACTIVE_BODY_MAX], "2": ids[0], "3": ids[1]}
+            return await self._post(self.message_payload(to, ContentSid=template, ContentVariables=json.dumps(variables)))
+        if approval:
+            text = f"{body}\n\nReply *YES* to approve or *NO* to deny."
+        else:
+            options = "\n".join(f"{i}. {title}" for i, (_, title) in enumerate(buttons, 1))
+            text = f"{body}\n\n{options}\n\nReply with a number or the option."
+        return await self.send_text(to, text)
+
+    async def send_media(self, to: str, url: str, kind: str, caption: str = "", filename: str = "") -> str:
+        body = caption if kind != "audio" else ""
+        if not body and filename and kind == "document":
+            body = filename
+        return await self._post(self.message_payload(to, MediaUrl=url, Body=body[:TWILIO_TEXT_MAX]))
+
+    async def send_template(self, to: str, name: str, lang: str, params: list[str]) -> str:
+        """``name`` is a Content SID (HX...); params fill {{1}}, {{2}}, ..."""
+        variables = {str(i): str(p)[:1000] for i, p in enumerate(params, 1)}
+        return await self._post(self.message_payload(to, ContentSid=name, ContentVariables=json.dumps(variables) if variables else ""))
+
+    async def download_media(self, media_id: str) -> tuple[bytes, str]:
+        """``media_id`` is the MediaUrl Twilio sent; fetching it needs the account's basic auth."""
+        url = str(media_id or "")
+        if not url.startswith(_MEDIA_HOSTS) or not re.match(r"^https://[^/]+/", url):
+            raise SendError("Unexpected media URL")
+        limit = get_settings().attachment_max_bytes
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            resp = await client.get(url, auth=self._auth())
+            if resp.status_code in (401, 403) and self._auth()[0] != self.s.twilio_account_sid:
+                resp = await client.get(url, auth=(self.s.twilio_account_sid, self.s.twilio_auth_token))
+            if resp.status_code >= 400:
+                raise SendError(f"Twilio media download failed: HTTP {resp.status_code}")
+            if len(resp.content) > limit:
+                raise SendError("That file is larger than the 25 MB limit")
+            return resp.content, str(resp.headers.get("content-type") or "application/octet-stream").split(";")[0]
+
+
+def choose(settings=None) -> str:
+    s = settings or get_settings()
+    want = str(getattr(s, "whatsapp_provider", "") or "").strip().lower()
+    if want in {"twilio", "meta"}:
+        return want
+    return "twilio" if getattr(s, "twilio_account_sid", "") else "meta"
+
+
 _provider: ChannelProvider | None = None
 
 
 def get_provider() -> ChannelProvider:
     global _provider
     if _provider is None:
-        _provider = MetaWhatsApp()
+        _provider = TwilioWhatsApp() if choose() == "twilio" else MetaWhatsApp()
     return _provider
 
 

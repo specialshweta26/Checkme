@@ -139,6 +139,22 @@ class Settings(BaseSettings):
     whatsapp_template_lang: str = "en"
     whatsapp_graph_version: str = "v21.0"
     whatsapp_rate_limit_per_minute: int = 20
+    # Which WhatsApp provider runs the channel: "twilio" or "meta". Empty picks twilio when TWILIO_ACCOUNT_SID is
+    # set, else meta. One shared business number serves every user; numbers are linked to accounts by code.
+    whatsapp_provider: str = ""
+    # Public base URL Twilio posts to (the web app, which proxies /api). Twilio signs this exact URL, so it must
+    # match what is configured on the sender. Empty falls back to PUBLIC_WEB_URL.
+    whatsapp_public_base_url: str = ""
+
+    # WhatsApp via Twilio (docs/WHATSAPP.md). On when the account SID, auth token and WhatsApp number are set.
+    twilio_account_sid: str = ""
+    twilio_auth_token: str = ""  # validates X-Twilio-Signature; also the REST fallback credential
+    twilio_api_key_sid: str = ""  # preferred REST credential (SK...) with twilio_api_key_secret
+    twilio_api_key_secret: str = ""
+    twilio_whatsapp_number: str = ""  # "whatsapp:+14155238886" or "+14155238886"
+    twilio_content_sid_approval: str = ""  # optional quick-reply Content template (HX...) for approvals
+    twilio_content_sid_notify: str = ""  # optional approved Content template (HX...) for outside the 24h window
+    twilio_status_callback: bool = False  # ask Twilio to post delivery status to /api/channels/whatsapp/twilio/status
 
     # Routing knobs, tuned by the routing eval.
     route_margin: float = 0.08

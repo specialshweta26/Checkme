@@ -22,8 +22,8 @@ from typing import Any, Callable
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.channels.formatting import chunk, to_whatsapp
-from app.channels.provider import BUTTON_MAX, Inbound, SendError, get_provider
+from app.channels.formatting import LIMIT, chunk, to_whatsapp
+from app.channels.provider import BUTTON_MAX, Inbound, SendError, e164, get_provider
 from app.config import get_settings
 from app.models import (
     AgentGroup,
@@ -110,8 +110,15 @@ def new_code() -> str:
     return "".join(secrets.choice(CODE_ALPHABET) for _ in range(CODE_LEN))
 
 
+def business_number() -> str:
+    """E.164 of the shared business number of the active provider (Twilio sender or Meta number)."""
+    p = get_provider()
+    fn = getattr(p, "business_number", None)
+    return (fn() if callable(fn) else "") or e164(get_settings().whatsapp_business_number)
+
+
 def wa_link(code: str = "") -> str:
-    digits = "".join(ch for ch in get_settings().whatsapp_business_number if ch.isdigit())
+    digits = "".join(ch for ch in business_number() if ch.isdigit())
     if not digits:
         return ""
     return f"https://wa.me/{digits}" + (f"?text=link%20{code}" if code else "")
@@ -129,7 +136,7 @@ async def create_link_code(db: AsyncSession, user: User) -> dict:
         "message": f"link {code}",
         "expires_at": expires.isoformat(),
         "wa_link": wa_link(code),
-        "business_number": get_settings().whatsapp_business_number,
+        "business_number": business_number(),
     }
 
 
@@ -160,7 +167,7 @@ async def status(db: AsyncSession, user: User) -> dict:
     }
     return {
         "enabled": enabled(),
-        "business_number": get_settings().whatsapp_business_number,
+        "business_number": business_number(),
         "wa_link": wa_link(),
         "links": [serialize_link(link, names) for link in links],
     }
@@ -288,7 +295,8 @@ def in_window(link: ChannelLink, now: datetime | None = None) -> bool:
 
 
 def text_parts(md: str) -> list[dict]:
-    return [{"type": "text", "text": c} for c in chunk(to_whatsapp(md))]
+    limit = int(getattr(get_provider(), "text_max", 0) or LIMIT)
+    return [{"type": "text", "text": c} for c in chunk(to_whatsapp(md), limit)]
 
 
 async def _send(address: str, part: dict) -> None:
@@ -320,7 +328,8 @@ async def deliver(db: AsyncSession | None, link: ChannelLink, parts: list[dict],
                 log.warning("whatsapp send to %s failed: %s", mask(link.address), exc)
         return "sent" if ok else "failed"
     link.outbox = [*(link.outbox or []), *parts][-OUTBOX_MAX:]
-    template = get_settings().whatsapp_template_notify.strip()
+    fn = getattr(get_provider(), "notify_template", None)
+    template = (fn() if callable(fn) else get_settings().whatsapp_template_notify).strip()
     if template:
         summary = " ".join((notify or parts[0].get("text") or "You have a new update.").split())[:200]
         try:
