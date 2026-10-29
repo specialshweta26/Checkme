@@ -491,7 +491,7 @@ def test_system_prompt_has_no_product_recipes():
     assert "never say the computer or browser is unavailable" in lowered
     assert "flight" not in lowered
     assert "instagram" in lowered
-    assert "web_fetch shows the page" in lowered and "given time to render" in lowered
+    assert "web_read" in lowered and "do not use or wake the computer" in lowered
     assert "browser_search" in lowered and "which search key to configure" in lowered
     assert "browser_handoff" in lowered
     assert "fill whole forms" in lowered

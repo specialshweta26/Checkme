@@ -21,7 +21,7 @@ from app.agent.attachments import summarize_one
 from app.agent.confirm import read_confirm
 from app.agent.deep import run_deep_agent
 from app.agent.memory import seed_letta
-from app.agent.progress import ProgressReporter, read_progress, read_progress_session, valid_progress_id
+from app.agent.progress import ProgressReporter, read_progress, read_progress_draft, read_progress_session, valid_progress_id
 from app.agents import service as agents_service
 from app.cache import rate_limited
 from app.config import get_settings
@@ -51,7 +51,14 @@ async def chat_progress(progress_id: str, user: User = Depends(current_user)):
         raise HTTPException(400, "Bad progress id")
     steps = await read_progress(user.id, progress_id)
     session_id = await read_progress_session(user.id, progress_id)
-    return {"steps": steps, "done": bool(steps and steps[-1].get("kind") == "done"), "session_id": session_id or None}
+    draft = await read_progress_draft(user.id, progress_id)
+    return {
+        "steps": steps,
+        "done": bool(steps and steps[-1].get("kind") == "done"),
+        "session_id": session_id or None,
+        # The reply streaming in, so the web app can show text before the turn finishes.
+        "draft": draft,
+    }
 
 
 @router.get("/sessions")

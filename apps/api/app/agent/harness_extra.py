@@ -83,6 +83,18 @@ class WebSearchInput(BaseModel):
     count: int = Field(default=8, description="How many results (1-12).")
 
 
+class WebSearchRecencyInput(WebSearchInput):
+    recency: str = Field(
+        default="auto",
+        description="Only recent pages: day, week, month, year, or none. 'auto' (default) picks it from words like "
+        "news, latest, today.",
+    )
+
+
+class WebReadInput(BaseModel):
+    urls: list[str] = Field(description="Up to 5 http(s) URLs to read at once (in parallel).")
+
+
 class ResearchInput(BaseModel):
     goal: str = Field(default="", description="What you are trying to find out; links are scored against it.")
     seeds: list[str] = Field(default_factory=list, description="Start URLs.")
@@ -308,10 +320,15 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         ctx.used_tools.append("request_takeover")
         return _dumps(await computer.request_takeover(ctx, reason, instruction))
 
-    async def web_search(query: str, count: int = 8) -> str:
-        """Search the public web. Use for facts, news, and 'what is going on'. Then web_fetch or browser_navigate the best URLs. Do not search_tools for this. For live bookings, inventory, or forms, browser_navigate the site itself instead of a Google Search URL. If it returns an error or no results, say so and never make results up. When the result has `setup`, tell the user which API key to configure. Order: Tavily (and other configured search APIs), then the computer browser, then free engines."""
+    async def web_search(query: str, count: int = 8, recency: str = "auto") -> str:
+        """Search the public web. Use for facts, news, and 'what is going on'. The top results come back WITH their page text (and often a short `answer`), so answer from them directly; read more pages only if needed with web_read (several in parallel). Recent things (news, latest, today) are filtered to recent pages automatically, or pass recency. Do not search_tools for this. For live bookings, inventory, or forms, browser_navigate the site itself instead of a Google Search URL. If it returns an error or no results, say so and never make results up. When the result has `setup`, tell the user which API key to configure. Order: Tavily (and other configured search APIs), then the computer browser, then free engines."""
         ctx.used_tools.append("web_search")
-        return _dumps(await web_tools.web_search(query, count, ctx))
+        return _dumps(await web_tools.web_search(query, count, ctx, recency=recency))
+
+    async def web_read(urls: list[str]) -> str:
+        """Read up to 5 public pages at once, in parallel, server-side (fast, short time limits; never boots the computer). Returns each page's text, or ok=false with the reason. Use after web_search when its inline page text is not enough. Never invent page content."""
+        ctx.used_tools.append("web_read")
+        return _dumps(await web_tools.web_read(ctx, list(urls or [])), 32000)
 
     async def browser_search(query: str, count: int = 8) -> str:
         """Search the web inside the live computer browser (Bing, DuckDuckGo, then Google) and return result links read from the page. Use when web_search is empty or blocked. A CAPTCHA page is reported, never solved."""
@@ -320,7 +337,7 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         return _dumps(data if data is not None else computer.computer_missing())
 
     async def web_fetch(url: str) -> str:
-        """Fetch a public http(s) page. Paints it onto the computer screen when the sandbox is available; otherwise returns page text. If the site blocks automated access it tries other ways to read the same page (Tavily's copy, proxy/hosted browser when configured, mobile/AMP version, reader, archive) and marks the copy read_only; if everything fails it returns blocked_source: name that site to the user plainly and use other sources. Never invent page content."""
+        """Fetch one public http(s) page and return its text, server-side (fast; does not need the computer). For several pages use web_read. If the site blocks automated access it tries other ways to read the same page (Tavily's copy, proxy/hosted browser when configured, mobile/AMP version, reader, archive) and marks the copy read_only; if everything fails it returns blocked_source: name that site to the user plainly and use other sources. Never invent page content."""
         ctx.used_tools.append("web_fetch")
         return _dumps(await web_tools.web_fetch(ctx, url), 32000)
 
@@ -542,7 +559,8 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         StructuredTool.from_function(coroutine=open_path, name="open_path", description=open_path.__doc__, args_schema=PathInput),
         StructuredTool.from_function(coroutine=launch_app, name="launch_app", description=launch_app.__doc__, args_schema=LaunchAppInput),
         StructuredTool.from_function(coroutine=request_takeover, name="request_takeover", description=request_takeover.__doc__, args_schema=TakeoverInput),
-        StructuredTool.from_function(coroutine=web_search, name="web_search", description=web_search.__doc__, args_schema=WebSearchInput),
+        StructuredTool.from_function(coroutine=web_search, name="web_search", description=web_search.__doc__, args_schema=WebSearchRecencyInput),
+        StructuredTool.from_function(coroutine=web_read, name="web_read", description=web_read.__doc__, args_schema=WebReadInput),
         StructuredTool.from_function(coroutine=browser_search, name="browser_search", description=browser_search.__doc__, args_schema=WebSearchInput),
         StructuredTool.from_function(coroutine=web_fetch, name="web_fetch", description=web_fetch.__doc__, args_schema=FetchInput),
         StructuredTool.from_function(coroutine=research_crawl, name="research_crawl", description=research_crawl.__doc__, args_schema=ResearchInput),

@@ -21,6 +21,9 @@ def _offline_browsing_ladder(monkeypatch):
     for step in ("tavily", "remote", "alternates", "reader", "archive"):
         monkeypatch.setitem(browsing._STEPS, step, _off)
     browsing._CACHE.clear()
+    from app.agent import web_tools
+
+    web_tools._SEARCH_CACHE.clear()
 
 
 class SkillStore:

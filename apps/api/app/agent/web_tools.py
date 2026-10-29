@@ -153,19 +153,35 @@ def _http_error(resp) -> str:
     return f"HTTP {resp.status_code}: {(resp.text or '')[:160]}"
 
 
-async def _search_tavily(q: str, limit: int, key: str) -> list[dict]:
+class Hits(list):
+    """Search hits plus the provider's short answer, when it gave one."""
+
+    answer: str = ""
+
+
+_RANGES = {"day", "week", "month", "year"}
+
+
+async def _search_tavily(q: str, limit: int, key: str, recency: str = "", news: bool = False) -> list[dict]:
     body: dict[str, Any] = {"query": q, "max_results": limit, "search_depth": "basic"}
     raw = bool(_cfg("tavily_raw_content", True))
     if raw:
         # Each result's page text comes back with the search (same credit cost on basic search). It is cached
         # briefly so web_fetch on a result is instant and does not depend on the site letting us in.
         body["include_raw_content"] = "markdown"
+    if bool(_cfg("tavily_include_answer", True)):
+        body["include_answer"] = "basic"
+    if recency in _RANGES:
+        # Recency-sensitive questions ("latest", "today", "news"): only recent pages, news index when it is news.
+        body["time_range"] = recency
+        if news:
+            body["topic"] = "news"
     resp = await _request(
         "POST",
         "https://api.tavily.com/search",
         json=body,
         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-        timeout=15.0,
+        timeout=float(_cfg("tavily_search_timeout_s", 10.0)),
     )
     if resp.status_code >= 400:
         raise RuntimeError(_http_error(resp))
@@ -176,11 +192,19 @@ async def _search_tavily(q: str, limit: int, key: str) -> list[dict]:
         for r in data.get("results") or []:
             if isinstance(r, dict) and r.get("url") and r.get("raw_content"):
                 cache_put(str(r["url"]), str(r.get("title") or ""), str(r["raw_content"]))
-    return [
-        {"title": str(r.get("title") or r.get("url") or "")[:200], "url": r.get("url") or "", "snippet": str(r.get("content") or "")[:400]}
+    out = Hits(
+        {
+            "title": str(r.get("title") or r.get("url") or "")[:200],
+            "url": r.get("url") or "",
+            "snippet": str(r.get("content") or "")[:400],
+            **({"published": str(r["published_date"])[:40]} if r.get("published_date") else {}),
+            **({"_raw": str(r["raw_content"])[:8000]} if raw and r.get("raw_content") else {}),
+        }
         for r in data.get("results") or []
         if isinstance(r, dict) and r.get("url")
-    ]
+    )
+    out.answer = str(data.get("answer") or "").strip()[:1200]
+    return out
 
 
 async def _search_brave_api(q: str, limit: int, key: str) -> list[dict]:
@@ -354,14 +378,19 @@ def search_order() -> list[str]:
 
 
 def search_providers() -> list[tuple[str, Any]]:
-    """HTTP providers in SEARCH_ORDER (the browser stage is handled by web_search). Paid ones only when keyed."""
+    """HTTP providers in SEARCH_ORDER (the browser stage is handled by web_search). Paid ones only when keyed.
+    Each is called as fn(query, limit, **opts); only Tavily uses opts (recency, news)."""
     chain: list[tuple[str, Any]] = []
     for name in search_order():
         if name in _FREE_FNS:
-            chain.append((name, globals()[_FREE_FNS[name]]))
+            fn = globals()[_FREE_FNS[name]]
+            chain.append((name, (lambda f: (lambda q, n, **_o: f(q, n)))(fn)))
         elif name in _PAID_FNS and _key(name):
             fn, key = globals()[_PAID_FNS[name]], _key(name)
-            chain.append((name, (lambda f, k: (lambda q, n: f(q, n, k)))(fn, key)))
+            if name == "tavily":
+                chain.append((name, (lambda f, k: (lambda q, n, **o: f(q, n, k, **o) if o else f(q, n, k)))(fn, key)))
+            else:
+                chain.append((name, (lambda f, k: (lambda q, n, **_o: f(q, n, k)))(fn, key)))
     return chain
 
 
@@ -434,20 +463,92 @@ def _browser_plan(ctx, paid_left: bool) -> tuple[bool, float, str]:
     return True, max(timeout, float(_cfg("search_browser_cold_timeout_s", 120.0))), ""
 
 
-async def web_search(query: str, count: int = 8, ctx=None) -> dict:
+def _recency_opts(query: str, recency: str | None) -> dict:
+    from app.agent.fast_path import recency_for
+
+    r = str(recency or "auto").strip().lower()
+    if r in {"", "none", "any", "off", "false"}:
+        return {}
+    if r in {"d", "w", "m", "y"}:
+        r = {"d": "day", "w": "week", "m": "month", "y": "year"}[r]
+    auto_range, news = recency_for(query)
+    if r == "auto":
+        r = auto_range
+    if r not in _RANGES:
+        return {}
+    return {"recency": r, "news": news}
+
+
+_SEARCH_CACHE: dict[tuple, tuple[float, dict]] = {}
+_SEARCH_CACHE_MAX = 256
+
+
+def _inline_pages(out: dict, pages: int, chars: int) -> dict:
+    """Give the top results their page text (from the search provider), so no separate read is needed."""
+    from app.connectors.browsing import cache_get
+
+    rows = []
+    for i, hit in enumerate(out.get("results") or []):
+        hit = dict(hit)
+        raw = hit.pop("_raw", "")
+        if i < pages:
+            if not raw:
+                cached = cache_get(str(hit.get("url") or ""))
+                raw = (cached or {}).get("text") or ""
+            if raw:
+                text = re.sub(r"\n{3,}", "\n\n", str(raw)).strip()
+                hit["text"] = text[:chars] + (" …" if len(text) > chars else "")
+        rows.append(hit)
+    out["results"] = rows
+    if pages and any("text" in r for r in rows):
+        out["note_text"] = (
+            "Top results include their page text: answer from it. Read more pages only if needed, "
+            "several at once with web_read."
+        )
+    return out
+
+
+async def web_search(query: str, count: int = 8, ctx=None, recency: str | None = "auto", pages: int | None = None) -> dict:
     """Real results from the first stage that answers, or a clear error. Never invents results.
 
     Default order (SEARCH_ORDER=paid,browser,free): Tavily (then any other keyed paid API), then the same search
     in the cloud computer's real browser, then keyless HTTP engines. Each stage has a time budget.
     Verification pages are reported, never bypassed.
+
+    ``recency`` ("auto" by default, or day/week/month/year/none) filters to recent pages (Tavily time_range, news
+    topic for news). The top ``pages`` results carry their page text. Identical searches are cached briefly.
     """
-    import asyncio
+    import copy
     import time
 
     q = (query or "").strip()
     if not q:
         return {"error": "query is required", "results": []}
     limit = max(1, min(int(count or 8), 12))
+    opts = _recency_opts(q, recency)
+    n_pages = int(pages if pages is not None else _cfg("search_inline_pages", 3))
+    n_pages = max(0, min(n_pages, 5))
+    chars = int(_cfg("search_inline_chars", 2500))
+    ttl = float(_cfg("search_cache_ttl_s", 120.0))
+    key = (q.lower(), limit, opts.get("recency", ""), bool(opts.get("news")), tuple(n for n, _ in search_providers()))
+    hit = _SEARCH_CACHE.get(key)
+    if ttl > 0 and hit and time.monotonic() - hit[0] < ttl:
+        out = copy.deepcopy(hit[1])
+        out["cached"] = True
+        return _inline_pages(out, n_pages, chars)
+    out = await _web_search_uncached(q, limit, ctx, opts)
+    if ttl > 0 and out.get("results"):
+        if len(_SEARCH_CACHE) >= _SEARCH_CACHE_MAX:
+            for stale in sorted(_SEARCH_CACHE, key=lambda k: _SEARCH_CACHE[k][0])[: _SEARCH_CACHE_MAX // 4]:
+                _SEARCH_CACHE.pop(stale, None)
+        _SEARCH_CACHE[key] = (time.monotonic(), copy.deepcopy(out))
+    return _inline_pages(out, n_pages, chars)
+
+
+async def _web_search_uncached(q: str, limit: int, ctx, opts: dict) -> dict:
+    import asyncio
+    import time
+
     tried: list[str] = []
     order = search_order()
     providers = dict(search_providers())
@@ -495,7 +596,11 @@ async def web_search(query: str, count: int = 8, ctx=None) -> dict:
             continue
         t0 = time.monotonic()
         try:
-            hits = await asyncio.wait_for(search(q, limit), timeout=min(per_provider if stage == "free" else left, left))
+            hits = await asyncio.wait_for(search(q, limit, **opts), timeout=min(per_provider if stage == "free" else left, left))
+            if not hits and opts.get("recency") and name == "tavily":
+                # Nothing that recent: same search without the date filter rather than a fallback engine.
+                hits = await asyncio.wait_for(search(q, limit), timeout=max(1.0, min(left, per_provider)))
+            answer = str(getattr(hits, "answer", "") or "")
         except (asyncio.TimeoutError, TimeoutError):
             log.warning("web_search %s timed out", name)
             tried.append(f"{name}: timed out")
@@ -517,6 +622,10 @@ async def web_search(query: str, count: int = 8, ctx=None) -> dict:
             tried.append(f"{name}: no results")
             continue
         out = _ok(hits, name, started)
+        if answer:
+            out["answer"] = answer
+        if opts.get("recency"):
+            out["recency"] = opts["recency"]
         if name == "wikipedia":
             out["note"] = "Only Wikipedia answered; general web engines were unavailable. Say so if the answer needs fresher sources."
         return out
@@ -543,11 +652,40 @@ async def web_search(query: str, count: int = 8, ctx=None) -> dict:
     return out
 
 
+def _computer_fallback_ok(ctx) -> bool:
+    """May a blocked page be opened in the cloud computer's browser? Only when it is already running (no cold boot
+    inside a read), unless WEB_FETCH_BROWSER_FALLBACK=always; 'never' turns it off."""
+    if not computer_slug(ctx):
+        return False
+    policy = str(_cfg("web_fetch_browser_fallback", "warm")).lower()
+    if policy == "never":
+        return False
+    if policy == "always":
+        return True
+    return computer_warm(ctx) is True
+
+
+async def _read_server(target: str, total_s: float | None = None, step_s: float | None = None) -> dict:
+    from app.connectors.browsing import LADDER_QUICK, fetch_with_ladder
+
+    return await fetch_with_ladder(
+        target,
+        LADDER_QUICK,
+        total_s=float(total_s if total_s is not None else _cfg("web_fetch_quick_total_s", 12.0)),
+        step_s=float(step_s if step_s is not None else _cfg("web_fetch_quick_step_s", 6.0)),
+    )
+
+
 async def web_fetch(ctx, url: str) -> Any:
+    """Read one page, server-side first (Tavily copy, direct request, proxy, Tavily extract, AMP/mobile, reader),
+    with short timeouts. The cloud computer is used only for a page those cannot read, and only when the computer
+    is already running; WEB_FETCH_ON_SCREEN=true restores painting every page on the live screen."""
     target = (url or "").strip()
     if not target:
         return {"error": "url is required"}
-    if computer_slug(ctx):
+    from app.connectors.daytona_box import safe_http_url
+
+    if computer_slug(ctx) and bool(_cfg("web_fetch_on_screen", False)):
         try:
             painted = await run_computer(ctx, "web_fetch", {"url": target})
         except Exception as exc:  # noqa: BLE001
@@ -555,23 +693,94 @@ async def web_fetch(ctx, url: str) -> Any:
             painted = {"error": str(exc)[:200]}
         if not (isinstance(painted, dict) and painted.get("error")):
             return painted
-    from app.connectors.browsing import LADDER_READ, fetch_with_ladder
-    from app.connectors.daytona_box import safe_http_url
-
     try:
         target = safe_http_url(target)
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "url": target, "error": str(exc)[:200]}
     try:
-        page = await fetch_with_ladder(target, LADDER_READ)
+        page = await _read_server(target)
     except Exception as exc:  # noqa: BLE001 - a slow or dead site must not fail the whole chat turn
         log.warning("web_fetch %s failed: %s", target[:200], type(exc).__name__)
-        return {
+        page = {
             "ok": False,
             "url": target,
             "error": f"Could not fetch the page ({type(exc).__name__}: {str(exc)[:160]}). Try another source; do not invent its content.",
         }
+    if isinstance(page, dict) and page.get("ok") is False and _computer_fallback_ok(ctx):
+        try:
+            shown = await run_computer(ctx, "browser_navigate", {"url": target})
+        except Exception as exc:  # noqa: BLE001
+            log.warning("web_fetch browser fallback failed: %s", type(exc).__name__)
+            shown = None
+        if isinstance(shown, dict) and shown.get("ok", True) and not shown.get("error") and (shown.get("text") or "").strip():
+            shown.setdefault("fetched_via", "browser")
+            return shown
+    if isinstance(page, dict) and page.get("ok") is False and computer_slug(ctx):
+        page["hint"] = (
+            str(page.get("hint") or "")
+            + " Server-side copies could not read this page. Only if it is essential (other sources do not cover it), "
+            "open it with browser_navigate on the cloud computer; otherwise use other sources."
+        ).strip()
     return page
+
+
+async def web_read(ctx, urls: list[str], max_pages: int | None = None, chars: int | None = None) -> dict:
+    """Read several pages at once, in parallel, server-side, each with a short time limit. For quick answers."""
+    import asyncio
+    import time
+
+    cap = max(1, min(int(max_pages or _cfg("web_read_max_pages", 5)), 8))
+    per_chars = int(chars or _cfg("web_read_chars", 6000))
+    seen: list[str] = []
+    for u in urls or []:
+        u = str(u or "").strip()
+        if u and u not in seen:
+            seen.append(u)
+    picked = seen[:cap]
+    if not picked:
+        return {"error": "urls is required", "pages": []}
+    page_s = float(_cfg("web_read_page_timeout_s", 10.0))
+    started = time.monotonic()
+    from app.connectors.daytona_box import safe_http_url
+
+    async def one(u: str) -> dict:
+        try:
+            target = safe_http_url(u)
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "url": u, "error": str(exc)[:200]}
+        t0 = time.monotonic()
+        try:
+            page = await asyncio.wait_for(_read_server(target, total_s=page_s, step_s=min(6.0, page_s)), timeout=page_s + 1)
+        except (asyncio.TimeoutError, TimeoutError):
+            page = {"ok": False, "url": target, "error": f"timed out after {page_s:g}s; use other sources"}
+        except Exception as exc:  # noqa: BLE001
+            page = {"ok": False, "url": target, "error": f"{type(exc).__name__}: {str(exc)[:160]}"}
+        page = dict(page or {})
+        text = str(page.get("text") or "")
+        row = {
+            "ok": bool(page.get("ok", bool(text))),
+            "url": page.get("url") or target,
+            "title": page.get("title") or "",
+            "fetched_via": page.get("fetched_via") or "",
+            "ms": int((time.monotonic() - t0) * 1000),
+        }
+        if text:
+            row["text"] = text[:per_chars] + (" …" if len(text) > per_chars else "")
+        for k in ("error", "blocked_source", "read_only", "note"):
+            if page.get(k):
+                row[k] = page[k]
+        return row
+
+    pages = await asyncio.gather(*(one(u) for u in picked))
+    out: dict[str, Any] = {"pages": list(pages), "took_s": round(time.monotonic() - started, 1)}
+    if len(seen) > cap:
+        out["skipped"] = seen[cap:]
+    if any(not p.get("ok") for p in pages) and computer_slug(ctx):
+        out["hint"] = (
+            "Pages marked ok=false could not be read server-side. Use the other pages; open one with "
+            "browser_navigate only if it is essential."
+        )
+    return out
 
 
 async def generate_image(prompt: str, size: str = "1024x1024") -> dict:
