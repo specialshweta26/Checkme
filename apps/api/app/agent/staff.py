@@ -38,7 +38,7 @@ def _now(tz: str) -> datetime:
         return datetime.now(ZoneInfo("Asia/Kolkata"))
 
 
-async def dispatch(db: AsyncSession, user, runtime, tool: str, args: dict, agent=None) -> dict:
+async def dispatch(db: AsyncSession, user, runtime, tool: str, args: dict, agent=None, session_id=None) -> dict:
     if tool == "today_briefing":
         return await today_briefing(db, user, runtime, agent=agent)
     if tool == "ask_inbox":
@@ -50,7 +50,7 @@ async def dispatch(db: AsyncSession, user, runtime, tool: str, args: dict, agent
     if tool == "scan_admin":
         return await scan_admin(db, user, runtime)
     if tool == "schedule_task":
-        return await schedule_task(db, user, args, agent=agent)
+        return await schedule_task(db, user, args, agent=agent, session_id=session_id)
     if tool == "list_scheduled_tasks":
         return await list_scheduled_tasks(db, user, agent=agent)
     if tool == "update_scheduled_task":
@@ -243,7 +243,7 @@ async def scan_admin(db, user, runtime) -> dict:
     return {"added": len(saved), "items": saved}
 
 
-async def schedule_task(db, user, args: dict, agent=None) -> dict:
+async def schedule_task(db, user, args: dict, agent=None, session_id=None) -> dict:
     from app.tasks.service import create_from_prompt
 
     prompt = (args.get("prompt") or "").strip()
@@ -258,7 +258,13 @@ async def schedule_task(db, user, args: dict, agent=None) -> dict:
             return {"error": f"No agent named {name}. Leave agent_name empty to schedule it on yourself."}
         agent = named
     try:
-        task = await create_from_prompt(db, user, prompt, agent_id=getattr(agent, "id", None) if agent is not None else None)
+        task = await create_from_prompt(
+            db,
+            user,
+            prompt,
+            agent_id=getattr(agent, "id", None) if agent is not None else None,
+            chat_session_id=session_id,
+        )
     except ValueError as exc:
         return {"error": str(exc)}
     return {"created": True, "task": task}

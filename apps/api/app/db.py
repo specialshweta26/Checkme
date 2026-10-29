@@ -69,6 +69,13 @@ async def _migrate() -> None:
         )
         await conn.execute(text("ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS agent_id UUID"))
         await conn.execute(text("ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS group_id UUID"))
+        await conn.execute(
+            text(
+                "ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS "
+                "chat_session_id UUID REFERENCES chat_sessions(id) ON DELETE SET NULL"
+            )
+        )
+        await conn.execute(text("ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS interval_minutes INTEGER"))
         await conn.execute(text("ALTER TABLE workspace_agents ADD COLUMN IF NOT EXISTS pinned BOOLEAN DEFAULT false"))
         await conn.execute(text("ALTER TABLE workspace_agents ADD COLUMN IF NOT EXISTS archived BOOLEAN DEFAULT false"))
         await conn.execute(text("ALTER TABLE workspace_agents ADD COLUMN IF NOT EXISTS unread BOOLEAN DEFAULT false"))

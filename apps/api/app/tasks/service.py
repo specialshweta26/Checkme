@@ -30,6 +30,7 @@ def serialize(task: ScheduledTask, tz: str, *, agent_name: str = "", agent_color
         "instruction": task.instruction,
         "prompt": task.prompt,
         "schedule_kind": task.schedule_kind,
+        "interval_minutes": task.interval_minutes,
         "schedule_label": task.schedule_label,
         "next_run_at": task.next_run_at.isoformat() if task.next_run_at else None,
         "next_run_label": format_local(task.next_run_at, tz) if task.next_run_at else "—",
@@ -68,7 +69,7 @@ async def agent_for_task(db: AsyncSession, user: User, task: ScheduledTask):
 
 
 async def create_from_prompt(
-    db: AsyncSession, user: User, prompt: str, *, require_time: bool = False, agent_id=None
+    db: AsyncSession, user: User, prompt: str, *, require_time: bool = False, agent_id=None, chat_session_id=None
 ) -> dict | None:
     text = (prompt or "").strip()
     if not text:
@@ -89,10 +90,12 @@ async def create_from_prompt(
         instruction=parsed["instruction"],
         prompt=text,
         schedule_kind=parsed["schedule_kind"],
+        interval_minutes=parsed.get("interval_minutes"),
         schedule_label=parsed["schedule_label"],
         next_run_at=parsed["next_run_at"].astimezone(timezone.utc),
         status="active",
         connected_apps=await infer_apps(db, user, text),
+        chat_session_id=chat_session_id,
     )
     db.add(task)
     await db.commit()
@@ -202,7 +205,9 @@ def advance(task: ScheduledTask, tz: str = "UTC") -> None:
     nxt = as_local(task.next_run_at or datetime.now(timezone.utc), tz)
     now = as_local(datetime.now(timezone.utc), tz)
     while nxt <= now:
-        if task.schedule_kind == "weekly":
+        if task.schedule_kind == "interval":
+            nxt += timedelta(minutes=max(1, task.interval_minutes or 1))
+        elif task.schedule_kind == "weekly":
             nxt += timedelta(days=7)
         else:
             nxt += timedelta(days=1)
@@ -254,14 +259,17 @@ async def execute_task(db: AsyncSession, user: User, task: ScheduledTask, *, fro
         + (task.instruction or task.prompt)
     )
     agent = await agent_for_task(db, user, task)
-    sess = ChatSession(
-        user_id=user.id,
-        title=f"Task · {task.title}"[:200],
-        state={"scheduled_task_id": str(task.id)},
-        agent_id=agent.id,
-    )
-    db.add(sess)
-    await db.flush()
+    sess = await db.get(ChatSession, task.chat_session_id) if task.chat_session_id else None
+    if sess is None or sess.user_id != user.id or sess.agent_id != agent.id:
+        sess = ChatSession(
+            user_id=user.id,
+            title=f"Task · {task.title}"[:200],
+            state={"scheduled_task_id": str(task.id)},
+            agent_id=agent.id,
+        )
+        db.add(sess)
+        await db.flush()
+        task.chat_session_id = sess.id
     request_id = random_token(12)
     try:
         result = await run_deep_agent(

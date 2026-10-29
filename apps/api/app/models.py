@@ -380,10 +380,14 @@ class ScheduledTask(Base):
     agent_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("workspace_agents.id", ondelete="CASCADE"), index=True
     )
+    chat_session_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("chat_sessions.id", ondelete="SET NULL"), index=True
+    )
     title: Mapped[str] = mapped_column(String(200))
     instruction: Mapped[str] = mapped_column(Text)
     prompt: Mapped[str] = mapped_column(Text, default="")
     schedule_kind: Mapped[str] = mapped_column(String(20), default="once")
+    interval_minutes: Mapped[int | None] = mapped_column(Integer)
     schedule_label: Mapped[str] = mapped_column(String(120), default="")
     next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

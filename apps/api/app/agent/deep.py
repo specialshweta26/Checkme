@@ -1509,7 +1509,7 @@ async def run_staff(ctx: RunContext, name: str, args: dict | None = None) -> Any
     }:
         return {"error": "No mail connector is enabled for this user."}
     try:
-        result = await staff_dispatch(ctx.db, ctx.user, runtime, name, as_dict(args), agent=ctx.agent)
+        result = await staff_dispatch(ctx.db, ctx.user, runtime, name, as_dict(args), agent=ctx.agent, session_id=ctx.session_id)
         ctx.sources.append({"source_tool": name, "args": as_dict(args), "snippet": compact_payload(result, 2000)})
         return compact_payload(result)
     except Exception as exc:  # noqa: BLE001

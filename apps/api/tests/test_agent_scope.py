@@ -19,7 +19,7 @@ from app.agents.scope import (
     choose_default_agent,
     owner_by_user,
 )
-from app.models import ChatSession, MemoryBlock, MemoryPassage, ScheduledTask, User, WorkspaceAgent
+from app.models import ChatMessage, ChatSession, MemoryBlock, MemoryPassage, ScheduledTask, User, WorkspaceAgent
 from app.tasks.service import create_from_prompt, execute_task
 
 
@@ -333,6 +333,7 @@ async def test_execute_task_runs_as_owning_agent(monkeypatch):
     home = _agent(user, "Home")
     dev = _agent(user, "Dev")
     captured = []
+    home_chat = ChatSession(id=uuid.uuid4(), user_id=user.id, title="Tony chat", state={}, agent_id=home.id)
 
     async def fake_run(*_args, **kwargs):
         captured.append(kwargs)
@@ -361,6 +362,8 @@ async def test_execute_task_runs_as_owning_agent(monkeypatch):
         async def get(self, model, ident):
             if model is WorkspaceAgent:
                 return self.agents.get(ident)
+            if model is ChatSession and ident == home_chat.id:
+                return home_chat
             return None
 
     db = _DB()
@@ -377,12 +380,15 @@ async def test_execute_task_runs_as_owning_agent(monkeypatch):
             status="active",
             connected_apps=[],
             run_count=0,
+            chat_session_id=home_chat.id if owner is home else None,
         )
         await execute_task(db, user, task, from_scheduler=False)
     assert [item["workspace_agent"].name for item in captured] == ["Home", "Dev"]
     assert all(item["auto_confirm"] is True for item in captured)
     sessions = [obj for obj in db.added if isinstance(obj, ChatSession)]
-    assert [session.agent_id for session in sessions] == [home.id, dev.id]
+    assert [session.agent_id for session in sessions] == [dev.id]
+    messages = [obj for obj in db.added if isinstance(obj, ChatMessage)]
+    assert messages and {message.session_id for message in messages if message.user_id == user.id} >= {home_chat.id}
 
 
 @pytest.mark.asyncio
