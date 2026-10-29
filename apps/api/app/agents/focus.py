@@ -1,8 +1,7 @@
-"""Per-agent focus areas picked on a new agent's first screen.
+"""Legacy per-agent focus areas and their optional system-prompt guidance.
 
-The onboarding card in chat ("What would you most like a hand with?") offers these, in
-order, as A–D. Picking one stores ``WorkspaceAgent.focus``; the deep agent then gets the
-focus prompt (and, for coding, extra plan-and-build tools) on every turn.
+New agents now get role-specific onboarding generated from their profile. The stored
+focus field remains for existing agents that previously chose one of these areas.
 """
 
 from __future__ import annotations
@@ -136,12 +135,13 @@ FOCUSES: dict[str, dict[str, Any]] = {
 }
 
 UNSET_PROMPT = (
-    "Your focus area is not set yet. This user just created you and was asked what they would most like a hand with: "
-    "Email and calendar, Coding and deployments, Research and writing, or Errands and bookings. If their message says what "
-    "they want help with, call set_my_focus with the closest key (email_calendar, coding, research, errands), then reply "
-    "warmly in two or three sentences: confirm what you will focus on, name one or two concrete things you can do, and ask "
-    "for the first task (or start it if they already gave one). If it fits none of these, use update_agent to set your title "
-    "and instructions instead."
+    "You are a newly created agent. Infer your role from your name, title, and any instructions; do not present a fixed "
+    "menu of preset categories. In your first reply, introduce yourself naturally, ask one or two specific questions about "
+    "the user's desired outcome and working preferences, and offer one or two relevant ways to begin. When the user names "
+    "a repeatable process, offer to save it as an agent-only skill with save_skill. When they describe work that should "
+    "happen later or recur, use schedule_task. Ask only for details needed to make the task useful, then help create it. "
+    "Use chat history to avoid repeating the introduction after it has happened. Do not claim a skill or scheduled task "
+    "was created until its tool succeeds."
 )
 
 
@@ -192,7 +192,7 @@ def focus_prompt(agent) -> str:
     if (
         agent is not None
         and (getattr(agent, "kind", "custom") or "custom") != "default"
-        and not (getattr(agent, "instructions", "") or "").strip()
+        and not (getattr(agent, "focus", "") or "").strip()
     ):
         return UNSET_PROMPT + "\n"
     return ""

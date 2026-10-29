@@ -4,6 +4,7 @@ import { DeployPlatforms } from "../components/DeployPlatforms";
 import { FormEvent, memo, useCallback, useEffect, useMemo, useState } from "react";
 import { AppShell } from "../components/AppShell";
 import { WhatsAppConnect } from "../components/WhatsAppConnect";
+import { AgentAvatar } from "../components/AgentAvatar";
 import {
   assignConnectorAgents,
   assignToolkitAgents,
@@ -542,9 +543,7 @@ function AgentAssign({
                 );
               }}
             />
-            <span className="agent-avatar tiny" style={{ background: agent.color }}>
-              {(agent.name || "?").slice(0, 1).toUpperCase()}
-            </span>
+            <AgentAvatar name={agent.name} color={agent.color} avatar={agent.avatar} className="agent-avatar tiny" />
             <span className="agent-check-name">{agent.name}</span>
           </label>
         );

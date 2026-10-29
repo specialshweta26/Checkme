@@ -174,6 +174,7 @@ class WorkspaceAgent(Base):
     # Focus picked on the agent's first screen: email_calendar | coding | research | errands | "" (see agents/focus.py)
     focus: Mapped[str] = mapped_column(String(40), default="")
     color: Mapped[str] = mapped_column(String(16), default="#f97316")
+    avatar: Mapped[str] = mapped_column(Text, default="")
     kind: Mapped[str] = mapped_column(String(20), default="custom")  # default | custom
     pinned: Mapped[bool] = mapped_column(Boolean, default=False)
     archived: Mapped[bool] = mapped_column(Boolean, default=False)

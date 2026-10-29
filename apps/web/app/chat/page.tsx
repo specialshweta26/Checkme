@@ -7,10 +7,11 @@ import { chatAttachments, ComputerIcon, computerFromMeta, ScreenRail } from "../
 import { cardsFromMeta, ConnectCards } from "../components/ConnectCard";
 import { EmailThreadButton, mailRefsFromMeta } from "../components/EmailThread";
 import { Markdown } from "../components/Markdown";
-import { dismissFocusCard, focusCardDismissed, FocusOnboarding, type FocusOption } from "../components/FocusCard";
+import { dismissFocusCard, focusCardDismissed, FocusOnboarding } from "../components/FocusCard";
+import { AgentAvatar } from "../components/AgentAvatar";
 import { JobTimeline } from "../components/JobTimeline";
 import { Thinking } from "../components/Thinking";
-import { announceWorkspaceChanged, chatHref, updateAgent, deleteSession, getMe, listSessions, loadSession, rememberScope, uploadFiles, startTeaching, stopTeaching, type ChatSessionRow, type Me, type UploadedFile, type WorkspaceRoster } from "../lib";
+import { announceWorkspaceChanged, chatHref, deleteSession, getMe, listSessions, loadSession, rememberScope, uploadFiles, startTeaching, stopTeaching, type ChatSessionRow, type Me, type UploadedFile, type WorkspaceRoster } from "../lib";
 
 const STORE = "assistant.session";
 
@@ -348,6 +349,7 @@ export default function ChatPage() {
             agent_id: item.agent_id,
             agent_name: item.agent_name,
             agent_color: item.agent_color,
+            agent_avatar: item.agent_avatar,
             peer: true,
             used_tools: item.used_tools,
             computer: item.computer,
@@ -488,6 +490,7 @@ export default function ChatPage() {
   const activeGroup = roster.groups.find((g) => g.id === groupId) || null;
   const screenName = activeGroup?.name || activeAgent?.name || "Chief";
   const screenColor = activeGroup?.members[0]?.color || activeAgent?.color || "#f97316";
+  const screenAvatar = activeGroup?.members[0]?.avatar || activeAgent?.avatar || "";
   const ownerName = activeGroup?.owner_id
     ? activeGroup.members.find((m) => m.id === activeGroup.owner_id)?.name
     : activeGroup?.members[0]?.name;
@@ -500,7 +503,6 @@ export default function ChatPage() {
     !activeGroup &&
       activeAgent &&
       (activeAgent.kind || "custom") !== "default" &&
-      !activeAgent.focus &&
       !focusHidden[activeAgent.id] &&
       !focusCardDismissed(activeAgent.id),
   );
@@ -510,18 +512,6 @@ export default function ChatPage() {
     setFocusHidden((all) => ({ ...all, [id]: true }));
   }
 
-  async function pickFocus(option: FocusOption) {
-    if (!activeAgent) return;
-    const id = activeAgent.id;
-    try {
-      const updated = await updateAgent(id, { focus: option.key });
-      setRoster((r) => ({ ...r, agents: r.agents.map((a) => (a.id === id ? updated : a)) }));
-      announceWorkspaceChanged();
-    } catch {
-      // The agent can still set its own focus from the answer (set_my_focus).
-    }
-    hideFocusCard(id);
-  }
   const scopedSessions = sessions.filter((s) => sessionInScopeRow(s, agentId, groupId));
   const computer = [...messages].reverse().map((m) => computerFromMeta(m.meta)).find(Boolean) || null;
 
@@ -610,6 +600,7 @@ export default function ChatPage() {
       headline={screenName}
       headlineMeta={screenMeta}
       headlineColor={screenColor}
+      headlineAvatar={screenAvatar}
       computerOpen={screenOpen}
       computerLive={Boolean(watching || controlling || computer?.live)}
       onToggleComputer={() => setScreenOpen((open) => !open)}
@@ -667,15 +658,11 @@ export default function ChatPage() {
           {activeGroup ? (
             <span className="group-stack chat-head-face" aria-hidden>
               {activeGroup.members.slice(0, 3).map((m) => (
-                <span key={m.id} className="agent-avatar tiny" style={{ background: m.color }}>
-                  {(m.name || "?").slice(0, 1).toUpperCase()}
-                </span>
+                <AgentAvatar key={m.id} name={m.name} color={m.color} avatar={m.avatar} className="agent-avatar tiny" />
               ))}
             </span>
           ) : (
-            <span className="agent-avatar chat-head-face" style={{ background: screenColor }}>
-              {screenName.slice(0, 1).toUpperCase()}
-            </span>
+            <AgentAvatar name={screenName} color={screenColor} avatar={screenAvatar} className="agent-avatar chat-head-face" />
           )}
           <div className="chat-head-copy">
             <strong>{screenName}</strong>
@@ -696,28 +683,29 @@ export default function ChatPage() {
             {notice ? <p className="notice">{notice}</p> : null}
             {messages.length === 0 && !busyHere && showFocusCard && activeAgent ? (
               <FocusOnboarding
+                agentId={activeAgent.id}
                 userName={firstName(me)}
                 agentName={activeAgent.name}
+                agentTitle={activeAgent.title}
                 agentColor={activeAgent.color}
+                agentAvatar={activeAgent.avatar}
                 disabled={busyHere}
-                onPick={(opt) => void pickFocus(opt)}
+                onPick={(prompt) => send(prompt)}
                 onDismiss={() => hideFocusCard(activeAgent.id)}
               />
             ) : null}
-            {messages.length === 0 && !busyHere ? (
-              <div className={showFocusCard ? "welcome welcome-after-onboard" : "welcome"}>
-                {showFocusCard ? null : (
-                  <>
-                    <h1>{hello}</h1>
-                    <p>
-                      {activeGroup
-                        ? `${firstName(me)} set this group up. The kickoff owner introduces proposed roles, then each bot replies as itself. @ one bot, or @everyone, and they talk to each other in this thread.`
-                        : activeAgent?.suggested_tasks?.length
-                          ? `${activeAgent.name} is ready to work. Pick a useful first task, or describe a different one below.`
-                          : "Here's what's happening today — brief the inbox, ask a connected system, or schedule a send."}
-                    </p>
-                  </>
-                )}
+            {messages.length === 0 && !busyHere && !showFocusCard ? (
+              <div className="welcome">
+                <h1>{hello}</h1>
+                <p>
+                  {activeGroup
+                    ? `${firstName(me)} set this group up. The kickoff owner introduces proposed roles, then each bot replies as itself. @ one bot, or @everyone, and they talk to each other in this thread.`
+                    : activeAgent?.suggested_tasks?.length
+                      ? `${activeAgent.name} is ready to work. Pick a useful first task, or describe a different one below.`
+                      : activeAgent?.kind !== "default" && activeAgent
+                        ? `${activeAgent.name} is ready to help. Tell it what outcome you want, or choose an idea below.`
+                        : "Here's what's happening today — brief the inbox, ask a connected system, or schedule a send."}
+                </p>
                 <div className="hero-cards">
                   {activeGroup ? (
                     <>
@@ -755,6 +743,12 @@ export default function ChatPage() {
                         <span>{task.prompt}</span>
                       </button>
                     ))
+                  ) : activeAgent?.kind !== "default" && activeAgent ? (
+                    <button className="hero-card" onClick={() => send(`Help me choose a useful first task for you as ${activeAgent.title || activeAgent.name}. Ask one or two questions to understand the outcome I want.`)}>
+                      <span className="mark" />
+                      <strong>Choose a useful first task</strong>
+                      <span>Start a conversation about the outcomes you want this agent to own.</span>
+                    </button>
                   ) : (
                     <>
                       <button className="hero-card" onClick={() => send("What matters today? Give me my chief of staff briefing.")}>
@@ -787,9 +781,7 @@ export default function ChatPage() {
                 <div key={i} className={`turn assistant${m.meta?.agent_name ? " speaker" : ""}`}>
                   {m.meta?.agent_name ? (
                     <div className="agent-chip">
-                      <span className="agent-avatar tiny" style={{ background: m.meta.agent_color || "#f97316" }}>
-                        {String(m.meta.agent_name).slice(0, 1)}
-                      </span>
+                      <AgentAvatar name={String(m.meta.agent_name)} color={m.meta.agent_color || "#f97316"} avatar={m.meta.agent_avatar} className="agent-avatar tiny" />
                       {m.meta.agent_name}
                     </div>
                   ) : null}

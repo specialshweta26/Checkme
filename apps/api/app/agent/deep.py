@@ -2892,6 +2892,7 @@ async def _ask_teammate(ctx: RunContext, agent_id: str, prompt: str) -> dict:
         "agent_id": str(member.id),
         "agent_name": member.name,
         "agent_color": getattr(member, "color", "") or "",
+        "agent_avatar": getattr(member, "avatar", "") or "",
         "peer": True,
         "used_tools": nested.get("used_tools") or [],
         "computer": nested.get("computer") or {},
@@ -3245,6 +3246,7 @@ async def run_deep_agent(
             "id": str(workspace_agent.id),
             "name": workspace_agent.name,
             "color": getattr(workspace_agent, "color", "") or "",
+            "avatar": getattr(workspace_agent, "avatar", "") or "",
             "title": getattr(workspace_agent, "title", "") or "",
         }
     return {

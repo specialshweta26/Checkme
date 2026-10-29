@@ -30,11 +30,29 @@ import {
   type WorkspaceRoster,
 } from "../lib";
 import { SkillDetail, SkillStatusChip } from "./SkillDetail";
+import { AgentAvatar } from "./AgentAvatar";
 
 type Ctx = { kind: "agent" | "group"; id: string; x: number; y: number };
 
 const HOLD_MS = 500;
 const HOLD_MOVE_PX = 12;
+const AVATAR_ICONS = ["✦", "●", "◆", "✿", "⬟", "☼", "♥", "✧", "✳", "◈", "☻", "✺"];
+const AGENT_COLORS = ["#111111", "#8b5e3c", "#f43f5e", "#f97316", "#eab308", "#10b981", "#14b8a6", "#2f6bff", "#8b5cf6", "#ec4899", "#737373"];
+
+async function avatarFromFile(file: File): Promise<string> {
+  const bitmap = await createImageBitmap(file);
+  const scale = Math.min(1, 256 / Math.max(bitmap.width, bitmap.height));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+  canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("Could not prepare that image.");
+  context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  bitmap.close();
+  const image = canvas.toDataURL("image/webp", 0.82);
+  if (image.length > 600_000) throw new Error("Choose a smaller image.");
+  return image;
+}
 
 function menuPoint(x: number, y: number) {
   const width = Math.min(260, window.innerWidth - 16);
@@ -155,6 +173,8 @@ export function AgentsNav({
   const [name, setName] = useState("");
   const [title, setTitle] = useState("");
   const [instructions, setInstructions] = useState("");
+  const [avatar, setAvatar] = useState(AVATAR_ICONS[0]);
+  const [color, setColor] = useState("#10b981");
   const [picked, setPicked] = useState<string[]>([]);
   const [outcome, setOutcome] = useState("");
   const [ownerId, setOwnerId] = useState("");
@@ -232,6 +252,8 @@ export function AgentsNav({
     setName("");
     setTitle("");
     setInstructions("");
+    setAvatar(AVATAR_ICONS[0]);
+    setColor("#10b981");
     setPicked([]);
     setOutcome("");
     setOwnerId("");
@@ -253,6 +275,8 @@ export function AgentsNav({
     setName(agent.name);
     setTitle(agent.title || "");
     setInstructions(agent.instructions || "");
+    setAvatar(agent.avatar || "");
+    setColor(agent.color || "#10b981");
     setForm("edit");
     setCtx(null);
     listSkills(agent.id)
@@ -300,37 +324,13 @@ export function AgentsNav({
     e.preventDefault();
     e.stopPropagation();
     if (saving) return;
-    if (Boolean(skillName.trim()) !== Boolean(skillHint.trim())) {
-      setError("Enter both the starter skill name and instructions, or leave both blank.");
-      return;
-    }
     setSaving(true);
     setError("");
     try {
-      const initialSkillName = skillName.trim();
-      const initialSkillHint = skillHint.trim();
-      const row = await createAgent({ name, title, instructions });
-      let skillSaveError = "";
-      if (initialSkillName && initialSkillHint) {
-        try {
-          await saveSkill({ name: initialSkillName, agent_id: row.id, instruction: initialSkillHint });
-        } catch (err: any) {
-          skillSaveError = `Starter skill could not be saved: ${err.message || "try again"}`;
-        }
-      }
+      const row = await createAgent({ name, color, avatar });
       resetForm();
       await refresh();
       onSelectAgent?.(row.id);
-      if (skillSaveError) {
-        setEditingId(row.id);
-        setName(row.name);
-        setTitle(row.title || "");
-        setInstructions(row.instructions || "");
-        setSkillName(initialSkillName);
-        setSkillHint(initialSkillHint);
-        setForm("edit");
-        setError(skillSaveError);
-      }
     } catch (err: any) {
       setError(err.message || "Could not create agent");
       setSaving(false);
@@ -344,7 +344,7 @@ export function AgentsNav({
     setSaving(true);
     setError("");
     try {
-      await updateAgent(editingId, { name, title, instructions });
+      await updateAgent(editingId, { name, title, instructions, color, avatar });
       resetForm();
       await refresh();
     } catch (err: any) {
@@ -616,7 +616,7 @@ export function AgentsNav({
             onClick={(e) => e.stopPropagation()}
             onSubmit={form === "connectors" ? (e) => e.preventDefault() : form === "group" ? onCreateGroup : form === "edit" ? onEditAgent : onCreateAgent}
           >
-            <h3>{form === "group" ? "New group" : form === "edit" ? "Edit profile" : form === "connectors" ? "Connectors" : "New agent"}</h3>
+            <h3>{form === "group" ? "New group" : form === "edit" ? "Edit profile" : form === "connectors" ? "Connectors" : "Create new bot"}</h3>
             {error ? <p className="err">{error}</p> : null}
             {form === "connectors" && editingId ? (
               <ConnectorPicker
@@ -648,8 +648,51 @@ export function AgentsNav({
               <>
                 <label>
                   Name
-                  <input value={name} onChange={(e) => setName(e.target.value)} required maxLength={80} placeholder={form === "group" ? "Ops team" : "Researcher"} />
+                  <input value={name} onChange={(e) => setName(e.target.value)} required maxLength={80} placeholder={form === "group" ? "Ops team" : "Name your bot"} />
                 </label>
+                {form !== "group" ? (
+                  <div className="agent-avatar-editor">
+                    <div className="agent-avatar-preview">
+                      <AgentAvatar name={name} color={color} avatar={avatar} className="agent-avatar large" />
+                      <span>{form === "edit" ? "Avatar" : "Choose an icon and color"}</span>
+                    </div>
+                    <fieldset>
+                      <legend>Icon</legend>
+                      <div className="avatar-icon-grid">
+                        {AVATAR_ICONS.map((icon) => (
+                          <button key={icon} type="button" className={avatar === icon ? "selected" : ""} aria-pressed={avatar === icon} onClick={() => setAvatar(icon)}>
+                            {icon}
+                          </button>
+                        ))}
+                      </div>
+                      <span className="avatar-field-label">Color</span>
+                      <div className="avatar-color-grid">
+                        {AGENT_COLORS.map((swatch) => (
+                          <button key={swatch} type="button" className={color.toLowerCase() === swatch ? "selected" : ""} style={{ backgroundColor: swatch }} aria-label={`Choose ${swatch}`} aria-pressed={color.toLowerCase() === swatch} onClick={() => setColor(swatch)} />
+                        ))}
+                      </div>
+                      <div className="avatar-editor-actions">
+                        <button type="button" className="btn secondary" onClick={() => {
+                          setAvatar(AVATAR_ICONS[Math.floor(Math.random() * AVATAR_ICONS.length)]);
+                          setColor(AGENT_COLORS[Math.floor(Math.random() * AGENT_COLORS.length)]);
+                        }}>Generate avatar</button>
+                        <label className="btn secondary avatar-upload">
+                          Upload from device
+                          <input type="file" accept="image/png,image/jpeg,image/webp" onChange={async (event) => {
+                            const file = event.currentTarget.files?.[0];
+                            event.currentTarget.value = "";
+                            if (!file) return;
+                            try {
+                              setAvatar(await avatarFromFile(file));
+                            } catch (err: any) {
+                              setError(err.message || "Could not use that image");
+                            }
+                          }} />
+                        </label>
+                      </div>
+                    </fieldset>
+                  </div>
+                ) : null}
                 {form === "group" ? (
                   <>
                     <label>
@@ -704,14 +747,16 @@ export function AgentsNav({
                   </>
                 ) : (
                   <>
-                    <label>
-                      Title
-                      <input value={title} onChange={(e) => setTitle(e.target.value)} maxLength={80} placeholder="analyst" />
-                    </label>
-                    <label>
-                      Instructions
-                      <textarea value={instructions} onChange={(e) => setInstructions(e.target.value)} rows={5} placeholder="How this agent should work…" />
-                    </label>
+                    {form === "edit" ? <>
+                      <label>
+                        Title
+                        <input value={title} onChange={(e) => setTitle(e.target.value)} maxLength={80} placeholder="analyst" />
+                      </label>
+                      <label>
+                        Instructions
+                        <textarea value={instructions} onChange={(e) => setInstructions(e.target.value)} rows={5} placeholder="How this agent should work…" />
+                      </label>
+                    </> : null}
                     {form === "edit" && editingId ? (
                       <>
                         <SkillEditor
@@ -737,19 +782,6 @@ export function AgentsNav({
                           ) : <p className="muted">Memory could not be loaded.</p>}
                         </details>
                       </>
-                    ) : form === "agent" ? (
-                      <fieldset>
-                        <legend>Starter skill (optional)</legend>
-                        <p className="muted">Give this agent a reusable procedure. It will be available only to this agent.</p>
-                        <label>
-                          Skill name
-                          <input value={skillName} onChange={(e) => setSkillName(e.target.value)} maxLength={160} placeholder="Weekly competitor review" />
-                        </label>
-                        <label>
-                          How to do it
-                          <textarea value={skillHint} onChange={(e) => setSkillHint(e.target.value)} rows={3} placeholder="Sources to check, steps to follow, and how to report the result…" />
-                        </label>
-                      </fieldset>
                     ) : null}
                   </>
                 )}
@@ -847,9 +879,7 @@ function AgentRow({
           window.location.assign(href);
         }}
       >
-        <span className="agent-avatar" style={{ background: agent.color }}>
-          {(agent.name || "?").slice(0, 1).toUpperCase()}
-        </span>
+        <AgentAvatar name={agent.name} color={agent.color} avatar={agent.avatar} />
         <span className="agent-copy">
           <strong>
             {agent.pinned ? <span className="agent-pin" aria-hidden /> : null}
@@ -1190,9 +1220,7 @@ function GroupStack({ members }: { members: WorkspaceAgent[] }) {
   return (
     <span className="group-stack" aria-hidden>
       {shown.map((m) => (
-        <span key={m.id} className="agent-avatar tiny" style={{ background: m.color }}>
-          {(m.name || "?").slice(0, 1).toUpperCase()}
-        </span>
+        <AgentAvatar key={m.id} name={m.name} color={m.color} avatar={m.avatar} className="agent-avatar tiny" />
       ))}
     </span>
   );

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+import re
 
 from sqlalchemy import delete as sql_delete, select, update
 from sqlalchemy.exc import IntegrityError
@@ -32,6 +33,7 @@ AGENT_COLORS = ("#f97316", "#2f6bff", "#10b981", "#8b5cf6", "#ec4899", "#eab308"
 NAME_MAX = 80
 INSTRUCTIONS_MAX = 8000
 OUTCOME_MAX = 400
+AVATAR_MAX = 600_000
 
 
 class AgentError(ValueError):
@@ -43,6 +45,19 @@ def _clean_focus(value) -> str:
         return normalize_focus(value)
     except ValueError as exc:
         raise AgentError(str(exc)) from exc
+
+
+def _clean_avatar(value) -> str:
+    raw = str(value or "").strip()
+    if len(raw) > AVATAR_MAX:
+        raise AgentError("Avatar image is too large. Choose an image under 400 KB.")
+    if raw.startswith("data:image/"):
+        if not re.fullmatch(r"data:image/(?:webp|png|jpeg);base64,[A-Za-z0-9+/]+={0,2}", raw):
+            raise AgentError("Use a PNG, JPEG, or WebP avatar image.")
+        return raw
+    if len(raw) > 16:
+        raise AgentError("Choose one of the available avatar icons or upload an image.")
+    return raw
 
 
 def pick_color(index: int) -> str:
@@ -59,6 +74,7 @@ def serialize_agent(row: WorkspaceAgent) -> dict:
         "focus_label": focus_label(getattr(row, "focus", "") or ""),
         "suggested_tasks": suggested_tasks(getattr(row, "focus", "") or ""),
         "color": row.color or DEFAULT_AGENT_COLOR,
+        "avatar": getattr(row, "avatar", "") or "",
         "kind": row.kind or "custom",
         "pinned": bool(getattr(row, "pinned", False)),
         "archived": bool(getattr(row, "archived", False)),
@@ -342,6 +358,7 @@ async def create_agent(db: AsyncSession, user: User, body: dict) -> WorkspaceAge
         instructions=_clean_instructions(body.get("instructions") or ""),
         focus=_clean_focus(body.get("focus")),
         color=str(body.get("color") or pick_color(count)),
+        avatar=_clean_avatar(body.get("avatar") or ""),
         kind="custom",
     )
     db.add(row)
@@ -381,6 +398,8 @@ async def update_agent(db: AsyncSession, user: User, agent_id: uuid.UUID, body: 
             row.title = FOCUSES[row.focus]["title"]
     if body.get("color"):
         row.color = str(body["color"])[:16]
+    if "avatar" in body and body["avatar"] is not None:
+        row.avatar = _clean_avatar(body["avatar"])
     if "pinned" in body and body["pinned"] is not None:
         row.pinned = bool(body["pinned"])
     if "archived" in body and body["archived"] is not None:
@@ -492,7 +511,7 @@ async def duplicate_agent(db: AsyncSession, user: User, agent_id: uuid.UUID) -> 
     row = await create_agent(
         db,
         user,
-        {"name": name, "title": src.title or "", "instructions": src.instructions or "", "focus": getattr(src, "focus", "") or "", "color": src.color},
+        {"name": name, "title": src.title or "", "instructions": src.instructions or "", "focus": getattr(src, "focus", "") or "", "color": src.color, "avatar": getattr(src, "avatar", "") or ""},
     )
     links = (await db.execute(select(AgentConnector).where(AgentConnector.agent_id == src.id))).scalars().all()
     for link in links:

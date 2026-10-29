@@ -18,6 +18,7 @@ import {
 } from "../lib";
 import { AgentsNav } from "./AgentsNav";
 import { BrandMark } from "./BrandMark";
+import { AgentAvatar } from "./AgentAvatar";
 
 type Nav = "chat" | "inbox" | "tasks" | "connectors";
 
@@ -151,6 +152,7 @@ export function AppShell({
   headline,
   headlineMeta,
   headlineColor,
+  headlineAvatar,
   onToggleComputer,
   computerOpen,
   computerLive,
@@ -174,6 +176,7 @@ export function AppShell({
   headline?: string;
   headlineMeta?: string;
   headlineColor?: string;
+  headlineAvatar?: string;
   onToggleComputer?: () => void;
   computerOpen?: boolean;
   computerLive?: boolean;
@@ -423,9 +426,7 @@ export function AppShell({
         <header className="topbar">
           <button className="ghost topbar-who" type="button" onClick={() => setOpen(true)} aria-label="Open menu">
             {headlineColor ? (
-              <span className="agent-avatar tiny" style={{ background: headlineColor }}>
-                {(headline || "?").slice(0, 1).toUpperCase()}
-              </span>
+              <AgentAvatar name={headline || "?"} color={headlineColor} avatar={headlineAvatar} className="agent-avatar tiny" />
             ) : (
               <BrandMark size={22} />
             )}

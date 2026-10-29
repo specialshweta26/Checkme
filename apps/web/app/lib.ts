@@ -25,6 +25,7 @@ export type WorkspaceAgent = {
   focus_label?: string;
   suggested_tasks?: { title: string; prompt: string }[];
   color: string;
+  avatar?: string;
   kind?: string;
   pinned?: boolean;
   archived?: boolean;
@@ -139,7 +140,7 @@ export function apiError(data: unknown, fallback: string) {
   return fallback;
 }
 
-export async function createAgent(body: { name: string; title?: string; instructions?: string; color?: string }) {
+export async function createAgent(body: { name: string; title?: string; instructions?: string; color?: string; avatar?: string }) {
   const res = await fetch("/api/agents", {
     method: "POST",
     credentials: "include",
@@ -178,12 +179,27 @@ export async function updateAgent(
     instructions?: string;
     focus?: string;
     color?: string;
+    avatar?: string;
     pinned?: boolean;
     archived?: boolean;
     unread?: boolean;
   },
 ) {
   return agentAction(`/api/agents/${id}`, "PATCH", body) as Promise<WorkspaceAgent>;
+}
+
+export type AgentOnboarding = {
+  greeting: string;
+  questions: string[];
+  tasks: { title: string; prompt: string }[];
+  skills: { title: string; prompt: string }[];
+};
+
+export async function getAgentOnboarding(id: string): Promise<AgentOnboarding> {
+  const res = await fetch(`/api/agents/${id}/onboarding`, { credentials: "include" });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(apiError(data, "Could not prepare agent onboarding"));
+  return data as AgentOnboarding;
 }
 
 export async function duplicateAgent(id: string) {

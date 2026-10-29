@@ -305,6 +305,7 @@ async def chat(
                 "agent_id": (result.get("speaker") or {}).get("id") if result.get("speaker") else (str(workspace_agent.id) if workspace_agent else None),
                 "agent_name": (result.get("speaker") or {}).get("name"),
                 "agent_color": (result.get("speaker") or {}).get("color"),
+                "agent_avatar": (result.get("speaker") or {}).get("avatar"),
                 "group_id": result.get("group_id"),
                 "steps": [s.get("text") for s in (progress.steps if progress else []) if s.get("kind") != "done"][:40],
                 "jobs": result.get("jobs_started") or [],
@@ -541,9 +542,11 @@ async def _start_turn(db, sess, user_id, request_id, user_text, user_meta=None, 
 
     agent_id = getattr(agent, "id", None)
     agent_name = getattr(agent, "name", None)
+    agent_avatar = getattr(agent, "avatar", "") or ""
     shared_meta = {
         "agent_id": str(agent_id) if agent_id else None,
         "agent_name": agent_name,
+        "agent_avatar": agent_avatar,
         "group_id": str(getattr(group, "id", "")) if group is not None else None,
     }
     db.add(ChatMessage(session_id=sess.id, user_id=user_id, role="user", content=user_text, meta=user_meta or {}, request_id=request_id))
@@ -586,6 +589,7 @@ async def _store(db, sess, user_id, request_id, user_text, assistant_text, meta,
                     "agent_id": item.get("agent_id"),
                     "agent_name": item.get("agent_name"),
                     "agent_color": item.get("agent_color") or "",
+                    "agent_avatar": item.get("agent_avatar") or "",
                     "peer": True,
                     "used_tools": item.get("used_tools") or [],
                     "computer": item.get("computer") or {},

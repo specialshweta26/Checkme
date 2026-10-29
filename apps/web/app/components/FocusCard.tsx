@@ -1,16 +1,10 @@
 "use client";
 
-/** Options for a new agent's first screen. Keys match apps/api/app/agents/focus.py (FOCUS_ORDER). */
-export const FOCUS_OPTIONS = [
-  { key: "email_calendar", label: "Email and calendar", answer: "I'd most like a hand with email and calendar." },
-  { key: "coding", label: "Coding and deployments", answer: "I'd most like a hand with coding and deployments." },
-  { key: "research", label: "Research and writing", answer: "I'd most like a hand with research and writing." },
-  { key: "errands", label: "Errands and bookings", answer: "I'd most like a hand with errands and bookings." },
-] as const;
+import { useEffect, useState } from "react";
+import { getAgentOnboarding, type AgentOnboarding } from "../lib";
+import { AgentAvatar } from "./AgentAvatar";
 
-export type FocusOption = (typeof FOCUS_OPTIONS)[number];
-
-const DISMISS_KEY = "checkme.focusCard.dismissed";
+const DISMISS_KEY = "checkme.agentOnboarding.dismissed";
 
 export function focusCardDismissed(agentId: string) {
   if (typeof window === "undefined") return false;
@@ -21,58 +15,83 @@ export function dismissFocusCard(agentId: string) {
   window.localStorage.setItem(`${DISMISS_KEY}.${agentId}`, "1");
 }
 
-/**
- * Greeting + "What would you most like a hand with?" card shown on a new agent's empty chat.
- * Picking an option stores the agent's focus and reveals tailored starter tasks.
- */
 export function FocusOnboarding({
+  agentId,
   userName,
   agentName,
+  agentTitle,
   agentColor,
+  agentAvatar,
   disabled,
   onPick,
   onDismiss,
 }: {
+  agentId: string;
   userName: string;
   agentName: string;
+  agentTitle?: string;
   agentColor?: string;
+  agentAvatar?: string;
   disabled?: boolean;
-  onPick: (option: FocusOption) => void;
+  onPick: (prompt: string) => void;
   onDismiss: () => void;
 }) {
+  const [data, setData] = useState<AgentOnboarding | null>(null);
+  useEffect(() => {
+    let alive = true;
+    getAgentOnboarding(agentId)
+      .then((result) => { if (alive) setData(result); })
+      .catch(() => { if (alive) setData(null); });
+    return () => { alive = false; };
+  }, [agentId]);
+
   return (
     <div className="onboard">
       <div className="turn assistant">
         <div className="agent-chip">
-          <span className="agent-avatar tiny" style={{ background: agentColor || "#f97316" }}>
-            {agentName.slice(0, 1)}
-          </span>
+          <AgentAvatar name={agentName} color={agentColor} avatar={agentAvatar} className="agent-avatar tiny" />
           {agentName}
         </div>
         <div className="onboard-hello">
-          Hi {userName}, I&apos;m {agentName}. Happy to be here, and I&apos;d love to get a sense of how I can make your days
-          easier.
+          {data?.greeting || `Hi ${userName}, I’m ${agentName}${agentTitle ? `, your ${agentTitle}` : ""}. I’m getting a few ideas ready for how I can help.`}
         </div>
       </div>
-      <div className="focus-card" role="group" aria-label="What would you most like a hand with?">
+      <div className="focus-card" role="group" aria-label={`Getting started with ${agentName}`}>
         <div className="focus-card-head">
-          <strong>What would you most like a hand with?</strong>
-          <button type="button" className="focus-card-close" aria-label="Dismiss" onClick={onDismiss}>
-            ×
-          </button>
+          <strong>{data ? "A few things we can shape together" : "Preparing ideas for this agent…"}</strong>
+          <button type="button" className="focus-card-close" aria-label="Dismiss" onClick={onDismiss}>×</button>
         </div>
-        <ul>
-          {FOCUS_OPTIONS.map((opt, i) => (
-            <li key={opt.key}>
-              <button type="button" className="focus-option" disabled={disabled} onClick={() => onPick(opt)}>
-                <span className="focus-letter">{String.fromCharCode(65 + i)}</span>
-                {opt.label}
-              </button>
-            </li>
-          ))}
-        </ul>
+        {data?.questions.length ? (
+          <ul className="agent-onboard-questions">
+            {data.questions.map((question) => <li key={question}>{question}</li>)}
+          </ul>
+        ) : null}
+        {data?.tasks.length ? (
+          <>
+            <p className="agent-onboard-label">Possible first tasks</p>
+            <div className="agent-onboard-actions">
+              {data.tasks.map((task) => (
+                <button key={task.title} type="button" className="focus-option" disabled={disabled} onClick={() => onPick(task.prompt)}>
+                  <span className="focus-letter">↗</span><span><b>{task.title}</b><small>{task.prompt}</small></span>
+                </button>
+              ))}
+            </div>
+          </>
+        ) : null}
+        {data?.skills.length ? (
+          <>
+            <p className="agent-onboard-label">Skills this agent could learn</p>
+            <div className="agent-onboard-actions">
+              {data.skills.map((skill) => (
+                <button key={skill.title} type="button" className="focus-option" disabled={disabled} onClick={() => onPick(skill.prompt)}>
+                  <span className="focus-letter">✦</span><span><b>{skill.title}</b><small>{skill.prompt}</small></span>
+                </button>
+              ))}
+            </div>
+          </>
+        ) : null}
       </div>
-      <p className="focus-hint">Pick a focus to see task ideas. They won’t run until you choose one.</p>
+      <p className="focus-hint">You can choose an idea, answer one of the questions, or tell {agentName} what you need in your own words.</p>
     </div>
   );
 }
