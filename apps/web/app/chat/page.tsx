@@ -668,6 +668,12 @@ export default function ChatPage() {
             <strong>{screenName}</strong>
             {screenMeta ? <span className="muted">{screenMeta}</span> : null}
           </div>
+          <a className="chat-task-btn" href="/tasks" aria-label="Tasks" title="Tasks">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
+              <circle cx="12" cy="12" r="8" stroke="currentColor" strokeWidth="1.8" />
+              <path d="M12 8v4.5l3 2" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+            </svg>
+          </a>
           <button
             type="button"
             className={`chat-computer-btn${screenOpen ? " on" : ""}${watching || controlling || computer?.live ? " live" : ""}`}
