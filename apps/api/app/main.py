@@ -28,6 +28,21 @@ log = logging.getLogger("assistant")
 logging.basicConfig(level=logging.INFO)
 
 
+async def _reclaim_redis_later() -> None:
+    from app.cache import reclaim_if_full
+
+    for delay in (0, 5, 15, 30, 45, 60):
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            out = await asyncio.wait_for(reclaim_if_full(), 15)
+        except Exception as vis_exc:  # noqa: BLE001
+            log.warning("redis reclaim skipped: %s", vis_exc)
+            continue
+        if out.get("ok"):
+            return
+
+
 async def _sync_builtins_later() -> None:
     await asyncio.sleep(0.2)
     try:
@@ -64,18 +79,13 @@ async def lifespan(_app: FastAPI):
         ensure_bucket()
     except Exception as vis_exc:  # noqa: BLE001
         log.warning("object storage not ready: %s", vis_exc)
-    try:
-        from app.cache import reclaim_if_full
-
-        await asyncio.wait_for(reclaim_if_full(), 20)
-    except Exception as vis_exc:  # noqa: BLE001
-        log.warning("redis reclaim skipped: %s", vis_exc)
     from app.agent.memory_worker import start_memory_worker
     from app.inbox.worker import start_inbox_worker
     from app.jobs.worker import start_job_worker
     from app.tasks.scheduler import start_scheduler
 
     workers = [
+        asyncio.create_task(_reclaim_redis_later(), name="redis-reclaim"),
         asyncio.create_task(_sync_builtins_later(), name="startup-sync"),
         await start_scheduler(),
         await start_job_worker(),
