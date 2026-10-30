@@ -57,23 +57,29 @@ def _cache_key(user_id, message_id: str, attachment_id: str) -> str:
 
 
 async def cache_attachment(user_id, message_id: str, attachment_id: str, card: dict) -> None:
-    await get_redis().set(
-        _cache_key(user_id, message_id, attachment_id),
-        json.dumps(
-            {
-                "filename": card.get("filename"),
-                "extracted_text": card.get("extracted_text") or "",
-                "download_url": card.get("download_url"),
-                "preview_url": card.get("preview_url"),
-                "kind": card.get("kind"),
-            }
-        ),
-        ex=max(86400, file_link_ttl_s()),
-    )
+    try:
+        await get_redis().set(
+            _cache_key(user_id, message_id, attachment_id),
+            json.dumps(
+                {
+                    "filename": card.get("filename"),
+                    "extracted_text": card.get("extracted_text") or "",
+                    "download_url": card.get("download_url"),
+                    "preview_url": card.get("preview_url"),
+                    "kind": card.get("kind"),
+                }
+            ),
+            ex=max(86400, file_link_ttl_s()),
+        )
+    except Exception:  # noqa: BLE001
+        return
 
 
 async def cached_attachment(user_id, message_id: str, attachment_id: str) -> dict | None:
-    raw = await get_redis().get(_cache_key(user_id, message_id, attachment_id))
+    try:
+        raw = await get_redis().get(_cache_key(user_id, message_id, attachment_id))
+    except Exception:  # noqa: BLE001
+        return None
     return json.loads(raw) if raw else None
 
 

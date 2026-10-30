@@ -1,4 +1,14 @@
-from app.llm import _as_chat_completion, _responses_tools, _split_messages, _text_format, reasoning_payload
+from types import SimpleNamespace
+
+from app.llm import (
+    _EMB_LOCAL,
+    _as_chat_completion,
+    _responses_tools,
+    _split_messages,
+    _text_format,
+    embed_texts,
+    reasoning_payload,
+)
 
 
 def test_reasoning_payload_shape():
@@ -49,3 +59,24 @@ def test_text_format_json_and_plain():
 def test_as_chat_completion_keeps_caller_shape():
     resp = _as_chat_completion("ok")
     assert resp.choices[0].message.content == "ok"
+
+
+async def test_embed_texts_uses_process_cache_not_redis(monkeypatch):
+    _EMB_LOCAL.clear()
+    calls = []
+
+    class _Emb:
+        def __init__(self, vec):
+            self.embedding = vec
+
+    class _Embeddings:
+        async def create(self, **kwargs):
+            calls.append(kwargs["input"])
+            return SimpleNamespace(data=[_Emb([0.1, 0.2]) for _ in kwargs["input"]])
+
+    monkeypatch.setattr("app.llm.openai_client", lambda: SimpleNamespace(embeddings=_Embeddings()))
+    first = await embed_texts(["hello"])
+    second = await embed_texts(["hello", "hello"])
+    assert first == [[0.1, 0.2]]
+    assert second == [[0.1, 0.2], [0.1, 0.2]]
+    assert calls == [["hello"]]

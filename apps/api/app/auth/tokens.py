@@ -22,29 +22,51 @@ class ReauthRequired(Exception):
 
 async def _cached_or_refresh(cache_key: str, refresher) -> str:
     r = get_redis()
-    hit = await r.get(cache_key)
+    try:
+        hit = await r.get(cache_key)
+    except Exception:  # noqa: BLE001
+        hit = None
     if hit:
         return hit.decode()
     lock = f"lock:{cache_key}"
-    if await r.set(lock, b"1", nx=True, ex=15):
+    try:
+        got_lock = await r.set(lock, b"1", nx=True, ex=15)
+    except Exception:  # noqa: BLE001
+        got_lock = True
+    if got_lock:
         try:
             token, ttl = await refresher()
-            await r.set(cache_key, token.encode(), ex=max(60, ttl - 120))
+            try:
+                await r.set(cache_key, token.encode(), ex=max(60, ttl - 120))
+            except Exception:  # noqa: BLE001
+                pass
             return token
         finally:
-            await r.delete(lock)
+            try:
+                await r.delete(lock)
+            except Exception:  # noqa: BLE001
+                pass
     for _ in range(30):
         await asyncio.sleep(0.2)
-        hit = await r.get(cache_key)
+        try:
+            hit = await r.get(cache_key)
+        except Exception:  # noqa: BLE001
+            break
         if hit:
             return hit.decode()
     token, ttl = await refresher()
-    await r.set(cache_key, token.encode(), ex=max(60, ttl - 120))
+    try:
+        await r.set(cache_key, token.encode(), ex=max(60, ttl - 120))
+    except Exception:  # noqa: BLE001
+        pass
     return token
 
 
 async def seed_access_token(account_id: uuid.UUID, token: str, expires_in: int) -> None:
-    await get_redis().set(f"at:acct:{account_id}", token.encode(), ex=max(60, expires_in - 120))
+    try:
+        await get_redis().set(f"at:acct:{account_id}", token.encode(), ex=max(60, expires_in - 120))
+    except Exception:  # noqa: BLE001
+        return
 
 
 async def account_access_token(account_id: uuid.UUID) -> str:
@@ -112,8 +134,11 @@ async def mcp_access_token(connector_id: uuid.UUID) -> str:
 
 
 async def invalidate(connector_id: uuid.UUID | None = None, account_id: uuid.UUID | None = None) -> None:
-    r = get_redis()
-    if connector_id:
-        await r.delete(f"at:mcp:{connector_id}")
-    if account_id:
-        await r.delete(f"at:acct:{account_id}")
+    try:
+        r = get_redis()
+        if connector_id:
+            await r.delete(f"at:mcp:{connector_id}")
+        if account_id:
+            await r.delete(f"at:acct:{account_id}")
+    except Exception:  # noqa: BLE001
+        return
