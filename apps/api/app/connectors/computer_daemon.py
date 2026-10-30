@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import queue
 import random
 import re
 import threading
@@ -13,7 +14,7 @@ from pathlib import Path
 
 HOST = "127.0.0.1"
 PORT = 18765
-VERSION = "19"
+VERSION = "20"
 _HOME = Path(os.environ.get("CHECKME_BROWSER_HOME") or "/tmp")
 SHOT = "/tmp/checkme-browser.png"
 PROFILE = str(_HOME / "profile")
@@ -47,18 +48,116 @@ READY_HTML = (
 _lock = threading.Lock()
 # Playwright's sync API is bound to the thread that started it, and ThreadingHTTPServer answers every request on a
 # new thread: without this, every browser command after the first fails with "cannot switch to a different thread".
-# All browser work runs on this one long-lived thread, in arrival order.
+# A leftover asyncio loop on that thread makes start() raise "Sync API inside the asyncio loop" (Playwright's guard
+# if get_running_loop() succeeds). All browser work runs on this one long-lived thread, with no running loop.
 _browser_thread = None
+_pending_pages: list = []
+_pending_downloads: list = []
+_saved_downloads: dict = {}
+
+
+def asyncio_loop_is_running() -> bool:
+    """True when this thread is inside a running asyncio loop (Playwright sync start() forbids that)."""
+    import asyncio
+
+    try:
+        asyncio.get_running_loop()
+        return True
+    except RuntimeError:
+        return False
+
+
+def prepare_thread_for_sync_playwright() -> None:
+    """Drop an idle leftover loop so sync_playwright().start() can create its own. A running loop cannot be dropped."""
+    import asyncio
+
+    if asyncio_loop_is_running():
+        return
+    try:
+        asyncio.set_event_loop(None)
+    except Exception:
+        pass
+
+
+class _BrowserThread:
+    """One worker: serial Playwright calls, started with no asyncio loop on the thread."""
+
+    def __init__(self):
+        self._jobs: queue.Queue = queue.Queue()
+        self._thread = threading.Thread(target=self._run, name="checkme-browser", daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        prepare_thread_for_sync_playwright()
+        while True:
+            item = self._jobs.get()
+            if item is None:
+                return
+            fn, args, box, done = item
+            try:
+                box.append(("ok", fn(*args)))
+            except BaseException as exc:
+                box.append(("err", exc))
+            done.set()
+
+    def submit(self, fn, *args):
+        if threading.current_thread() is self._thread:
+            return fn(*args)
+        done = threading.Event()
+        box: list = []
+        self._jobs.put((fn, args, box, done))
+        done.wait()
+        kind, value = box[0]
+        if kind == "err":
+            raise value
+        return value
 
 
 def on_browser_thread(fn, *args):
     global _browser_thread
     with _lock:
         if _browser_thread is None:
-            from concurrent.futures import ThreadPoolExecutor
+            _browser_thread = _BrowserThread()
 
-            _browser_thread = ThreadPoolExecutor(max_workers=1, thread_name_prefix="checkme-browser")
-    return _browser_thread.submit(fn, *args).result()
+    def wrapped():
+        try:
+            return fn(*args)
+        finally:
+            drain_browser_events()
+
+    return _browser_thread.submit(wrapped)
+
+
+def _on_new_page(page) -> None:
+    """Queue only: Playwright fires this while its driver loop is running, so sync APIs here raise."""
+    _pending_pages.append(page)
+
+
+def _on_download(item) -> None:
+    _pending_downloads.append(item)
+
+
+def drain_browser_events() -> None:
+    """Register popups and save downloads after the current Playwright call returns."""
+    while True:
+        pages = list(_pending_pages)
+        _pending_pages.clear()
+        downloads = list(_pending_downloads)
+        _pending_downloads.clear()
+        if not pages and not downloads:
+            return
+        for page in pages:
+            try:
+                _register_tab(page, activate=False)
+            except Exception:
+                pass
+        for item in downloads:
+            try:
+                _save_download(item)
+            except Exception:
+                pass
+
+
 _browser_page = None
 _browser_context = None
 _elements: list[dict] = []
@@ -887,6 +986,9 @@ def _upload_file(page, loc, node, step: dict) -> dict:
 
 
 def _save_download(download) -> dict:
+    key = id(download)
+    if key in _saved_downloads:
+        return _saved_downloads[key]
     name = str(getattr(download, "suggested_filename", None) or "download")
     dest = _unique_download(name)
     download.save_as(str(dest))
@@ -895,7 +997,9 @@ def _save_download(download) -> dict:
         url = str(download.url or "")
     except Exception:
         pass
-    return remember_download(str(dest), dest.name, url)
+    row = remember_download(str(dest), dest.name, url)
+    _saved_downloads[key] = row
+    return row
 
 
 def _click_download(page, loc, node, step: dict) -> dict:
@@ -1197,6 +1301,15 @@ def _ensure_page():
     if _browser_page is not None:
         if _needs_desktop(_browser_page):
             _paint_desktop(_browser_page)
+        drain_browser_events()
+        return _browser_page
+    if _pw is not None and _browser_context is not None:
+        pages = list(getattr(_browser_context, "pages", None) or [])
+        _browser_page = pages[0] if pages else _browser_context.new_page()
+        _register_tab(_browser_page, activate=True)
+        if _needs_desktop(_browser_page):
+            _paint_desktop(_browser_page)
+        drain_browser_events()
         return _browser_page
     from playwright.sync_api import sync_playwright
 
@@ -1207,6 +1320,7 @@ def _ensure_page():
             Path(FRESH_MARK).write_text("1")
         except Exception:
             pass
+    prepare_thread_for_sync_playwright()
     _pw = sync_playwright().start()
     headed = browser_headed()
     version = "" if headed else _browser_version(_pw, CONFIG)
@@ -1221,16 +1335,12 @@ def _ensure_page():
     harden_context(_browser_context)
     _browser_page = _browser_context.pages[0] if _browser_context.pages else _browser_context.new_page()
     _register_tab(_browser_page, activate=True)
-    # Links with target=_blank and window.open become tabs the agent can list and switch to.
-    _browser_context.on("page", lambda pg: _register_tab(pg, activate=False))
-    def _on_download(item):
-        try:
-            _save_download(item)
-        except Exception:
-            pass
+    # Queue only: these fire while Playwright's driver loop is running (goto, screenshot, first paint).
+    _browser_context.on("page", _on_new_page)
     _browser_context.on("download", _on_download)
     if _needs_desktop(_browser_page):
         _paint_desktop(_browser_page)
+    drain_browser_events()
     return _browser_page
 
 
@@ -1455,22 +1565,25 @@ TAB_COMMANDS = {"tabs", "new_tab", "switch_tab", "close_tab"}
 
 
 def handle(cmd: dict) -> dict:
-    command = str(cmd.get("command") or "").strip()
-    if command == "serp":
-        return _serp(cmd)
-    if command == "export_state":
-        return _export_state()
-    if command == "import_state":
-        return _import_state(cmd)
-    if command == "remote_fetch":
-        return _remote_fetch(cmd)
-    if command in TAB_COMMANDS:
-        return _tab_command(command, cmd)
-    if command in {"navigate", "goto", "snapshot", "act", "observe", "screenshot", "load_html"}:
-        tid, page = _page_for(cmd)
-        data = _handle_page(command, cmd, page)
-        return _with_tab(data, tid) if isinstance(data, dict) else data
-    return _handle_page(command, cmd, _ensure_page())
+    try:
+        command = str(cmd.get("command") or "").strip()
+        if command == "serp":
+            return _serp(cmd)
+        if command == "export_state":
+            return _export_state()
+        if command == "import_state":
+            return _import_state(cmd)
+        if command == "remote_fetch":
+            return _remote_fetch(cmd)
+        if command in TAB_COMMANDS:
+            return _tab_command(command, cmd)
+        if command in {"navigate", "goto", "snapshot", "act", "observe", "screenshot", "load_html"}:
+            tid, page = _page_for(cmd)
+            data = _handle_page(command, cmd, page)
+            return _with_tab(data, tid) if isinstance(data, dict) else data
+        return _handle_page(command, cmd, _ensure_page())
+    finally:
+        drain_browser_events()
 
 
 def _handle_page(command: str, cmd: dict, page) -> dict:
@@ -1555,10 +1668,13 @@ def _handle_page(command: str, cmd: dict, page) -> dict:
 
 
 def _screen_shot():
-    page = _ensure_page()
-    if _needs_desktop(page):
-        _paint_desktop(page)
-    page.screenshot(path=SHOT, full_page=False)
+    try:
+        page = _ensure_page()
+        if _needs_desktop(page):
+            _paint_desktop(page)
+        page.screenshot(path=SHOT, full_page=False)
+    finally:
+        drain_browser_events()
 
 
 class Handler(BaseHTTPRequestHandler):
