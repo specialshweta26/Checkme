@@ -272,6 +272,25 @@ async def test_fs_is_daytona_shaped(sdk, tmp_path):
     assert names == {"a.txt", "b.bin"}
 
 
+async def test_touch_resumes_paused_sandbox_and_extends_timeout(sdk):
+    row = _row({})
+    box = await e2b_box.ensure_sandbox(row)
+    sbx = sdk.existing[box.id]
+    sbx.running = False
+    sbx.timeouts.clear()
+    e2b_box.forget()
+    data = await e2b_box.touch(row)
+    assert data["ok"] is True and data["state"] == "running"
+    assert sdk.connected[-1] == box.id
+    assert sbx.timeouts, "touch must extend the sandbox idle timeout while the user is on the screen"
+
+
+async def test_touch_without_sandbox_does_not_create_one(sdk):
+    data = await e2b_box.touch(_row({}))
+    assert data["state"] == "stopped" and data["ok"] is False
+    assert not sdk.created
+
+
 async def test_status_never_resumes_a_paused_sandbox(sdk):
     sdk.info["sbx-p"] = "paused"
     row = _row({"e2b_sandbox_id": "sbx-p", "e2b_stream_key": "k"})

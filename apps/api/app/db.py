@@ -98,6 +98,7 @@ async def _migrate() -> None:
         await _migrate_github(conn)
         await _migrate_jobs(conn)
         await _migrate_agent_scope(conn)
+        await _migrate_memory(conn)
 
 
 async def _migrate_jobs(conn) -> None:
@@ -250,3 +251,49 @@ async def _migrate_agent_scope(conn) -> None:
     await _add_agent_fk(conn, "memory_passages", "memory_passages_agent_id_fkey")
     await _add_agent_fk(conn, "scheduled_tasks", "scheduled_tasks_agent_id_fkey")
     await _add_agent_fk(conn, "automations", "automations_agent_id_fkey")
+
+
+async def _migrate_memory(conn) -> None:
+    """ChatGPT-style per-agent memory: scope, status, provenance, full-text, extract jobs."""
+    await conn.execute(text("ALTER TABLE memory_blocks ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now()"))
+    await conn.execute(text("ALTER TABLE memory_passages ADD COLUMN IF NOT EXISTS scope VARCHAR(20) DEFAULT 'agent'"))
+    await conn.execute(text("ALTER TABLE memory_passages ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'active'"))
+    await conn.execute(text("ALTER TABLE memory_passages ADD COLUMN IF NOT EXISTS source_session_id UUID"))
+    await conn.execute(text("ALTER TABLE memory_passages ADD COLUMN IF NOT EXISTS source_message_id BIGINT"))
+    await conn.execute(text("ALTER TABLE memory_passages ADD COLUMN IF NOT EXISTS supersedes_id BIGINT"))
+    await conn.execute(text("UPDATE memory_passages SET scope = 'agent' WHERE scope IS NULL OR btrim(scope) = ''"))
+    await conn.execute(text("UPDATE memory_passages SET status = 'active' WHERE status IS NULL OR btrim(status) = ''"))
+    tsv = await conn.execute(
+        text(
+            """
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'memory_passages' AND column_name = 'search_tsv'
+            """
+        )
+    )
+    if tsv.first() is None:
+        await conn.execute(
+            text(
+                """
+                ALTER TABLE memory_passages
+                ADD COLUMN search_tsv tsvector
+                GENERATED ALWAYS AS (to_tsvector('simple', coalesce(text, ''))) STORED
+                """
+            )
+        )
+    await conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_memory_passages_user_agent_status "
+            "ON memory_passages (user_id, agent_id, status)"
+        )
+    )
+    await conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_memory_passages_user_shared "
+            "ON memory_passages (user_id, status) WHERE scope = 'user_shared'"
+        )
+    )
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_memory_passages_tsv ON memory_passages USING gin (search_tsv)"))
+    await conn.execute(
+        text("CREATE INDEX IF NOT EXISTS ix_chat_messages_user_request ON chat_messages (user_id, request_id)")
+    )

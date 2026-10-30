@@ -67,6 +67,15 @@ def _serializer() -> URLSafeTimedSerializer:
     return URLSafeTimedSerializer(get_settings().session_secret, salt="oauth-state")
 
 
+def _file_serializer() -> URLSafeTimedSerializer:
+    return URLSafeTimedSerializer(get_settings().session_secret, salt="file-link")
+
+
+def file_link_ttl_s() -> int:
+    days = max(1, int(get_settings().file_link_ttl_days or 90))
+    return days * 86400
+
+
 def sign_state(data: dict[str, Any]) -> str:
     return _serializer().dumps(data)
 
@@ -76,6 +85,21 @@ def load_state(value: str, max_age: int = 600) -> dict[str, Any] | None:
         return _serializer().loads(value, max_age=max_age)
     except BadData:
         return None
+
+
+def sign_file_token(data: dict[str, Any]) -> str:
+    return _file_serializer().dumps(data)
+
+
+def load_file_token(value: str, max_age: int | None = None) -> dict[str, Any] | None:
+    age = file_link_ttl_s() if max_age is None else max_age
+    try:
+        return _file_serializer().loads(value, max_age=age)
+    except BadData:
+        try:
+            return _serializer().loads(value, max_age=age)
+        except BadData:
+            return None
 
 
 def pkce_pair() -> tuple[str, str]:

@@ -29,6 +29,8 @@ _BROWSER_APPS = {
 _EDITOR_APPS = {"code", "vscode", "vs code", "cursor", "visual studio code"}
 _APP_NAME = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._+-]{0,40}$")
 _TEXT_FILES = re.compile(r"\.(txt|md|py|js|ts|tsx|json|yml|yaml|toml|csv|html|css|xml|sh|log)$", re.I)
+_DELIVERABLE = re.compile(r"\.(html?|pdf|png|jpe?g|gif|webp|svg|csv|md|txt|docx|xlsx)$", re.I)
+_BROWSER_START_FAIL = re.compile(r"module|did not start|ImportError|playwright|had to restart", re.I)
 
 
 def computer_slug(ctx) -> str | None:
@@ -76,6 +78,14 @@ async def run_computer(ctx, tool_name: str, args: dict | None = None) -> Any:
         return result
     annotate_page(result)
     if tool_name in {"browser_handoff", "computer_handoff"}:
+        return result
+    if result.get("ok") is False and _BROWSER_START_FAIL.search(str(result.get("error") or "")):
+        result["continue"] = True
+        result.setdefault(
+            "note",
+            "The page browser restarted. The live desktop still has the user's work. "
+            "Call browser_snapshot or computer_observe and continue; do not treat this as the task failing.",
+        )
         return result
     if result.get("bot_wall") and result.get("handoff", True) is not False:
         return await _handoff_wall(ctx, result)  # a CAPTCHA only a person can solve
@@ -265,7 +275,15 @@ async def read_file(ctx, path: str) -> Any:
 async def write_file(ctx, path: str, content: str) -> Any:
     if not (path or "").strip():
         return {"error": "path is required"}
-    return await run_computer(ctx, "write_file", {"path": path, "content": content or ""})
+    result = await run_computer(ctx, "write_file", {"path": path, "content": content or ""})
+    if isinstance(result, dict) and result.get("ok") and _DELIVERABLE.search(path):
+        published = await attach_file(ctx, path)
+        if isinstance(published, dict) and published.get("download_url"):
+            result["download_url"] = published["download_url"]
+            result["preview_url"] = published.get("preview_url")
+            result["filename"] = published.get("filename") or path.rsplit("/", 1)[-1]
+            result["hint"] = "File is saved to durable storage. Give the user download_url; it stays valid. Never cite a sandbox path."
+    return result
 
 
 async def attach_file(ctx, path: str, filename: str = "") -> Any:

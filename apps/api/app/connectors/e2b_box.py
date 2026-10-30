@@ -559,6 +559,19 @@ async def status(row) -> dict:
     return data
 
 
+async def touch(row) -> dict:
+    """Keep the sandbox awake while the user is on the live screen. Resumes a paused desktop; does not create one."""
+    user_key = _user_key(row)
+    creds = decrypt_json(row.credentials_enc) if getattr(row, "credentials_enc", None) else {}
+    if user_key not in _LIVE and not creds.get(CREDS_ID):
+        return {"ok": False, "state": "stopped", "screenAvailable": False, "provider": "e2b"}
+    box = await ensure_sandbox(row)
+    _keepalive(box._live, force=True)
+    data = {"ok": True, "state": "running", "screenAvailable": True, "provider": "e2b"}
+    data.update(box.stream_urls())
+    return data
+
+
 async def pause(row) -> bool:
     """Pause now (keeps memory + disk). Optional; idle sandboxes also pause on their own timeout."""
     live = _LIVE.pop(_user_key(row), None)

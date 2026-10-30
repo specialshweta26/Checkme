@@ -49,6 +49,7 @@ class Settings(BaseSettings):
     session_secret: str = "dev-only-change-me"
     token_encryption_key: str = ""
     session_ttl_days: int = 14
+    file_link_ttl_days: int = 90
 
     database_url: str = "postgresql+asyncpg://assistant:assistant@localhost:5432/assistant"
     database_hostport: str = ""

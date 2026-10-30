@@ -70,7 +70,19 @@ class _MemoryDB:
         if isinstance(obj, MemoryBlock):
             self.blocks.append(obj)
         if isinstance(obj, MemoryPassage):
+            if getattr(obj, "id", None) is None:
+                obj.id = len(self.passages) + 1
+            if not getattr(obj, "scope", None):
+                obj.scope = "agent"
+            if not getattr(obj, "status", None):
+                obj.status = "active"
             self.passages.append(obj)
+
+    async def delete(self, obj):
+        if isinstance(obj, MemoryBlock):
+            self.blocks = [row for row in self.blocks if row is not obj]
+        if isinstance(obj, MemoryPassage):
+            self.passages = [row for row in self.passages if row is not obj]
 
     async def commit(self):
         return None
@@ -80,6 +92,8 @@ class _MemoryDB:
             return self.user if self.user.id == ident else None
         if model is WorkspaceAgent:
             return self.agents.get(ident)
+        if model is MemoryPassage:
+            return next((row for row in self.passages if row.id == ident), None)
         return None
 
     async def execute(self, stmt, params=None):
@@ -87,9 +101,12 @@ class _MemoryDB:
             self.sql.append(str(stmt))
             uid, aid = params.get("uid"), params.get("aid")
             rows = [
-                (row.text,)
+                (row.id,)
                 for row in self.passages
-                if row.user_id == uid and row.agent_id == aid and row.embedding is not None
+                if row.user_id == uid
+                and getattr(row, "status", "active") == "active"
+                and row.embedding is not None
+                and (row.agent_id == aid or getattr(row, "scope", "agent") == "user_shared")
             ]
             return _Result(rows)
         compiled = stmt.compile().params
@@ -105,7 +122,14 @@ class _MemoryDB:
             ]
             return _Result(rows)
         if entity is MemoryPassage:
-            rows = [row for row in self.passages if row.user_id == uid and row.agent_id == aid]
+            rows = []
+            for row in self.passages:
+                if row.user_id != uid:
+                    continue
+                if getattr(row, "status", "active") in {"deleted", "superseded"}:
+                    continue
+                if aid is None or row.agent_id == aid or getattr(row, "scope", "agent") == "user_shared":
+                    rows.append(row)
             return _Result(rows)
         return _Result([])
 
@@ -176,6 +200,74 @@ async def test_fallback_memory_is_isolated_between_agents():
     assert "checkme" in dev_mem and "terse diffs" in dev_mem and "pytest" in dev_mem
     assert "Ada" not in dev_mem and "rent" not in dev_mem and "warm" not in dev_mem
     assert {row.agent_id for row in db.passages} == {home.id, dev.id}
+
+
+@pytest.mark.asyncio
+async def test_shared_facts_are_visible_to_every_agent_of_that_user(monkeypatch):
+    user = _user()
+    other = _user()
+    chief = _agent(user, "Chief", kind="default")
+    home = _agent(user, "Home")
+    dev = _agent(user, "Dev")
+    stranger = _agent(other, "Home")
+    db = _MemoryDB(user, [chief, home, dev, stranger])
+
+    async def fake_default(_db, _user):
+        return chief
+
+    monkeypatch.setattr("app.agents.service.ensure_default_agent", fake_default)
+    await memory.remember(db, user.id, "archival", "I live in Bengaluru", home.id, scope=memory.SCOPE_SHARED)
+    home_mem = await memory.load_memory(db, user, "Bengaluru", home)
+    dev_mem = await memory.load_memory(db, user, "city", dev)
+    other_db = _MemoryDB(other, [stranger])
+    other_mem = await memory.load_memory(other_db, other, "Bengaluru", stranger)
+    assert "Bengaluru" in home_mem and "Bengaluru" in dev_mem
+    assert "Bengaluru" not in other_mem
+    assert all(row.scope == memory.SCOPE_SHARED for row in db.passages if "Bengaluru" in row.text)
+
+
+@pytest.mark.asyncio
+async def test_forgotten_passage_is_not_retrieved():
+    user = _user()
+    home = _agent(user, "Home")
+    db = _MemoryDB(user, [home])
+    await memory.remember(db, user.id, "archival", "favorite color is blue", home.id)
+    ctx = RunContext(db=db, user=user, connectors={}, agent=home)
+    out = await memory.forget_memory(ctx, text="favorite color is blue")
+    assert out.get("ok") is True
+    home_mem = await memory.load_memory(db, user, "color", home)
+    assert "blue" not in home_mem
+    assert db.passages[0].status == memory.STATUS_DELETED
+
+
+@pytest.mark.asyncio
+async def test_historical_intent_injects_dated_snippet():
+    user = _user()
+    home = _agent(user, "Home")
+    db = _MemoryDB(user, [home])
+    assert memory.historical_intent("what did we decide last month") is True
+    assert memory.historical_intent("what's the weather") is False
+    assembled = memory._assemble_memory(
+        [MemoryBlock(user_id=user.id, agent_id=home.id, label="voice", value="short answers")],
+        [],
+        ["2026-09-01: we chose Postgres for Checkme"],
+    )
+    assert "Persona" in assembled and "short answers" in assembled
+    assert "2026-09-01" in assembled and "Postgres" in assembled
+
+
+@pytest.mark.asyncio
+async def test_load_memory_injects_history_on_past_questions(monkeypatch):
+    user = _user()
+    home = _agent(user, "Home")
+    db = _MemoryDB(user, [home])
+
+    async def fake_hist(*_args, **_kwargs):
+        return ["2026-09-01: we chose Postgres for Checkme"]
+
+    monkeypatch.setattr(memory, "_search_agent_history", fake_hist)
+    text = await memory.load_memory(db, user, "what did we decide last month", home)
+    assert "Postgres" in text and "From earlier chats" in text
 
 
 @pytest.mark.asyncio

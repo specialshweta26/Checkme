@@ -497,15 +497,22 @@ def _out(response) -> str:
     return str(getattr(response, "result", None) or getattr(response, "stdout", "") or "")
 
 
+BROWSER_HOME = "/home/daytona/.checkme/browser"
+DAEMON_PY = f"{BROWSER_HOME}/checkme_browser_daemon.py"
+DETECT_PY = f"{BROWSER_HOME}/checkme_block_detect.py"
+PW_READY = f"{BROWSER_HOME}/pw-ready"
+DAEMON_LOG = f"{BROWSER_HOME}/daemon.log"
+_MODULE_FAIL = re.compile(r"ModuleNotFoundError|No module named|ImportError", re.I)
+
 PLAYWRIGHT_INSTALL = (
     "python3 -m pip install -q playwright && python3 -m playwright install chromium"
-    " && python3 -c 'from playwright.sync_api import sync_playwright' && touch /tmp/checkme-pw-ready"
+    f" && python3 -c 'from playwright.sync_api import sync_playwright' && mkdir -p {BROWSER_HOME} && touch {PW_READY}"
 )
 # E2B Desktop runs as a non-root user with passwordless sudo and lacks Chromium's system libraries.
 PLAYWRIGHT_INSTALL_DESKTOP = (
     "(python3 -m pip install -q --user playwright || python3 -m pip install -q --user --break-system-packages playwright)"
     " && (python3 -m playwright install --with-deps chromium || python3 -m playwright install chromium)"
-    " && python3 -c 'from playwright.sync_api import sync_playwright' && touch /tmp/checkme-pw-ready"
+    f" && python3 -c 'from playwright.sync_api import sync_playwright' && mkdir -p {BROWSER_HOME} && touch {PW_READY}"
 )
 
 
@@ -518,13 +525,22 @@ CHROME_INSTALL = (
 )
 
 
-async def _ensure_playwright(proc) -> None:
-    marker = await _exec(proc, "test -f /tmp/checkme-pw-ready && echo ready || echo missing", 15)
-    if "ready" not in _out(marker):
-        desktop = bool(getattr(proc, "browser_deps", False))
-        install = await _exec(proc, PLAYWRIGHT_INSTALL_DESKTOP if desktop else PLAYWRIGHT_INSTALL, 480 if desktop else 240)
-        if getattr(install, "exit_code", 1) not in {0, None}:
-            raise ToolError("Could not install a browser in the computer sandbox. " + _clip(_out(install), 400))
+async def _playwright_import_ok(proc) -> bool:
+    probe = await _exec(
+        proc,
+        "python3 -c 'from playwright.sync_api import sync_playwright' && echo OK || echo FAIL",
+        20,
+    )
+    return "OK" in _out(probe)
+
+
+async def _ensure_playwright(proc, force: bool = False) -> None:
+    if not force and await _playwright_import_ok(proc):
+        return
+    desktop = bool(getattr(proc, "browser_deps", False))
+    install = await _exec(proc, PLAYWRIGHT_INSTALL_DESKTOP if desktop else PLAYWRIGHT_INSTALL, 480 if desktop else 240)
+    if getattr(install, "exit_code", 1) not in {0, None} or not await _playwright_import_ok(proc):
+        raise ToolError("Could not install a browser in the computer sandbox. " + _clip(_out(install), 400))
     if str(getattr(get_settings(), "browser_channel", "") or "").strip().lower() == "chrome" and getattr(proc, "browser_deps", False):
         ready = await _exec(proc, "test -f /tmp/checkme-chrome-tried && echo tried || echo no", 10)
         if "tried" not in _out(ready):
@@ -574,8 +590,9 @@ async def _install_daemon(proc, fs=None, config: dict | None = None) -> None:
 
     from app.connectors import block_detect, computer_daemon
 
-    await _put_sandbox_file(proc, fs, "/tmp/checkme_block_detect.py", FilePath(block_detect.__file__).read_bytes())
-    await _put_sandbox_file(proc, fs, "/tmp/checkme_browser_daemon.py", FilePath(computer_daemon.__file__).read_bytes())
+    await _exec(proc, f"mkdir -p {BROWSER_HOME}", 8)
+    await _put_sandbox_file(proc, fs, DETECT_PY, FilePath(block_detect.__file__).read_bytes())
+    await _put_sandbox_file(proc, fs, DAEMON_PY, FilePath(computer_daemon.__file__).read_bytes())
     if config is not None:
         # Read once by the daemon at start, then deleted (it may hold proxy credentials).
         await _put_sandbox_file(proc, fs, "/tmp/checkme_browser_config.json", json.dumps(config).encode("utf-8"))
@@ -620,28 +637,47 @@ async def _ensure_daemon(proc, fs=None) -> None:
         await _ensure_daemon_locked(proc, fs)
 
 
+def _daemon_boot_cmd(proc) -> str:
+    env = str(getattr(proc, "daemon_env", "") or "")
+    inner = (
+        f"mkdir -p {BROWSER_HOME}; "
+        f"export CHECKME_BROWSER_HOME={BROWSER_HOME} PYTHONPATH={BROWSER_HOME}:${{PYTHONPATH:-}}; "
+        f"{env}"
+        f"setsid nohup python3 {DAEMON_PY} >{DAEMON_LOG} 2>&1 & disown; "
+        "for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do "
+        "curl -sf http://127.0.0.1:18765/health && exit 0; sleep 2; done; "
+        f"tail -n 80 {DAEMON_LOG}; exit 1"
+    )
+    return "bash -c " + shlex.quote(inner)
+
+
+async def _boot_daemon(proc, fs=None) -> Any:
+    await _exec(proc, "pkill -f checkme_browser_daemon.py >/dev/null 2>&1 || true", 8)
+    await _install_daemon(proc, fs, await _daemon_config())
+    present = await _exec(proc, f"test -s {DAEMON_PY} && echo HAS || echo MISSING", 8)
+    if "HAS" not in _out(present):
+        raise ToolError("Computer browser did not start. Daemon file missing in sandbox.")
+    return await _exec(proc, _daemon_boot_cmd(proc), 80)
+
+
 async def _ensure_daemon_locked(proc, fs=None) -> None:
     await _ensure_playwright(proc)
     config = await _daemon_config()
     if await _daemon_up(proc, config.get("hash", "")):
         return
-    await _exec(proc, "pkill -f checkme_browser_daemon.py >/dev/null 2>&1 || true", 8)
-    await _install_daemon(proc, fs, config)
-    present = await _exec(proc, "test -s /tmp/checkme_browser_daemon.py && echo HAS || echo MISSING", 8)
-    if "HAS" not in _out(present):
-        raise ToolError("Computer browser did not start. Daemon file missing in sandbox.")
-    boot = await _exec(
-        proc,
-        "bash -lc '"
-        + str(getattr(proc, "daemon_env", "") or "")
-        + "nohup python3 /tmp/checkme_browser_daemon.py >/tmp/checkme-browser-daemon.log 2>&1 & disown; "
-        "for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do "
-        "curl -sf http://127.0.0.1:18765/health && exit 0; sleep 2; done; "
-        "tail -n 40 /tmp/checkme-browser-daemon.log; exit 1'",
-        80,
-    )
+    boot = await _boot_daemon(proc, fs)
     if getattr(boot, "exit_code", 1) not in {0, None} and not await _daemon_up(proc):
-        raise ToolError("Computer browser did not start. " + _clip(_out(boot), 500))
+        boot_log = _out(boot)
+        if _MODULE_FAIL.search(boot_log):
+            log.warning("computer: browser missing a module; reinstalling Playwright and retrying")
+            await _ensure_playwright(proc, force=True)
+            boot = await _boot_daemon(proc, fs)
+        if getattr(boot, "exit_code", 1) not in {0, None} and not await _daemon_up(proc):
+            raise ToolError(
+                "The page browser had to restart. The live desktop still has the user's work — "
+                "call browser_snapshot or computer_observe and continue; do not treat this as the task failing. "
+                + _clip(_out(boot), 400)
+            )
     await _restore_profile(proc, fs)
 
 
@@ -1162,7 +1198,7 @@ async def _e2b_screen_or_status(row, name: str) -> Any:
 # tools also bound each daemon command; this is the outer backstop, sized to allow a first-run browser
 # install (several minutes) on a fresh computer.
 _BROWSER_CAP_S = 600.0
-_NO_CAP = {"screen_png", "status", "write_analytics_report", "browser_handoff", "computer_handoff"}
+_NO_CAP = {"screen_png", "status", "touch", "write_analytics_report", "browser_handoff", "computer_handoff"}
 
 
 def tool_time_cap(name: str, args: dict[str, Any] | None) -> float | None:
@@ -1221,6 +1257,18 @@ async def _invoke_daytona(row, name: str, args: dict[str, Any]) -> Any:
         from app.connectors.analytics_report import render_report
 
         return render_report(args)
+    if name == "touch":
+        if _use_e2b():
+            from app.connectors import e2b_box
+
+            return await e2b_box.touch(row)
+        _client_obj, sandbox = await _ensure_sandbox(row)
+        try:
+            return {"ok": True, "state": "running", "screenAvailable": True, "provider": "daytona"}
+        finally:
+            close = getattr(_client_obj, "close", None)
+            if callable(close):
+                await close()
     if name in {"screen_png", "status"} and _use_e2b():
         return await _e2b_screen_or_status(row, name)
     if name in {"screen_png", "status"}:

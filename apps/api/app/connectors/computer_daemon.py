@@ -13,14 +13,15 @@ from pathlib import Path
 
 HOST = "127.0.0.1"
 PORT = 18765
-VERSION = "16"
+VERSION = "17"
+_HOME = Path(os.environ.get("CHECKME_BROWSER_HOME") or "/tmp")
 SHOT = "/tmp/checkme-browser.png"
-PROFILE = "/tmp/checkme-browser-profile"
-LAST = "/tmp/checkme-browser-last.json"
+PROFILE = str(_HOME / "profile")
+LAST = str(_HOME / "last.json")
 # Written by the API before it starts the daemon (locale, timezone, proxy, channel...). Read once, then deleted so
 # proxy credentials do not sit on disk. See docs/BROWSING.md.
 CONFIG_PATH = "/tmp/checkme_browser_config.json"
-FRESH_MARK = "/tmp/checkme-browser-profile/.checkme-created"
+FRESH_MARK = str(_HOME / "profile" / ".checkme-created")
 VIEW_W = 1280
 VIEW_H = 800
 GOOGLE_HOME = "https://www.google.com/"
