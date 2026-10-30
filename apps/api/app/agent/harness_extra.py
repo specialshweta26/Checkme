@@ -258,7 +258,7 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         return _dumps(await computer.run_computer(ctx, "browser_snapshot", {"tab": tab} if tab else {}))
 
     async def browser_act(actions: list[dict[str, Any]], tab: str = "") -> str:
-        """Act on the live computer browser using snapshot refs (e0, e1). kind: click, fill, type, select, check, press, scroll, wait, reload, back. Returns a fresh snapshot."""
+        """Act on the live computer browser using snapshot refs (e0, e1). kind: click, fill, type, select, pick, check, press, scroll, wait, reload, back. For type-ahead lists use type or select/pick (field ref + value); do not request_takeover for a dropdown. Returns a fresh snapshot."""
         ctx.used_tools.append("browser_act")
         args: dict[str, Any] = {"actions": actions}
         if tab:
@@ -331,7 +331,7 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         return _dumps(await computer.launch_app(ctx, name))
 
     async def request_takeover(reason: str, instruction: str = "") -> str:
-        """Pause and give the user control of the live computer screen. Use for login, 2FA, captcha, payment, or any step you cannot complete. Same as browser_handoff."""
+        """Pause and give the user control of the live computer screen. Use only for login, 2FA, captcha, payment, or OS file pickers. Do not use for dropdowns or autocomplete. Same as browser_handoff."""
         ctx.used_tools.append("request_takeover")
         return _dumps(await computer.request_takeover(ctx, reason, instruction))
 

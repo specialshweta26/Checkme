@@ -495,6 +495,9 @@ def test_system_prompt_has_no_product_recipes():
     assert "browser_search" in lowered and "which search key to configure" in lowered
     assert "browser_handoff" in lowered
     assert "fill whole forms" in lowered
+    assert "type-ahead" in lowered
+    assert "anything you cannot complete" not in lowered
+    assert "never request_takeover to pick a dropdown" in lowered
     assert "never attach page.png" in lowered
     assert "google.com/search" in lowered
     assert "web_fetch" in lowered
