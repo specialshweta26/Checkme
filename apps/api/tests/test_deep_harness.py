@@ -498,6 +498,12 @@ def test_system_prompt_has_no_product_recipes():
     assert "type-ahead" in lowered
     assert "anything you cannot complete" not in lowered
     assert "never request_takeover to pick a dropdown" in lowered
+    assert "execute the user's website task" in lowered
+    assert "do not invent personal" in lowered
+    assert "do not click submit" in lowered
+    assert "analyze it in your role" in lowered
+    assert "get_skill and follow it" in lowered
+    assert "run_code on the saved download path" in lowered
     assert "never attach page.png" in lowered
     assert "google.com/search" in lowered
     assert "web_fetch" in lowered
@@ -567,6 +573,7 @@ FIRST_CLASS = [
     "browser_snapshot",
     "browser_act",
     "shell",
+    "run_code",
     "ensure_toolchain",
     "list_files",
     "read_file",
@@ -621,6 +628,22 @@ async def test_browser_navigate_harness_uses_computer_connector():
     data = json.loads(raw)
     assert data["url"] == "https://example.com"
     assert calls == [("computer", "browser_navigate", {"url": "https://example.com"})]
+
+
+async def test_run_code_harness_uses_computer_connector():
+    calls = []
+
+    async def fake_call(slug, tool, args):
+        calls.append((slug, tool, dict(args)))
+        return {"ok": True, "stdout": "42"}
+
+    computer = _conn(slug="computer", provider="daytona", kind="builtin", name="Computer", alias="computer")
+    ctx = _ctx([computer], call_impl=fake_call)
+    tool = next(t for t in harness_tools(ctx) if t.name == "run_code")
+    raw = await tool.coroutine(code="print(40+2)")
+    data = json.loads(raw)
+    assert data["stdout"] == "42"
+    assert calls == [("computer", "run_code", {"code": "print(40+2)", "timeout": 120})]
 
 
 async def test_user_computer_shell_hidden_without_local_computer():

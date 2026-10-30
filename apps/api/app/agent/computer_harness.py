@@ -66,6 +66,40 @@ def computer_missing() -> dict:
     return {"error": reason, "computer_unavailable": True}
 
 
+async def _publish_downloads(ctx, result: dict) -> dict:
+    published = []
+    for item in result.get("downloads") or []:
+        if not isinstance(item, dict) or not item.get("path"):
+            continue
+        if item.get("download_url"):
+            published.append(item)
+            continue
+        att = await attach_file(ctx, str(item["path"]), str(item.get("filename") or ""))
+        if isinstance(att, dict) and att.get("download_url"):
+            published.append(
+                {
+                    **item,
+                    "download_url": att["download_url"],
+                    "preview_url": att.get("preview_url"),
+                    "filename": att.get("filename") or item.get("filename"),
+                    "extracted_text": att.get("extracted_text") or "",
+                    "kind": att.get("kind") or item.get("kind"),
+                }
+            )
+        else:
+            published.append(item)
+    if published:
+        result["downloads"] = published
+        result.setdefault(
+            "hint",
+            "Read each download's extracted_text and analyze it in your role and skills (get_skill if one matches). "
+            "If the user asked for a deep dive, or this file is tabular/numeric and extracted_text is not enough, "
+            "run_code on path with pandas and print real figures. Post that analysis in chat and cite download_url. "
+            "Never cite a sandbox path. If extracted_text is empty, still attach the file and say what kind it is.",
+        )
+    return result
+
+
 async def run_computer(ctx, tool_name: str, args: dict | None = None) -> Any:
     from app.agent.deep import call_user_tool
     from app.connectors.computer_daemon import annotate_page
@@ -77,6 +111,8 @@ async def run_computer(ctx, tool_name: str, args: dict | None = None) -> Any:
     if not isinstance(result, dict):
         return result
     annotate_page(result)
+    if tool_name in {"browser_act", "browse_act"} and result.get("downloads"):
+        result = await _publish_downloads(ctx, result)
     if tool_name in {"browser_handoff", "computer_handoff"}:
         return result
     if result.get("ok") is False and _BROWSER_START_FAIL.search(str(result.get("error") or "")):
@@ -257,6 +293,12 @@ async def ensure_toolchain(ctx, tools: list[str] | None = None, force: bool = Fa
     if not computer_slug(ctx):
         return computer_missing()
     return await toolchain.ensure_tools(ctx, list(tools or ["dev"]), force=force)
+
+
+async def run_code(ctx, code: str, timeout: int = 120) -> Any:
+    if not (code or "").strip():
+        return {"error": "code is required"}
+    return await run_computer(ctx, "run_code", {"code": code, "timeout": max(10, min(int(timeout or 120), 300))})
 
 
 async def list_files(ctx, path: str = "") -> Any:

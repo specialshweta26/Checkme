@@ -55,6 +55,11 @@ class ShellInput(BaseModel):
     timeout: int = Field(default=60, description="Seconds to wait (10-900).")
 
 
+class RunCodeInput(BaseModel):
+    code: str = Field(description="Python source to run on the cloud computer. Use the saved download path from browser_act.")
+    timeout: int = Field(default=120, description="Seconds to wait (10-300).")
+
+
 class ToolchainInput(BaseModel):
     tools: list[str] = Field(
         default_factory=lambda: ["dev"],
@@ -258,7 +263,7 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         return _dumps(await computer.run_computer(ctx, "browser_snapshot", {"tab": tab} if tab else {}))
 
     async def browser_act(actions: list[dict[str, Any]], tab: str = "") -> str:
-        """Act on the live computer browser using snapshot refs (e0, e1). kind: click, fill, type, select, pick, check, press, scroll, wait, reload, back. For type-ahead lists use type or select/pick (field ref + value); do not request_takeover for a dropdown. Returns a fresh snapshot."""
+        """Act on the live computer browser using snapshot refs (e0, e1). kind: click, dblclick, rightclick, fill, type, select, pick, check, hover, drag, press, scroll, wait, wait_for, upload, download, reload, back, forward. For type-ahead lists use type or select/pick (field ref + value). upload needs path; download saves the file and returns extracted_text plus download_url — analyze that text in your role and skills, then post the analysis in chat. For a deep dive on tabular files, run_code on the saved path. Read verified/alerts/tables/downloads on the returned snapshot. Do not request_takeover for a dropdown. Returns a fresh snapshot."""
         ctx.used_tools.append("browser_act")
         args: dict[str, Any] = {"actions": actions}
         if tab:
@@ -284,6 +289,11 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         """Close a tab (default: the active one)."""
         ctx.used_tools.append("browser_close_tab")
         return _dumps(await computer.run_computer(ctx, "browser_close_tab", {"tab": tab}))
+
+    async def run_code(code: str, timeout: int = 120) -> str:
+        """Run a Python snippet on this user's cloud computer. Use for deep-dive analysis of a downloaded CSV/Excel/JSON/PDF extract: pandas groupby, joins, correlations, outliers. Open the saved path from browser_act downloads. Print real figures (do not invent). Write charts or cleaned tables under /tmp then attach_file. Install pandas/openpyxl with pip --user if missing. Returns stdout."""
+        ctx.used_tools.append("run_code")
+        return _dumps(await computer.run_code(ctx, code, timeout), 40000)
 
     async def shell(command: str, cwd: str | None = None, timeout: int = 60) -> str:
         """Run a bash command on this user's cloud computer (E2B sandbox; home ~, work in ~/work). Use it for installs, CLIs, scripts and builds. npm -g, pip --user and ~/.local/bin are on PATH without sudo (sudo -n works when the image allows it). A missing known tool (node/npm, pnpm, yarn, python/pip, git, gh, vercel, render, uv) is installed automatically and the command retried once. Install anything else yourself; never tell the user to install things on their own machine. Never put secrets in a command. Returns exit_code and stdout."""
@@ -565,6 +575,7 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         StructuredTool.from_function(coroutine=browser_new_tab, name="browser_new_tab", description=browser_new_tab.__doc__, args_schema=NewTabInput),
         StructuredTool.from_function(coroutine=browser_switch_tab, name="browser_switch_tab", description=browser_switch_tab.__doc__, args_schema=TabInput),
         StructuredTool.from_function(coroutine=browser_close_tab, name="browser_close_tab", description=browser_close_tab.__doc__, args_schema=TabInput),
+        StructuredTool.from_function(coroutine=run_code, name="run_code", description=run_code.__doc__, args_schema=RunCodeInput),
         StructuredTool.from_function(coroutine=shell, name="shell", description=shell.__doc__, args_schema=ShellInput),
         StructuredTool.from_function(coroutine=ensure_toolchain, name="ensure_toolchain", description=ensure_toolchain.__doc__, args_schema=ToolchainInput),
         StructuredTool.from_function(coroutine=list_files, name="list_files", description=list_files.__doc__, args_schema=PathInput),

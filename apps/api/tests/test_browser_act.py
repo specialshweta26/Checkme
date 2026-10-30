@@ -1,12 +1,19 @@
-"""Generic type-ahead / dropdown picking on the computer browser (any site)."""
+"""Generic type-ahead / dropdown picking and browser-operator actions."""
+
+from pathlib import Path
+
+import pytest
 
 from app.connectors.computer_daemon import (
     _SNAPSHOT_JS,
     _SUGGEST_JS,
+    _act_step,
     _type_into,
     best_option,
+    launch_options,
     looks_combobox,
     pick_suggestion,
+    safe_upload_path,
     score_option,
 )
 
@@ -98,11 +105,28 @@ class _Loc:
             raise RuntimeError("Element is not a <select> element")
         self.selected = value
 
-    def click(self, timeout=0):
+    def click(self, timeout=0, button="left"):
         self.clicks += 1
+        self.button = button
 
     def fill(self, text, timeout=0):
         self.filled = text
+
+    def count(self):
+        return 1
+
+    def dblclick(self, timeout=0):
+        self.dbl = True
+
+    def set_input_files(self, path, timeout=0):
+        self.files = path
+
+    def wait_for(self, state="visible", timeout=0):
+        self.seen = state
+
+    @property
+    def first(self):
+        return self
 
 
 def test_pick_native_select_does_not_type():
@@ -158,3 +182,40 @@ def test_snapshot_script_covers_overlays_iframes_and_shadow():
     assert 'role="option"' in _SNAPSHOT_JS
     assert 'role="listbox"' in _SNAPSHOT_JS
     assert "shadowRoot" in _SUGGEST_JS
+
+
+def test_safe_upload_path_stays_in_workspace():
+    allowed = Path("/tmp/checkme-upload-test.txt")
+    allowed.write_text("hi", encoding="utf-8")
+    try:
+        assert safe_upload_path(str(allowed)).name == "checkme-upload-test.txt"
+    finally:
+        allowed.unlink(missing_ok=True)
+    with pytest.raises(RuntimeError, match="outside|not found"):
+        safe_upload_path("/etc/hosts")
+
+
+def test_launch_options_accept_downloads():
+    opts = launch_options(True, {"locale": "en-IN"})
+    assert opts["accept_downloads"] is True
+    assert opts["downloads_path"]
+
+
+def test_dblclick_and_upload_actions():
+    loc = _Loc(tag="input", role="file")
+    page = _Page()
+    page.locator = lambda *a, **k: loc  # type: ignore[method-assign]
+    page.get_by_label = page.locator
+    page.get_by_placeholder = page.locator
+    page.get_by_role = lambda *a, **k: loc
+    page.get_by_text = page.locator
+    _act_step(page, {"kind": "dblclick", "ref": "Open"})
+    assert loc.dbl is True
+    dest = Path("/tmp/checkme-upload-act.txt")
+    dest.write_text("file", encoding="utf-8")
+    try:
+        extra = _act_step(page, {"kind": "upload", "ref": "Open", "path": str(dest)})
+        assert extra["upload"]["filename"] == "checkme-upload-act.txt"
+        assert loc.files == str(dest.resolve())
+    finally:
+        dest.unlink(missing_ok=True)
