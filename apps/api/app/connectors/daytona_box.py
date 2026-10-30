@@ -82,14 +82,14 @@ DAYTONA_TOOLS = [
     ToolSpec(
         name="run_code",
         description=(
-            "Run a Python snippet in this user's Daytona sandbox. "
-            "For charts or HTML reports, write files under /tmp then call publish_file so the user gets a download link."
+            "Run a Python snippet in this user's Daytona sandbox. Use for deep-dive analysis of a downloaded CSV/Excel/JSON "
+            "(pandas groupby, joins, correlations). Open the saved path; print real figures; write charts under /tmp then publish_file."
         ),
         input_schema={
             "type": "object",
             "properties": {
                 "code": {"type": "string", "description": "Python source to execute."},
-                "timeout": {"type": "integer", "description": "Seconds to wait. Default 60."},
+                "timeout": {"type": "integer", "description": "Seconds to wait. Default 120."},
             },
             "required": ["code"],
         },
@@ -181,12 +181,14 @@ DAYTONA_TOOLS = [
         name="browser_act",
         description=(
             "Act on the live computer browser using snapshot refs (e0, e1) or a CSS/label selector. "
-            "actions is a list of {kind, ref, text}. kind: click, fill, type, select, pick, check, uncheck, hover, press, scroll, wait, reload, back. "
-            "fill/type/select/pick need text. Ordinary fields: fill then submit. Comboboxes and type-ahead lists: "
+            "actions is a list of {kind, ref, text, path, to}. kind: click, dblclick, rightclick, fill, type, select, pick, check, uncheck, hover, drag, press, scroll, wait, wait_for, upload, download, reload, back, forward. "
+            "fill/type/select/pick need text. upload needs path (a computer file). download clicks the control and saves the file. "
+            "Ordinary fields: fill then submit. Comboboxes and type-ahead lists: "
             "type or select/pick with the field ref and the value (it types, waits, and clicks the matching option). "
             "Do not batch several type-ahead fields in one call — pick each suggestion before the next field. "
+            "Read the returned snapshot (verified, alerts, tables, downloads) before the next step. "
             "If fallback is computer_act, use computer_observe then computer_act (click the suggestion, or ArrowDown then Enter). "
-            "Do not request_takeover for a dropdown."
+            "Do not request_takeover for a dropdown. Do not click Submit/Pay/Book/Delete unless the user asked to finish."
         ),
         input_schema={
             "type": "object",
@@ -292,8 +294,8 @@ DAYTONA_TOOLS = [
     ToolSpec(
         name="browse_act",
         description=(
-            "Act on the open Daytona browser tab: click, fill, type, select, pick, check, press, scroll, reload, or back. "
-            "Prefer CSS selectors or visible labels. select/pick on a type-ahead field types the value and clicks the matching option."
+            "Act on the open Daytona browser tab: click, dblclick, fill, type, select, pick, upload, download, check, press, scroll, reload, or back. "
+            "Prefer CSS selectors or visible labels. select/pick on a type-ahead field types the value and clicks the matching option. upload needs path; download saves the file."
         ),
         input_schema={
             "type": "object",
@@ -1081,8 +1083,10 @@ async def _browser_cmd(proc, payload: dict, timeout: int = 90, fs=None) -> dict:
         step["ref"] = str(payload.get("selector"))
         step["text"] = payload.get("text") or ""
         return await _browser_rpc(proc, {"command": "act", "actions": [step]}, timeout, fs)
-    if kind in {"type", "press", "fill", "select", "pick"}:
+    if kind in {"type", "press", "fill", "select", "pick", "upload", "download", "wait_for"}:
         step["text"] = payload.get("text") or ""
+        if payload.get("path"):
+            step["path"] = payload.get("path")
     if kind == "scroll":
         step["dx"] = payload.get("dx") or 0
         step["dy"] = payload.get("dy") or 800
@@ -1422,6 +1426,8 @@ async def _invoke_daytona(row, name: str, args: dict[str, Any]) -> Any:
             action = str(args.get("action") or "").strip().lower()
             if action not in {
                 "click",
+                "dblclick",
+                "rightclick",
                 "fill",
                 "type",
                 "select",
@@ -1429,13 +1435,18 @@ async def _invoke_daytona(row, name: str, args: dict[str, Any]) -> Any:
                 "check",
                 "uncheck",
                 "hover",
+                "drag",
                 "press",
                 "scroll",
                 "reload",
                 "back",
+                "forward",
                 "wait",
+                "wait_for",
+                "upload",
+                "download",
             }:
-                raise ToolError("action must be click, fill, type, select, pick, check, press, scroll, reload, back, or wait")
+                raise ToolError("action must be click, fill, type, select, pick, upload, download, check, press, scroll, reload, back, or wait")
             payload = {
                 "action": action,
                 "selector": args.get("selector") or "",

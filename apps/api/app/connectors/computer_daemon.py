@@ -13,11 +13,15 @@ from pathlib import Path
 
 HOST = "127.0.0.1"
 PORT = 18765
-VERSION = "18"
+VERSION = "19"
 _HOME = Path(os.environ.get("CHECKME_BROWSER_HOME") or "/tmp")
 SHOT = "/tmp/checkme-browser.png"
 PROFILE = str(_HOME / "profile")
 LAST = str(_HOME / "last.json")
+DOWNLOAD_DIR = Path(os.environ.get("CHECKME_DOWNLOADS") or "/tmp/checkme-downloads")
+_UPLOAD_ROOTS = ("/tmp", "/home", "/var/data", str(_HOME))
+_UPLOAD_MAX_B = 25 * 1024 * 1024
+_downloads: list[dict] = []
 # Written by the API before it starts the daemon (locale, timezone, proxy, channel...). Read once, then deleted so
 # proxy credentials do not sit on disk. See docs/BROWSING.md.
 CONFIG_PATH = "/tmp/checkme_browser_config.json"
@@ -330,7 +334,7 @@ _SNAPSHOT_JS = """(start) => {
   const BASE = 'a, button, input, textarea, select, option, label, summary, [role="button"], [role="link"], [role="textbox"], [role="searchbox"], [role="checkbox"], [role="radio"], [role="combobox"], [role="option"], [role="listbox"], [role="tab"], [role="menuitem"], [role="menuitemradio"], [role="treeitem"], [role="row"], [contenteditable="true"]';
   const SUGGEST = '[role="option"], [role="menuitem"], [role="menuitemradio"], [role="treeitem"], [role="listbox"] li, [role="listbox"] button, [role="menu"] li, [role="menu"] button, [role="dialog"] li, [role="listbox"] [tabindex]';
   const tags = {A: 'link', BUTTON: 'button', INPUT: 'textbox', TEXTAREA: 'textbox', SELECT: 'combobox', OPTION: 'option', LABEL: 'label', SUMMARY: 'button', LI: 'option'};
-  const inputRole = {submit: 'button', button: 'button', reset: 'button', image: 'button', checkbox: 'checkbox', radio: 'radio', search: 'searchbox', range: 'slider'};
+  const inputRole = {submit: 'button', button: 'button', reset: 'button', image: 'button', checkbox: 'checkbox', radio: 'radio', search: 'searchbox', range: 'slider', file: 'file'};
   const visible = (el) => {
     const r = el.getBoundingClientRect();
     if (r.width < 1 || r.height < 1) return false;
@@ -477,6 +481,15 @@ def _snapshot(page):
     data = _dump(page)
     data["tree"] = tree
     data["elements"] = _elements
+    facts = _page_facts(page)
+    if facts:
+        data["verified"] = facts
+        if facts.get("tables"):
+            data["tables"] = facts["tables"]
+        if facts.get("alerts"):
+            data["alerts"] = facts["alerts"]
+    if _downloads:
+        data["downloads"] = list(_downloads[-8:])
     return annotate_page(data)
 
 
@@ -551,14 +564,50 @@ def _settle(page, timeout: int = 8000) -> None:
         pass
 
 
+_PAGE_FACTS_JS = """() => {
+  const alerts = Array.from(document.querySelectorAll('[role="alert"], [aria-invalid="true"]'))
+    .map((el) => (el.innerText || el.getAttribute('aria-label') || '').replace(/\\s+/g, ' ').trim())
+    .filter(Boolean).slice(0, 8);
+  const fields = Array.from(document.querySelectorAll('input, textarea, select')).slice(0, 40).map((el) => {
+    const type = (el.getAttribute('type') || el.tagName || '').toLowerCase();
+    let value = el.value || '';
+    if (type === 'password') value = value ? '••••' : '';
+    return {
+      name: (el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.getAttribute('name') || el.id || '').slice(0, 60),
+      type,
+      value: String(value).slice(0, 120),
+      required: !!(el.required || el.getAttribute('aria-required') === 'true'),
+    };
+  }).filter((f) => f.name || f.value);
+  const tables = Array.from(document.querySelectorAll('table')).slice(0, 3).map((t) => {
+    const rows = Array.from(t.querySelectorAll('tr')).slice(0, 21).map((r) =>
+      Array.from(r.querySelectorAll('th,td')).map((c) => (c.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 80))
+    );
+    return { headers: rows[0] || [], rows: rows.slice(1, 20) };
+  });
+  return { alerts, fields, tables };
+}"""
+
+
+def _page_facts(page) -> dict:
+    try:
+        row = page.evaluate(_PAGE_FACTS_JS)
+    except Exception:
+        return {}
+    return row if isinstance(row, dict) else {}
+
+
 def _act_page(page, actions: list):
     completed = 0
+    extras: list[dict] = []
     try:
         for step in actions:
-            _act_step(page, step)
+            extra = _act_step(page, step)
+            if extra:
+                extras.append(extra)
             completed += 1
             kind = str(step.get("kind") or "").lower()
-            pause = 700 if kind in {"fill", "type", "select", "pick", "select_option"} else 250
+            pause = 700 if kind in {"fill", "type", "select", "pick", "select_option", "upload", "download"} else 250
             page.wait_for_timeout(pause)
     except Exception as exc:
         _settle(page)
@@ -570,13 +619,30 @@ def _act_page(page, actions: list):
             "The page may have changed. Use the refs in this fresh snapshot (tree) and try again. "
             "For a type-ahead list, type into the field, wait, then click the matching option "
             "(or select/pick with the field ref and the value); if refs miss, computer_observe + "
-            "computer_act at x,y or press ArrowDown then Enter. Do not request_takeover for a dropdown."
+            "computer_act at x,y or press ArrowDown then Enter. Do not request_takeover for a dropdown. "
+            "Check verified.alerts after a failed fill."
         )
+        _merge_extras(data, extras)
         return data
     _settle(page)
     data = _snapshot(page)
     data["completed"] = completed
+    _merge_extras(data, extras)
     return data
+
+
+def _merge_extras(data: dict, extras: list[dict]) -> None:
+    downloads = list(data.get("downloads") or [])
+    uploads = []
+    for extra in extras:
+        if extra.get("download"):
+            downloads.append(extra["download"])
+        if extra.get("upload"):
+            uploads.append(extra["upload"])
+    if downloads:
+        data["downloads"] = downloads
+    if uploads:
+        data["uploads"] = uploads
 
 
 def score_option(query: str, name: str) -> int:
@@ -756,7 +822,100 @@ def pick_suggestion(page, loc, node, text: str) -> str:
     return "keyboard"
 
 
-def _act_step(page, step: dict) -> None:
+def safe_upload_path(raw: str) -> Path:
+    """Only files on the computer workspace may be uploaded into the page."""
+    text = str(raw or "").strip()
+    if not text:
+        raise RuntimeError("upload needs path")
+    path = Path(text).expanduser()
+    try:
+        path = path.resolve()
+    except Exception:
+        raise RuntimeError(f"upload path is not usable: {text}") from None
+    if not path.is_file():
+        raise RuntimeError(f"upload file not found: {text}")
+    allowed = False
+    for root in _UPLOAD_ROOTS:
+        try:
+            path.relative_to(Path(root).expanduser().resolve())
+            allowed = True
+            break
+        except Exception:
+            continue
+    if not allowed:
+        raise RuntimeError("upload path is outside the computer workspace")
+    if path.stat().st_size > _UPLOAD_MAX_B:
+        raise RuntimeError("upload is larger than 25 MB")
+    return path
+
+
+def _unique_download(name: str) -> Path:
+    DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", (name or "download"))[:180] or "download"
+    dest = DOWNLOAD_DIR / safe
+    if not dest.exists():
+        return dest
+    stem, suffix = dest.stem, dest.suffix
+    for i in range(2, 100):
+        candidate = DOWNLOAD_DIR / f"{stem}-{i}{suffix}"
+        if not candidate.exists():
+            return candidate
+    return DOWNLOAD_DIR / f"{stem}-{os.getpid()}{suffix}"
+
+
+def remember_download(path: str, filename: str, url: str = "") -> dict:
+    row = {"path": path, "filename": filename, "url": url}
+    _downloads.append(row)
+    return row
+
+
+def _upload_file(page, loc, node, step: dict) -> dict:
+    path = safe_upload_path(str(step.get("path") or step.get("file") or step.get("text") or ""))
+    if loc is not None:
+        try:
+            loc.set_input_files(str(path), timeout=12000)
+            return {"upload": {"path": str(path), "filename": path.name}}
+        except Exception:
+            pass
+    chooser = getattr(page, "expect_file_chooser", None)
+    if callable(chooser):
+        with chooser(timeout=8000) as pending:
+            _click_target(page, loc, node, step.get("x"), step.get("y"))
+        pending.value.set_files(str(path))
+        return {"upload": {"path": str(path), "filename": path.name}}
+    raise RuntimeError("could not attach the file; snapshot a file input (role file) and retry")
+
+
+def _save_download(download) -> dict:
+    name = str(getattr(download, "suggested_filename", None) or "download")
+    dest = _unique_download(name)
+    download.save_as(str(dest))
+    url = ""
+    try:
+        url = str(download.url or "")
+    except Exception:
+        pass
+    return remember_download(str(dest), dest.name, url)
+
+
+def _click_download(page, loc, node, step: dict) -> dict:
+    expect = getattr(page, "expect_download", None)
+    if callable(expect):
+        try:
+            with expect(timeout=int(step.get("wait_ms") or 15000)) as pending:
+                _click_target(page, loc, node, step.get("x"), step.get("y"))
+            return {"download": _save_download(pending.value)}
+        except Exception as exc:
+            if _downloads:
+                return {"download": _downloads[-1]}
+            raise RuntimeError(f"download did not start: {str(exc)[:200]}") from exc
+    _click_target(page, loc, node, step.get("x"), step.get("y"))
+    if _downloads:
+        return {"download": _downloads[-1]}
+    raise RuntimeError("download did not start")
+
+
+def _act_step(page, step: dict) -> dict | None:
     kind = str(step.get("kind") or "").lower()
     ref = str(step.get("ref") or step.get("selector") or "").strip()
     node = _find(ref) if ref else None
@@ -764,16 +923,24 @@ def _act_step(page, step: dict) -> None:
     if loc is None and node is not None and page.url != _elements_url:
         # The page changed since the snapshot: its coordinates belong to another page.
         node = None
-        if step.get("x") is None and kind not in {"press", "key", "scroll", "wait", "reload", "back"}:
+        if step.get("x") is None and kind not in {"press", "key", "scroll", "wait", "reload", "back", "forward"}:
             raise RuntimeError(f"ref {ref} is from an older page; take a new browser_snapshot")
     if kind == "click":
-        _click_target(
-            page,
-            loc,
-            node,
-            step.get("x"),
-            step.get("y"),
-        )
+        _click_target(page, loc, node, step.get("x"), step.get("y"))
+    elif kind in {"dblclick", "double_click", "doubleclick"}:
+        if loc is not None:
+            loc.dblclick(timeout=12000)
+        elif node and node.get("x") is not None:
+            page.mouse.dblclick(int(node["x"]), int(node["y"]))
+        else:
+            raise RuntimeError(f"unknown ref {ref}; take a new browser_snapshot")
+    elif kind in {"rightclick", "contextclick", "context_click"}:
+        if loc is not None:
+            loc.click(button="right", timeout=12000)
+        elif node and node.get("x") is not None:
+            page.mouse.click(int(node["x"]), int(node["y"]), button="right")
+        else:
+            raise RuntimeError(f"unknown ref {ref}; take a new browser_snapshot")
     elif kind in {"fill", "type"}:
         _type_into(page, loc, node, str(step.get("text") or ""), kind == "fill")
     elif kind in {"select", "select_option", "pick"}:
@@ -792,18 +959,49 @@ def _act_step(page, step: dict) -> None:
         if loc is None:
             raise RuntimeError(f"unknown hover ref {ref}")
         loc.hover(timeout=12000)
+    elif kind == "drag":
+        to_ref = str(step.get("to") or step.get("to_ref") or "")
+        to_node = _find(to_ref) if to_ref else None
+        to_loc = _locator(page, {"ref": to_ref}, to_node) if to_ref else None
+        if loc is not None and to_loc is not None:
+            loc.drag_to(to_loc, timeout=12000)
+        else:
+            x1 = int((node or {}).get("x") or step.get("x") or 0)
+            y1 = int((node or {}).get("y") or step.get("y") or 0)
+            x2 = int((to_node or {}).get("x") or step.get("x2") or 0)
+            y2 = int((to_node or {}).get("y") or step.get("y2") or 0)
+            page.mouse.move(x1, y1)
+            page.mouse.down()
+            page.mouse.move(x2, y2)
+            page.mouse.up()
     elif kind in {"press", "key"}:
         page.keyboard.press(str(step.get("text") or step.get("key") or "Enter"))
     elif kind == "scroll":
         page.mouse.wheel(int(step.get("dx") or 0), int(step.get("dy") or 800))
     elif kind == "wait":
         page.wait_for_timeout(int(step.get("wait_ms") or step.get("ms") or 1000))
+    elif kind in {"wait_for", "waitfor"}:
+        timeout = int(step.get("wait_ms") or step.get("ms") or 8000)
+        needle = str(step.get("text") or ref)
+        if loc is not None:
+            loc.wait_for(state="visible", timeout=timeout)
+        elif needle:
+            page.get_by_text(needle, exact=False).first.wait_for(state="visible", timeout=timeout)
+        else:
+            page.wait_for_timeout(timeout)
+    elif kind == "upload":
+        return _upload_file(page, loc, node, step)
+    elif kind == "download":
+        return _click_download(page, loc, node, step)
     elif kind == "reload":
         page.reload(wait_until="domcontentloaded")
     elif kind == "back":
         page.go_back(wait_until="domcontentloaded")
+    elif kind == "forward":
+        page.go_forward(wait_until="domcontentloaded")
     else:
         raise RuntimeError(f"unsupported action {kind}")
+    return None
 
 
 def _desktop(page, actions: list):
@@ -812,6 +1010,10 @@ def _desktop(page, actions: list):
         kind = str(step.get("kind") or "").lower()
         if kind in {"click", "move", "pointer"}:
             page.mouse.click(int(step.get("x") or 0), int(step.get("y") or 0))
+        elif kind in {"dblclick", "double_click", "doubleclick"}:
+            page.mouse.dblclick(int(step.get("x") or 0), int(step.get("y") or 0))
+        elif kind in {"rightclick", "contextclick", "context_click"}:
+            page.mouse.click(int(step.get("x") or 0), int(step.get("y") or 0), button="right")
         elif kind in {"type", "fill"}:
             page.keyboard.type(str(step.get("text") or ""))
         elif kind in {"key", "press"}:
@@ -928,6 +1130,7 @@ def launch_options(headed: bool, cfg: dict | None = None, browser_version: str =
         args += ["--disable-http2", "--disable-quic"]
     if headed:
         args += ["--window-position=0,0", f"--window-size={VIEW_W},{VIEW_H + 100}"]
+    DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
     opts: dict = {
         "headless": not headed,
         "viewport": {"width": VIEW_W, "height": VIEW_H},
@@ -935,6 +1138,8 @@ def launch_options(headed: bool, cfg: dict | None = None, browser_version: str =
         "ignore_default_args": ["--enable-automation"],
         "ignore_https_errors": True,
         "locale": locale,
+        "accept_downloads": True,
+        "downloads_path": str(DOWNLOAD_DIR),
     }
     if cfg.get("timezone"):
         opts["timezone_id"] = str(cfg["timezone"])
@@ -1018,6 +1223,12 @@ def _ensure_page():
     _register_tab(_browser_page, activate=True)
     # Links with target=_blank and window.open become tabs the agent can list and switch to.
     _browser_context.on("page", lambda pg: _register_tab(pg, activate=False))
+    def _on_download(item):
+        try:
+            _save_download(item)
+        except Exception:
+            pass
+    _browser_context.on("download", _on_download)
     if _needs_desktop(_browser_page):
         _paint_desktop(_browser_page)
     return _browser_page

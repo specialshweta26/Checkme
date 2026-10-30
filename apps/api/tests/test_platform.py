@@ -51,6 +51,7 @@ def test_browser_act_covers_forms_and_handoff():
     assert "fill" in low
     assert "select" in low
     assert "pick" in low
+    assert "upload" in low and "download" in low
     assert "type-ahead" in low or "autocomplete" in low or "combobox" in low
     handoff = next(s for s in DAYTONA_TOOLS if s.name == "browser_handoff")
     hlow = handoff.description.lower()
@@ -122,7 +123,7 @@ def test_catalog_lines_label_computer_and_marketplace():
 
 
 def test_daemon_version_is_current():
-    assert DAEMON_VERSION == "18"
+    assert DAEMON_VERSION == "19"
 
 
 def test_bot_wall_detects_sorry_and_skips_cookie_consent():

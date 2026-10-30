@@ -992,6 +992,11 @@ async def search_user_tools(ctx: RunContext, query: str, connector_slug: str | N
             "png",
             "csv",
             "excel",
+            "xlsx",
+            "spreadsheet",
+            "pandas",
+            "deep dive",
+            "download",
             "report",
             "dashboard",
             "analytics",
@@ -1067,6 +1072,9 @@ async def search_user_tools(ctx: RunContext, query: str, connector_slug: str | N
                     "browse_open",
                     "browse_act",
                     "publish_file",
+                    "run_code",
+                    "write_analytics_report",
+                    "read_file",
                 )
             )
     if connecting:
@@ -2648,7 +2656,7 @@ def system_prompt(
         "connect_app returns redirect_url; the chat always shows the Composio connect card. Do not only paste the URL, and do not refuse to connect when composio is listed.\n"
         "Computer, browser, files, web search, memory, skills, and scratchpad are first-class tools. Call them directly. "
         "Do not search_tools or call_tool for browser_navigate, browser_snapshot, browser_act, computer_observe, computer_act, "
-        "shell, list_files, read_file, write_file, attach_file, open_path, launch_app, request_takeover, web_search, web_read, web_fetch, "
+        "shell, run_code, list_files, read_file, write_file, attach_file, open_path, launch_app, request_takeover, web_search, web_read, web_fetch, "
         "remember, recall_memory, or scratchpad_add.\n"
         "When the user asks for a chart, plot, HTML report, or downloadable file: fetch the data first, then "
         "render_plot or write_analytics_report with tables and charts, or write_file plus attach_file / publish_file. "
@@ -2683,12 +2691,25 @@ def system_prompt(
         "computer, then browser_snapshot and browser_act on it. "
         "web_search already falls back to searching in the computer browser; browser_search does that directly. web_search tries Tavily (and any other configured search API) first, then the computer browser, then free server-side search engines; Tavily often returns each result's page text, so web_fetch or web_read on a result is instant. If it returns `setup`, tell the user in one line which search key to configure (it names the env vars) and why, then keep going with browser_navigate on known sites. "
         "Never stop after one failed page. Never say you cannot verify live updates until you have searched and opened at least one article.\n"
-        "End-to-end web work: browser_navigate, browser_snapshot for refs (e0, e1), then browser_act — click, fill, type, select, pick, check, press, scroll. "
-        "Fill whole forms from the snapshot: one fill per ordinary field, then click submit. Comboboxes and type-ahead lists "
+        "Browser operator: execute the user's website task on the live computer yourself. Do not tell them how to click. "
+        "Loop until done: inspect the snapshot (tree, verified, alerts, tables) → browser_act one logical step → read the new snapshot → continue. "
+        "Identify controls by role and name first, then label, then visible text; computer_act x,y last. "
+        "Fill whole forms from the snapshot: one fill per ordinary field. Comboboxes and type-ahead lists "
         "(airports, places, search suggestions): type or select/pick with that field's ref and the value — do not fill, and do not "
         "batch several type-ahead fields in one browser_act; pick each matching option before the next field. If the option has no "
         "ref, computer_observe then computer_act (click the suggestion, or press ArrowDown then Enter). Never request_takeover to "
-        "pick a dropdown option. "
+        "pick a dropdown option. Dates, checkboxes, radios, and page file pickers are your job (upload with path= a computer file; "
+        "download saves the file). When a download (or publish_file) returns extracted_text, analyze it in YOUR role — your title, "
+        "standing instructions, focus, and skills — not as a generic summarizer. If a listed skill covers this file or domain, get_skill "
+        "and follow it before you write the analysis. Post findings, figures, risks, and recommended actions that fit that domain in the "
+        "chat reply, and cite download_url. If the file is tabular or numeric and your role includes data, sales, inventory, finance, or "
+        "reporting, also call write_analytics_report with the real figures. When the user asks for a deep dive, or extracted_text is truncated, "
+        "incomplete, or too coarse for the question, run_code on the saved download path (pandas; install with pip --user if missing), print "
+        "real computed figures, then write_analytics_report or attach_file any chart you wrote under /tmp. Do not invent numbers. Do not only drop a link. "
+        "If extracted_text is empty, say you attached the file and its kind (image/pdf/zip) and still give download_url. "
+        "After each critical step check verified.alerts and that values stuck; retry once with another strategy if they did not. "
+        "Do not invent personal, address, financial, or ID data — ask only for facts you do not have. "
+        "Search, filter, fill drafts, and download are allowed. Do not click Submit, Pay, Book, Send, Publish, or Delete unless the user clearly asked you to finish that step. "
         "If a page tool returns fallback computer_act, call computer_observe then computer_act (click x,y / type / key / scroll). "
         "Prefer the destination site (put dates and filters in that site's URL when the user gave them) over a Google Search results page for live results, prices, availability, or forms — Google Search often returns a verification wall to the cloud browser. "
         "Cite only what is visible on the snapshot. If the page has no prices, times, or results yet, say so. Never treat a generic landing page as a confirmed result. "

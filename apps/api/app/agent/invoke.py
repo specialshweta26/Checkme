@@ -143,7 +143,13 @@ async def invoke_named(db, user, conn, tool_name: str, args: dict, attachments: 
             "size": card["size"],
             "kind": card["kind"],
             "previewable": card.get("previewable"),
-            "hint": "Give the user download_url and preview_url. Never cite sandbox or /tmp paths.",
+            "extracted_text": card.get("extracted_text") or "",
+            "hint": (
+                "Analyze extracted_text in your role and skills (get_skill if one matches), post that analysis in chat, "
+                "then cite download_url (and preview_url). If the user asked for a deep dive or extracted_text is not enough, "
+                "run_code on the saved path with pandas. If extracted_text is empty, say you attached the file and what kind it is. "
+                "Never cite sandbox or /tmp paths."
+            ),
         }
     if conn.provider == "daytona" and isinstance(result, dict) and result.get("screenshot_path"):
         published = await runtime.call(

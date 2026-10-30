@@ -179,6 +179,32 @@ async def test_write_file_publishes_html_to_durable_storage(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_browser_downloads_include_extracted_text_for_chat(monkeypatch):
+    from app.agent import computer_harness as ch
+
+    async def fake_attach(_ctx, path, filename=""):
+        return {
+            "download_url": "https://app.test/api/files?t=inv",
+            "preview_url": "https://app.test/api/files?t=prev",
+            "filename": filename or "invoice.pdf",
+            "extracted_text": "Invoice #88  Total 1,240 INR  Due 16 Dec 2026",
+            "kind": "pdf",
+        }
+
+    monkeypatch.setattr(ch, "attach_file", fake_attach)
+    out = await ch._publish_downloads(
+        None,
+        {"downloads": [{"path": "/tmp/checkme-downloads/invoice.pdf", "filename": "invoice.pdf"}]},
+    )
+    row = out["downloads"][0]
+    assert "Invoice #88" in row["extracted_text"]
+    assert row["download_url"].endswith("t=inv")
+    assert "your role" in out["hint"]
+    assert "get_skill" in out["hint"]
+    assert "run_code" in out["hint"]
+
+
+@pytest.mark.asyncio
 async def test_browser_start_failure_tells_agent_to_continue(monkeypatch):
     from app.agent import computer_harness as ch
 

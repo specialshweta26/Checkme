@@ -276,6 +276,8 @@ def describe_tool(name: str, args: dict | None, connector_names: dict[str, str] 
         return "Using the computer screen"
     if n == "request_takeover":
         return "Handing the computer to you"
+    if n == "run_code":
+        return "Running Python on the computer"
     if n == "web_search":
         return f"Searching the web for {_quote(a.get('query'))}" if a.get("query") else "Searching the web"
     if n == "browser_search":
