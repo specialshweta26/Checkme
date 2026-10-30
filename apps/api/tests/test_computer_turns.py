@@ -98,7 +98,10 @@ def no_daemon(monkeypatch):
     monkeypatch.setattr(box, "_ensure_daemon", ready)
 
 
-async def test_parallel_browser_commands_use_their_own_payload_files(no_daemon):
+async def test_parallel_browser_commands_use_their_own_payload_files(no_daemon, monkeypatch):
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "browser_fast_rpc", False)  # the file transport (BROWSER_FAST_RPC=0)
     proc, fs = FakeProc(), FakeFs()
     await asyncio.gather(
         box._browser_rpc(proc, {"command": "navigate", "url": "https://a.test"}, 30, fs),
@@ -110,6 +113,26 @@ async def test_parallel_browser_commands_use_their_own_payload_files(no_daemon):
     assert payloads == ["navigate", "snapshot"]
     curls = [c for c in proc.commands if "curl -sS" in c]
     assert all("rm -f /tmp/checkme_cmd_" in c for c in curls)
+
+
+async def test_parallel_inline_commands_carry_their_own_payload(no_daemon):
+    import base64
+    import re
+
+    proc, fs = FakeProc(), FakeFs()
+    await asyncio.gather(
+        box._browser_rpc(proc, {"command": "navigate", "url": "https://a.test"}, 30, fs),
+        box._browser_rpc(proc, {"command": "snapshot"}, 30, fs),
+    )
+    curls = [c for c in proc.commands if "curl -sS" in c]
+    assert len(curls) == 2 and not fs.files  # no upload round trip
+    sent = sorted(json.loads(base64.b64decode(re.match(r"printf %s (\S+) \|", c).group(1)))["command"] for c in curls)
+    assert sent == ["navigate", "snapshot"]
+
+
+def test_large_payload_falls_back_to_a_file():
+    assert box.inline_rpc_command({"command": "act", "actions": [{"kind": "fill", "text": "x" * 200_000}]}, 30) is None
+    assert box.inline_rpc_command({"command": "snapshot"}, 30).startswith("printf %s ")
 
 
 async def test_undelivered_command_is_retried_once(no_daemon):

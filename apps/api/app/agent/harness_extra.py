@@ -8,6 +8,7 @@ from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
 from app.agent import computer_harness as computer
+from app.agent import fast_browser as fast
 from app.agent import scratchpad as pad
 from app.agent import task_catalog as tasks
 from app.agent import web_tools
@@ -32,6 +33,27 @@ class BrowserActInput(BaseModel):
         description="Ordered steps, e.g. [{kind: click, ref: e3}]. kind: click, fill, type, select, check, press, scroll, wait, reload, back."
     )
     tab: str = Field(default="", description="Optional tab id (t1, t2 from browser_tabs); works on that tab without switching the screen. Default: active tab.")
+
+
+class BrowserTaskInput(BaseModel):
+    goal: str = Field(description="What to get done on the site, e.g. 'log in and open the latest statement'. Mention the final action only if the user asked to finish it.")
+    url: str = Field(default="", description="Start page (http/https). Empty = continue on the current page.")
+    values: dict[str, str] = Field(default_factory=dict, description="Values the steps need, by name, e.g. {email: ..., password: ...}. Typed as {{name}}; the planning model never sees them.")
+    max_steps: int = Field(default=0, description="Model rounds (0 = default 12).")
+    allow_final_action: bool = Field(default=False, description="True only if the user asked to finish (pay, book, send, delete...).")
+
+
+class BrowserReplayInput(BaseModel):
+    name: str = Field(default="", description="Saved run name or goal (from an earlier browser_task).")
+    url: str = Field(default="", description="Site URL to find saved runs for.")
+    skill_id: str = Field(default="", description="A taught skill id whose recording to replay.")
+    values: dict[str, str] = Field(default_factory=dict, description="Values for the run's parameters (e.g. password).")
+
+
+class BrowserDownloadInput(BaseModel):
+    url: str = Field(default="", description="File URL (a link's href from the snapshot).")
+    ref: str = Field(default="", description="Or the snapshot ref of the download link/button.")
+    filename: str = Field(default="", description="Optional file name.")
 
 
 class TabInput(BaseModel):
@@ -255,12 +277,12 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
             args["wait_ms"] = wait_ms
         if tab:
             args["tab"] = tab
-        return _dumps(await computer.run_computer(ctx, "browser_navigate", args))
+        return _dumps(fast.for_model(await computer.run_computer(ctx, "browser_navigate", args)))
 
     async def browser_snapshot(tab: str = "") -> str:
         """Re-read the live computer browser: URL, title, page text, and interactive refs (e0, e1). browser_navigate and browser_act already return one."""
         ctx.used_tools.append("browser_snapshot")
-        return _dumps(await computer.run_computer(ctx, "browser_snapshot", {"tab": tab} if tab else {}))
+        return _dumps(fast.for_model(await computer.run_computer(ctx, "browser_snapshot", {"tab": tab} if tab else {})))
 
     async def browser_act(actions: list[dict[str, Any]], tab: str = "") -> str:
         """Act on the live computer browser using snapshot refs (e0, e1). kind: click, dblclick, rightclick, fill, type, select, pick, check, hover, drag, press, scroll, wait, wait_for, upload, download, reload, back, forward. For type-ahead lists use type or select/pick (field ref + value). upload needs path; download saves the file and returns extracted_text plus download_url — analyze that text in your role and skills, then post the analysis in chat. For a deep dive on tabular files, run_code on the saved path. Read verified/alerts/tables/downloads on the returned snapshot. Do not request_takeover for a dropdown. Returns a fresh snapshot."""
@@ -268,7 +290,22 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         args: dict[str, Any] = {"actions": actions}
         if tab:
             args["tab"] = tab
-        return _dumps(await computer.run_computer(ctx, "browser_act", args))
+        return _dumps(fast.for_model(await computer.run_computer(ctx, "browser_act", args)))
+
+    async def browser_task(goal: str, url: str = "", values: dict[str, str] | None = None, max_steps: int = 0, allow_final_action: bool = False) -> str:
+        """Fast path for routine multi-step browser work (log in, fill a form, search a site, open a statement, download a file). A small fast model reads the page's numbered elements and runs several actions per call (stops at the first failure), escalates to the main model on repeated failures, and replays a saved run of the same task with no model calls. Pass the values the steps need in values ({email: ..., password: ...}); they are typed as {{name}} and never shown to the planning model or logged. Returns done + result, need_user (CAPTCHA, missing code), stopped_before (a Pay/Book/Send/Delete control it will not click unless allow_final_action), or fallback: then continue yourself with browser_act from the returned page."""
+        ctx.used_tools.append("browser_task")
+        return _dumps(await fast.browser_task(ctx, goal, url, values or {}, max_steps, allow_final_action))
+
+    async def browser_replay(name: str = "", url: str = "", skill_id: str = "", values: dict[str, str] | None = None) -> str:
+        """Replay a saved browser run (a finished browser_task, or a taught skill's recording) by name, site URL or skill_id, with no model call per step. Each step is verified; on a mismatch it stops and returns the page so you continue with browser_task or browser_act. Pass parameter values (e.g. password) in values."""
+        ctx.used_tools.append("browser_replay")
+        return _dumps(await fast.replay_named(ctx, name, url, skill_id, values or {}))
+
+    async def browser_download(url: str = "", ref: str = "", filename: str = "") -> str:
+        """Download a file from the site directly with the browser's signed-in cookies (no click-through), given its URL (a link href) or the ref of its link/button. Returns the saved file with extracted_text and download_url, like browser_act download."""
+        ctx.used_tools.append("browser_download")
+        return _dumps(await fast.browser_download(ctx, url, ref, filename))
 
     async def browser_tabs() -> str:
         """List open browser tabs (t1, t2): URL, title, and which is active on the live screen."""
@@ -278,7 +315,7 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
     async def browser_new_tab(url: str = "", background: bool = False) -> str:
         """Open a new tab (optionally at a URL) and return its tab id and snapshot. Keep several pages open, e.g. the same search on different sites, and work each by passing tab= to browser_navigate / browser_snapshot / browser_act."""
         ctx.used_tools.append("browser_new_tab")
-        return _dumps(await computer.run_computer(ctx, "browser_new_tab", {"url": url, "background": background}))
+        return _dumps(fast.for_model(await computer.run_computer(ctx, "browser_new_tab", {"url": url, "background": background})))
 
     async def browser_switch_tab(tab: str = "") -> str:
         """Show a tab on the live screen (make it active) and return its snapshot."""
@@ -572,6 +609,21 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         StructuredTool.from_function(coroutine=browser_snapshot, name="browser_snapshot", description=browser_snapshot.__doc__, args_schema=TabInput),
         StructuredTool.from_function(coroutine=browser_act, name="browser_act", description=browser_act.__doc__, args_schema=BrowserActInput),
         StructuredTool.from_function(coroutine=browser_tabs, name="browser_tabs", description=browser_tabs.__doc__),
+        *(
+            [StructuredTool.from_function(coroutine=browser_task, name="browser_task", description=browser_task.__doc__, args_schema=BrowserTaskInput)]
+            if fast.setting("browser_fast_loop", True)
+            else []
+        ),
+        *(
+            [StructuredTool.from_function(coroutine=browser_replay, name="browser_replay", description=browser_replay.__doc__, args_schema=BrowserReplayInput)]
+            if fast.setting("browser_replay", True)
+            else []
+        ),
+        *(
+            [StructuredTool.from_function(coroutine=browser_download, name="browser_download", description=browser_download.__doc__, args_schema=BrowserDownloadInput)]
+            if fast.setting("browser_direct_downloads", True)
+            else []
+        ),
         StructuredTool.from_function(coroutine=browser_new_tab, name="browser_new_tab", description=browser_new_tab.__doc__, args_schema=NewTabInput),
         StructuredTool.from_function(coroutine=browser_switch_tab, name="browser_switch_tab", description=browser_switch_tab.__doc__, args_schema=TabInput),
         StructuredTool.from_function(coroutine=browser_close_tab, name="browser_close_tab", description=browser_close_tab.__doc__, args_schema=TabInput),
