@@ -253,6 +253,37 @@ def _stream_fields(data: dict) -> dict:
     return out
 
 
+@router.post("/computer/touch")
+async def computer_touch(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Extend the live desktop timeout while the user (or a handoff) is on the screen. Resumes if asleep."""
+    backend = get_settings().computer_backend
+    if not backend:
+        raise HTTPException(503, "No computer is configured on the server (set E2B_API_KEY).")
+    try:
+        row = await _computer_row(db, user, provision=False)
+    except HTTPException:
+        return {"ok": False, "state": "stopped", "screenAvailable": False, "provider": backend or "none"}
+    from app.connectors.daytona_box import call_daytona
+
+    try:
+        data = await call_daytona(row, "touch", {})
+    except Exception as exc:  # noqa: BLE001
+        log.warning("computer touch failed (%s): %s", backend, str(exc)[:200])
+        raise HTTPException(400, str(exc)[:240]) from exc
+    await db.commit()
+    if not isinstance(data, dict):
+        return {"ok": True, "state": "running", "screenAvailable": True}
+    return {
+        "ok": data.get("ok", True),
+        "state": data.get("state") or "running",
+        "screenAvailable": bool(data.get("screenAvailable", True)),
+        "url": data.get("url") or "",
+        "title": data.get("title") or "",
+        **({"error": str(data["error"])[:300]} if data.get("error") else {}),
+        **_stream_fields(data),
+    }
+
+
 @router.post("/computer/boot")
 async def computer_boot(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     """Wake the computer (E2B desktop or Daytona) and its Chromium so the right-rail screen can stream."""

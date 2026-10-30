@@ -126,6 +126,72 @@ async def test_failed_action_is_not_retried(no_daemon):
     assert len([c for c in proc.commands if "curl -sS" in c]) == 1
 
 
+@pytest.mark.asyncio
+async def test_ensure_playwright_reinstalls_when_import_fails():
+    class Proc:
+        def __init__(self):
+            self.commands = []
+            self.browser_deps = False
+            self._imports = 0
+
+        async def exec(self, command, timeout=60):
+            self.commands.append(command)
+            if "from playwright.sync_api import sync_playwright" in command and "pip install" not in command:
+                self._imports += 1
+                ok = self._imports > 1
+                return type("R", (), {"exit_code": 0, "result": "OK" if ok else "FAIL"})()
+            return type("R", (), {"exit_code": 0, "result": "installed"})()
+
+    proc = Proc()
+    await box._ensure_playwright(proc)
+    assert any("pip install" in c for c in proc.commands)
+    assert proc._imports >= 2
+
+
+def test_daemon_boot_uses_persistent_home_not_login_shell():
+    cmd = box._daemon_boot_cmd(type("P", (), {"daemon_env": "DISPLAY=:0 "})())
+    assert box.BROWSER_HOME in cmd and box.DAEMON_PY in cmd
+    assert "CHECKME_BROWSER_HOME=" in cmd and "PYTHONPATH=" in cmd
+    assert "bash -lc" not in cmd
+    assert "setsid nohup python3" in cmd
+
+
+@pytest.mark.asyncio
+async def test_write_file_publishes_html_to_durable_storage(monkeypatch):
+    from app.agent import computer_harness as ch
+
+    calls = []
+
+    async def fake_run(_ctx, name, args=None):
+        calls.append(name)
+        if name == "write_file":
+            return {"ok": True, "path": args["path"]}
+        if name == "publish_file":
+            return {"download_url": "https://app.test/api/files?t=abc", "preview_url": "https://app.test/api/files?t=def", "filename": "r.html"}
+        return {}
+
+    monkeypatch.setattr(ch, "run_computer", fake_run)
+    out = await ch.write_file(None, "/tmp/r.html", "<h1>hi</h1>")
+    assert out["download_url"].endswith("t=abc")
+    assert calls == ["write_file", "publish_file"]
+    py = await ch.write_file(None, "/tmp/app.py", "x=1")
+    assert "download_url" not in py
+
+
+@pytest.mark.asyncio
+async def test_browser_start_failure_tells_agent_to_continue(monkeypatch):
+    from app.agent import computer_harness as ch
+
+    async def fake_call(_ctx, _slug, _tool, _args):
+        return {"ok": False, "error": "ModuleNotFoundError: No module named 'playwright'"}
+
+    monkeypatch.setattr("app.agent.deep.call_user_tool", fake_call)
+    monkeypatch.setattr(ch, "computer_slug", lambda _ctx: "computer")
+    out = await ch.run_computer(type("C", (), {"pending": []})(), "browser_snapshot", {})
+    assert out["continue"] is True
+    assert "do not treat this as the task failing" in out["note"].lower()
+
+
 async def test_hung_browser_command_returns_an_error_instead_of_freezing(no_daemon, monkeypatch):
     proc, fs = FakeProc(hang=True), FakeFs()
     real_wait_for = asyncio.wait_for

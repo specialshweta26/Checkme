@@ -11,7 +11,7 @@ from app.agent.attachments import is_previewable
 from app.config import get_settings
 from app.deps import current_user
 from app.models import User
-from app.security import load_state
+from app.security import load_file_token
 from app.storage import extract_text, get_bytes, guess_media_type, put_bytes, render_pdf_preview, signed_url
 from connector_core.text import clip
 
@@ -20,9 +20,9 @@ router = APIRouter(prefix="/files", tags=["files"])
 
 @router.get("")
 async def get_file(t: str = Query(..., min_length=8), render: bool = False):
-    data = load_state(t, max_age=3600)
+    data = load_file_token(t)
     if not data or not data.get("key"):
-        raise HTTPException(404, "File link expired. Ask again in chat.")
+        raise HTTPException(404, "File not found.")
     try:
         body, stored_type = get_bytes(data["key"])
     except Exception as exc:  # noqa: BLE001

@@ -130,13 +130,13 @@ def get_bytes(key: str) -> tuple[bytes, str]:
 def file_url(key: str, filename: str, content_type: str, inline: bool = False) -> str:
     from urllib.parse import quote
 
-    from app.security import sign_state
+    from app.security import sign_file_token
 
-    token = sign_state({"key": key, "filename": filename, "content_type": content_type, "inline": inline})
+    token = sign_file_token({"key": key, "filename": filename, "content_type": content_type, "inline": inline})
     return f"{get_settings().public_web_url.rstrip('/')}/api/files?t={quote(token, safe='')}"
 
 
-def signed_url(key: str, filename: str, expires: int = 3600, inline: bool = False, content_type: str = "application/octet-stream") -> str:
+def signed_url(key: str, filename: str, expires: int = 0, inline: bool = False, content_type: str = "application/octet-stream") -> str:
     return file_url(key, filename, content_type, inline=inline)
 
 

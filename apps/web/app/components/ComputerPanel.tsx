@@ -422,6 +422,25 @@ export function ScreenRail({
     };
   }, []);
   useEffect(() => {
+    const keep = controlling || teaching || Boolean(session?.handoff) || streaming;
+    if (!keep) return;
+    const ac = new AbortController();
+    const ping = () => {
+      fetch("/api/connectors/computer/touch", { method: "POST", credentials: "include", signal: ac.signal })
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data) => {
+          if (data) applyStream(data);
+        })
+        .catch(() => undefined);
+    };
+    ping();
+    const timer = window.setInterval(ping, 20000);
+    return () => {
+      ac.abort();
+      window.clearInterval(timer);
+    };
+  }, [controlling, teaching, session?.handoff, streaming]);
+  useEffect(() => {
     if (machine !== "booting") return;
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);

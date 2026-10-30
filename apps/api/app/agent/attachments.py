@@ -9,6 +9,7 @@ from app.cache import get_redis
 from app.config import get_settings
 from app.connectors.runtime import RuntimeConnector, is_binary
 from app.llm import chat_complete
+from app.security import file_link_ttl_s
 from app.storage import extract_text, put_bytes, signed_url
 from connector_core.text import clip
 
@@ -67,7 +68,7 @@ async def cache_attachment(user_id, message_id: str, attachment_id: str, card: d
                 "kind": card.get("kind"),
             }
         ),
-        ex=3600,
+        ex=max(86400, file_link_ttl_s()),
     )
 
 
