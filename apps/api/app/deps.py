@@ -25,14 +25,26 @@ async def optional_user(request: Request, db: AsyncSession = Depends(get_db)) ->
     if not claims:
         return None
     sid = uuid.UUID(claims["sid"])
-    r = get_redis()
-    if await r.get(f"revoked:{sid}"):
+    cached = None
+    revoked = None
+    r = None
+    try:
+        r = get_redis()
+        revoked = await r.get(f"revoked:{sid}")
+        cached = await r.get(f"sess:{sid}")
+    except Exception:  # noqa: BLE001 — Redis outage must not 500 login or /me
+        r = None
+    if revoked:
         return None
-    if not await r.get(f"sess:{sid}"):
+    if not cached:
         sess = await db.get(AuthSession, sid)
         if sess is None or sess.revoked or sess.expires_at < datetime.now(timezone.utc):
             return None
-        await r.set(f"sess:{sid}", b"1", ex=300)
+        if r is not None:
+            try:
+                await r.set(f"sess:{sid}", b"1", ex=300)
+            except Exception:  # noqa: BLE001
+                pass
     user = await db.get(User, uuid.UUID(claims["sub"]))
     if user is not None:
         request.state.auth_session_id = sid

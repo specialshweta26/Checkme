@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import hashlib
-import json
+from collections import OrderedDict
 from types import SimpleNamespace
 from typing import Any
 
 from openai import AsyncOpenAI
 
-from app.cache import get_redis
 from app.config import get_settings
+
+# Process-local only. Storing embedding JSON in Redis filled the 256MB instance and crashed it.
+_EMB_LOCAL: OrderedDict[str, list[float]] = OrderedDict()
+_EMB_LOCAL_MAX = 256
 
 _client: AsyncOpenAI | None = None
 
@@ -119,17 +122,33 @@ async def chat_complete(
     return _as_chat_completion(_output_text(resp))
 
 
+def _emb_key(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def _emb_get(digest: str) -> list[float] | None:
+    hit = _EMB_LOCAL.get(digest)
+    if hit is not None:
+        _EMB_LOCAL.move_to_end(digest)
+    return hit
+
+
+def _emb_put(digest: str, vec: list[float]) -> None:
+    _EMB_LOCAL[digest] = vec
+    _EMB_LOCAL.move_to_end(digest)
+    while len(_EMB_LOCAL) > _EMB_LOCAL_MAX:
+        _EMB_LOCAL.popitem(last=False)
+
+
 async def embed_texts(texts: list[str]) -> list[list[float]]:
     if not texts:
         return []
-    r = get_redis()
     cached: list[list[float] | None] = []
     missing: list[tuple[int, str]] = []
     for i, text in enumerate(texts):
-        key = "emb:" + hashlib.sha256(text.encode()).hexdigest()
-        hit = await r.get(key)
-        if hit:
-            cached.append(json.loads(hit))
+        hit = _emb_get(_emb_key(text))
+        if hit is not None:
+            cached.append(hit)
         else:
             cached.append(None)
             missing.append((i, text))
@@ -138,11 +157,10 @@ async def embed_texts(texts: list[str]) -> list[list[float]]:
             model=get_settings().openai_embedding_model,
             input=[t for _, t in missing],
         )
-        for (i, text), item in zip(missing, resp.data, strict=True):
+        for (i, _text), item in zip(missing, resp.data, strict=True):
             vec = list(item.embedding)
             cached[i] = vec
-            key = "emb:" + hashlib.sha256(text.encode()).hexdigest()
-            await r.set(key, json.dumps(vec), ex=7 * 86400)
+            _emb_put(_emb_key(_text), vec)
     return [v or [] for v in cached]
 
 

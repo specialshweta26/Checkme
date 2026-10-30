@@ -170,7 +170,10 @@ async def logout(request: Request, user: User = Depends(current_user), db: Async
         if sess:
             sess.revoked = True
             await db.commit()
-        await get_redis().set(f"revoked:{sid}", b"1", ex=get_settings().session_ttl_days * 86400)
+        try:
+            await get_redis().set(f"revoked:{sid}", b"1", ex=get_settings().session_ttl_days * 86400)
+        except Exception:  # noqa: BLE001
+            pass
     resp = RedirectResponse(_web("/"), status_code=303)
     resp.delete_cookie(SESSION_COOKIE, path="/")
     return resp

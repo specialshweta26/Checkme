@@ -159,13 +159,16 @@ async def request_remote(user_id: Any, refs: list[Any], redis_client: Any = None
 
 
 async def remote_requested(run: Run, redis_client: Any = None) -> bool:
-    if redis_client is None:
-        from app.cache import get_redis
+    try:
+        if redis_client is None:
+            from app.cache import get_redis
 
-        redis_client = get_redis()
-    for ref in (run.request_id, run.progress_id, run.session_id):
-        if ref and await redis_client.get(_remote_key(run.user_id, ref)):
-            return True
+            redis_client = get_redis()
+        for ref in (run.request_id, run.progress_id, run.session_id):
+            if ref and await redis_client.get(_remote_key(run.user_id, ref)):
+                return True
+    except Exception:  # noqa: BLE001
+        return False
     return False
 
 
