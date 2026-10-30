@@ -234,3 +234,26 @@ def test_daemon_runs_every_command_on_one_thread():
         t.join()
     assert len(seen) == 4 and len(set(seen)) == 1
     assert seen[0] not in {t.ident for t in threads}
+
+
+def test_browser_thread_is_outside_a_running_asyncio_loop():
+    # Playwright sync start() raises if get_running_loop() succeeds on that thread.
+    import asyncio
+
+    from app.connectors import computer_daemon as d
+
+    def playwright_start_guard():
+        d.prepare_thread_for_sync_playwright()
+        if d.asyncio_loop_is_running():
+            raise RuntimeError(
+                "It looks like you are using Playwright Sync API inside the asyncio loop. "
+                "Please use the Async API instead."
+            )
+        return "ok"
+
+    async def from_loop():
+        with pytest.raises(RuntimeError, match="asyncio loop"):
+            playwright_start_guard()
+        return d.on_browser_thread(playwright_start_guard)
+
+    assert asyncio.run(from_loop()) == "ok"

@@ -62,10 +62,12 @@ def browser(monkeypatch):
     monkeypatch.setattr(d, "_tab_refs", {})
     monkeypatch.setattr(d, "_tab_seq", 0)
     monkeypatch.setattr(d, "_active_tab", "")
+    monkeypatch.setattr(d, "_pending_pages", [])
+    monkeypatch.setattr(d, "_pending_downloads", [])
     monkeypatch.setattr(d, "_browser_context", ctx)
     monkeypatch.setattr(d, "_browser_page", first)
     d._register_tab(first, activate=True)
-    ctx.on("page", lambda pg: d._register_tab(pg, activate=False))
+    ctx.on("page", d._on_new_page)
     monkeypatch.setattr(d, "_needs_desktop", lambda page: False)
     monkeypatch.setattr(d, "_snapshot", lambda page: {"ok": True, "url": page.url})
     monkeypatch.setattr(d, "_dump", lambda page: {"ok": True, "url": page.url})
@@ -96,6 +98,7 @@ def test_commands_target_a_tab_without_switching(browser):
 
 def test_popups_become_tabs_and_close_falls_back(browser):
     browser.popup("https://popup.test/")
+    d.drain_browser_events()
     assert "t2" in d._tabs and d._active_tab == "t1"
     d.handle({"command": "switch_tab", "tab": "t2"})
     out = d.handle({"command": "close_tab"})
@@ -109,3 +112,11 @@ def test_tab_limit(browser, monkeypatch):
     d.handle({"command": "new_tab"})
     with pytest.raises(RuntimeError, match="at most 2 tabs"):
         d.handle({"command": "new_tab"})
+
+
+def test_page_event_does_not_call_playwright_until_drained(browser):
+    page = browser.popup("https://popup.test/")
+    assert "close" not in page.handlers
+    assert "t2" not in d._tabs
+    d.drain_browser_events()
+    assert "close" in page.handlers and "t2" in d._tabs
