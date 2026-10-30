@@ -707,6 +707,9 @@ def daemon_config(timezone: str = "") -> dict:
         "timezone": tz,
         "http2": bool(_cfg("browser_http2", True)),
         "challenge_wait_s": float(_cfg("browser_challenge_wait_s", 15.0)),
+        # Fast browser (docs/BROWSING.md): event-based waits instead of fixed sleeps; direct file fetches.
+        "smart_waits": bool(_cfg("browser_smart_waits", True)),
+        "direct_downloads": bool(_cfg("browser_direct_downloads", True)),
     }
     channel = str(_cfg("browser_channel", "") or "").strip().lower()
     if channel in {"chrome", "chrome-beta", "msedge"}:

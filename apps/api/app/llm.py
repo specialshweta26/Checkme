@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from collections import OrderedDict
 from types import SimpleNamespace
 from typing import Any
@@ -98,11 +99,13 @@ async def chat_complete(
     temperature: float | None = None,
     response_format: dict | None = None,
     max_tokens: int = 1200,
+    model: str | None = None,
 ) -> Any:
-    """Call /v1/responses. gpt-6-luna cannot use function tools on chat completions with reasoning."""
+    """Call /v1/responses. gpt-6-luna cannot use function tools on chat completions with reasoning.
+    ``model`` overrides OPENAI_MODEL for this call (the fast browser loop's BROWSER_FAST_MODEL)."""
     instructions, items = _split_messages(messages)
     kwargs: dict[str, Any] = {
-        "model": get_settings().openai_model,
+        "model": (model or "").strip() or get_settings().openai_model,
         "service_tier": "default",
         "input": items,
         "text": _text_format(response_format),

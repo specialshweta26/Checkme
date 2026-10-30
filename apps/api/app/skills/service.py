@@ -770,6 +770,7 @@ async def write_up(skill_id: str) -> None:
 async def _finalize(key: str, row: dict) -> None:
     """Background: stop the recorder, wait for transcripts, store the final recording, then write it up."""
     skill_id = row.get("skill_id")
+    captured: dict = {}
     try:
         captured = await recorder.stop(key)
         clips = row.get("audio") or []
@@ -798,7 +799,37 @@ async def _finalize(key: str, row: dict) -> None:
         log.warning("teach: finishing the recording failed skill=%s: %s", skill_id, _short_error(exc))
         if not skill_id:
             return
+    trace_id = await _save_dom_trace(row, skill_id, (captured or {}).get("dom_events") or [])
     await write_up(skill_id)
+    if trace_id:
+        await _add_replay_line(skill_id)
+
+
+async def _save_dom_trace(row: dict, skill_id: str, dom_events: list[dict]) -> str | None:
+    """BROWSER_TEACH_DOM: the page browser's selector-level steps become a replayable trace for this skill."""
+    if not dom_events or not recorder.teach_dom_enabled():
+        return None
+    try:
+        from app.agent import fast_browser
+
+        trace_id = await fast_browser.save_teach_trace(row["user_id"], str(skill_id), row.get("name") or "", dom_events)
+        log.info("teach: saved %d DOM events as replay trace for skill=%s: %s", len(dom_events), skill_id, bool(trace_id))
+        return trace_id
+    except Exception as exc:  # noqa: BLE001 - the skill itself is still written
+        log.info("teach: saving the replay trace failed skill=%s: %s", skill_id, type(exc).__name__)
+        return None
+
+
+async def _add_replay_line(skill_id: str) -> None:
+    try:
+        from app.agent import fast_browser
+
+        data = await _store_get(skill_id)
+        line = fast_browser.teach_replay_line(str(skill_id))
+        if data and line.strip() not in (data.get("instruction") or ""):
+            await _store_update(skill_id, instruction=(data.get("instruction") or "") + line)
+    except Exception as exc:  # noqa: BLE001
+        log.info("teach: adding the replay hint failed skill=%s: %s", skill_id, type(exc).__name__)
 
 
 async def _finalize_orphan(skill_id: str) -> None:

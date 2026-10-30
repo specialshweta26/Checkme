@@ -97,6 +97,11 @@ async def save(user_id: str, cookies: list[Any]) -> bool:
         return False
 
 
+def save_soon(user_id: str) -> None:
+    """Drop the throttle so the next save runs (after a sign-in, so a recycled computer stays signed in)."""
+    _last_save.pop(str(user_id), None)
+
+
 def due(user_id: str, now: float | None = None) -> bool:
     """Throttle: at most one export per user every SAVE_EVERY_S."""
     if not enabled(user_id):

@@ -40,6 +40,8 @@ _COMPUTER_USE = {
     "computer_act",
     "computer_control",
     "browse_act",
+    "browser_replay",
+    "browser_download",
 }
 
 
@@ -633,6 +635,42 @@ def daemon_current(health_output: str, config_hash: str = "") -> bool:
 
 
 _DAEMON_LOCKS: dict[str, asyncio.Lock] = {}
+# Fast browser: a daemon proven healthy (this release, this config) on this sandbox is trusted for
+# BROWSER_READY_TTL_S without the Playwright import probe and health curl (two sandbox round trips per command).
+# Any delivery failure or error drops the entry, and the next command runs the full check again.
+_READY: dict[tuple, float] = {}
+
+
+def fast_rpc() -> bool:
+    return bool(getattr(get_settings(), "browser_fast_rpc", True))
+
+
+def _ready_ttl() -> float:
+    return float(getattr(get_settings(), "browser_ready_ttl_s", 600.0) or 0)
+
+
+def ready_key(proc, config_hash: str = "") -> tuple:
+    """Who + which sandbox + which daemon release and settings: a new sandbox or a new deploy never hits."""
+    from app.connectors.computer_daemon import VERSION
+
+    sbx = getattr(proc, "_sbx", None)
+    sid = str(getattr(sbx, "sandbox_id", "") or getattr(proc, "sandbox_id", "") or "") or f"obj{id(sbx if sbx is not None else proc)}"
+    return (_SCREEN_USER.get() or "default", sid, VERSION, config_hash)
+
+
+def daemon_known_ready(key: tuple) -> bool:
+    ts = _READY.get(key)
+    return bool(ts) and (time.monotonic() - ts) < _ready_ttl()
+
+
+def mark_daemon_ready(key: tuple) -> None:
+    _READY[key] = time.monotonic()
+
+
+def forget_daemon_ready(user: str | None = None) -> None:
+    who = user if user is not None else (_SCREEN_USER.get() or "default")
+    for key in [k for k in _READY if k[0] == who]:
+        _READY.pop(key, None)
 
 
 async def _ensure_daemon(proc, fs=None) -> None:
@@ -667,9 +705,13 @@ async def _boot_daemon(proc, fs=None) -> Any:
 
 
 async def _ensure_daemon_locked(proc, fs=None) -> None:
-    await _ensure_playwright(proc)
     config = await _daemon_config()
+    key = ready_key(proc, config.get("hash", ""))
+    if fast_rpc() and daemon_known_ready(key):
+        return
+    await _ensure_playwright(proc)
     if await _daemon_up(proc, config.get("hash", "")):
+        mark_daemon_ready(key)
         return
     boot = await _boot_daemon(proc, fs)
     if getattr(boot, "exit_code", 1) not in {0, None} and not await _daemon_up(proc):
@@ -685,6 +727,7 @@ async def _ensure_daemon_locked(proc, fs=None) -> None:
                 + _clip(_out(boot), 400)
             )
     await _restore_profile(proc, fs)
+    mark_daemon_ready(key)
 
 
 async def _restore_profile(proc, fs=None) -> None:
@@ -719,6 +762,35 @@ async def _save_profile(proc, fs=None) -> None:
         log.info("computer: cookie save skipped: %s", type(exc).__name__)
 
 
+_SAVE_TASKS: set = set()
+
+
+def _save_after_sign_in(proc, fs, data: Any) -> None:
+    """A step typed into a password/OTP field and worked: save the session cookies soon (in the background), so
+    the warm browser stays signed in even if the computer is recycled."""
+    from app.connectors import browser_profile
+
+    if not isinstance(data, dict) or data.get("ok") is False:
+        return
+    if not any(isinstance(t, dict) and t.get("secret") for t in data.get("trace") or []):
+        return
+    user = _SCREEN_USER.get() or ""
+    if not browser_profile.enabled(user):
+        return
+
+    async def run() -> None:
+        await asyncio.sleep(4.0)  # let the post-login redirect set its cookies
+        browser_profile.save_soon(user)
+        await _save_profile(proc, fs)
+
+    try:
+        task = asyncio.get_running_loop().create_task(run())
+    except RuntimeError:
+        return
+    _SAVE_TASKS.add(task)
+    task.add_done_callback(_SAVE_TASKS.discard)
+
+
 _RPC_LOCKS: dict[str, asyncio.Lock] = {}
 
 
@@ -738,10 +810,39 @@ async def _browser_rpc(proc, payload: dict, timeout: int = 90, fs=None) -> dict:
     """One command to the browser daemon. Never hangs past ``timeout`` (plus queueing) and never raises:
     failures come back as ``ok: false`` with the reason so the agent can retry or switch approach."""
     url = str(payload.get("url") or "")
+    started = time.monotonic()
     try:
         await _ensure_daemon(proc, fs)
     except Exception as exc:  # noqa: BLE001
+        forget_daemon_ready()
         return _rpc_error(url, str(exc) or type(exc).__name__)
+    ensured = time.monotonic()
+    try:
+        out = await _browser_rpc_locked(proc, payload, timeout, fs)
+    finally:
+        _log_rpc_timing(payload, started, ensured)
+    if not isinstance(out, dict) or (out.get("ok") is False and out.get("fallback") == "computer_act" and not out.get("title")):
+        # Transport-level failure (not a page-level "step failed"): re-check the daemon next time.
+        forget_daemon_ready()
+    return out
+
+
+def _log_rpc_timing(payload: dict, started: float, ensured: float) -> None:
+    """One line per browser command: what ran and how long. Never the typed text or URLs' query strings."""
+    if not getattr(get_settings(), "browser_timing_logs", True):
+        return
+    steps = payload.get("actions") or payload.get("steps") or []
+    kinds = ",".join(str((s or {}).get("kind") or "?") for s in steps[:12]) if isinstance(steps, list) else ""
+    done = time.monotonic()
+    log.info(
+        "browser.timing command=%s steps=%s ensure_ms=%d rpc_ms=%d total_ms=%d fast=%s",
+        payload.get("command"), kinds or "-", int((ensured - started) * 1000), int((done - ensured) * 1000),
+        int((done - started) * 1000), fast_rpc(),
+    )  # fmt: skip
+
+
+async def _browser_rpc_locked(proc, payload: dict, timeout: int, fs=None) -> dict:
+    url = str(payload.get("url") or "")
     # Browser commands for one user's computer run one at a time (the daemon drives a single tab), and
     # each one ships its payload in its own file so parallel tool calls can never swap commands.
     lock = _RPC_LOCKS.setdefault(_SCREEN_USER.get() or "default", asyncio.Lock())
@@ -753,6 +854,7 @@ async def _browser_rpc(proc, payload: dict, timeout: int = 90, fs=None) -> dict:
                 # The command never reached the browser (upload hiccup, daemon restarting): safe to retry once,
                 # even for clicks. Anything that may have run is not retried, so actions never double up.
                 log.info("e2b: browser %s not delivered (%s); retrying once", payload.get("command"), first)
+                forget_daemon_ready()
                 await asyncio.sleep(1.0)
                 await _ensure_daemon(proc, fs)
                 return await asyncio.wait_for(_browser_rpc_once(proc, payload, timeout, fs), timeout=timeout + 30)
@@ -776,21 +878,40 @@ class _NotDelivered(Exception):
 _CURL_NOT_SENT = {7, 26}
 
 
+# A command line is one argv string for bash (Linux caps one at 128 KiB): larger payloads go through a file.
+INLINE_MAX_B64 = 96_000
+
+
+def inline_rpc_command(payload: dict, timeout: int) -> str | None:
+    """One sandbox exec that pipes the JSON payload straight into curl (no upload round trip), or None if too big."""
+    import base64
+
+    blob = base64.b64encode(json.dumps(payload).encode()).decode("ascii")
+    if len(blob) > INLINE_MAX_B64:
+        return None
+    return (
+        f"printf %s {blob} | base64 -d | curl -sS -m {max(15, timeout - 5)}"
+        " -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:18765/"
+    )
+
+
 async def _browser_rpc_once(proc, payload: dict, timeout: int, fs=None) -> dict:
     import secrets as _secrets
 
-    cmd_path = f"/tmp/checkme_cmd_{_secrets.token_hex(6)}.json"
-    try:
-        await _put_sandbox_file(proc, fs, cmd_path, json.dumps(payload).encode())
-    except Exception as exc:  # noqa: BLE001
-        raise _NotDelivered(f"upload failed: {type(exc).__name__}") from exc
-    response = await proc.exec(
-        "curl -sS -m "
-        + str(max(15, timeout - 5))
-        + f" -H 'Content-Type: application/json' --data-binary @{cmd_path} http://127.0.0.1:18765/"
-        + f"; rc=$?; rm -f {cmd_path}; exit $rc",
-        timeout=timeout,
-    )
+    command = inline_rpc_command(payload, timeout) if fast_rpc() else None
+    if command is None:
+        cmd_path = f"/tmp/checkme_cmd_{_secrets.token_hex(6)}.json"
+        try:
+            await _put_sandbox_file(proc, fs, cmd_path, json.dumps(payload).encode())
+        except Exception as exc:  # noqa: BLE001
+            raise _NotDelivered(f"upload failed: {type(exc).__name__}") from exc
+        command = (
+            "curl -sS -m "
+            + str(max(15, timeout - 5))
+            + f" -H 'Content-Type: application/json' --data-binary @{cmd_path} http://127.0.0.1:18765/"
+            + f"; rc=$?; rm -f {cmd_path}; exit $rc"
+        )
+    response = await proc.exec(command, timeout=timeout)
     raw = _out(response).strip()
     code = getattr(response, "exit_code", 0)
     if code in _CURL_NOT_SENT:
@@ -804,8 +925,26 @@ async def _browser_rpc_once(proc, payload: dict, timeout: int, fs=None) -> dict:
     if not isinstance(data, dict):
         raise ToolError("Computer browser returned no page data.")
     data.setdefault("screenshot_name", "page.png")
-    await _cache_shot(proc, fs)
+    if fast_rpc():
+        # The live frame for the chat rail is fetched off the hot path (the noVNC stream shows the tab anyway).
+        _spawn_shot(proc, fs)
+    else:
+        await _cache_shot(proc, fs)
     return data
+
+
+_SHOT_TASKS: dict[str, asyncio.Task] = {}
+
+
+def _spawn_shot(proc, fs) -> None:
+    user = _SCREEN_USER.get() or "default"
+    running = _SHOT_TASKS.get(user)
+    if running is not None and not running.done():
+        return  # one in flight is enough; the next command refreshes it
+    try:
+        _SHOT_TASKS[user] = asyncio.get_running_loop().create_task(_cache_shot(proc, fs))
+    except RuntimeError:
+        pass
 
 
 def decode_screen_b64(raw: str) -> bytes:
@@ -1206,7 +1345,7 @@ async def _e2b_screen_or_status(row, name: str) -> Any:
 # tools also bound each daemon command; this is the outer backstop, sized to allow a first-run browser
 # install (several minutes) on a fresh computer.
 _BROWSER_CAP_S = 600.0
-_NO_CAP = {"screen_png", "status", "touch", "write_analytics_report", "browser_handoff", "computer_handoff"}
+_NO_CAP = {"screen_png", "status", "touch", "write_analytics_report", "browser_handoff", "computer_handoff", "browser_warm"}
 
 
 def tool_time_cap(name: str, args: dict[str, Any] | None) -> float | None:
@@ -1300,10 +1439,29 @@ async def _invoke_daytona(row, name: str, args: dict[str, Any]) -> Any:
             close = getattr(_client_obj, "close", None)
             if callable(close):
                 await close()
+    if name == "browser_warm" and args.get("only_if_running"):
+        # Prewarm without booting: only when this user's computer is already up.
+        if _use_e2b():
+            from app.connectors import e2b_box
+
+            if await e2b_box.existing_sandbox(row) is None:
+                return {"ok": False, "skipped": "computer is not running"}
+        else:
+            _c, existing = await _existing_sandbox(row)
+            close = getattr(_c, "close", None)
+            if callable(close):
+                await close()
+            if existing is None:
+                return {"ok": False, "skipped": "computer is not running"}
     client, sandbox = await _ensure_sandbox(row)
     try:
         proc = sandbox.process
         fs = getattr(sandbox, "fs", None)
+        if name == "browser_warm":
+            # Internal (not in DAYTONA_TOOLS): start or check the browser daemon (and restore saved cookies) so
+            # the turn's first browser command does not pay for it.
+            await _ensure_daemon(proc, fs)
+            return {"ok": True, "warm": True}
         if name == "boot" and getattr(sandbox, "provider", "") == "e2b":
             # The desktop and its stream are up: answer now so the UI can show the screen, and start the
             # browser (first run installs Playwright, which can take minutes) in the background.
@@ -1403,7 +1561,31 @@ async def _invoke_daytona(row, name: str, args: dict[str, Any]) -> Any:
                 actions = json.loads(actions)
             if not isinstance(actions, list) or not actions:
                 raise ToolError("browser_act requires actions")
-            return await _browser_rpc(proc, {"command": "act", "actions": actions, "tab": tab}, 90, fs)
+            out = await _browser_rpc(proc, {"command": "act", "actions": actions, "tab": tab}, 90, fs)
+            _save_after_sign_in(proc, fs, out)
+            return out
+        if name == "browser_replay":
+            # Internal: verified selector replay of a saved trace (app/agent/fast_browser.py).
+            steps = args.get("steps")
+            if not isinstance(steps, list) or not steps:
+                raise ToolError("browser_replay requires steps")
+            out = await _browser_rpc(proc, {"command": "replay", "steps": steps, "tab": tab}, 120, fs)
+            _save_after_sign_in(proc, fs, out)
+            return out
+        if name == "browser_download":
+            # Internal: fetch a file URL with the browser session's cookies (no click-through).
+            url = safe_http_url(str(args.get("url") or ""))
+            payload = {"command": "fetch_download", "url": url, "filename": str(args.get("filename") or "")[:180]}
+            return await _browser_rpc(proc, payload, 120, fs)
+        if name == "browser_rec":
+            # Internal: teach mode's DOM recorder (start / drain / stop).
+            op = str(args.get("op") or "drain")
+            if op not in {"start", "drain", "stop"}:
+                raise ToolError("browser_rec op must be start, drain or stop")
+            if args.get("only_if_running") and not await _daemon_up(proc):
+                # Teach mode never starts a browser the user did not open.
+                return {"ok": False, "skipped": "browser is not running"}
+            return await _browser_rpc(proc, {"command": f"rec_{op}"}, 30, fs)
         if name == "computer_observe":
             return await _browser_rpc(proc, {"command": "observe", "tab": tab}, 60, fs)
         if name in {"computer_act", "computer_control"}:

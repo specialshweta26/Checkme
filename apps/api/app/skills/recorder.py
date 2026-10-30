@@ -153,6 +153,10 @@ class Recorder:
     notes: list[str] = field(default_factory=list)
     capture_attempts: int = 0
     events_text: str = ""  # latest copy of the in-sandbox capture file (read without stopping it)
+    dom_on: bool = False  # the page browser's DOM recorder is running (BROWSER_TEACH_DOM)
+    dom_attempts: int = 0
+    dom_events: list[dict] = field(default_factory=list)  # selector-level steps for deterministic replay
+    row: Any = None
 
 
 _RECORDERS: dict[str, Recorder] = {}
@@ -284,12 +288,54 @@ async def _loop(rec: Recorder, limit: float) -> None:
             except Exception as exc:  # noqa: BLE001
                 log.info("teach: snapshot failed user=%s: %s", rec.user_key, type(exc).__name__)
                 rec.sandbox = None
+        if rec.sandbox is not None:
+            await _dom_tick(rec)
         if rec.sandbox is not None and rec.capture_offset is not None:
             try:
                 rec.events_text = await asyncio.wait_for(asyncio.to_thread(_peek_events, rec.sandbox._live.sbx), timeout=10)
             except Exception as exc:  # noqa: BLE001 - the next tick or stop() reads it again
                 log.info("teach: reading capture failed user=%s: %s", rec.user_key, type(exc).__name__)
         await asyncio.sleep(SNAPSHOT_EVERY)
+
+
+DOM_ATTEMPTS = 6
+
+
+def teach_dom_enabled() -> bool:
+    from app.config import get_settings
+
+    return bool(getattr(get_settings(), "browser_teach_dom", True))
+
+
+async def _dom(rec: Recorder, op: str) -> dict:
+    """Teach mode's DOM recorder in the page browser (start / drain / stop). Best effort; never boots anything."""
+    from app.connectors.daytona_box import call_daytona
+
+    if rec.row is None:
+        rec.row = await _computer_row(rec.user_key)
+    if rec.row is None:
+        return {"ok": False}
+    out = await asyncio.wait_for(call_daytona(rec.row, "browser_rec", {"op": op, "only_if_running": True}), timeout=40)
+    return out if isinstance(out, dict) else {"ok": False}
+
+
+async def _dom_tick(rec: Recorder) -> None:
+    if not teach_dom_enabled():
+        return
+    try:
+        if not rec.dom_on:
+            if rec.dom_attempts >= DOM_ATTEMPTS:
+                return
+            rec.dom_attempts += 1
+            rec.dom_on = bool((await _dom(rec, "start")).get("recording"))
+            return
+        out = await _dom(rec, "drain")
+        rec.dom_events.extend(e for e in out.get("events") or [] if isinstance(e, dict))
+        if out.get("recording") is False or out.get("skipped"):
+            rec.dom_on = False  # the browser restarted: start again on the next tick
+        del rec.dom_events[:-500]
+    except Exception as exc:  # noqa: BLE001 - screen capture still records the session
+        log.info("teach: DOM recorder %s user=%s: %s", "drain" if rec.dom_on else "start", rec.user_key, type(exc).__name__)
 
 
 def start(user_key: str, started: float, limit: float) -> None:
@@ -379,12 +425,18 @@ def parse_capture(text: str, offset: float) -> tuple[list[dict], list[str]]:
 
 
 async def stop(user_key: str) -> dict:
-    """Stop recording; returns {"events", "frames", "notes"}. Never raises."""
+    """Stop recording; returns {"events", "frames", "notes", "dom_events"}. Never raises."""
     rec = _RECORDERS.pop(user_key, None)
     if rec is None:
-        return {"events": [], "frames": [], "notes": []}
+        return {"events": [], "frames": [], "notes": [], "dom_events": []}
     if rec.task:
         rec.task.cancel()
+    if rec.dom_on:
+        try:
+            out = await _dom(rec, "stop")
+            rec.dom_events.extend(e for e in out.get("events") or [] if isinstance(e, dict))
+        except Exception as exc:  # noqa: BLE001
+            log.info("teach: stopping the DOM recorder failed user=%s: %s", user_key, type(exc).__name__)
     events: list[dict] = []
     notes = list(rec.notes)
     box = rec.sandbox
@@ -405,7 +457,7 @@ async def stop(user_key: str) -> dict:
         notes.extend(more)
     elif rec.capture_offset is None and not any("capture" in n for n in notes):
         notes.append("on-screen clicks were not captured (the computer was not running or capture did not start)")
-    return {"events": events, "frames": rec.frames, "notes": notes}
+    return {"events": events, "frames": rec.frames, "notes": notes, "dom_events": list(rec.dom_events)}
 
 
 def peek(user_key: str) -> dict:

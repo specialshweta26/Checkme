@@ -2532,6 +2532,15 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
     return tools
 
 
+def _fast_browser_hint() -> str:
+    try:
+        from app.agent import fast_browser
+
+        return fast_browser.prompt_hint()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def shell_routing_hint(connectors: list | None, agent=None) -> str:
     """Prompt lines that route installs/commands to the cloud computer (docs/COMPUTER.md)."""
     from app.agent.coding import is_coding_agent
@@ -2693,6 +2702,7 @@ def system_prompt(
         "Never stop after one failed page. Never say you cannot verify live updates until you have searched and opened at least one article.\n"
         "Browser operator: execute the user's website task on the live computer yourself. Do not tell them how to click. "
         "Loop until done: inspect the snapshot (tree, verified, alerts, tables) → browser_act one logical step → read the new snapshot → continue. "
+        f"{_fast_browser_hint()}"
         "Identify controls by role and name first, then label, then visible text; computer_act x,y last. "
         "Fill whole forms from the snapshot: one fill per ordinary field. Comboboxes and type-ahead lists "
         "(airports, places, search suggestions): type or select/pick with that field's ref and the value — do not fill, and do not "
@@ -3188,6 +3198,14 @@ async def run_deep_agent(
         job=job,
         toolkit_assignments=toolkits,
     )
+    if plan.kind == fast_path.COMPUTER:
+        # Start the browser (and restore saved sign-ins) while the model plans its first step.
+        try:
+            from app.agent import fast_browser
+
+            fast_browser.prewarm(ctx)
+        except Exception:  # noqa: BLE001
+            log.info("browser prewarm could not start", exc_info=True)
     await _maybe_start_connect(ctx, query)
     from app.agent import scratchpad as pad
 

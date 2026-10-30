@@ -57,6 +57,30 @@ class BrowserProfile(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
 
+class BrowserTrace(Base):
+    """A browser flow that worked before (a finished browser_task, or a teach-mode DOM recording), stored as
+    selector steps so it can be replayed without a model call per step (docs/BROWSING.md "Fast browser").
+    Secret values are never stored: a password/OTP step keeps only its parameter name."""
+
+    __tablename__ = "browser_traces"
+    __table_args__ = (Index("ix_browser_traces_user_host", "user_id", "host"),)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    host: Mapped[str] = mapped_column(String(255), default="")
+    name: Mapped[str] = mapped_column(String(200), default="")
+    goal: Mapped[str] = mapped_column(Text, default="")
+    start_url: Mapped[str] = mapped_column(Text, default="")
+    source: Mapped[str] = mapped_column(String(20), default="task")  # task | teach
+    skill_id: Mapped[str] = mapped_column(String(64), default="")
+    steps: Mapped[list] = mapped_column(JSONB, default=list)
+    params: Mapped[list] = mapped_column(JSONB, default=list)
+    uses: Mapped[int] = mapped_column(Integer, default=0)
+    successes: Mapped[int] = mapped_column(Integer, default=0)
+    failures: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
 class Account(Base):
     """An OAuth identity (Google or Microsoft). Used for sign-in and for the built-in mail connector."""
 
