@@ -518,6 +518,8 @@ def test_system_prompt_has_no_product_recipes():
     assert "request_takeover" in lowered
     assert "bot_wall" in lowered
     assert "do not invent" in lowered
+    assert "standing facts" in lowered
+    assert "persona is how" in lowered
     assert "destination site" in lowered
     assert "search_flights" not in lowered
     assert "start_teaching" in lowered

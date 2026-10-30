@@ -313,6 +313,24 @@ async def chat(
             thread=result.get("thread"),
             working_message=working_message,
         )
+        try:
+            from app.agent.memory_extract import enqueue_turn
+            from app.db import SessionLocal
+
+            async with SessionLocal() as mem_db:
+                await enqueue_turn(
+                    mem_db,
+                    user.id,
+                    workspace_agent,
+                    sess.id,
+                    request_id,
+                    user_text=text,
+                    assistant_text=result.get("text") or "",
+                    thread=result.get("thread"),
+                )
+                await mem_db.commit()
+        except Exception as mem_exc:  # noqa: BLE001
+            log.warning("memory extract enqueue skipped: %s", mem_exc)
         return {"session_id": str(sess.id), **result, "request_id": request_id, "uploads": public_uploads}
     except Exception as exc:  # noqa: BLE001
         log.exception("chat store failed")

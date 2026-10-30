@@ -6,12 +6,12 @@ import time
 import uuid
 
 import httpx
-from sqlalchemy import desc, select, text
+from sqlalchemy import desc, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.llm import embed_one
-from app.models import ChatMessage, MemoryBlock, MemoryPassage, User, WorkspaceAgent
+from app.models import ChatMessage, ChatSession, MemoryBlock, MemoryPassage, User, WorkspaceAgent
 from connector_core.http import shared_client
 
 log = logging.getLogger(__name__)
@@ -20,7 +20,25 @@ _LETTA_TIMEOUT = httpx.Timeout(2.5, connect=0.8)
 _letta_skip_until = 0.0
 _LABEL = re.compile(r"^[A-Za-z0-9_-]{1,50}$")
 CORE_LABELS = ("prefs", "people", "voice", "work", "coding")
+PERSONA_LABELS = ("voice", "prefs")
+STANDING_LABELS = ("people", "work", "learned")
+MEMORY_BUDGET = 2400
+SCOPE_AGENT = "agent"
+SCOPE_SHARED = "user_shared"
+STATUS_ACTIVE = "active"
+STATUS_SUPERSEDED = "superseded"
+STATUS_DELETED = "deleted"
 _SECRET_LANGUAGE = re.compile(r"\b(password|passphrase|api[ _-]?key|access[ _-]?token|refresh[ _-]?token|secret|private key|recovery code)\b", re.I)
+_HISTORY_INTENT = re.compile(
+    r"\b(last (time|month|week|year)|remember when|we decided|what did we|previously|a month ago|"
+    r"weeks ago|years ago|last time|that (decision|choice|call)|what we (chose|picked|tried))\b",
+    re.I,
+)
+_HISTORY_STOP = {
+    "the", "and", "for", "what", "did", "we", "you", "our", "last", "time", "month", "week",
+    "year", "ago", "when", "remember", "previously", "that", "this", "about", "from",
+    "earlier", "decide", "decided", "chose", "picked", "tried", "decision", "choice", "call",
+}
 
 
 def _letta_down() -> bool:
@@ -287,60 +305,230 @@ async def _write_letta_block(agent, label: str, value: str) -> None:
         log.warning("letta block write unavailable: %s", exc)
 
 
-async def _load_fallback(db: AsyncSession, user_id, agent_id, query: str) -> str:
-    blocks = (
+async def _forget_letta_text(agent, snippet: str) -> None:
+    s = get_settings()
+    letta_id = getattr(agent, "letta_agent_id", None) if agent is not None else None
+    needle = (snippet or "").strip()[:200]
+    if not s.letta_base_url or not letta_id or _letta_down() or not needle:
+        return
+    try:
+        archival = await shared_client().get(
+            f"{s.letta_base_url}/v1/agents/{letta_id}/archival-memory",
+            params={"query": needle, "limit": 8},
+            headers=_headers(),
+            timeout=_LETTA_TIMEOUT,
+        )
+        if archival.status_code >= 400:
+            return
+        items = archival.json()
+        if isinstance(items, dict):
+            items = items.get("passages") or items.get("results") or items.get("archival_memory") or []
+        for item in items if isinstance(items, list) else []:
+            if not isinstance(item, dict):
+                continue
+            mid = item.get("id") or item.get("memory_id")
+            body = str(item.get("text") or item.get("content") or "")
+            if not mid or needle.lower() not in body.lower():
+                continue
+            await shared_client().delete(
+                f"{s.letta_base_url}/v1/agents/{letta_id}/archival-memory/{mid}",
+                headers=_headers(),
+                timeout=_LETTA_TIMEOUT,
+            )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("letta archival delete unavailable: %s", exc)
+
+
+def historical_intent(query: str) -> bool:
+    return bool(_HISTORY_INTENT.search(query or ""))
+
+
+def _is_active(row) -> bool:
+    status = getattr(row, "status", None) or STATUS_ACTIVE
+    return status == STATUS_ACTIVE
+
+
+def _keyword_score(body: str, query: str) -> float:
+    tokens = set(re.findall(r"[a-z0-9]{2,}", (query or "").lower()))
+    words = set(re.findall(r"[a-z0-9]{2,}", (body or "").lower()))
+    if not tokens or not words:
+        return 0.0
+    return len(tokens & words) / len(tokens)
+
+
+def _rank_passages(rows: list, query: str) -> list:
+    scored = []
+    for row in rows:
+        if not _is_active(row):
+            continue
+        recency = 0.3
+        created = getattr(row, "created_at", None)
+        if created is not None:
+            try:
+                age_days = max(0.0, (_now_utc() - created).total_seconds() / 86400)
+                recency = max(0.05, 1.0 / (1.0 + age_days / 30.0))
+            except Exception:  # noqa: BLE001
+                recency = 0.3
+        score = 0.55 * _keyword_score(getattr(row, "text", "") or "", query) + 0.45 * recency
+        scored.append((score, row))
+    scored.sort(key=lambda item: (-item[0], -(getattr(item[1], "id", 0) or 0)))
+    return [row for _score, row in scored]
+
+
+def _now_utc():
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc)
+
+
+async def _agent_passages(db: AsyncSession, user_id, agent_id):
+    rows = (
         await db.execute(
-            select(MemoryBlock).where(MemoryBlock.user_id == user_id, MemoryBlock.agent_id == agent_id)
+            select(MemoryPassage).where(
+                MemoryPassage.user_id == user_id,
+                or_(MemoryPassage.agent_id == agent_id, MemoryPassage.scope == SCOPE_SHARED),
+            )
         )
     ).scalars().all()
-    parts = [f"{b.label}: {b.value}" for b in blocks if b.value]
+    return [row for row in rows if _is_active(row)]
+
+
+async def _search_agent_history(db: AsyncSession, user_id, agent_id, query: str, limit: int = 3) -> list[str]:
+    q = " ".join((query or "").split())[:80]
+    if not q:
+        return []
+    tokens = [tok for tok in re.findall(r"[a-z0-9]{3,}", q.lower()) if tok not in _HISTORY_STOP][:6]
     try:
-        vec = await embed_one(query)
-        vec_lit = "[" + ",".join(f"{x:.7f}" for x in vec) + "]"
-        rows = (
-            await db.execute(
-                text(
-                    """
-                    SELECT text FROM memory_passages
-                    WHERE user_id = :uid AND agent_id = :aid AND embedding IS NOT NULL
-                    ORDER BY embedding <=> CAST(:vec AS vector)
-                    LIMIT 4
-                    """
-                ),
-                {"uid": user_id, "aid": agent_id, "vec": vec_lit},
+        stmt = (
+            select(ChatMessage, ChatSession)
+            .join(ChatSession, ChatSession.id == ChatMessage.session_id)
+            .where(
+                ChatMessage.user_id == user_id,
+                ChatSession.user_id == user_id,
+                ChatSession.agent_id == agent_id,
+                ChatMessage.role.in_(("user", "assistant")),
             )
-        ).all()
-        parts.extend(f"memory: {r[0]}" for r in rows)
+            .order_by(ChatMessage.id.desc())
+            .limit(24)
+        )
+        if tokens:
+            stmt = stmt.where(or_(*[ChatMessage.content.ilike(f"%{tok}%") for tok in tokens]))
+        rows = (await db.execute(stmt)).all()
     except Exception:  # noqa: BLE001
-        recent = (
-            await db.execute(
-                select(MemoryPassage)
-                .where(MemoryPassage.user_id == user_id, MemoryPassage.agent_id == agent_id)
-                .order_by(MemoryPassage.id.desc())
-                .limit(3)
-            )
-        ).scalars().all()
-        parts.extend(f"{p.kind}: {p.text}" for p in recent)
-    return "\n".join(parts)[:1800]
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for message, sess in rows:
+        meta = message.meta or {}
+        if meta.get("in_progress") or meta.get("peer"):
+            continue
+        body = " ".join((message.content or "").split())[:220]
+        if not body or body in seen:
+            continue
+        seen.add(body)
+        when = ""
+        stamp = getattr(message, "created_at", None)
+        if stamp is not None:
+            try:
+                when = stamp.strftime("%Y-%m-%d")
+            except Exception:  # noqa: BLE001
+                when = ""
+        title = (getattr(sess, "title", None) or "")[:60]
+        prefix = f"{when}: " if when else ""
+        suffix = f" ({title})" if title else ""
+        out.append(f"{prefix}{body}{suffix}")
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _assemble_memory(blocks: list, facts: list, history: list[str] | None = None) -> str:
+    parts: list[str] = []
+    persona = [b for b in blocks if b.label in PERSONA_LABELS and (b.value or "").strip()]
+    standing_blocks = [b for b in blocks if b.label in STANDING_LABELS and (b.value or "").strip()]
+    other = [b for b in blocks if b.label not in PERSONA_LABELS + STANDING_LABELS and (b.value or "").strip()]
+    if persona:
+        parts.append("Persona")
+        parts.extend(f"{b.label}: {b.value.strip()}" for b in persona)
+    if standing_blocks or facts:
+        parts.append("Standing facts")
+        parts.extend(f"{b.label}: {b.value.strip()}" for b in standing_blocks)
+        for row in facts:
+            tag = "shared" if getattr(row, "scope", SCOPE_AGENT) == SCOPE_SHARED else "fact"
+            parts.append(f"- [{tag}] {row.text.strip()}")
+    parts.extend(f"{b.label}: {b.value.strip()}" for b in other)
+    if history:
+        parts.append("From earlier chats")
+        parts.extend(f"- {line}" for line in history)
+    return "\n".join(parts).strip()[:MEMORY_BUDGET]
 
 
 async def load_memory(db: AsyncSession, user: User, query: str, agent=None) -> str:
-    """Memory for one workspace agent. Group chats pass the speaker; teammates pass themselves."""
-    owner = await _memory_agent(db, user, agent=agent)
-    await _ensure_saved_letta(db, user, owner)
-    letta_text = await _read_letta(owner, query)
-    fallback = await _load_fallback(db, user.id, owner.id, query)
-    if not letta_text:
-        return fallback
-    if not fallback:
-        return letta_text[:1800]
-    lines = [line for line in letta_text.splitlines() if line.strip()]
-    seen = set(lines)
-    for line in fallback.splitlines():
-        if line.strip() and line not in seen and line not in letta_text:
-            lines.append(line)
-            seen.add(line)
-    return "\n".join(lines)[:1800]
+    """Labeled persona + facts for one workspace agent. Fail-open: empty string on error."""
+    try:
+        owner = await _memory_agent(db, user, agent=agent)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("memory owner lookup failed: %s", exc)
+        return ""
+    try:
+        blocks = (
+            await db.execute(
+                select(MemoryBlock).where(MemoryBlock.user_id == user.id, MemoryBlock.agent_id == owner.id)
+            )
+        ).scalars().all()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("memory block load failed: %s", exc)
+        blocks = []
+    try:
+        passages = await _agent_passages(db, user.id, owner.id)
+        ranked = _rank_passages(passages, query)
+        try:
+            vec = await embed_one(query or "preferences")
+            vec_lit = "[" + ",".join(f"{x:.7f}" for x in vec) + "]"
+            hits = (
+                await db.execute(
+                    text(
+                        """
+                        SELECT id FROM memory_passages
+                        WHERE user_id = :uid AND status = 'active'
+                          AND (agent_id = :aid OR scope = 'user_shared')
+                          AND embedding IS NOT NULL
+                        ORDER BY embedding <=> CAST(:vec AS vector)
+                        LIMIT 8
+                        """
+                    ),
+                    {"uid": user.id, "aid": owner.id, "vec": vec_lit},
+                )
+            ).all()
+            order = {row[0]: i for i, row in enumerate(hits)}
+            ranked.sort(key=lambda row: (order.get(row.id, 99), -_keyword_score(row.text or "", query)))
+        except Exception:  # noqa: BLE001
+            pass
+        facts = ranked[:8]
+    except Exception as vis_exc:  # noqa: BLE001
+        log.warning("memory passage load failed: %s", vis_exc)
+        facts = []
+    history: list[str] = []
+    if historical_intent(query or ""):
+        history = await _search_agent_history(db, user.id, owner.id, query)
+    assembled = _assemble_memory(list(blocks), facts, history)
+    if getattr(owner, "letta_agent_id", None) and not _letta_down():
+        letta_text = await _read_letta(owner, query)
+        if letta_text:
+            extra = []
+            blob = assembled.lower()
+            for line in letta_text.splitlines():
+                stripped = line.strip()
+                if not stripped or stripped.lower().startswith("memory:"):
+                    continue
+                if stripped.lower() in blob:
+                    continue
+                extra.append(stripped)
+            if extra:
+                assembled = (assembled + ("\n" if assembled else "") + "\n".join(extra)).strip()[:MEMORY_BUDGET]
+            elif not assembled:
+                assembled = letta_text[:MEMORY_BUDGET]
+    return assembled
 
 
 async def read_core(db: AsyncSession, user: User, label: str, agent=None) -> str:
@@ -358,20 +546,54 @@ async def read_core(db: AsyncSession, user: User, label: str, agent=None) -> str
     return (row.value if row else "") or ""
 
 
-async def remember(db: AsyncSession, user_id: uuid.UUID, kind: str, text: str, agent_id=None) -> None:
+async def remember(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    kind: str,
+    text: str,
+    agent_id=None,
+    scope: str = SCOPE_AGENT,
+    source_session_id=None,
+    source_message_id=None,
+    supersedes_id=None,
+) -> MemoryPassage | None:
     user = await db.get(User, user_id)
     if user is None:
-        return
+        return None
     owner = await _memory_agent(db, user, agent_id=agent_id)
+    if (scope or SCOPE_AGENT) == SCOPE_SHARED:
+        from app.agents.service import ensure_default_agent
+
+        owner = await ensure_default_agent(db, user)
+        scope = SCOPE_SHARED
+    else:
+        scope = SCOPE_AGENT
     await _ensure_saved_letta(db, user, owner)
     vec = None
     try:
         vec = await embed_one(text)
     except Exception:  # noqa: BLE001
         pass
-    db.add(MemoryPassage(user_id=user_id, agent_id=owner.id, kind=kind, text=text[:800], embedding=vec))
+    if supersedes_id:
+        prior = await db.get(MemoryPassage, supersedes_id)
+        if prior is not None and prior.user_id == user_id:
+            prior.status = STATUS_SUPERSEDED
+    row = MemoryPassage(
+        user_id=user_id,
+        agent_id=owner.id,
+        kind=kind,
+        text=text[:800],
+        embedding=vec,
+        scope=scope,
+        status=STATUS_ACTIVE,
+        source_session_id=source_session_id,
+        source_message_id=source_message_id,
+        supersedes_id=supersedes_id,
+    )
+    db.add(row)
     await db.commit()
     await _write_letta_passage(owner, text[:800])
+    return row
 
 
 async def upsert_core(db: AsyncSession, user_id: uuid.UUID, label: str, value: str, agent_id) -> None:
@@ -423,7 +645,14 @@ async def remember_fact(ctx, text: str, label: str = "", shared: bool = False) -
         merged = (existing.rstrip() + "\n" + body).strip() if existing else body
         await upsert_core(ctx.db, ctx.user.id, tag, merged[:800], getattr(owner, "id", None))
         return {"ok": True, "kind": "block", "label": tag, "shared": bool(shared), "value": merged[:800]}
-    await remember(ctx.db, ctx.user.id, "archival", body[:800], getattr(owner, "id", None))
+    await remember(
+        ctx.db,
+        ctx.user.id,
+        "archival",
+        body[:800],
+        getattr(owner, "id", None),
+        scope=SCOPE_SHARED if shared else SCOPE_AGENT,
+    )
     return {"ok": True, "kind": "passage", "shared": bool(shared), "text": body[:800]}
 
 
@@ -442,50 +671,27 @@ async def recall_memory(ctx, query: str = "", label: str = "") -> dict:
         blocks = [b for b in blocks if b.label == tag]
     block_rows = [{"kind": "block", "label": b.label, "text": b.value} for b in blocks if b.value]
     q = (query or "").strip()
-    passages: list[dict] = []
+    try:
+        candidates = await _agent_passages(ctx.db, ctx.user.id, owner.id)
+    except Exception:  # noqa: BLE001
+        candidates = []
     if q:
-        try:
-            vec = await embed_one(q)
-            vec_lit = "[" + ",".join(f"{x:.7f}" for x in vec) + "]"
-            rows = (
-                await ctx.db.execute(
-                    text(
-                        """
-                        SELECT id, kind, text FROM memory_passages
-                        WHERE user_id = :uid AND agent_id = :aid AND embedding IS NOT NULL
-                        ORDER BY embedding <=> CAST(:vec AS vector)
-                        LIMIT 6
-                        """
-                    ),
-                    {"uid": ctx.user.id, "aid": owner.id, "vec": vec_lit},
-                )
-            ).all()
-            passages = [{"kind": r[1], "id": r[0], "text": r[2]} for r in rows]
-        except Exception:  # noqa: BLE001
-            needle = f"%{q[:80]}%"
-            rows = (
-                await ctx.db.execute(
-                    select(MemoryPassage)
-                    .where(
-                        MemoryPassage.user_id == ctx.user.id,
-                        MemoryPassage.agent_id == owner.id,
-                        MemoryPassage.text.ilike(needle),
-                    )
-                    .order_by(MemoryPassage.id.desc())
-                    .limit(6)
-                )
-            ).scalars().all()
-            passages = [{"kind": r.kind, "id": r.id, "text": r.text} for r in rows]
+        ranked = _rank_passages(candidates, q)
+        if not ranked:
+            needle = q[:80].lower()
+            ranked = [row for row in candidates if needle in (row.text or "").lower()][:6]
+        rows = ranked[:6]
     else:
-        rows = (
-            await ctx.db.execute(
-                select(MemoryPassage)
-                .where(MemoryPassage.user_id == ctx.user.id, MemoryPassage.agent_id == owner.id)
-                .order_by(MemoryPassage.id.desc())
-                .limit(6)
-            )
-        ).scalars().all()
-        passages = [{"kind": r.kind, "id": r.id, "text": r.text} for r in rows]
+        rows = sorted(candidates, key=lambda row: getattr(row, "id", 0) or 0, reverse=True)[:6]
+    passages = [
+        {
+            "kind": r.kind,
+            "id": r.id,
+            "text": r.text,
+            "scope": getattr(r, "scope", SCOPE_AGENT),
+        }
+        for r in rows
+    ]
     return {"blocks": block_rows, "passages": passages}
 
 
@@ -522,25 +728,31 @@ async def forget_memory(ctx, memory_id: str = "", label: str = "", text: str = "
             pid = None
         if pid is not None:
             row = await ctx.db.get(MemoryPassage, pid)
-            if row is not None and row.user_id == ctx.user.id and row.agent_id == owner.id:
-                await ctx.db.delete(row)
+            if row is not None and row.user_id == ctx.user.id and (
+                row.agent_id == owner.id or getattr(row, "scope", "") == SCOPE_SHARED
+            ):
+                row.status = STATUS_DELETED
                 removed.append(f"passage:{pid}")
+                await _forget_letta_text(owner, row.text or "")
     snippet = (text or "").strip()
     if snippet and not memory_id and not tag:
         rows = (
             await ctx.db.execute(
-                select(MemoryPassage)
-                .where(
+                select(MemoryPassage).where(
                     MemoryPassage.user_id == ctx.user.id,
-                    MemoryPassage.agent_id == owner.id,
+                    or_(MemoryPassage.agent_id == owner.id, MemoryPassage.scope == SCOPE_SHARED),
                     MemoryPassage.text.ilike(f"%{snippet[:80]}%"),
                 )
-                .limit(8)
             )
         ).scalars().all()
-        for row in rows:
-            await ctx.db.delete(row)
+        for row in rows[:8]:
+            if getattr(row, "status", STATUS_ACTIVE) == STATUS_DELETED:
+                continue
+            if snippet.lower() not in (row.text or "").lower():
+                continue
+            row.status = STATUS_DELETED
             removed.append(f"passage:{row.id}")
+            await _forget_letta_text(owner, row.text or "")
     if not removed:
         return {"error": "Nothing matched to forget. Pass memory_id, label, or text."}
     await ctx.db.commit()
@@ -627,17 +839,38 @@ async def list_agent_memory(db: AsyncSession, user: User, agent_id: uuid.UUID) -
     passages = (
         await db.execute(
             select(MemoryPassage)
-            .where(MemoryPassage.user_id == user.id, MemoryPassage.agent_id == agent.id)
+            .where(
+                MemoryPassage.user_id == user.id,
+                or_(MemoryPassage.agent_id == agent.id, MemoryPassage.scope == SCOPE_SHARED),
+            )
             .order_by(desc(MemoryPassage.id))
-            .limit(50)
+            .limit(80)
         )
     ).scalars().all()
+    active = [row for row in passages if _is_active(row)]
+    private = [row for row in active if getattr(row, "scope", SCOPE_AGENT) != SCOPE_SHARED]
+    shared = [row for row in active if getattr(row, "scope", SCOPE_AGENT) == SCOPE_SHARED]
+    persona = [{"label": row.label, "value": row.value} for row in blocks if row.label in PERSONA_LABELS and row.value]
+    def _row(item):
+        created = getattr(item, "created_at", None)
+        return {
+            "id": item.id,
+            "kind": item.kind,
+            "text": item.text,
+            "scope": getattr(item, "scope", SCOPE_AGENT),
+            "created_at": created.isoformat() if created is not None else "",
+        }
+
     return {
         "agent_id": str(agent.id),
         "agent_name": agent.name,
-        "core": [{"label": row.label, "value": row.value} for row in blocks],
-        "recent_work": [
-            {"id": row.id, "kind": row.kind, "text": row.text, "created_at": row.created_at.isoformat()}
-            for row in passages
+        "persona": persona,
+        "core": [
+            {"label": row.label, "value": row.value}
+            for row in blocks
+            if row.label not in PERSONA_LABELS and row.value
         ],
+        "private_facts": [_row(item) for item in private[:40]],
+        "shared_facts": [_row(item) for item in shared[:40]],
+        "recent_work": [_row(item) for item in private[:50]],
     }

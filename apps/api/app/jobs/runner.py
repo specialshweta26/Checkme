@@ -201,4 +201,23 @@ async def run_job(job_id, session_factory: Callable | None = None, agent_impl: C
                 if agent_row is not None:
                     agent_row.unread = True
         await db.commit()
+        try:
+            from app.agent.memory_extract import enqueue_turn
+
+            text = ""
+            if isinstance(result, dict):
+                text = str(result.get("text") or "")
+            async with session_factory() as mem_db:
+                await enqueue_turn(
+                    mem_db,
+                    user.id,
+                    agent,
+                    job.session_id,
+                    f"job-{str(job.id)[:8]}-{job.attempts or 0}",
+                    user_text=query,
+                    assistant_text=text,
+                )
+                await mem_db.commit()
+        except Exception as mem_exc:  # noqa: BLE001
+            log.warning("memory extract enqueue skipped for job %s: %s", job.id, mem_exc)
         return job.status

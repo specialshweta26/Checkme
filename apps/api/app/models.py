@@ -304,7 +304,7 @@ class RouteLog(Base):
 
 
 class MemoryBlock(Base):
-    """Fallback core memory when Letta is not configured. One row per agent and label."""
+    """Per-agent core memory (voice, prefs, coding). One row per agent and label."""
 
     __tablename__ = "memory_blocks"
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
@@ -313,6 +313,7 @@ class MemoryBlock(Base):
     )
     label: Mapped[str] = mapped_column(String(50), primary_key=True)
     value: Mapped[str] = mapped_column(Text, default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
 
 class Commitment(Base):
@@ -451,9 +452,13 @@ class JobEvent(Base):
 
 
 class MemoryPassage(Base):
-    """Fallback archival + episodic memory when Letta is not configured."""
+    """Standing facts and episodic notes. Postgres is canonical; Letta is optional write-through."""
 
     __tablename__ = "memory_passages"
+    __table_args__ = (
+        Index("ix_memory_passages_user_agent_status", "user_id", "agent_id", "status"),
+        Index("ix_memory_passages_tsv", "search_tsv", postgresql_using="gin"),
+    )
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
     agent_id: Mapped[uuid.UUID] = mapped_column(
@@ -462,7 +467,34 @@ class MemoryPassage(Base):
     kind: Mapped[str] = mapped_column(String(20))  # archival | episodic
     text: Mapped[str] = mapped_column(Text)
     embedding = mapped_column(Vector(DIMS), nullable=True)
+    scope: Mapped[str] = mapped_column(String(20), default="agent")  # agent | user_shared
+    status: Mapped[str] = mapped_column(String(20), default="active")  # active | superseded | deleted
+    source_session_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    source_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    supersedes_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    search_tsv = mapped_column(TSVECTOR, Computed("to_tsvector('simple', coalesce(text, ''))", persisted=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class MemoryExtractJob(Base):
+    """Async persona/fact extraction after a chat or job turn. Not an AgentJob (no computer lock)."""
+
+    __tablename__ = "memory_extract_jobs"
+    __table_args__ = (
+        UniqueConstraint("request_id", "agent_id"),
+        Index("ix_memory_extract_jobs_status", "status", "created_at"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    agent_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("workspace_agents.id", ondelete="CASCADE"), index=True)
+    session_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    request_id: Mapped[str] = mapped_column(String(64), default="")
+    status: Mapped[str] = mapped_column(String(20), default="queued")  # queued | running | done | failed
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    payload: Mapped[dict] = mapped_column(JSONB, default=dict)
+    last_error: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
 
 class AgentSkill(Base):

@@ -157,7 +157,13 @@ export function AgentsNav({
   const [outcome, setOutcome] = useState("");
   const [ownerId, setOwnerId] = useState("");
   const [skills, setSkills] = useState<AgentSkill[]>([]);
-  const [agentMemory, setAgentMemory] = useState<{ core: { label: string; value: string }[]; recent_work: { id: number; kind: string; text: string; created_at: string }[] } | null>(null);
+  const [agentMemory, setAgentMemory] = useState<{
+    persona?: { label: string; value: string }[];
+    core: { label: string; value: string }[];
+    private_facts?: { id: number; kind: string; text: string; created_at: string }[];
+    shared_facts?: { id: number; kind: string; text: string; created_at: string }[];
+    recent_work: { id: number; kind: string; text: string; created_at: string }[];
+  } | null>(null);
   const [memoryLoading, setMemoryLoading] = useState(false);
   const [skillName, setSkillName] = useState("");
   const [skillHint, setSkillHint] = useState("");
@@ -728,9 +734,12 @@ export function AgentsNav({
                           <summary>What this agent remembers</summary>
                           {memoryLoading ? <p className="muted">Loading private agent memory…</p> : agentMemory ? (
                             <>
-                              {agentMemory.core.length ? <div><strong>Learned preferences</strong>{agentMemory.core.map((item) => <p key={item.label}><b>{item.label}:</b> {item.value}</p>)}</div> : <p className="muted">No saved preferences yet. Tell this agent “remember that…” in chat.</p>}
-                              {agentMemory.recent_work.length ? <div><strong>Recent work</strong>{agentMemory.recent_work.slice(0, 8).map((item) => <p key={item.id}>{item.text}</p>)}</div> : null}
-                              <p className="muted">This memory belongs to {name || "this agent"}; teammates keep separate memories.</p>
+                              {(agentMemory.persona || []).length ? <div><strong>Persona</strong>{agentMemory.persona!.map((item) => <p key={item.label}><b>{item.label}:</b> {item.value}</p>)}</div> : null}
+                              {agentMemory.core.length ? <div><strong>Learned preferences</strong>{agentMemory.core.map((item) => <p key={item.label}><b>{item.label}:</b> {item.value}</p>)}</div> : !(agentMemory.persona || []).length ? <p className="muted">No saved preferences yet. Tell this agent “remember that…” in chat.</p> : null}
+                              {(agentMemory.private_facts || []).length ? <div><strong>Private facts</strong>{agentMemory.private_facts!.slice(0, 8).map((item) => <p key={item.id}>{item.text}</p>)}</div> : null}
+                              {(agentMemory.shared_facts || []).length ? <div><strong>Shared with every agent</strong>{agentMemory.shared_facts!.slice(0, 8).map((item) => <p key={item.id}>{item.text}</p>)}</div> : null}
+                              {!(agentMemory.private_facts || []).length && agentMemory.recent_work.length ? <div><strong>Recent work</strong>{agentMemory.recent_work.slice(0, 8).map((item) => <p key={item.id}>{item.text}</p>)}</div> : null}
+                              <p className="muted">This memory belongs to {name || "this agent"}; teammates keep separate memories. Shared facts are visible to every agent.</p>
                             </>
                           ) : <p className="muted">Memory could not be loaded.</p>}
                         </details>
