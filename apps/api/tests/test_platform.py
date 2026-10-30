@@ -47,10 +47,15 @@ def test_platform_tool_sets():
 
 def test_browser_act_covers_forms_and_handoff():
     spec = next(s for s in DAYTONA_TOOLS if s.name == "browser_act")
-    assert "fill" in spec.description.lower()
-    assert "select" in spec.description.lower()
+    low = spec.description.lower()
+    assert "fill" in low
+    assert "select" in low
+    assert "pick" in low
+    assert "type-ahead" in low or "autocomplete" in low or "combobox" in low
     handoff = next(s for s in DAYTONA_TOOLS if s.name == "browser_handoff")
-    assert "login" in handoff.description.lower()
+    hlow = handoff.description.lower()
+    assert "login" in hlow
+    assert "dropdown" in hlow or "autocomplete" in hlow
 
 
 def test_browser_urls_must_be_http():
@@ -117,7 +122,7 @@ def test_catalog_lines_label_computer_and_marketplace():
 
 
 def test_daemon_version_is_current():
-    assert DAEMON_VERSION == "17"
+    assert DAEMON_VERSION == "18"
 
 
 def test_bot_wall_detects_sorry_and_skips_cookie_consent():

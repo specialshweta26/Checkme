@@ -13,7 +13,7 @@ from pathlib import Path
 
 HOST = "127.0.0.1"
 PORT = 18765
-VERSION = "17"
+VERSION = "18"
 _HOME = Path(os.environ.get("CHECKME_BROWSER_HOME") or "/tmp")
 SHOT = "/tmp/checkme-browser.png"
 PROFILE = str(_HOME / "profile")
@@ -324,44 +324,153 @@ def _dump(page):
     )
 
 
+# Snapshot collector: open overlays / listboxes first, then other controls. Walks open shadow roots.
+# start is the first ref index so iframes can share one e0..eN sequence.
+_SNAPSHOT_JS = """(start) => {
+  const BASE = 'a, button, input, textarea, select, option, label, summary, [role="button"], [role="link"], [role="textbox"], [role="searchbox"], [role="checkbox"], [role="radio"], [role="combobox"], [role="option"], [role="listbox"], [role="tab"], [role="menuitem"], [role="menuitemradio"], [role="treeitem"], [role="row"], [contenteditable="true"]';
+  const SUGGEST = '[role="option"], [role="menuitem"], [role="menuitemradio"], [role="treeitem"], [role="listbox"] li, [role="listbox"] button, [role="menu"] li, [role="menu"] button, [role="dialog"] li, [role="listbox"] [tabindex]';
+  const tags = {A: 'link', BUTTON: 'button', INPUT: 'textbox', TEXTAREA: 'textbox', SELECT: 'combobox', OPTION: 'option', LABEL: 'label', SUMMARY: 'button', LI: 'option'};
+  const inputRole = {submit: 'button', button: 'button', reset: 'button', image: 'button', checkbox: 'checkbox', radio: 'radio', search: 'searchbox', range: 'slider'};
+  const visible = (el) => {
+    const r = el.getBoundingClientRect();
+    if (r.width < 1 || r.height < 1) return false;
+    const st = window.getComputedStyle(el);
+    return st.visibility !== 'hidden' && st.display !== 'none' && Number(st.opacity || 1) > 0.05;
+  };
+  const inView = (el) => { const r = el.getBoundingClientRect(); return r.bottom > 0 && r.top < window.innerHeight; };
+  const overlayRoot = (el) => {
+    const role = (el.getAttribute('role') || '').toLowerCase();
+    if (['listbox', 'menu', 'dialog', 'alertdialog', 'list'].includes(role)) return true;
+    const st = window.getComputedStyle(el);
+    const z = parseInt(st.zIndex, 10);
+    return (st.position === 'fixed' || st.position === 'absolute') && Number.isFinite(z) && z >= 10 && el.getBoundingClientRect().height > 24;
+  };
+  const collect = (root, selector) => {
+    const out = [];
+    const visit = (node) => {
+      if (!node || !node.querySelectorAll) return;
+      for (const el of node.querySelectorAll(selector)) out.push(el);
+      for (const el of node.querySelectorAll('*')) {
+        if (el.shadowRoot) visit(el.shadowRoot);
+      }
+    };
+    visit(root);
+    return out;
+  };
+  document.querySelectorAll('[data-checkme-ref]').forEach((el) => el.removeAttribute('data-checkme-ref'));
+  const suggest = [];
+  const rest = [];
+  const seen = new Set();
+  const add = (el, bucket) => {
+    if (!el || seen.has(el) || !visible(el)) return;
+    seen.add(el);
+    bucket.push(el);
+  };
+  for (const el of collect(document, SUGGEST)) add(el, suggest);
+  for (const el of collect(document, '*')) {
+    if (!overlayRoot(el) || !visible(el)) continue;
+    for (const child of collect(el, BASE + ', li, button, [tabindex]:not([tabindex="-1"])')) add(child, suggest);
+  }
+  for (const el of collect(document, BASE)) add(el, rest);
+  const ordered = suggest.filter(inView).concat(suggest.filter((el) => !inView(el)))
+    .concat(rest.filter(inView)).concat(rest.filter((el) => !inView(el)));
+  const origin = Number(start) || 0;
+  return ordered.slice(0, 150).map((el, i) => {
+    const ref = 'e' + (origin + i);
+    try { el.setAttribute('data-checkme-ref', ref); } catch (e) {}
+    const name = (el.getAttribute('aria-label') || el.innerText || el.getAttribute('placeholder') || el.value || el.getAttribute('title') || el.getAttribute('name') || '').replace(/\\s+/g, ' ').trim().slice(0, 80);
+    const r = el.getBoundingClientRect();
+    const role = (el.getAttribute('role') || (el.tagName === 'INPUT' && inputRole[(el.getAttribute('type') || '').toLowerCase()]) || tags[el.tagName] || el.tagName.toLowerCase());
+    return {
+      ref, role, name,
+      tag: el.tagName.toLowerCase(),
+      href: el.href || '',
+      input_type: el.getAttribute('type') || '',
+      in_view: inView(el),
+      overlay: suggest.includes(el),
+      x: Math.round(r.x + r.width / 2),
+      y: Math.round(r.y + r.height / 2),
+    };
+  });
+}"""
+
+# Visible type-ahead / menu rows (open shadow roots included). Used while picking a suggestion.
+_SUGGEST_JS = """() => {
+  const SEL = '[role="option"], [role="menuitem"], [role="menuitemradio"], [role="treeitem"], [role="listbox"] li, [role="listbox"] button, [role="menu"] li, [role="menu"] button, [role="dialog"] li, [role="listbox"] [tabindex]';
+  const visible = (el) => {
+    const r = el.getBoundingClientRect();
+    if (r.width < 1 || r.height < 1) return false;
+    const st = window.getComputedStyle(el);
+    return st.visibility !== 'hidden' && st.display !== 'none' && Number(st.opacity || 1) > 0.05;
+  };
+  const overlayRoot = (el) => {
+    const role = (el.getAttribute('role') || '').toLowerCase();
+    if (['listbox', 'menu', 'dialog', 'alertdialog', 'list'].includes(role)) return true;
+    const st = window.getComputedStyle(el);
+    const z = parseInt(st.zIndex, 10);
+    return (st.position === 'fixed' || st.position === 'absolute') && Number.isFinite(z) && z >= 10 && el.getBoundingClientRect().height > 24;
+  };
+  const collect = (root, selector) => {
+    const out = [];
+    const visit = (node) => {
+      if (!node || !node.querySelectorAll) return;
+      for (const el of node.querySelectorAll(selector)) out.push(el);
+      for (const el of node.querySelectorAll('*')) {
+        if (el.shadowRoot) visit(el.shadowRoot);
+      }
+    };
+    visit(root);
+    return out;
+  };
+  const seen = new Set();
+  const rows = [];
+  const push = (el) => {
+    if (!el || seen.has(el) || !visible(el)) return;
+    seen.add(el);
+    const name = (el.getAttribute('aria-label') || el.innerText || el.getAttribute('title') || '').replace(/\\s+/g, ' ').trim().slice(0, 120);
+    if (name.length < 1) return;
+    const r = el.getBoundingClientRect();
+    rows.push({
+      name,
+      role: (el.getAttribute('role') || el.tagName || '').toLowerCase(),
+      x: Math.round(r.x + r.width / 2),
+      y: Math.round(r.y + r.height / 2),
+    });
+  };
+  for (const el of collect(document, SEL)) push(el);
+  for (const el of collect(document, '*')) {
+    if (!overlayRoot(el) || !visible(el)) continue;
+    for (const child of collect(el, 'li, button, a, [role="option"], [role="menuitem"], [tabindex]:not([tabindex="-1"])')) push(child);
+  }
+  return rows.slice(0, 40);
+}"""
+
+
+def _frames_of(page):
+    try:
+        frames = list(page.frames)
+    except Exception:
+        frames = []
+    return frames[:16] if frames else [page]
+
+
 def _snapshot(page):
-    nodes = page.evaluate(
-        """() => {
-          const sel = 'a, button, input, textarea, select, option, label, summary, [role="button"], [role="link"], [role="textbox"], [role="searchbox"], [role="checkbox"], [role="radio"], [role="combobox"], [role="option"], [role="tab"], [role="menuitem"], [contenteditable="true"]';
-          document.querySelectorAll('[data-checkme-ref]').forEach((el) => el.removeAttribute('data-checkme-ref'));
-          const visible = (el) => {
-            const r = el.getBoundingClientRect();
-            if (r.width < 1 || r.height < 1) return false;
-            const st = window.getComputedStyle(el);
-            return st.visibility !== 'hidden' && st.display !== 'none' && Number(st.opacity || 1) > 0.05;
-          };
-          const tags = {A: 'link', BUTTON: 'button', INPUT: 'textbox', TEXTAREA: 'textbox', SELECT: 'combobox', OPTION: 'option', LABEL: 'label', SUMMARY: 'button'};
-          const all = Array.from(document.querySelectorAll(sel)).filter(visible);
-          // Elements in view first (what the user sees on the screen), then the rest of the page.
-          const inView = (el) => { const r = el.getBoundingClientRect(); return r.bottom > 0 && r.top < window.innerHeight; };
-          const ordered = all.filter(inView).concat(all.filter((el) => !inView(el)));
-          const inputRole = {submit: 'button', button: 'button', reset: 'button', image: 'button', checkbox: 'checkbox', radio: 'radio', search: 'searchbox', range: 'slider'};
-          return ordered.slice(0, 150).map((el, i) => {
-            const ref = 'e' + i;
-            el.setAttribute('data-checkme-ref', ref);
-            const name = (el.getAttribute('aria-label') || el.innerText || el.getAttribute('placeholder') || el.value || el.getAttribute('title') || el.getAttribute('name') || '').replace(/\\s+/g, ' ').trim().slice(0, 80);
-            const r = el.getBoundingClientRect();
-            return {
-              ref,
-              role: (el.getAttribute('role') || (el.tagName === 'INPUT' && inputRole[(el.getAttribute('type') || '').toLowerCase()]) || tags[el.tagName] || el.tagName.toLowerCase()),
-              name,
-              tag: el.tagName.toLowerCase(),
-              href: el.href || '',
-              input_type: el.getAttribute('type') || '',
-              in_view: r.bottom > 0 && r.top < window.innerHeight,
-              x: Math.round(r.x + r.width / 2),
-              y: Math.round(r.y + r.height / 2),
-            };
-          });
-        }"""
-    )
+    nodes: list[dict] = []
+    start = 0
+    for frame in _frames_of(page):
+        try:
+            part = frame.evaluate(_SNAPSHOT_JS, start)
+        except Exception:
+            continue
+        if not isinstance(part, list):
+            continue
+        nodes.extend(n for n in part if isinstance(n, dict))
+        start = len(nodes)
+        if start >= 150:
+            nodes = nodes[:150]
+            break
     global _elements, _elements_url
-    _elements = nodes if isinstance(nodes, list) else []
+    _elements = nodes
     _elements_url = page.url
     _tab_refs[id(page)] = (_elements, _elements_url)
     tree = "\n".join(f"- {n.get('ref')} {n.get('role')} {n.get('name') or ''}".strip() for n in _elements)
@@ -416,6 +525,9 @@ def _locator(page, step, node):
         lambda: page.get_by_placeholder(ref, exact=True).first,
         lambda: page.get_by_role("textbox", name=ref, exact=True).first,
         lambda: page.get_by_role("combobox", name=ref, exact=True).first,
+        lambda: page.get_by_role("searchbox", name=ref, exact=True).first,
+        lambda: page.get_by_role("option", name=ref, exact=False).first,
+        lambda: page.get_by_role("menuitem", name=ref, exact=False).first,
         lambda: page.get_by_role("button", name=ref, exact=True).first,
         lambda: page.get_by_role("link", name=ref, exact=True).first,
         lambda: page.get_by_text(ref, exact=True).first,
@@ -445,7 +557,9 @@ def _act_page(page, actions: list):
         for step in actions:
             _act_step(page, step)
             completed += 1
-            page.wait_for_timeout(250)
+            kind = str(step.get("kind") or "").lower()
+            pause = 700 if kind in {"fill", "type", "select", "pick", "select_option"} else 250
+            page.wait_for_timeout(pause)
     except Exception as exc:
         _settle(page)
         data = _snapshot(page)
@@ -453,8 +567,10 @@ def _act_page(page, actions: list):
         data["completed"] = completed
         data["error"] = f"step {completed + 1} failed: {str(exc)[:400]}"
         data["hint"] = (
-            "The page may have changed. Use the refs in this fresh snapshot (tree) and try again, "
-            "or computer_observe + computer_act with x,y."
+            "The page may have changed. Use the refs in this fresh snapshot (tree) and try again. "
+            "For a type-ahead list, type into the field, wait, then click the matching option "
+            "(or select/pick with the field ref and the value); if refs miss, computer_observe + "
+            "computer_act at x,y or press ArrowDown then Enter. Do not request_takeover for a dropdown."
         )
         return data
     _settle(page)
@@ -463,7 +579,133 @@ def _act_page(page, actions: list):
     return data
 
 
+def score_option(query: str, name: str) -> int:
+    """How well a visible suggestion matches what the agent wants to pick (0 = no match)."""
+    q = (query or "").strip().lower()
+    n = (name or "").strip().lower()
+    if not q or not n:
+        return 0
+    if n == q:
+        return 100
+    if f"({q})" in n or n.startswith(q + " ") or n.startswith(q + ","):
+        return 92
+    tokens = [t for t in re.split(r"[^a-z0-9]+", q) if t]
+    if tokens and all(t in n for t in tokens):
+        return max(50, 85 - max(0, len(n) - len(q)) // 8)
+    if q in n:
+        return 70
+    hits = sum(1 for t in tokens if len(t) >= 3 and t in n)
+    if hits:
+        return 40 + hits * 8
+    return 0
+
+
+def best_option(query: str, candidates: list[dict]) -> dict | None:
+    best = None
+    best_score = 0
+    for row in candidates or []:
+        if not isinstance(row, dict):
+            continue
+        sc = score_option(query, str(row.get("name") or ""))
+        if sc > best_score:
+            best_score = sc
+            best = row
+    return best if best_score >= 40 else None
+
+
+def looks_combobox(node: dict | None, info: dict | None = None) -> bool:
+    role = str((node or {}).get("role") or "").lower()
+    tag = str((node or {}).get("tag") or "").lower()
+    if role in {"combobox", "searchbox", "listbox"}:
+        return True
+    if tag == "select":
+        return False
+    info = info or {}
+    if str(info.get("role") or "").lower() in {"combobox", "searchbox"}:
+        return True
+    if str(info.get("ac") or "").lower() in {"list", "both", "inline"}:
+        return True
+    if str(info.get("popup") or "").lower() in {"listbox", "menu", "true"}:
+        return True
+    if info.get("list") or info.get("ce"):
+        return True
+    return False
+
+
+def _combobox_info(loc) -> dict:
+    if loc is None:
+        return {}
+    try:
+        return loc.evaluate(
+            """el => ({
+              role: (el.getAttribute('role') || '').toLowerCase(),
+              ac: (el.getAttribute('aria-autocomplete') || '').toLowerCase(),
+              popup: (el.getAttribute('aria-haspopup') || '').toLowerCase(),
+              list: el.getAttribute('list') || '',
+              tag: (el.tagName || '').toLowerCase(),
+              ce: !!el.isContentEditable,
+            })"""
+        ) or {}
+    except Exception:
+        return {}
+
+
+def _click_target(page, loc=None, node=None, x=None, y=None, timeout: int = 12000) -> None:
+    if loc is not None:
+        try:
+            loc.click(timeout=timeout)
+            return
+        except Exception:
+            pass
+    if x is None and node:
+        x, y = node.get("x"), node.get("y")
+    if x is not None and y is not None:
+        page.mouse.click(int(x), int(y))
+        return
+    raise RuntimeError("nothing to click; take a new browser_snapshot")
+
+
+def _suggestion_hits(page) -> list[dict]:
+    hits: list[dict] = []
+    for frame in _frames_of(page):
+        try:
+            rows = frame.evaluate(_SUGGEST_JS)
+        except Exception:
+            continue
+        if isinstance(rows, list):
+            hits.extend(r for r in rows if isinstance(r, dict))
+    return hits
+
+
+def _wait_suggestion(page, query: str, tries: int = 12) -> dict | None:
+    best = None
+    for _ in range(max(1, tries)):
+        hit = best_option(query, _suggestion_hits(page))
+        if hit is not None:
+            sc = score_option(query, str(hit.get("name") or ""))
+            if sc >= 60:
+                return hit
+            best = hit
+        page.wait_for_timeout(200)
+    return best
+
+
+def _type_keys(page, text: str, replace: bool) -> None:
+    if replace:
+        page.keyboard.press("Control+A")
+        page.keyboard.press("Backspace")
+    page.keyboard.type(text, delay=random.randint(35, 70))
+
+
 def _type_into(page, loc, node, text: str, replace: bool) -> None:
+    info = _combobox_info(loc)
+    suggest = looks_combobox(node, info)
+    if suggest:
+        _click_target(page, loc, node)
+        page.wait_for_timeout(150)
+        _type_keys(page, text, replace=True)
+        page.wait_for_timeout(450)
+        return
     if loc is not None:
         try:
             if replace:
@@ -473,14 +715,45 @@ def _type_into(page, loc, node, text: str, replace: bool) -> None:
                 page.keyboard.type(text, delay=random.randint(30, 70))
             return
         except Exception:
-            # Not a plain input (custom combobox / contenteditable): click it and type like a person.
             loc.click(timeout=8000)
     elif node and node.get("x") is not None:
         page.mouse.click(int(node["x"]), int(node["y"]))
+    _type_keys(page, text, replace)
     if replace:
-        page.keyboard.press("Control+A")
-        page.keyboard.press("Backspace")
-    page.keyboard.type(text, delay=20)
+        page.wait_for_timeout(120)
+
+
+def pick_suggestion(page, loc, node, text: str) -> str:
+    """Choose a value on a native <select> or a custom type-ahead list. Returns how it was picked."""
+    value = str(text or "").strip()
+    if not value:
+        raise RuntimeError("select/pick needs text")
+    tag = str((node or {}).get("tag") or "")
+    info = _combobox_info(loc)
+    if not tag:
+        tag = str(info.get("tag") or "")
+    if loc is not None and tag == "select":
+        loc.select_option(value, timeout=12000)
+        return "native"
+    if loc is not None:
+        try:
+            loc.select_option(value, timeout=2500)
+            return "native"
+        except Exception:
+            pass
+    _click_target(page, loc, node)
+    page.wait_for_timeout(200)
+    _type_keys(page, value, replace=True)
+    hit = _wait_suggestion(page, value)
+    if hit is not None and hit.get("x") is not None:
+        page.mouse.click(int(hit["x"]), int(hit["y"]))
+        page.wait_for_timeout(200)
+        return "option"
+    page.keyboard.press("ArrowDown")
+    page.wait_for_timeout(120)
+    page.keyboard.press("Enter")
+    page.wait_for_timeout(200)
+    return "keyboard"
 
 
 def _act_step(page, step: dict) -> None:
@@ -494,21 +767,19 @@ def _act_step(page, step: dict) -> None:
         if step.get("x") is None and kind not in {"press", "key", "scroll", "wait", "reload", "back"}:
             raise RuntimeError(f"ref {ref} is from an older page; take a new browser_snapshot")
     if kind == "click":
-        if loc is not None:
-            loc.click(timeout=12000)
-        elif step.get("x") is not None:
-            page.mouse.click(int(step["x"]), int(step["y"]))
-        elif node and node.get("x") is not None:
-            page.mouse.click(int(node["x"]), int(node["y"]))
-        else:
-            raise RuntimeError(f"unknown ref {ref}; take a new browser_snapshot")
+        _click_target(
+            page,
+            loc,
+            node,
+            step.get("x"),
+            step.get("y"),
+        )
     elif kind in {"fill", "type"}:
         _type_into(page, loc, node, str(step.get("text") or ""), kind == "fill")
-    elif kind in {"select", "select_option"}:
-        value = str(step.get("text") or step.get("value") or "")
-        if loc is None:
-            raise RuntimeError(f"unknown select ref {ref}")
-        loc.select_option(value, timeout=12000)
+    elif kind in {"select", "select_option", "pick"}:
+        if loc is None and node is None:
+            raise RuntimeError(f"unknown select ref {ref}; take a new browser_snapshot")
+        pick_suggestion(page, loc, node, str(step.get("text") or step.get("value") or ""))
     elif kind == "check":
         if loc is None:
             raise RuntimeError(f"unknown check ref {ref}")
