@@ -487,9 +487,12 @@ def test_system_prompt_has_no_product_recipes():
     assert "live computer" in lowered or "persistent chromium" in lowered or "shared live machine" in lowered
     assert "do not open the browser" in lowered
     assert "not in list_connections" in lowered
-    assert "google flights" in lowered or "public lookup" in lowered
+    assert "website without an api" in lowered
+    assert "never say the computer or browser is unavailable" in lowered
+    assert "flight" not in lowered
     assert "instagram" in lowered
-    assert "web_fetch paints" in lowered or "paints that html" in lowered
+    assert "web_read" in lowered and "do not use or wake the computer" in lowered
+    assert "browser_search" in lowered and "which search key to configure" in lowered
     assert "browser_handoff" in lowered
     assert "fill whole forms" in lowered
     assert "never attach page.png" in lowered
@@ -560,7 +563,7 @@ FIRST_CLASS = [
     "browser_snapshot",
     "browser_act",
     "shell",
-    "user_computer_shell",
+    "ensure_toolchain",
     "list_files",
     "read_file",
     "write_file",
@@ -616,20 +619,35 @@ async def test_browser_navigate_harness_uses_computer_connector():
     assert calls == [("computer", "browser_navigate", {"url": "https://example.com"})]
 
 
-async def test_user_computer_shell_does_not_use_daytona():
+async def test_user_computer_shell_hidden_without_local_computer():
+    computer = _conn(slug="computer", provider="daytona", kind="builtin", name="Computer", alias="computer")
+    ctx = _ctx([computer])
+    names = [t.name for t in harness_tools(ctx)]
+    assert "shell" in names and "user_computer_shell" not in names
+    local = _conn(slug="laptop", provider="trusted_local", kind="builtin", name="Laptop", alias="laptop")
+    names = [t.name for t in harness_tools(_ctx([computer, local]))]
+    assert names.index("user_computer_shell") == names.index("shell") + 1
+
+
+async def test_user_computer_shell_without_local_runs_on_cloud(monkeypatch):
+    from app.agent import computer_harness
+    from app.config import get_settings
+
     calls = []
 
     async def fake_call(slug, tool, args):
         calls.append(slug)
-        return {"ok": True}
+        return {"exit_code": 0, "stdout": "ok"}
 
     computer = _conn(slug="computer", provider="daytona", kind="builtin", name="Computer", alias="computer")
     ctx = _ctx([computer], call_impl=fake_call)
-    tool = next(t for t in harness_tools(ctx) if t.name == "user_computer_shell")
-    data = json.loads(await tool.coroutine(command="ls"))
-    assert data.get("error")
-    assert "local" in data["error"].lower()
-    assert calls == []
+    data = await computer_harness.user_computer_shell(ctx, "ls")
+    assert calls == ["computer"]  # never the user's machine
+    assert data["ran_on"] == "cloud_computer" and "shell" in data["note"]
+    monkeypatch.setattr(get_settings(), "local_shell_fallback_to_cloud", False)
+    data = await computer_harness.user_computer_shell(ctx, "ls")
+    assert data["use_instead"] == "shell" and "local" in data["error"].lower()
+    assert calls == ["computer"]
 
 
 async def test_request_takeover_is_browser_handoff():

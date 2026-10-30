@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import re
 import shlex
 import time
 from contextvars import ContextVar
@@ -27,8 +29,13 @@ _COMPUTER_USE = {
     "browse_open",
     "browser_navigate",
     "web_fetch",
+    "browser_search",
     "browser_snapshot",
     "browser_act",
+    "browser_tabs",
+    "browser_new_tab",
+    "browser_switch_tab",
+    "browser_close_tab",
     "computer_observe",
     "computer_act",
     "computer_control",
@@ -139,7 +146,10 @@ DAYTONA_TOOLS = [
             "Open an http(s) URL in the live Chromium tab on this user's computer. "
             "Same visible browser the chat screen shows. Prefer the destination site over a Google Search URL "
             "when the user needs a live product page (bookings, inventory, forms). "
-            "If the page is a CAPTCHA or verification wall, stop and hand off — do not invent results. "
+            "Waits out passive bot checks like a normal visitor. If the site still blocks, it tries other ways to read "
+            "the same page and shows a read-only copy (read_only=true), or reports blocked_source: tell the user that "
+            "site blocked automated access and use equivalent sources. A CAPTCHA only a person can solve "
+            "(handoff=true) goes to the user on the live screen — do not invent results. "
             "If a site fails, try another source — do not stop after one error."
         ),
         input_schema={
@@ -147,6 +157,7 @@ DAYTONA_TOOLS = [
             "properties": {
                 "url": {"type": "string", "description": "http or https URL to open."},
                 "wait_ms": {"type": "integer", "description": "Extra wait after load. Default 1200."},
+                "tab": {"type": "string", "description": "Optional tab id (t1, t2 from browser_tabs). Works on that tab without switching the screen; default is the active tab."},
             },
             "required": ["url"],
         },
@@ -157,10 +168,12 @@ DAYTONA_TOOLS = [
     ToolSpec(
         name="browser_snapshot",
         description=(
-            "Read the live computer browser: URL, title, page text, and up to 80 interactive refs (e0, e1). "
-            "Call this before browser_act. If it returns fallback computer_act, observe the screen instead."
+            "Read the live computer browser: URL, title, page text, and up to 150 visible interactive refs (e0, e1), "
+            "in-view elements first. Refs stay valid until the page changes. browser_navigate and browser_act already "
+            "return a fresh snapshot, so call this only when you need to re-read. If it returns fallback computer_act, "
+            "observe the screen instead."
         ),
-        input_schema={"type": "object", "properties": {}},
+        input_schema={"type": "object", "properties": {"tab": {"type": "string", "description": "Optional tab id (t1, t2 from browser_tabs). Works on that tab without switching the screen; default is the active tab."},}},
         group="computer",
         tags=("computer", "browser"),
     ),
@@ -178,10 +191,52 @@ DAYTONA_TOOLS = [
                 "actions": {
                     "type": "array",
                     "description": "Ordered steps, e.g. [{kind: click, ref: e3}].",
-                }
+                },
+                "tab": {"type": "string", "description": "Optional tab id (t1, t2 from browser_tabs). Works on that tab without switching the screen; default is the active tab."},
             },
             "required": ["actions"],
         },
+        group="computer",
+        read_only=False,
+        tags=("computer", "browser"),
+    ),
+    ToolSpec(
+        name="browser_tabs",
+        description="List the computer browser's open tabs: tab id (t1, t2), URL, title, and which one is active (shown on the live screen).",
+        input_schema={"type": "object", "properties": {}},
+        group="computer",
+        tags=("computer", "browser"),
+    ),
+    ToolSpec(
+        name="browser_new_tab",
+        description=(
+            "Open a new browser tab, optionally at a URL, and return its tab id and snapshot. Use tabs to keep several "
+            "pages open at once (e.g. the same search on different sites) and come back to each with its state intact. "
+            "background=true opens it without switching the live screen. Links that open a new window also become tabs."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "Optional http(s) URL."},
+                "background": {"type": "boolean", "description": "Open without making it the active tab."},
+            },
+        },
+        group="computer",
+        read_only=False,
+        tags=("computer", "browser"),
+    ),
+    ToolSpec(
+        name="browser_switch_tab",
+        description="Make a tab active (shown on the live screen) and return its snapshot.",
+        input_schema={"type": "object", "properties": {"tab": {"type": "string", "description": "Tab id from browser_tabs."}}, "required": ["tab"]},
+        group="computer",
+        read_only=False,
+        tags=("computer", "browser"),
+    ),
+    ToolSpec(
+        name="browser_close_tab",
+        description="Close a tab (default: the active one). The last tab is cleared instead of closed.",
+        input_schema={"type": "object", "properties": {"tab": {"type": "string", "description": "Tab id from browser_tabs."}}},
         group="computer",
         read_only=False,
         tags=("computer", "browser"),
@@ -276,10 +331,28 @@ DAYTONA_TOOLS = [
         tags=("computer", "browser", "handoff"),
     ),
     ToolSpec(
+        name="browser_search",
+        description=(
+            "Search the web inside the computer's real browser (Bing, DuckDuckGo, then Google) and return result "
+            "links read from the page. Use when web_search comes back empty or blocked."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "What to search for."},
+                "count": {"type": "integer", "description": "Max results (1-12).", "default": 8},
+            },
+            "required": ["query"],
+        },
+        group="computer",
+        tags=("computer", "browser", "search"),
+    ),
+    ToolSpec(
         name="web_fetch",
         description=(
             "Fetch a public http(s) page over the network and show it on the computer screen. "
-            "Use for news and when browser_navigate returns chrome-error or connection reset."
+            "Use for news and when browser_navigate returns chrome-error or connection reset. Blocked sites go through "
+            "the same fallback ladder as browser_navigate (read-only copy or a plain blocked_source report)."
         ),
         input_schema={
             "type": "object",
@@ -386,7 +459,7 @@ async def _file_bytes(fs, proc, path: str) -> bytes:
 
 async def _cache_shot(proc, fs) -> None:
     try:
-        remember_screen(await _file_bytes(fs, proc, "/tmp/checkme-browser.png"))
+        remember_screen(await asyncio.wait_for(_file_bytes(fs, proc, "/tmp/checkme-browser.png"), timeout=20))
     except Exception:  # noqa: BLE001
         pass
 
@@ -424,17 +497,40 @@ def _out(response) -> str:
     return str(getattr(response, "result", None) or getattr(response, "stdout", "") or "")
 
 
+PLAYWRIGHT_INSTALL = (
+    "python3 -m pip install -q playwright && python3 -m playwright install chromium"
+    " && python3 -c 'from playwright.sync_api import sync_playwright' && touch /tmp/checkme-pw-ready"
+)
+# E2B Desktop runs as a non-root user with passwordless sudo and lacks Chromium's system libraries.
+PLAYWRIGHT_INSTALL_DESKTOP = (
+    "(python3 -m pip install -q --user playwright || python3 -m pip install -q --user --break-system-packages playwright)"
+    " && (python3 -m playwright install --with-deps chromium || python3 -m playwright install chromium)"
+    " && python3 -c 'from playwright.sync_api import sync_playwright' && touch /tmp/checkme-pw-ready"
+)
+
+
+# Optional (BROWSER_CHANNEL=chrome): Google Chrome stable instead of the bundled Chromium, for a browser whose
+# brand and version match what most visitors use. Best effort: the daemon falls back to Chromium.
+CHROME_INSTALL = (
+    "test -x /usr/bin/google-chrome || ((command -v wget >/dev/null || sudo apt-get install -y -q wget)"
+    " && wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb"
+    " && sudo apt-get install -y -q /tmp/chrome.deb; rm -f /tmp/chrome.deb); test -x /usr/bin/google-chrome"
+)
+
+
 async def _ensure_playwright(proc) -> None:
     marker = await _exec(proc, "test -f /tmp/checkme-pw-ready && echo ready || echo missing", 15)
-    if "ready" in _out(marker):
-        return
-    install = await _exec(
-        proc,
-        "python3 -m pip install -q playwright && python3 -m playwright install chromium && python3 -c 'from playwright.sync_api import sync_playwright' && touch /tmp/checkme-pw-ready",
-        240,
-    )
-    if getattr(install, "exit_code", 1) not in {0, None}:
-        raise ToolError("Could not install a browser in the computer sandbox. " + _clip(_out(install), 400))
+    if "ready" not in _out(marker):
+        desktop = bool(getattr(proc, "browser_deps", False))
+        install = await _exec(proc, PLAYWRIGHT_INSTALL_DESKTOP if desktop else PLAYWRIGHT_INSTALL, 480 if desktop else 240)
+        if getattr(install, "exit_code", 1) not in {0, None}:
+            raise ToolError("Could not install a browser in the computer sandbox. " + _clip(_out(install), 400))
+    if str(getattr(get_settings(), "browser_channel", "") or "").strip().lower() == "chrome" and getattr(proc, "browser_deps", False):
+        ready = await _exec(proc, "test -f /tmp/checkme-chrome-tried && echo tried || echo no", 10)
+        if "tried" not in _out(ready):
+            got = await _exec(proc, CHROME_INSTALL + "; touch /tmp/checkme-chrome-tried", 300)
+            if getattr(got, "exit_code", 1) not in {0, None}:
+                log.info("computer: Google Chrome install failed; using bundled Chromium")
 
 
 async def _put_sandbox_file(proc, fs, dest: str, data: bytes) -> None:
@@ -449,9 +545,9 @@ async def _put_sandbox_file(proc, fs, dest: str, data: bytes) -> None:
                 tmp.write(data)
                 local = tmp.name
             try:
-                await fs.upload_file(local, dest)
+                await asyncio.wait_for(fs.upload_file(local, dest), timeout=30)
             except TypeError:
-                await fs.upload_file(data, dest)
+                await asyncio.wait_for(fs.upload_file(data, dest), timeout=30)
             return
         except Exception:  # noqa: BLE001
             pass
@@ -473,32 +569,72 @@ async def _put_sandbox_file(proc, fs, dest: str, data: bytes) -> None:
         )
 
 
-async def _install_daemon(proc, fs=None) -> None:
+async def _install_daemon(proc, fs=None, config: dict | None = None) -> None:
     from pathlib import Path as FilePath
 
-    from app.connectors import computer_daemon
+    from app.connectors import block_detect, computer_daemon
 
+    await _put_sandbox_file(proc, fs, "/tmp/checkme_block_detect.py", FilePath(block_detect.__file__).read_bytes())
     await _put_sandbox_file(proc, fs, "/tmp/checkme_browser_daemon.py", FilePath(computer_daemon.__file__).read_bytes())
+    if config is not None:
+        # Read once by the daemon at start, then deleted (it may hold proxy credentials).
+        await _put_sandbox_file(proc, fs, "/tmp/checkme_browser_config.json", json.dumps(config).encode("utf-8"))
 
 
-async def _daemon_up(proc) -> bool:
+_USER_TZ: dict[str, str] = {}
+
+
+async def _daemon_config() -> dict:
+    from app.connectors.browsing import daemon_config, user_timezone
+
+    user = _SCREEN_USER.get() or ""
+    if user and user not in _USER_TZ:
+        _USER_TZ[user] = await user_timezone(user)
+    return daemon_config(_USER_TZ.get(user, ""))
+
+
+async def _daemon_up(proc, config_hash: str = "") -> bool:
     ping = await _exec(proc, "curl -sf http://127.0.0.1:18765/health && echo OK || echo DOWN", 8)
     out = _out(ping)
-    return "OK" in out and '"version": "9"' in out
+    return daemon_current(out, config_hash)
+
+
+def daemon_current(health_output: str, config_hash: str = "") -> bool:
+    """True when the running daemon is healthy, is this release and runs with the current browser settings
+    (a stale one is restarted)."""
+    from app.connectors.computer_daemon import VERSION
+
+    if "OK" not in health_output or f'"version": "{VERSION}"' not in health_output:
+        return False
+    return not config_hash or f'"config": "{config_hash}"' in health_output
+
+
+_DAEMON_LOCKS: dict[str, asyncio.Lock] = {}
 
 
 async def _ensure_daemon(proc, fs=None) -> None:
+    # One install/start at a time per user: the E2B boot warms the browser in the background while the
+    # agent's first browser tool may ask for it too.
+    lock = _DAEMON_LOCKS.setdefault(_SCREEN_USER.get() or "default", asyncio.Lock())
+    async with lock:
+        await _ensure_daemon_locked(proc, fs)
+
+
+async def _ensure_daemon_locked(proc, fs=None) -> None:
     await _ensure_playwright(proc)
-    if await _daemon_up(proc):
+    config = await _daemon_config()
+    if await _daemon_up(proc, config.get("hash", "")):
         return
     await _exec(proc, "pkill -f checkme_browser_daemon.py >/dev/null 2>&1 || true", 8)
-    await _install_daemon(proc, fs)
+    await _install_daemon(proc, fs, config)
     present = await _exec(proc, "test -s /tmp/checkme_browser_daemon.py && echo HAS || echo MISSING", 8)
     if "HAS" not in _out(present):
         raise ToolError("Computer browser did not start. Daemon file missing in sandbox.")
     boot = await _exec(
         proc,
-        "bash -lc 'nohup python3 /tmp/checkme_browser_daemon.py >/tmp/checkme-browser-daemon.log 2>&1 & disown; "
+        "bash -lc '"
+        + str(getattr(proc, "daemon_env", "") or "")
+        + "nohup python3 /tmp/checkme_browser_daemon.py >/tmp/checkme-browser-daemon.log 2>&1 & disown; "
         "for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do "
         "curl -sf http://127.0.0.1:18765/health && exit 0; sleep 2; done; "
         "tail -n 40 /tmp/checkme-browser-daemon.log; exit 1'",
@@ -506,38 +642,128 @@ async def _ensure_daemon(proc, fs=None) -> None:
     )
     if getattr(boot, "exit_code", 1) not in {0, None} and not await _daemon_up(proc):
         raise ToolError("Computer browser did not start. " + _clip(_out(boot), 500))
+    await _restore_profile(proc, fs)
+
+
+async def _restore_profile(proc, fs=None) -> None:
+    """A new daemon on an empty profile gets this user's saved cookies back (browser_profile)."""
+    from app.connectors import browser_profile
+
+    user = _SCREEN_USER.get() or ""
+    if not browser_profile.enabled(user):
+        return
+    cookies = await browser_profile.load(user)
+    if not cookies:
+        return
+    try:
+        # Called under the daemon lock, so straight to the daemon (not _browser_rpc, which takes that lock).
+        out = await asyncio.wait_for(_browser_rpc_once(proc, {"command": "import_state", "cookies": cookies}, 60, fs), 70)
+        log.info("computer: restored %s browser cookies", (out or {}).get("imported"))
+    except Exception as exc:  # noqa: BLE001 - never block browsing on this
+        log.info("computer: cookie restore skipped: %s", type(exc).__name__)
+
+
+async def _save_profile(proc, fs=None) -> None:
+    from app.connectors import browser_profile
+
+    user = _SCREEN_USER.get() or ""
+    if not browser_profile.due(user):
+        return
+    try:
+        data = await _browser_rpc(proc, {"command": "export_state"}, 30, fs)
+        if isinstance(data, dict) and data.get("ok") and data.get("cookies"):
+            await browser_profile.save(user, data["cookies"])
+    except Exception as exc:  # noqa: BLE001
+        log.info("computer: cookie save skipped: %s", type(exc).__name__)
+
+
+_RPC_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+def _rpc_error(url: str, message: str) -> dict:
+    return {
+        "ok": False,
+        "error": _clip(message, 500),
+        "fallback": "computer_act",
+        "url": url,
+        "title": "",
+        "text": "",
+        "screenshot_name": "page.png",
+    }
 
 
 async def _browser_rpc(proc, payload: dict, timeout: int = 90, fs=None) -> dict:
+    """One command to the browser daemon. Never hangs past ``timeout`` (plus queueing) and never raises:
+    failures come back as ``ok: false`` with the reason so the agent can retry or switch approach."""
     url = str(payload.get("url") or "")
     try:
         await _ensure_daemon(proc, fs)
-        await _put_sandbox_file(proc, fs, "/tmp/checkme_browser_cmd.json", json.dumps(payload).encode())
-        response = await proc.exec(
-            "curl -sS -m "
-            + str(max(15, timeout - 5))
-            + " -H 'Content-Type: application/json' --data-binary @/tmp/checkme_browser_cmd.json http://127.0.0.1:18765/",
-            timeout=timeout,
-        )
-        raw = _out(response).strip()
-        if getattr(response, "exit_code", 0) not in {0, None}:
-            raise ToolError("Computer browser action failed. " + _clip(raw, 600))
-        data = json.loads(raw.splitlines()[-1])
-        if not isinstance(data, dict):
-            raise ToolError("Computer browser returned no page data.")
-        data.setdefault("screenshot_name", "page.png")
-        await _cache_shot(proc, fs)
-        return data
     except Exception as exc:  # noqa: BLE001
-        return {
-            "ok": False,
-            "error": _clip(str(exc), 500),
-            "fallback": "computer_act",
-            "url": url,
-            "title": "",
-            "text": "",
-            "screenshot_name": "page.png",
-        }
+        return _rpc_error(url, str(exc) or type(exc).__name__)
+    # Browser commands for one user's computer run one at a time (the daemon drives a single tab), and
+    # each one ships its payload in its own file so parallel tool calls can never swap commands.
+    lock = _RPC_LOCKS.setdefault(_SCREEN_USER.get() or "default", asyncio.Lock())
+    try:
+        async with lock:
+            try:
+                return await asyncio.wait_for(_browser_rpc_once(proc, payload, timeout, fs), timeout=timeout + 30)
+            except _NotDelivered as first:
+                # The command never reached the browser (upload hiccup, daemon restarting): safe to retry once,
+                # even for clicks. Anything that may have run is not retried, so actions never double up.
+                log.info("e2b: browser %s not delivered (%s); retrying once", payload.get("command"), first)
+                await asyncio.sleep(1.0)
+                await _ensure_daemon(proc, fs)
+                return await asyncio.wait_for(_browser_rpc_once(proc, payload, timeout, fs), timeout=timeout + 30)
+    except (asyncio.TimeoutError, TimeoutError):
+        log.warning("e2b: browser %s timed out after %ss", payload.get("command"), timeout)
+        return _rpc_error(
+            url,
+            f"The computer browser did not answer '{payload.get('command')}' within {timeout}s. "
+            "Take a browser_snapshot or computer_observe to see the page, then continue or try another way.",
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _rpc_error(url, str(exc) or type(exc).__name__)
+
+
+class _NotDelivered(Exception):
+    """A browser command that provably did not reach the daemon."""
+
+
+# curl exit codes meaning the request never got to the daemon: 7 = connection refused, 26 = cannot read the
+# payload file.
+_CURL_NOT_SENT = {7, 26}
+
+
+async def _browser_rpc_once(proc, payload: dict, timeout: int, fs=None) -> dict:
+    import secrets as _secrets
+
+    cmd_path = f"/tmp/checkme_cmd_{_secrets.token_hex(6)}.json"
+    try:
+        await _put_sandbox_file(proc, fs, cmd_path, json.dumps(payload).encode())
+    except Exception as exc:  # noqa: BLE001
+        raise _NotDelivered(f"upload failed: {type(exc).__name__}") from exc
+    response = await proc.exec(
+        "curl -sS -m "
+        + str(max(15, timeout - 5))
+        + f" -H 'Content-Type: application/json' --data-binary @{cmd_path} http://127.0.0.1:18765/"
+        + f"; rc=$?; rm -f {cmd_path}; exit $rc",
+        timeout=timeout,
+    )
+    raw = _out(response).strip()
+    code = getattr(response, "exit_code", 0)
+    if code in _CURL_NOT_SENT:
+        raise _NotDelivered(f"curl exit {code}")
+    if code not in {0, None}:
+        raise ToolError("Computer browser action failed. " + _clip(raw, 600))
+    lines = raw.splitlines()
+    if not lines:
+        raise ToolError("Computer browser returned no page data.")
+    data = json.loads(lines[-1])
+    if not isinstance(data, dict):
+        raise ToolError("Computer browser returned no page data.")
+    data.setdefault("screenshot_name", "page.png")
+    await _cache_shot(proc, fs)
+    return data
 
 
 def decode_screen_b64(raw: str) -> bytes:
@@ -556,22 +782,52 @@ def decode_screen_b64(raw: str) -> bytes:
 
 
 async def _pull_screen(proc, fs=None) -> bytes:
-    # The file is rewritten by Chromium after each action. Always read it so live
-    # screen polling advances instead of pinning the first cached frame forever.
+    # Ask the browser daemon to capture a new frame over its dedicated screen
+    # endpoint first. This avoids relying on Daytona file downloads for live video.
+    try:
+        response = await _exec(
+            proc,
+            "bash -o pipefail -c 'curl -fsS --max-time 12 http://127.0.0.1:18765/screen | base64 -w0'",
+            20,
+        )
+        raw = decode_screen_b64(_out(response))
+        remember_screen(raw)
+        return raw
+    except Exception as capture_exc:  # noqa: BLE001
+        log.warning("Live screen endpoint capture failed: %s", _clip(str(capture_exc), 300))
+
+    # Keep the sandbox file as a fallback if the daemon's screenshot endpoint is
+    # briefly unavailable, then fall back to this user's last good frame.
     try:
         raw = await _file_bytes(fs, proc, "/tmp/checkme-browser.png")
-    except Exception:
+    except Exception as file_exc:  # noqa: BLE001
         cached = live_screen_png()
         if cached:
             return cached
-        raise
+        raise ToolError("Could not capture the live computer screen.") from file_exc
     if not isinstance(raw, (bytes, bytearray)) or len(raw) < 32 or not raw.startswith(b"\x89PNG"):
         cached = live_screen_png()
         if cached:
             return cached
-        raise ToolError("No live computer screen yet. Wake the computer first.")
+        raise ToolError("The computer returned an invalid screen image.")
     remember_screen(raw)
     return bytes(raw)
+
+
+_WARMING: set = set()
+
+
+def _warm_browser_later(proc, fs=None) -> None:
+    async def run() -> None:
+        try:
+            await _boot_computer(proc, fs)
+            log.info("e2b: browser ready on the desktop")
+        except Exception as exc:  # noqa: BLE001 - the agent's next browser tool retries and reports
+            log.warning("e2b: background browser start failed: %s: %s", type(exc).__name__, str(exc)[:300])
+
+    task = asyncio.get_running_loop().create_task(run())
+    _WARMING.add(task)
+    task.add_done_callback(_WARMING.discard)
 
 
 async def _boot_computer(proc, fs=None) -> dict:
@@ -601,39 +857,182 @@ async def _computer_status(proc) -> dict:
     }
 
 
-async def _open_in_browser(proc, fs, url: str, wait_ms: int = 1200) -> dict:
-    from app.connectors.computer_daemon import annotate_page
-    from app.connectors.web_fetch import browser_failed, fetch_public_page
+BROWSER_SEARCH_ENGINES = ("bing", "duckduckgo", "google")
 
-    data = await _browser_cmd(proc, {"action": "goto", "url": url, "wait_ms": wait_ms}, 180, fs)
-    annotate_page(data)
-    if data.get("bot_wall"):
-        return data
-    if not browser_failed(data, url):
-        return data
+
+def unwrap_result_url(url: str) -> str:
+    """Resolve search-engine redirect links (Bing /ck/a, DuckDuckGo /l/?uddg=, Google /url?q=) to the target."""
+    import base64
+    from urllib.parse import parse_qs, unquote, urlparse
+
     try:
-        page = await fetch_public_page(url)
-    except Exception as vis_exc:  # noqa: BLE001
-        data["error"] = (data.get("error") or str(vis_exc))[:500]
+        parsed = urlparse(url)
+    except ValueError:
+        return url
+    host = (parsed.hostname or "").lower()
+    qs = parse_qs(parsed.query)
+    if host.endswith("bing.com") and parsed.path.startswith("/ck/"):
+        raw = (qs.get("u") or [""])[0]
+        if raw.startswith("a1"):
+            raw = raw[2:]
+            try:
+                return base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)).decode("utf-8", "replace")
+            except Exception:  # noqa: BLE001
+                return url
+    if "duckduckgo.com" in host and parsed.path.startswith("/l/"):
+        return unquote((qs.get("uddg") or [url])[0])
+    if host.endswith("google.com") and parsed.path == "/url":
+        return (qs.get("q") or qs.get("url") or [url])[0]
+    return url
+
+
+_STOP = frozenset("the and for with from that this what when where which near best how are you your www com".split())
+
+
+def _query_terms(query: str) -> set[str]:
+    return {t for t in re.findall(r"[a-z0-9]{3,}", (query or "").lower()) if t not in _STOP}
+
+
+def _clean_serp(rows: list, count: int, query: str = "") -> list[dict]:
+    """Real result links only. Drops engine-internal links and rows that share no word with the query
+    (search engines sometimes serve unrelated filler results to automated browsers)."""
+    from urllib.parse import urlparse
+
+    terms = _query_terms(query)
+    out: list[dict] = []
+    seen: set[str] = set()
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        url = unwrap_result_url(str(row.get("url") or ""))
+        host = (urlparse(url).hostname or "").lower()
+        if not url.startswith(("http://", "https://")) or not host:
+            continue
+        if any(host.endswith(d) for d in ("bing.com", "duckduckgo.com", "google.com")) and "/maps" not in url:
+            continue
+        if url in seen:
+            continue
+        blob = f"{row.get('title') or ''} {row.get('snippet') or ''} {url}".lower()
+        if terms and not any(t in blob for t in terms):
+            continue
+        seen.add(url)
+        out.append({"title": str(row.get("title") or "")[:200], "url": url, "snippet": str(row.get("snippet") or "")[:400]})
+        if len(out) >= count:
+            break
+    return out
+
+
+async def browser_search(proc, fs, query: str, count: int = 8, engines=None) -> dict:
+    """Search in the cloud browser. A CAPTCHA/verification page is reported, never solved; then the next engine."""
+    query = (query or "").strip()
+    if not query:
+        raise ToolError("browser_search requires query")
+    count = max(1, min(int(count or 8), 12))
+    order = [e for e in (engines or BROWSER_SEARCH_ENGINES) if e in BROWSER_SEARCH_ENGINES] or list(BROWSER_SEARCH_ENGINES)
+    tried: list[str] = []
+    for engine in order:
+        try:
+            data = await _browser_rpc(proc, {"command": "serp", "engine": engine, "query": query, "count": count}, 35, fs)
+        except Exception as exc:  # noqa: BLE001 - one engine failing must not end the search
+            tried.append(f"browser:{engine}: {type(exc).__name__}: {str(exc)[:120]}")
+            continue
+        if not isinstance(data, dict):
+            tried.append(f"browser:{engine}: no response")
+            continue
+        if data.get("blocked"):
+            tried.append(f"browser:{engine}: blocked ({data.get('blocked')} page; not bypassed)")
+            continue
+        results = _clean_serp(data.get("results") or [], count, query)
+        if results:
+            return {"ok": True, "query": query, "results": results, "source": f"browser:{engine}", "tried": tried}
+        raw = len(data.get("results") or [])
+        detail = f" ({raw} unrelated links dropped)" if raw else ""
+        tried.append(f"browser:{engine}: no results{detail}" + (f" (error: {data.get('error')})" if data.get("error") else ""))
+    return {"ok": False, "query": query, "results": [], "tried": tried, "error": "Browser search found nothing. " + "; ".join(tried)}
+
+
+async def _open_in_browser(proc, fs, url: str, wait_ms: int = 1200, tab: str = "") -> dict:
+    """Open ``url`` in the computer's real browser; when the site blocks it or it fails to load, walk the
+    read-only ladder (docs/BROWSING.md) and paint the copy that worked, or report the blocked site plainly."""
+    from app.connectors.browsing import LADDER_AFTER_BROWSER, fetch_with_ladder, remote_provider
+    from app.connectors.computer_daemon import annotate_page
+    from app.connectors.web_fetch import browser_failed
+
+    data = await _browser_cmd(proc, {"action": "goto", "url": url, "wait_ms": wait_ms, "tab": tab}, 180, fs)
+    annotate_page(data)
+    wall = data.get("block") if data.get("bot_wall") else None
+    if not data.get("bot_wall") and not browser_failed(data, url):
+        await _save_profile(proc, fs)
+        return data
+    if data.get("bot_wall") and not wall:
+        wall = {"kind": data.get("bot_wall_kind") or "captcha", "interactive": bool(data.get("handoff")), "reason": data.get("reason") or ""}
+
+    hints: dict[str, Any] = {}
+    if remote_provider() == "browserbase":
+        hints["remote_cdp"] = lambda target, limit: _remote_cdp_fetch(proc, fs, target, limit)
+    steps = LADDER_AFTER_BROWSER if wall else ("server", *LADDER_AFTER_BROWSER)
+    total = 35.0 if (wall or {}).get("interactive") else None
+    page = await fetch_with_ladder(url, steps, hints=hints, total_s=total)
+    if not page.get("ok"):
+        data["attempts"] = page.get("attempts") or []
+        data["blocked_source"] = page.get("blocked_source")
+        if wall:
+            data["hint"] = page["hint"] + (
+                " The live screen shows the CAPTCHA if the user wants to solve it (take control)." if wall.get("interactive") else ""
+            )
+            return data
+        data["error"] = (str(data.get("error") or "") or page.get("error") or "")[:500]
         data["hint"] = "Try another source URL, or request_takeover if a CAPTCHA is showing. Do not invent results."
         return data
     shown = await _browser_rpc(
-        proc, {"command": "load_html", "html": page.get("html") or "", "url": page.get("url") or url}, 60, fs
+        proc, {"command": "load_html", "html": page.get("html") or "", "url": page.get("url") or url, "tab": tab}, 60, fs
     )
     shown["ok"] = True
     shown["url"] = page.get("url") or url
     shown["title"] = page.get("title") or shown.get("title") or ""
     shown["text"] = page.get("text") or shown.get("text") or ""
-    shown["fetched_via"] = "network"
-    shown.pop("error", None)
-    shown.pop("fallback", None)
+    via = str(page.get("fetched_via") or "network")
+    shown["fetched_via"] = "network" if via == "server" else via
+    shown["attempts"] = page.get("attempts") or []
+    shown["read_only"] = True
+    note = str(page.get("note") or "")
+    if wall:
+        shown["live_site_blocked"] = wall.get("reason") or "The site blocked the live browser."
+        note = (
+            f"{wall.get('reason') or 'The live site blocked the browser.'} Showing a read-only copy ({shown['fetched_via']}). "
+            + note
+            + " To log in, add to cart or fill forms on the real site, ask the user to take control."
+        ).strip()
+    if note:
+        shown["note"] = note
+    for key in ("error", "fallback", "bot_wall", "bot_wall_kind", "handoff", "reason", "block"):
+        shown.pop(key, None)
     return shown
+
+
+async def _remote_cdp_fetch(proc, fs, url: str, limit: float) -> dict | None:
+    """Browserbase: the API opens a session; the computer's Playwright reads the page over CDP."""
+    from app.connectors.browsing import _page, browserbase_session
+
+    cdp = await browserbase_session()
+    data = await _browser_rpc(proc, {"command": "remote_fetch", "cdp_url": cdp, "url": url}, int(max(20, limit)), fs)
+    if not isinstance(data, dict) or not (data.get("text") or data.get("html")):
+        raise RuntimeError(str((data or {}).get("error") or "hosted browser returned nothing")[:160])
+    page = _page(str(data.get("url") or url), str(data.get("title") or ""), str(data.get("text") or ""), str(data.get("html") or ""), 200, "remote:browserbase")
+    if data.get("block"):
+        page.update(ok=False, block=data["block"])
+    return page
 
 
 async def _browser_cmd(proc, payload: dict, timeout: int = 90, fs=None) -> dict:
     action = str(payload.get("action") or "goto")
     if action == "goto":
-        return await _browser_rpc(proc, {"command": "navigate", "url": payload.get("url"), "wait_ms": payload.get("wait_ms")}, timeout, fs)
+        return await _browser_rpc(
+            proc,
+            {"command": "navigate", "url": payload.get("url"), "wait_ms": payload.get("wait_ms"), "tab": payload.get("tab") or ""},
+            timeout,
+            fs,
+        )
     if action == "screenshot":
         return await _browser_rpc(proc, {"command": "observe"}, timeout, fs)
     kind = action
@@ -657,7 +1056,26 @@ async def _client():
     return AsyncDaytona(_config())
 
 
+def computer_warm(row) -> bool | None:
+    """Whether the user's computer is already running in this process (no cold boot needed). None if unknown."""
+    if row is None:
+        return None
+    if _use_e2b():
+        from app.connectors import e2b_box
+
+        return e2b_box._user_key(row) in e2b_box._LIVE
+    return None
+
+
+def _use_e2b() -> bool:
+    return get_settings().computer_backend == "e2b"
+
+
 async def _ensure_sandbox(row) -> tuple[Any, Any]:
+    if _use_e2b():
+        from app.connectors import e2b_box
+
+        return None, await e2b_box.ensure_sandbox(row)
     from daytona import CreateSandboxFromSnapshotParams
 
     client = await _client()
@@ -690,6 +1108,10 @@ async def _ensure_sandbox(row) -> tuple[Any, Any]:
 
 
 async def _existing_sandbox(row):
+    if _use_e2b():
+        from app.connectors import e2b_box
+
+        return None, await e2b_box.existing_sandbox(row)
     creds = decrypt_json(row.credentials_enc)
     sandbox_id = creds.get("sandbox_id")
     if not sandbox_id:
@@ -699,6 +1121,62 @@ async def _existing_sandbox(row):
         return client, await client.get(sandbox_id)
     except Exception:  # noqa: BLE001
         return None, None
+
+
+async def _e2b_screen_or_status(row, name: str) -> Any:
+    """E2B: the screen is the real desktop; status never resumes a paused sandbox."""
+    from app.connectors import e2b_box
+
+    if name == "status":
+        data = await e2b_box.status(row)
+        data.setdefault("url", "")
+        data.setdefault("title", "")
+        if data.get("state") == "running":
+            sandbox = await e2b_box.existing_sandbox(row)
+            if sandbox is not None:
+                try:
+                    page = await _computer_status(sandbox.process)
+                    data["url"] = page.get("url") or ""
+                    data["title"] = page.get("title") or ""
+                except Exception:  # noqa: BLE001
+                    pass
+        data["screen_agent"] = live_screen_agent()
+        return data
+    sandbox = await e2b_box.existing_sandbox(row)
+    if sandbox is None:
+        raise ToolError("No live computer screen yet. Wake the computer first.")
+    try:
+        raw = await sandbox.screenshot()
+    except Exception as exc:  # noqa: BLE001
+        cached = live_screen_png()
+        if cached:
+            return cached
+        raise ToolError("No live computer screen yet. Wake the computer first.") from exc
+    if not raw.startswith(b"\x89PNG"):
+        raise ToolError("No live computer screen yet. Wake the computer first.")
+    remember_screen(raw)
+    return raw
+
+
+# Upper bound for one computer tool call, so a stuck sandbox call can never freeze a chat turn. Browser
+# tools also bound each daemon command; this is the outer backstop, sized to allow a first-run browser
+# install (several minutes) on a fresh computer.
+_BROWSER_CAP_S = 600.0
+_NO_CAP = {"screen_png", "status", "write_analytics_report", "browser_handoff", "computer_handoff"}
+
+
+def tool_time_cap(name: str, args: dict[str, Any] | None) -> float | None:
+    if name in _NO_CAP or name == "boot":
+        return None
+    if name in {"exec", "run_code"}:
+        try:
+            own = int((args or {}).get("timeout") or (120 if name == "run_code" else 60))
+        except (TypeError, ValueError):
+            own = 60
+        return float(max(30, own) + 90)
+    if name in {"read_bytes", "publish_file", "read_file", "write_file", "list_dir", "sandbox_info"}:
+        return 300.0
+    return _BROWSER_CAP_S
 
 
 async def call_daytona(row, name: str, args: dict[str, Any]) -> Any:
@@ -711,7 +1189,8 @@ async def call_daytona(row, name: str, args: dict[str, Any]) -> Any:
         record_computer_step(getattr(row, "user_id", None), name, args)
         if agent_id:
             _LIVE_AGENT[user_key or "default"] = agent_name or agent_id
-        if user_key:
+        if user_key and name != "boot":
+            # The UI's boot (no agent) must not lock the agent out of its own computer.
             holder = _COMPUTER_BUSY.get(user_key)
             if holder and holder != (agent_id or "shared"):
                 raise ToolError("The shared computer is already in use. One computer-use task at a time.")
@@ -719,8 +1198,18 @@ async def call_daytona(row, name: str, args: dict[str, Any]) -> Any:
                 _COMPUTER_BUSY[user_key] = agent_id or "shared"
                 acquired = True
     screen_user_token = _SCREEN_USER.set(user_key or "default")
+    cap = tool_time_cap(name, args)
     try:
-        return await _invoke_daytona(row, name, args)
+        if cap is None:
+            return await _invoke_daytona(row, name, args)
+        try:
+            return await asyncio.wait_for(_invoke_daytona(row, name, args), timeout=cap)
+        except (asyncio.TimeoutError, TimeoutError) as exc:
+            log.warning("e2b: computer tool %s timed out after %ss", name, cap)
+            raise ToolError(
+                f"The computer did not finish {name} within {int(cap)}s, so it was stopped. "
+                "Check the screen with browser_snapshot or computer_observe, then continue or try another way."
+            ) from exc
     finally:
         _SCREEN_USER.reset(screen_user_token)
         if acquired and user_key:
@@ -732,6 +1221,8 @@ async def _invoke_daytona(row, name: str, args: dict[str, Any]) -> Any:
         from app.connectors.analytics_report import render_report
 
         return render_report(args)
+    if name in {"screen_png", "status"} and _use_e2b():
+        return await _e2b_screen_or_status(row, name)
     if name in {"screen_png", "status"}:
         _client_obj, sandbox = await _existing_sandbox(row)
         if sandbox is None:
@@ -747,7 +1238,8 @@ async def _invoke_daytona(row, name: str, args: dict[str, Any]) -> Any:
         except Exception as vis_exc:  # noqa: BLE001
             if name == "status":
                 return {"state": "suspended", "screenAvailable": False, "url": "", "title": "", "screen_agent": live_screen_agent()}
-            raise ToolError("No live computer screen yet. Wake the computer first.") from vis_exc
+            log.warning("Screen capture failed for user %s: %s", getattr(row, "user_id", "unknown"), vis_exc, exc_info=True)
+            raise ToolError(f"Live computer screen capture failed ({type(vis_exc).__name__}). Try reconnecting the computer.") from vis_exc
         finally:
             close = getattr(_client_obj, "close", None)
             if callable(close):
@@ -756,12 +1248,26 @@ async def _invoke_daytona(row, name: str, args: dict[str, Any]) -> Any:
     try:
         proc = sandbox.process
         fs = getattr(sandbox, "fs", None)
+        if name == "boot" and getattr(sandbox, "provider", "") == "e2b":
+            # The desktop and its stream are up: answer now so the UI can show the screen, and start the
+            # browser (first run installs Playwright, which can take minutes) in the background.
+            _warm_browser_later(proc, fs)
+            data = {"ok": True, "state": "running", "screenAvailable": True, "url": "", "title": "Computer"}
+            data["sandbox_id"] = getattr(sandbox, "id", None)
+            data["provider"] = "e2b"
+            data.update(sandbox.stream_urls())
+            return data
         if name == "boot":
             data = await _boot_computer(proc, fs)
             data["sandbox_id"] = getattr(sandbox, "id", None)
+            data["provider"] = getattr(sandbox, "provider", "daytona")
+            urls = getattr(sandbox, "stream_urls", None)
+            if callable(urls):
+                data.update(urls())
             return data
         if name == "sandbox_info":
             return {
+                "provider": getattr(sandbox, "provider", "daytona"),
                 "sandbox_id": getattr(sandbox, "id", None),
                 "state": str(getattr(sandbox, "state", None) or getattr(sandbox, "status", "")),
                 "cwd": getattr(sandbox, "user_cwd", None) or "/home/daytona",
@@ -779,13 +1285,49 @@ async def _invoke_daytona(row, name: str, args: dict[str, Any]) -> Any:
                 "exit_code": getattr(response, "exit_code", None),
                 "stdout": _clip(getattr(response, "result", None) or getattr(response, "stdout", "") or ""),
             }
+        tab = str(args.get("tab") or "").strip()
         if name in {"browse_open", "browser_navigate"}:
-            return await _open_in_browser(proc, fs, safe_http_url(args.get("url") or ""), int(args.get("wait_ms") or 1200))
+            return await _open_in_browser(proc, fs, safe_http_url(args.get("url") or ""), int(args.get("wait_ms") or 1200), tab)
+        if name == "browser_tabs":
+            return await _browser_rpc(proc, {"command": "tabs"}, 20, fs)
+        if name == "browser_new_tab":
+            url = str(args.get("url") or "").strip()
+            payload = {"command": "new_tab", "url": safe_http_url(url) if url else "", "background": bool(args.get("background"))}
+            return await _browser_rpc(proc, payload, 180, fs)
+        if name == "browser_switch_tab":
+            if not tab:
+                raise ToolError("browser_switch_tab requires tab (see browser_tabs)")
+            return await _browser_rpc(proc, {"command": "switch_tab", "tab": tab}, 60, fs)
+        if name == "browser_close_tab":
+            return await _browser_rpc(proc, {"command": "close_tab", "tab": tab}, 30, fs)
         if name == "web_fetch":
-            from app.connectors.web_fetch import fetch_public_page
+            from app.connectors.browsing import cache_get
+            from app.connectors.web_fetch import fetch_public_page, needs_real_browser
 
             url = safe_http_url(args.get("url") or "")
-            page = await fetch_public_page(url)
+            cached = cache_get(url)
+            if cached:
+                # Tavily already returned this page's text with the search results: no page load needed.
+                cached.pop("html", None)
+                return cached
+            try:
+                page = await fetch_public_page(url)
+            except Exception as fetch_exc:  # noqa: BLE001 - e.g. httpx.ReadTimeout; never crash the turn
+                # The server could not reach it; the cloud browser often can (different network path).
+                shown = await _open_in_browser(proc, fs, url, tab=tab)
+                shown.setdefault("fetched_via", "browser")
+                if not shown.get("ok", True) and not shown.get("bot_wall"):
+                    shown["error"] = (
+                        f"Could not fetch the page ({type(fetch_exc).__name__}) and the browser could not load it. "
+                        "Try another source; do not invent its content."
+                    )
+                return shown
+            if needs_real_browser(page):
+                # JS apps (Google Maps, Search, listing sites) and blocked fetches: painting the server's static
+                # HTML shows an empty shell, so load the page for real and wait for it to render.
+                shown = await _open_in_browser(proc, fs, url, tab=tab)
+                shown.setdefault("fetched_via", "browser")
+                return shown
             shown = await _browser_rpc(
                 proc, {"command": "load_html", "html": page.get("html") or "", "url": page.get("url") or url}, 60, fs
             )
@@ -795,17 +1337,19 @@ async def _invoke_daytona(row, name: str, args: dict[str, Any]) -> Any:
             shown["text"] = page.get("text") or shown.get("text") or ""
             shown["fetched_via"] = "network"
             return shown
+        if name == "browser_search":
+            return await browser_search(proc, fs, str(args.get("query") or ""), int(args.get("count") or 8), args.get("engines"))
         if name == "browser_snapshot":
-            return await _browser_rpc(proc, {"command": "snapshot"}, 60, fs)
+            return await _browser_rpc(proc, {"command": "snapshot", "tab": tab}, 60, fs)
         if name == "browser_act":
             actions = args.get("actions")
             if isinstance(actions, str):
                 actions = json.loads(actions)
             if not isinstance(actions, list) or not actions:
                 raise ToolError("browser_act requires actions")
-            return await _browser_rpc(proc, {"command": "act", "actions": actions}, 90, fs)
+            return await _browser_rpc(proc, {"command": "act", "actions": actions, "tab": tab}, 90, fs)
         if name == "computer_observe":
-            return await _browser_rpc(proc, {"command": "observe"}, 60, fs)
+            return await _browser_rpc(proc, {"command": "observe", "tab": tab}, 60, fs)
         if name in {"computer_act", "computer_control"}:
             actions = args.get("actions")
             if isinstance(actions, str):

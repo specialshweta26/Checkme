@@ -46,6 +46,17 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
+class BrowserProfile(Base):
+    """One user's cloud-browser cookies, encrypted, so a recycled computer starts as a returning visitor.
+    Per user only; never shared or copied between users (docs/BROWSING.md)."""
+
+    __tablename__ = "browser_profiles"
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    state_enc: Mapped[str] = mapped_column(Text, default="")
+    cookie_count: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
 class Account(Base):
     """An OAuth identity (Google or Microsoft). Used for sign-in and for the built-in mail connector."""
 
@@ -174,6 +185,7 @@ class WorkspaceAgent(Base):
     # Focus picked on the agent's first screen: email_calendar | coding | research | errands | "" (see agents/focus.py)
     focus: Mapped[str] = mapped_column(String(40), default="")
     color: Mapped[str] = mapped_column(String(16), default="#f97316")
+    avatar: Mapped[str] = mapped_column(Text, default="")
     kind: Mapped[str] = mapped_column(String(20), default="custom")  # default | custom
     pinned: Mapped[bool] = mapped_column(Boolean, default=False)
     archived: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -381,10 +393,14 @@ class ScheduledTask(Base):
     agent_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("workspace_agents.id", ondelete="CASCADE"), index=True
     )
+    chat_session_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("chat_sessions.id", ondelete="SET NULL"), index=True
+    )
     title: Mapped[str] = mapped_column(String(200))
     instruction: Mapped[str] = mapped_column(Text)
     prompt: Mapped[str] = mapped_column(Text, default="")
     schedule_kind: Mapped[str] = mapped_column(String(20), default="once")
+    interval_minutes: Mapped[int | None] = mapped_column(Integer)
     schedule_label: Mapped[str] = mapped_column(String(120), default="")
     next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -415,7 +431,7 @@ class AgentJob(Base):
     )
     root_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
     depth: Mapped[int] = mapped_column(Integer, default=1)
-    role: Mapped[str] = mapped_column(String(20), default="coder")  # planner | coder | reviewer
+    role: Mapped[str] = mapped_column(String(20), default="coder")  # planner | coder | reviewer | worker
     kind: Mapped[str] = mapped_column(String(20), default="chat")  # chat | delegate | scheduled
     title: Mapped[str] = mapped_column(String(200), default="")
     prompt: Mapped[str] = mapped_column(Text, default="")
@@ -498,7 +514,7 @@ class MemoryExtractJob(Base):
 
 
 class AgentSkill(Base):
-    """A saved or taught workflow for one bot. Teaching watches the screen, never a microphone."""
+    """A saved or taught workflow for one bot. Teaching records the screen plus optional, user-started narration."""
 
     __tablename__ = "agent_skills"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
@@ -510,6 +526,44 @@ class AgentSkill(Base):
     instruction: Mapped[str] = mapped_column(Text, default="")
     duration_ms: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    # Taught skills are saved while recording: recording -> writing -> ready. ``error`` holds a failed write-up.
+    status: Mapped[str] = mapped_column(String(20), default="ready")
+    error: Mapped[str] = mapped_column(Text, default="")
+    transcript: Mapped[list] = mapped_column(JSONB, default=list)  # narration segments {t, t_end, text}
+    frames: Mapped[list] = mapped_column(JSONB, default=list)  # key screenshots {t, jpeg (base64)}
+    notes: Mapped[list] = mapped_column(JSONB, default=list)
+    auto_named: Mapped[bool] = mapped_column(Boolean, default=False)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class TaskSkillState(Base):
+    """Which skill one task (a chat turn's thread or a background job) is following and how far it got.
+
+    ``task_key`` isolates concurrent tasks: ``job:<job id>`` or ``chat:<session id>:<agent id>``. A handover to another
+    agent creates a child row (``parent_id``) that starts from the same skill and step; its result is written back.
+    """
+
+    __tablename__ = "task_skill_states"
+    __table_args__ = (Index("ix_task_skill_states_user_key", "user_id", "task_key"),)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    task_key: Mapped[str] = mapped_column(String(200))
+    session_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    job_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    parent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    skill_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    skill_name: Mapped[str] = mapped_column(String(160), default="")
+    skill_version: Mapped[str] = mapped_column(String(40), default="")  # the skill's updated_at when chosen
+    # active | handed_off | done | failed | dropped
+    status: Mapped[str] = mapped_column(String(20), default="active")
+    step_index: Mapped[int] = mapped_column(Integer, default=0)  # steps done so far (0 = not started)
+    step_count: Mapped[int] = mapped_column(Integer, default=0)
+    notes: Mapped[list] = mapped_column(JSONB, default=list)  # {at, text, by}
+    artifacts: Mapped[list] = mapped_column(JSONB, default=list)  # {at, label, value, by}
+    result: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
 
 class InboxItem(Base):
@@ -538,3 +592,73 @@ class InboxItem(Base):
     seen: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class ResearchPage(Base):
+    """One user's cached reading of a public page (research memory, reused across jobs while fresh)."""
+
+    __tablename__ = "research_pages"
+    __table_args__ = (UniqueConstraint("user_id", "canonical_url", name="uq_research_pages_user_url"),)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    canonical_url: Mapped[str] = mapped_column(String(2000))
+    url: Mapped[str] = mapped_column(String(2000))
+    title: Mapped[str] = mapped_column(String(300), default="")
+    text: Mapped[str] = mapped_column(Text, default="")  # readable text, clipped
+    note: Mapped[str] = mapped_column(Text, default="")  # last extractive note
+    links: Mapped[list] = mapped_column(JSONB, default=list)  # [[url, anchor], ...] for re-crawling without a fetch
+    goal: Mapped[str] = mapped_column(String(500), default="")  # goal of the crawl that last read it
+    embedding = mapped_column(Vector(DIMS), nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
+
+
+class ResearchSummary(Base):
+    """What a research crawl or job concluded, searchable by later jobs of the same user."""
+
+    __tablename__ = "research_summaries"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    crawl_id: Mapped[str] = mapped_column(String(40), default="")
+    job_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    goal: Mapped[str] = mapped_column(String(500), default="")
+    summary: Mapped[str] = mapped_column(Text, default="")
+    sources: Mapped[list] = mapped_column(JSONB, default=list)
+    embedding = mapped_column(Vector(DIMS), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
+
+
+class ChannelLink(Base):
+    """A messaging address (an E.164 WhatsApp number) linked to one user. See app/channels."""
+
+    __tablename__ = "channel_links"
+    __table_args__ = (UniqueConstraint("channel", "address", name="uq_channel_links_address"),)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    channel: Mapped[str] = mapped_column(String(20), default="whatsapp")
+    address: Mapped[str] = mapped_column(String(32))  # E.164 with a leading +
+    display_name: Mapped[str] = mapped_column(String(120), default="")
+    sticky_agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    room_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))  # an AgentGroup set with /room
+    last_inbound_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    outbox: Mapped[list] = mapped_column(JSONB, default=list)  # messages held until the 24h window reopens
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class ChannelLinkCode(Base):
+    """A short-lived one-time code the user sends from WhatsApp ("link CODE") to link their number."""
+
+    __tablename__ = "channel_link_codes"
+    code: Mapped[str] = mapped_column(String(16), primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    channel: Mapped[str] = mapped_column(String(20), default="whatsapp")
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class ChannelInbound(Base):
+    """Provider message ids already accepted, so webhook retries are processed once."""
+
+    __tablename__ = "channel_inbound"
+    message_id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    channel: Mapped[str] = mapped_column(String(20), default="whatsapp")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

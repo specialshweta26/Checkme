@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -110,6 +111,10 @@ class RunContext:
     check_attempts: dict = field(default_factory=dict)
     toolkit_assignments: dict = field(default_factory=dict)
     scratchpad: list = field(default_factory=list)  # this-chat checklist (scratchpad_*)
+    active_skills: list = field(default_factory=list)  # skills routed to / loaded by this task
+    task_key: str = ""  # isolates this task's skill state (app/skills/task_state.py)
+    task_state: dict | None = None  # the skill this task follows and how far it got (checkpointed)
+    task_resumed: bool = False
 
 
 def _json_size(value: Any) -> int:
@@ -1026,8 +1031,12 @@ async def search_user_tools(ctx: RunContext, query: str, connector_slug: str | N
             "whats going on",
             "happening now",
             "live update",
-            "flight",
-            "flights",
+            "computer",
+            "click",
+            "sign in",
+            "log in",
+            "availability",
+            "price",
             "search the web",
             "look up",
             "look for",
@@ -1046,10 +1055,15 @@ async def search_user_tools(ctx: RunContext, query: str, connector_slug: str | N
                     "browser_navigate",
                     "browser_snapshot",
                     "browser_act",
+                    "browser_tabs",
+                    "browser_new_tab",
+                    "browser_switch_tab",
+                    "browser_close_tab",
                     "computer_observe",
                     "computer_act",
                     "browser_handoff",
                     "web_fetch",
+                    "browser_search",
                     "browse_open",
                     "browse_act",
                     "publish_file",
@@ -1287,6 +1301,9 @@ async def _track_github_writes(ctx: RunContext, conn, tool: str, args: dict, res
 
 
 async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, args: dict | None = None) -> Any:
+    from app.agent import cancel as run_cancel
+
+    run_cancel.check()  # the user pressed Stop: end at this step boundary
     args = as_dict(args)
     orig_tool = tool_name
     orig_args = dict(args)
@@ -1341,7 +1358,7 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
     if (destructive or git_write) and (git_write or not ctx.auto_confirm) and not _approved(
         ctx, conn, connector_slug, tool_name, args
     ):
-        # Background jobs wait for the user, so their approval cards live longer than chat ones.
+        # Background jobs wait for a conversational reply, so their signed confirmations live longer than chat ones.
         ttl = JOB_CONFIRM_TTL if (ctx.job is not None or ctx.auto_confirm) else 600
         token = sign_confirm("tool", {"slug": connector_slug, "tool": tool_name, "args": args}, ttl=ttl)
         pending = {
@@ -1496,7 +1513,7 @@ async def run_staff(ctx: RunContext, name: str, args: dict | None = None) -> Any
     }:
         return {"error": "No mail connector is enabled for this user."}
     try:
-        result = await staff_dispatch(ctx.db, ctx.user, runtime, name, as_dict(args), agent=ctx.agent)
+        result = await staff_dispatch(ctx.db, ctx.user, runtime, name, as_dict(args), agent=ctx.agent, session_id=ctx.session_id)
         ctx.sources.append({"source_tool": name, "args": as_dict(args), "snippet": compact_payload(result, 2000)})
         return compact_payload(result)
     except Exception as exc:  # noqa: BLE001
@@ -1604,6 +1621,19 @@ class SaveSkillInput(BaseModel):
     instruction: str = Field(default="", description="What to do when this skill runs.")
 
 
+class GetSkillInput(BaseModel):
+    skill_id: str = Field(default="", description="Skill id from your skill index or list_my_skills.")
+    name: str = Field(default="", description="Skill name, when you do not have the id.")
+
+
+class SkillProgressInput(BaseModel):
+    step: int = Field(description="How many steps of the skill are done now (1 after the first step).")
+    note: str = Field(default="", description="One line on what this step did or found.")
+    artifact_label: str = Field(default="", description="Name of something produced (link, file, id, quote). Optional.")
+    artifact_value: str = Field(default="", description="Its value. Optional.")
+    done: bool = Field(default=False, description="True when the whole skill is finished.")
+
+
 class StopTeachingInput(BaseModel):
     name: str = Field(default="", description="Name for the taught skill.")
 
@@ -1643,6 +1673,11 @@ class GitCommitInput(BaseModel):
 
 class StartJobInput(BaseModel):
     task: str = Field(description="Self-contained task: the repo (owner/name), what to change or check, and acceptance criteria.")
+    title: str = Field(default="", description="Short title for the timeline.")
+
+
+class BackgroundTaskInput(BaseModel):
+    task: str = Field(description="Self-contained task: the goal, constraints (dates, places, sources, limits) and what to deliver.")
     title: str = Field(default="", description="Short title for the timeline.")
 
 
@@ -1706,6 +1741,10 @@ async def delegate_job(ctx: "RunContext", role: str, task: str, agent_name: str 
     await ctx.db.flush()
     info = jobs.serialize_job(child)
     ctx.jobs_started.append(info)
+    handed = await _hand_over_state(ctx, getattr(agent, "id", None), getattr(agent, "name", "") or role, f"job:{child.id}", job_id=child.id)
+    if handed:
+        child.meta = {**(child.meta or {}), "skill_state_id": handed["id"], "skill_name": handed.get("skill_name")}
+        info["skill_state"] = handed
     if ctx.progress is not None and hasattr(ctx.progress, "record"):
         await ctx.progress.record("status", f"Delegated to {info['agent_name'] or role} ({role}): {info['title']}", {"child_id": info["id"]})
     return {
@@ -1905,10 +1944,10 @@ async def sandbox_shell(ctx: RunContext, command: str, cwd: str | None = None, t
         return {"error": coding.readiness(ctx.connectors)["missing"][0]}
     if not (command or "").strip():
         return {"error": "command is required"}
-    args: dict[str, Any] = {"command": command, "timeout": coding.clamp_timeout(timeout)}
-    if cwd:
-        args["cwd"] = cwd
-    return await call_user_tool(ctx, coding.COMPUTER_SLUG, "exec", args)
+    from app.agent import computer_harness
+
+    # Same path as every agent's shell: toolchain PATH, and a missing known tool is installed and retried once.
+    return await computer_harness.cloud_exec(ctx, command, cwd, coding.clamp_timeout(timeout))
 
 
 def harness_tools(ctx: RunContext) -> list[StructuredTool]:
@@ -1973,14 +2012,66 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
         )
         return dumps({"ok": True, "id": str(row.id), "name": row.name})
 
+    async def list_my_skills() -> str:
+        """List all of your skills (saved and taught workflows) with id, status and a one-line description of when to use each."""
+        from app.skills.profile import one_liner, usable
+        from app.skills.service import list_skills as _list
+
+        ctx.used_tools.append("list_my_skills")
+        if ctx.db is None:
+            return dumps({"skills": []})
+        rows = usable(await _list(ctx.db, ctx.user, getattr(ctx.agent, "id", None)))
+        return dumps(
+            {"skills": [{"id": r["id"], "name": r["name"], "kind": r["kind"], "status": r.get("status"), "use_when": one_liner(r), "steps": r.get("step_count", 0)} for r in rows]},
+            12000,
+        )
+
+    async def get_skill(skill_id: str = "", name: str = "") -> str:
+        """Load one of your skills in full (instructions, recorded steps, narration transcript) by id or name, before following it."""
+        from app.skills.service import get_skill as _get, serialize_skill
+
+        ctx.used_tools.append("get_skill")
+        if ctx.db is None:
+            return dumps({"error": "Cannot read skills without a workspace."})
+        row = await _get(ctx.db, ctx.user, skill_id, name, getattr(ctx.agent, "id", None))
+        if row is None:
+            return dumps({"error": "Unknown skill. Call list_my_skills for ids."})
+        data = serialize_skill(row, full=True)
+        data.pop("frames", None)
+        if not any(str(s.get("id")) == data["id"] for s in ctx.active_skills):
+            ctx.active_skills.append({"id": data["id"], "name": data["name"], "match": {"by": "loaded"}})
+        if ctx.task_key and (ctx.task_state is None or str(ctx.task_state.get("skill_id")) != data["id"]):
+            await _begin_task_state(ctx, data, resumed_ok=False)
+        if ctx.progress is not None:
+            await ctx.progress.emit(f"Using skill: {data['name']}", kind="skill", tool="get_skill")
+        return dumps(data, 16000)
+
+    async def skill_progress(step: int, note: str = "", artifact_label: str = "", artifact_value: str = "", done: bool = False) -> str:
+        """Checkpoint the skill this task is following: steps done, a progress note, anything produced. Saved at once, so the task resumes here after a restart or handover."""
+        from app.skills import task_state as ts
+
+        ctx.used_tools.append("skill_progress")
+        if not ctx.task_state:
+            return dumps({"error": "This task is not following a skill. Load one with get_skill first."})
+        by = getattr(ctx.agent, "name", "") or ""
+        artifact = {"label": artifact_label, "value": artifact_value} if (artifact_label or artifact_value) else None
+        state = await ts.checkpoint(ctx.task_state["id"], step_index=step, note=note, artifact=artifact, by=by)
+        if state is None:
+            return dumps({"error": "Task state is gone."})
+        if done:
+            state = await ts.finish(state["id"], note or "Done.", by=by) or state
+        ctx.task_state = state
+        await _narrate_task_state(ctx, note)
+        return dumps({"saved": True, "state": ts.serialize(state)}, 4000)
+
     async def start_teaching() -> str:
-        """Watch the computer screen while the user demonstrates a workflow. Max ten minutes. Does not record microphone audio."""
+        """Record the computer while the user demonstrates a workflow (the user may narrate out loud from the screen panel). Max ten minutes by default."""
         from app.skills.service import start_teaching as _start
 
-        return dumps(_start(ctx.user, getattr(ctx.agent, "id", None)))
+        return dumps(await _start(ctx.user, getattr(ctx.agent, "id", None)))
 
     async def stop_teaching(name: str = "") -> str:
-        """Stop watching the screen and save the taught skill. No audio was recorded."""
+        """Stop recording and save the taught skill (actions plus any narration; the instruction is written up in the background)."""
         from app.skills.service import stop_teaching as _stop
 
         if ctx.db is None:
@@ -2029,12 +2120,12 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
         return dumps(await workspace_tools.rename_group(ctx, group, name))
 
     async def delete_agent(target: str) -> str:
-        """Ask to delete a Checkme agent. This only shows the user a confirmation card; it is deleted after they confirm. Chief cannot be deleted."""
+        """Ask to delete a Checkme agent. Explain the deletion in chat and wait for the user's clear reply before deleting. Chief cannot be deleted."""
         ctx.used_tools.append("delete_agent")
         return dumps(await workspace_tools.request_delete(ctx, "agent", target))
 
     async def delete_agent_group(target: str) -> str:
-        """Ask to delete a Checkme agent group. This only shows the user a confirmation card; it is deleted after they confirm. Member agents are kept."""
+        """Ask to delete a Checkme agent group. Explain the deletion in chat and wait for the user's clear reply before deleting. Member agents are kept."""
         ctx.used_tools.append("delete_agent_group")
         return dumps(await workspace_tools.request_delete(ctx, "group", target))
 
@@ -2156,7 +2247,7 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
             return dumps(await coding_workspace_status(ctx), 8000)
 
         async def shell(command: str, cwd: str | None = None, timeout: int = 300) -> str:
-            """Run a bash command on the user's computer (Daytona sandbox): read and edit files (rg, sed, cat, heredocs, python patches), install packages, run builds. For git use git_checkout, git_diff, git_commit and push_branch instead: they handle GitHub auth safely. Never put tokens or credentials in a command. Returns exit_code and output."""
+            """Run a bash command on the user's cloud computer (E2B sandbox, or Daytona when configured): read and edit files (rg, sed, cat, heredocs, python patches), install packages, run builds. For git use git_checkout, git_diff, git_commit and push_branch instead: they handle GitHub auth safely. Never put tokens or credentials in a command. Returns exit_code and output."""
             ctx.used_tools.append("sandbox_shell")
             return dumps(await sandbox_shell(ctx, command, cwd, timeout), 40000)
 
@@ -2193,7 +2284,7 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
             draft: bool = False,
             pr_number: int = 0,
         ) -> str:
-            """Push an agent/* branch to GitHub and (by default) open a pull request with a clear body (## Summary, ## Changes, ## Tests, ## Caveats; the latest run_checks table is added if the body has no Tests section). To update an existing PR the user named, pass pr_number and its head branch. Always shows the user an approval card first; tell them it is waiting for approval. Opening a PR never merges it. If GitHub access is missing it saves a patch and returns status=blocked with the install link."""
+            """Push an agent/* branch to GitHub and (by default) open a pull request with a clear body (## Summary, ## Changes, ## Tests, ## Caveats; the latest run_checks table is added if the body has no Tests section). To update an existing PR the user named, pass pr_number and its head branch. Explain the exact write in chat and wait for the user's clear reply before pushing. Opening a PR never merges it. If GitHub access is missing it saves a patch and returns status=blocked with the install link."""
             ctx.used_tools.append("push_branch")
             return dumps(await git_tools.push_branch(ctx, repo, branch, open_pr, title, body, base, draft, pr_number), 8000)
 
@@ -2283,12 +2374,12 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
             return dumps(await deploy_mod.detect_deploy_targets(ctx, repo), 8000)
 
         async def deploy_tool(repo: str, platform: str = "", params=None, cwd: str = ".", use_cli: bool = False) -> str:
-            """Deploy a repo to a platform, end to end: clones it if needed, installs the CLI, signs in (saved key, the CLI's session on the computer, or it starts the CLI's browser login and returns status=awaiting_user_login with the link: give the user just that link in one line and end the turn; the job resumes by itself), fills free-tier / India-region defaults, creates the service on first deploy (Render: from the GitHub repo), then shows ONE approval card (platform, service, repo/branch, region, cost). After approval it waits until live, probes the URL and returns live_url, or the failure output: fix and call again (bounded retries reuse the approval). Never tell the user to configure or connect anything."""
+            """Deploy a repo to a platform, end to end: clones it if needed, installs the CLI, signs in (saved key, the CLI's session on the computer, or it starts the CLI's browser login and returns status=awaiting_user_login with the link: give the user just that link in one line and end the turn; the job resumes by itself), fills free-tier / India-region defaults, creates the service on first deploy (Render: from the GitHub repo), then clearly describe the platform, service, repo/branch, region and cost in chat and wait for the user's clear reply. After they say to continue, it waits until live, probes the URL and returns live_url, or the failure output: fix and call again (bounded retries reuse the confirmation). Never tell the user to configure or connect anything."""
             ctx.used_tools.append("deploy")
             return dumps(await deploy_mod.request_action(ctx, "deploy", repo, platform, _params(params or DeployParams()), cwd, use_cli), 8000)
 
         async def rollback_tool(repo: str, platform: str = "", params=None, cwd: str = ".", use_cli: bool = False) -> str:
-            """Roll a deployment back to an earlier deploy / version / image. Always shows an approval card first. Find the target with deploy_status."""
+            """Roll a deployment back to an earlier deploy / version / image. Explain the target in chat and wait for the user's clear reply first. Find the target with deploy_status."""
             ctx.used_tools.append("deploy_rollback")
             return dumps(await deploy_mod.request_action(ctx, "rollback", repo, platform, _params(params or DeployParams()), cwd, use_cli), 8000)
 
@@ -2347,7 +2438,7 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
             # waiting for a sign-in) runs in the background instead of inline.
 
             async def start_job(task: str, title: str = "") -> str:
-                """Start a background coding job for multi-step work (code changes, fixes, features, reviews, merges, deploys). It runs on the computer without the chat timeout and shows a live timeline (todo list, steps, tests, PR links) with approval and answer buttons in this chat. Give a self-contained task: repo (owner/name), goal and acceptance criteria. Follow-ups in this chat continue the same job."""
+                """Start a background coding job for multi-step work (code changes, fixes, features, reviews, merges, deploys). It runs on the computer without the chat timeout and shows a live timeline (todo list, steps, tests, PR links). If user input is needed, ask in natural language and accept a conversational reply in this chat. Give a self-contained task: repo (owner/name), goal and acceptance criteria. Follow-ups in this chat continue the same job."""
                 ctx.used_tools.append("start_coding_job")
                 return dumps(await start_coding_job(ctx, task, title), 4000)
 
@@ -2356,6 +2447,18 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
                     coroutine=start_job, name="start_coding_job", description=start_job.__doc__, args_schema=StartJobInput
                 )
             )
+    if ctx.job is None and ctx.db is not None and ctx.agent is not None and ctx.teammate_depth == 0:
+
+        async def start_task(task: str, title: str = "") -> str:
+            """Move long work to the background: tasks with many steps or pages (multi-site comparisons, research across many sources, long computer sessions, anything likely to take more than a couple of minutes). It runs without the chat timeout, survives the user closing the chat or the app restarting, and shows a live timeline (plan, steps, results) under this reply. Give a self-contained task: goal, constraints, what to deliver. Quick lookups stay in this turn."""
+            ctx.used_tools.append("start_background_task")
+            return dumps(await start_coding_job(ctx, task, title, role="worker"), 4000)
+
+        tools.append(
+            StructuredTool.from_function(
+                coroutine=start_task, name="start_background_task", description=start_task.__doc__, args_schema=BackgroundTaskInput
+            )
+        )
     if ctx.job is not None and ctx.teammate_depth == 0 and ctx.db is not None:
         from app.jobs.service import MAX_DEPTH
 
@@ -2389,6 +2492,23 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
                 args_schema=SaveSkillInput,
             ),
             StructuredTool.from_function(
+                coroutine=list_my_skills,
+                name="list_my_skills",
+                description=list_my_skills.__doc__,
+            ),
+            StructuredTool.from_function(
+                coroutine=get_skill,
+                name="get_skill",
+                description=get_skill.__doc__,
+                args_schema=GetSkillInput,
+            ),
+            StructuredTool.from_function(
+                coroutine=skill_progress,
+                name="skill_progress",
+                description=skill_progress.__doc__,
+                args_schema=SkillProgressInput,
+            ),
+            StructuredTool.from_function(
                 coroutine=start_teaching,
                 name="start_teaching",
                 description=start_teaching.__doc__,
@@ -2404,6 +2524,38 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
     return tools
 
 
+def shell_routing_hint(connectors: list | None, agent=None) -> str:
+    """Prompt lines that route installs/commands to the cloud computer (docs/COMPUTER.md)."""
+    from app.agent.coding import is_coding_agent
+    from app.agent.computer_harness import LOCAL_PROVIDERS
+
+    local = any(getattr(c, "provider", "") in LOCAL_PROVIDERS for c in (connectors or []))
+    text = (
+        "Commands, installs and CLIs ('install X', 'run Y', 'set up the requirements') run on the cloud computer with "
+        "shell, which every agent has. If a runtime or CLI is missing (node/npm, pnpm, python/pip, gh, vercel, render, "
+        "...), install it yourself (ensure_toolchain, or shell: npm -g, pip --user, ~/.local/bin; shell also auto-installs "
+        "known tools on 'command not found') and carry on. Never tell the user to install something on their own "
+        "machine unless they asked you to use their own machine. "
+    )
+    if local:
+        text += (
+            "user_computer_shell runs on the user's own connected computer (with their confirmation): use it only when "
+            "the user explicitly asks for their own machine. "
+        )
+    else:
+        text += (
+            "No local computer is connected, so everything runs on the cloud computer; if the user explicitly wants "
+            "their own laptop, say it needs the Checkme local agent connected and offer to do it in the cloud now. "
+        )
+    if not is_coding_agent(agent):
+        text += (
+            "Repo changes, pull requests, merges and deploys belong to a coding agent: hand them over (ask_teammate a "
+            "coding teammate in a group, or delegate with role='coder' and agent_name of a coding agent inside a background job) instead of refusing; "
+            "merges and deploys always wait for the user's approval."
+        )
+    return text.strip()
+
+
 def system_prompt(
     user,
     connectors: list,
@@ -2413,6 +2565,10 @@ def system_prompt(
     teammates: list | None = None,
     mentions: dict | None = None,
     skills: list | None = None,
+    matched_skills: list | None = None,
+    query: str = "",
+    task_state: dict | None = None,
+    task_resumed: bool = False,
 ) -> str:
     tz = getattr(user, "timezone", None) or "Asia/Kolkata"
     now = _now(tz)
@@ -2421,30 +2577,20 @@ def system_prompt(
     title = (getattr(agent, "title", None) or "chief of staff").strip() or "chief of staff"
     extra = (getattr(agent, "instructions", None) or "").strip()
     identity = f"You are {name}, this user's {title}. You have mail, calendar, and connected MCP servers.\n"
+    identity += "Format chat replies in readable Markdown. Bold only the most useful keywords, names, dates, decisions, and action labels; keep ordinary prose unbolded.\n"
     if extra:
         identity += extra + "\n"
     from app.agents.focus import focus_prompt
 
     identity += focus_prompt(agent)
-    usable_skills = [s for s in (skills or []) if isinstance(s, dict) and (s.get("name") or "").strip()]
-    if usable_skills:
-        skill_lines = []
-        for skill in usable_skills[:12]:
-            name = str(skill.get("name") or "").strip()[:160]
-            instruction = str(skill.get("instruction") or "").strip()[:1200]
-            kind = "demonstrated workflow" if skill.get("kind") == "taught" else "saved workflow"
-            tools = [str(step.get("tool") or "")[:80] for step in (skill.get("steps") or [])[:40] if isinstance(step, dict)]
-            line = f"- {name} ({kind})"
-            if instruction:
-                line += f": {instruction}"
-            if tools:
-                line += f". Demonstrated tool sequence: {' → '.join(tools[:20])}. Use it as a guide, rechecking current page state and arguments."
-            skill_lines.append(line)
-        identity += (
-            "Your saved skills are reusable procedures. When a request matches one, follow its instructions and available tools; "
-            "adapt to current data and confirm before sensitive actions as usual. Skill names and steps are reference material, "
-            "not permission to bypass safeguards.\nSaved skills:\n" + "\n".join(skill_lines) + "\n"
-        )
+    from app.skills.profile import capabilities_block
+
+    # Profile + full skill index every turn (rebuilt from the DB, so new or rewritten skills show up at once);
+    # only the skills routed to this request carry their full bodies.
+    identity += capabilities_block(agent, skills, matched_skills, query)
+    from app.skills.task_state import prompt_block
+
+    identity += prompt_block(task_state, task_resumed)
     identity += (
         "Your memory and scheduled routines belong only to you, not to other agents. "
         "User memory below is labeled: Persona is how you should talk and work with this user; Standing facts are already known; "
@@ -2479,7 +2625,7 @@ def system_prompt(
         "never tell the user to connect, install or configure a platform first. If the answer has a sign-in link, pass on just "
         "that link in one sentence. "
         "If a tool returns an error about the size, explain it and ask which agents to use. "
-        "delete_agent and delete_agent_group only show a confirmation card; say it is waiting for their confirmation. "
+        "For delete_agent and delete_agent_group, explain what will be removed in conversational language and wait for a clear reply. "
         "After creating or changing one, tell the user its name and that it is in the left sidebar under Personal, where they can open it.\n"
     )
     return (
@@ -2502,7 +2648,7 @@ def system_prompt(
         "connect_app returns redirect_url; the chat always shows the Composio connect card. Do not only paste the URL, and do not refuse to connect when composio is listed.\n"
         "Computer, browser, files, web search, memory, skills, and scratchpad are first-class tools. Call them directly. "
         "Do not search_tools or call_tool for browser_navigate, browser_snapshot, browser_act, computer_observe, computer_act, "
-        "shell, list_files, read_file, write_file, attach_file, open_path, launch_app, request_takeover, web_search, web_fetch, "
+        "shell, list_files, read_file, write_file, attach_file, open_path, launch_app, request_takeover, web_search, web_read, web_fetch, "
         "remember, recall_memory, or scratchpad_add.\n"
         "When the user asks for a chart, plot, HTML report, or downloadable file: fetch the data first, then "
         "render_plot or write_analytics_report with tables and charts, or write_file plus attach_file / publish_file. "
@@ -2516,8 +2662,8 @@ def system_prompt(
         "Do this even if the user did not say chart, HTML, or download. Never cite sandbox: or /tmp paths.\n"
         "Pick a source in this order. Do not browse when a connected tool already has the answer.\n"
         "1) Mail, calendar, CRM, sales, inventory, KPI, dashboards, and other already-connected apps: search_tools then call_tool. Do not open the browser.\n"
-        "2) Public lookup the user can do in a normal browser — flights, fares, news, hours, prices, people, "
-        "Instagram/Twitter/Facebook profiles, Wikipedia, 'just check', 'look up', 'open her/his page': "
+        "2) Anything the user could do on a public website in a normal browser (searching, comparing, reading pages, "
+        "checking live prices, schedules or availability, profiles, 'just check', 'look up', 'open her/his page'): "
         "open the computer browser even if a marketplace app exists. If that app is not in list_connections, do not ask to connect it for a lookup. "
         "browser_navigate Google or the named site so the computer screen shows the page. "
         "Do not search_tools for Instagram/Twitter/Facebook unless list_connections already shows that app.\n"
@@ -2525,29 +2671,51 @@ def system_prompt(
         "Use a connected data tool first only when list_connections shows that app is authorized.\n"
         "This user's computer is one shared live machine: shell/files, browser sessions, and logins. "
         "Each bot has its own screen on that machine. Only one computer-use task may run at a time. "
-        "shell is the cloud sandbox. user_computer_shell is the user's real machine and is unavailable until a local computer is connected.\n"
-        "Public facts, news, and 'what is going on': web_search first, then web_fetch the best URLs. "
+        f"{shell_routing_hint(connectors, agent)}\n"
+        "Public facts, news, and 'what is going on': web_search first; its top results already include page text "
+        "(and often an `answer`), so answer from them. If you need more, read the best 2-3 URLs in ONE web_read call "
+        "(parallel, server-side). Quick questions never need the computer. "
         "If search is empty, browser_navigate a Google search URL with the user's words "
         "(https://www.google.com/search?q=...) then open at least two result links. Search the acronym; do not ask what it means first. "
         "If navigate returns chrome-error, chromewebdata, or connection reset, web_fetch the same URL (or another source) and keep going. "
-        "web_fetch paints that HTML onto the same computer screen; then browser_snapshot and browser_act on it. Do not wake the computer after a page is showing. "
+        "web_fetch and web_read read pages server-side and return text (they do not use or wake the computer). To show, "
+        "click or fill a page (JavaScript apps such as maps and listing sites, logins, forms), browser_navigate it on the "
+        "computer, then browser_snapshot and browser_act on it. "
+        "web_search already falls back to searching in the computer browser; browser_search does that directly. web_search tries Tavily (and any other configured search API) first, then the computer browser, then free server-side search engines; Tavily often returns each result's page text, so web_fetch or web_read on a result is instant. If it returns `setup`, tell the user in one line which search key to configure (it names the env vars) and why, then keep going with browser_navigate on known sites. "
         "Never stop after one failed page. Never say you cannot verify live updates until you have searched and opened at least one article.\n"
         "End-to-end web work: browser_navigate, browser_snapshot for refs (e0, e1), then browser_act — click, fill, type, select, check, press, scroll. "
         "Fill whole forms from the snapshot: one fill per field, then click submit. "
         "If a page tool returns fallback computer_act, call computer_observe then computer_act (click x,y / type / key / scroll). "
-        "Prefer the destination site (put dates and filters in that site's URL when the user gave them) over a Google Search results page for live inventory, bookings, fares, or forms — Google Search often returns a verification wall to the cloud browser. "
+        "Prefer the destination site (put dates and filters in that site's URL when the user gave them) over a Google Search results page for live results, prices, availability, or forms — Google Search often returns a verification wall to the cloud browser. "
         "Cite only what is visible on the snapshot. If the page has no prices, times, or results yet, say so. Never treat a generic landing page as a confirmed result. "
-        "If the page is a CAPTCHA, unusual-traffic, or verification wall (bot_wall): request_takeover immediately, tell the user to finish it on the live screen, and do not invent numbers. "
+        "Blocked sites: browser_navigate and web_fetch already wait out passive bot checks and, when a site still blocks, try other ways to read the same page (Tavily's copy, a proxy or hosted browser if configured, the site's mobile/AMP version, a reader, an archived copy). A result with read_only=true is such a copy: use it, cite it, and say it is read-only (and archived/dated when `archived` is set). "
+        "If a page comes back blocked (blocked_source, bot_wall with handoff=false, 'Access Denied'), do not say the browser is restricted: tell the user plainly which site blocked automated access (for example 'Myntra blocked automated access') and continue with equivalent sources for the same information (other retailers, the brand or insurer's own site, comparison and review sites, news). Never invent what a blocked page says. "
+        "If the page is a CAPTCHA that only a person can solve (bot_wall with handoff=true, or a 'press and hold' / picture puzzle): first get the answer from other sites if that is enough; when the user needs that exact site (to log in, buy, or see their own data), request_takeover so they solve it on the live screen, and do not invent numbers. "
         "Login, 2FA, captcha, payment, or anything you cannot complete: request_takeover (same as browser_handoff) with a short instruction so the user takes control of that same screen. After they finish, snapshot and continue. "
         "Never attach page.png in chat; the computer screen already shows the tab. "
+        "Cheapest path first: a connector or API tool, then web_search + web_fetch; switch to the computer browser when "
+        "the answer needs interaction (search forms, dates, filters, logins, pages that only render in a browser) or the cheap "
+        "path came back empty or blocked. On the computer run a tight loop: act, read the returned snapshot (each "
+        "browser_navigate/browser_act returns a fresh tree with refs), decide, act again, until the task is done. "
+        "Refs (e0, e1) are only valid for the latest snapshot; after a page changes use the new ones. "
+        "If an action returns ok=false, read its error and the fresh snapshot, then adjust instead of stopping. "
+        "Long work (many pages or sites, or likely more than a couple of minutes) goes to start_background_task when "
+        "it is offered: start it, reply in a line or two, and let the job do the work.\n"
+        "Every agent has the computer: when a task needs a website without an API, use it and carry the task through "
+        "step by step (navigate, search, click, type, read, repeat) instead of describing how the user could do it. "
+        "The computer boots on demand; the first call may take a minute. If a computer tool returns an error, try once "
+        "more if it looks transient, then tell the user that exact error (for example an invalid E2B key, a quota limit "
+        "or a boot timeout). Never say the computer or browser is unavailable unless a computer tool returned that error "
+        "in this turn. "
         "Memory: remember (or save_memory) only when the user asked to remember something or stated a lasting preference. "
         "recall_memory to look it up, forget_memory to delete it, save_shared_memory for facts every agent should know (name, city, timezone). "
         "Do not dump the whole chat into memory. Durable facts are also extracted after the turn. "
         "search_history / read_history for this chat's messages.\n"
         "Scratchpad: scratchpad_add a short plan for multi-step work in this chat, then complete items as you go.\n"
-        "Skills: skill_create / save_skill for a repeatable workflow, skill_read / skill_update / skill_delete to manage them, "
+        "Skills: your profile lists every skill; get_skill loads one in full before you follow it, list_my_skills lists them. "
+        "skill_create / save_skill for a repeatable workflow, skill_update / skill_delete to manage them, "
         "or start_teaching so the user demonstrates on the visible screen "
-        "(up to ten minutes, no microphone audio), then stop_teaching with a name.\n"
+        "(up to ten minutes; they can turn on the microphone in the screen panel to narrate), then stop_teaching with a name.\n"
         "task_catalog action=search to find briefing, inbox, schedule, coding-job, or media tasks, then load and execute.\n"
         "Do not replay a completed or uncertain action. That is the computer browser, not Outlook or mail.\n"
         "search_tools already expands gateway catalogs into callable data tools. Prefer those names. "
@@ -2575,7 +2743,7 @@ def system_prompt(
         "Destructive connector actions still need call_tool; the app asks the user to confirm.\n"
         "If the user wants work done later (email a report in N minutes, tonight, every day), schedule_task and do not fetch now. "
         "For event-driven work, create a webhook automation with run_staff_tool(name='create_automation', args={trigger_type:'webhook', name, trigger:<exact event name>, condition, action, requires_approval:true}). "
-        "Use approval by default for external actions. Return the generated webhook URL, one-time secret, exact headers, and a ready-to-copy curl example; the secret is only returned at creation. List or disable automations with the automation endpoints when asked. "
+        "Keep external actions gated on a clear user reply. When a tool says a confirmation is needed, tell the user in one natural sentence exactly what you prepared and ask whether they want you to go ahead; do not mention approval, approve, cards, or buttons, and wait for a clear reply. Return the generated webhook URL, one-time secret, exact headers, and a ready-to-copy curl example; the secret is only returned at creation. List or disable automations with the automation endpoints when asked. "
         "If they want a calendar invite or meeting at a clock time, that time is the event start: call create_event now. "
         "If repeated requests reveal a useful routine, point that out and offer to schedule it; create it when the user asks. Use an existing schedule or webhook "
         "for future follow-through, and keep approval enabled for external actions unless the user explicitly changes it. "
@@ -2595,6 +2763,9 @@ def _chat_model():
     effort = (s.openai_reasoning_effort or "").strip() or "none"
     reasoning = reasoning_payload()
     base = {"model": s.openai_model, "api_key": s.openai_api_key}
+    if bool(getattr(s, "stream_tokens", True)):
+        # Tokens reach the callbacks as they are generated (the chat shows the reply as it streams).
+        base["streaming"] = True
     attempts = [
         {"use_responses_api": True, "reasoning": reasoning, "verbosity": "medium", "service_tier": "default"},
         {"use_responses_api": True, "reasoning": reasoning, "verbosity": "medium"},
@@ -2724,6 +2895,8 @@ async def _ask_teammate(ctx: RunContext, agent_id: str, prompt: str) -> dict:
         f"The user said: {clip(ctx.query, 500)}\n"
         f"{from_name} asked you: {task}"
     )
+    peer_key = f"peer:{ctx.task_state['id']}:{member.id}" if ctx.task_state else None
+    handed = await _hand_over_state(ctx, member.id, member.name, peer_key) if peer_key else None
     nested = await run_deep_agent(
         ctx.db,
         ctx.user,
@@ -2731,6 +2904,7 @@ async def _ask_teammate(ctx: RunContext, agent_id: str, prompt: str) -> dict:
         ctx.request_id or "peer",
         [],
         nested_query,
+        task_key=peer_key,
         auto_confirm=ctx.auto_confirm,
         workspace_agent=member,
         group=ctx.group,
@@ -2740,6 +2914,8 @@ async def _ask_teammate(ctx: RunContext, agent_id: str, prompt: str) -> dict:
         progress=ctx.progress.child(member.name) if ctx.progress is not None else None,
     )
     ctx.used_tools.append(f"ask_teammate:{member.name}")
+    if handed:
+        await _take_back_state(ctx, handed["id"], nested.get("text") or "", member.name)
     for item in nested.get("attachments") or []:
         ctx.attachments.append(item)
     for name in nested.get("used_tools") or []:
@@ -2765,6 +2941,7 @@ async def _ask_teammate(ctx: RunContext, agent_id: str, prompt: str) -> dict:
         "agent_id": str(member.id),
         "agent_name": member.name,
         "agent_color": getattr(member, "color", "") or "",
+        "agent_avatar": getattr(member, "avatar", "") or "",
         "peer": True,
         "used_tools": nested.get("used_tools") or [],
         "computer": nested.get("computer") or {},
@@ -2772,6 +2949,17 @@ async def _ask_teammate(ctx: RunContext, agent_id: str, prompt: str) -> dict:
     }
     ctx.thread.append(item)
     return {"from": member.name, "agent_id": str(member.id), "reply": item["text"]}
+
+
+async def _route_and_confirm(all_skills: list, query: str) -> list:
+    """Skills that fit this request: routed (keywords + embeddings), then confirmed by a short LLM check."""
+    from app.skills import task_state as ts
+    from app.skills.profile import route_skills
+
+    matched = await route_skills(all_skills, query)
+    if matched:
+        matched = await ts.confirm_skills(query, matched)
+    return matched
 
 
 def _progress_callbacks(ctx: RunContext, conns: list, query: str) -> list:
@@ -2782,6 +2970,118 @@ def _progress_callbacks(ctx: RunContext, conns: list, query: str) -> list:
     names = {str(c.slug): str(getattr(c, "alias", "") or getattr(c, "name", "") or c.slug) for c in conns}
     agents = {str(getattr(p, "id", "")): str(getattr(p, "name", "")) for p in ctx.teammates}
     return [ProgressCallback(ctx.progress, query=query, connector_names=names, agent_names=agents)]
+
+
+async def with_computer(db: AsyncSession, user, conns: list) -> list:
+    """Every agent gets the user's computer whenever a computer backend (E2B or Daytona) is configured.
+
+    ``user_connectors`` drops rows whose health is not ok/pending (an old Daytona failure could leave the computer
+    row 'down'), which used to make browser tools answer "the computer is not available for this agent" even though
+    the desktop boots on demand. The computer's own boot reports real errors (invalid key, quota, timeout) instead.
+    """
+    from app.agent.coding import COMPUTER_SLUG
+    from app.config import get_settings
+
+    if db is None or not get_settings().computer_backend:
+        return conns
+    if any(getattr(c, "slug", "") == COMPUTER_SLUG for c in conns):
+        return conns
+    try:
+        row = (
+            await db.execute(select(Connector).where(Connector.user_id == user.id, Connector.slug == COMPUTER_SLUG))
+        ).scalar_one_or_none()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("computer connector lookup failed: %s", exc)
+        return conns
+    if row is None:
+        return conns
+    log.info(
+        "computer connector added for this run (enabled=%s health=%s)", getattr(row, "enabled", None), getattr(row, "health", None)
+    )
+    return [*conns, row]
+
+
+async def _begin_task_state(ctx: RunContext, skill: dict | None, meta_question: bool = False, resumed_ok: bool = True) -> None:
+    """Open or resume this task's skill state and narrate it (chat status line + job timeline)."""
+    from app.skills import task_state as ts
+
+    if ctx.db is None or not ctx.task_key:
+        return
+    try:
+        state, resumed = await ts.begin(
+            ctx.user,
+            ctx.task_key,
+            agent_id=getattr(ctx.agent, "id", None),
+            skill=skill,
+            session_id=ctx.session_id,
+            job_id=getattr(ctx.job, "id", None),
+            meta_question=meta_question,
+        )
+    except Exception:  # noqa: BLE001 - never block a turn on task state
+        log.info("task state: begin failed", exc_info=True)
+        return
+    ctx.task_state = state
+    ctx.task_resumed = bool(resumed and resumed_ok)
+    if state:
+        if not any(str(s.get("id")) == str(state.get("skill_id")) for s in ctx.active_skills):
+            ctx.active_skills.append({"id": state.get("skill_id"), "name": state.get("skill_name"), "match": {"by": "resumed" if resumed else "loaded"}})
+        await _narrate_task_state(ctx, "", resumed=resumed)
+
+
+async def _narrate_task_state(ctx: RunContext, note: str = "", resumed: bool = False) -> None:
+    from app.skills import task_state as ts
+
+    state = ctx.task_state
+    if not state or ctx.progress is None:
+        return
+    verb = "Resuming skill" if resumed else "Using skill"
+    line = f"{verb}: {state.get('skill_name')} · {ts.step_label(state)}" + (f" — {clip(note, 160)}" if note else "")
+    if hasattr(ctx.progress, "record"):  # job timeline: a status event carrying the state
+        await ctx.progress.record("status", line, {"skill_state": ts.serialize(state)})
+    else:  # chat: the live status line
+        await ctx.progress.emit(line, kind="skill")
+
+
+async def _hand_over_state(ctx: RunContext, to_agent_id, to_name: str, task_key: str, job_id=None) -> dict | None:
+    """Pass this task's skill state to another agent (delegate / ask_teammate). Returns the child state."""
+    from app.skills import task_state as ts
+
+    if not ctx.task_state or not task_key:
+        return None
+    try:
+        child = await ts.handover(ctx.task_state, to_agent_id, task_key, by=getattr(ctx.agent, "name", "") or "", to_name=to_name, job_id=job_id)
+        ctx.task_state = await ts.STORE.get(ctx.task_state["id"]) or ctx.task_state
+    except Exception:  # noqa: BLE001
+        log.info("task state: handover failed", exc_info=True)
+        return None
+    if ctx.progress is not None:
+        line = f"Handing skill {child.get('skill_name')} ({ts.step_label(child)}) to {to_name}"
+        if hasattr(ctx.progress, "record"):
+            await ctx.progress.record("status", line, {"skill_state": ts.serialize(child)})
+        else:
+            await ctx.progress.emit(line, kind="skill")
+    return ts.serialize(child)
+
+
+async def _take_back_state(ctx: RunContext, child_id, result: str, by: str) -> None:
+    """A teammate finished its part in this turn: close its state and write the result back to ours."""
+    from app.skills import task_state as ts
+
+    try:
+        await ts.finish(child_id, result, ok=True, by=by)
+        if ctx.task_state:
+            ctx.task_state = await ts.STORE.get(ctx.task_state["id"]) or ctx.task_state
+    except Exception:  # noqa: BLE001
+        log.info("task state: taking back the handover failed", exc_info=True)
+        return
+    if ctx.task_state:
+        await _narrate_task_state(ctx, f"result back from {by}")
+
+
+def _task_state_out(ctx: RunContext) -> dict | None:
+    from app.skills import task_state as ts
+
+    return ts.serialize(ctx.task_state)
 
 
 async def run_deep_agent(
@@ -2800,6 +3100,7 @@ async def run_deep_agent(
     mentions: dict | None = None,
     progress: Any = None,
     job: Any = None,
+    task_key: str | None = None,
 ) -> dict[str, Any]:
     from app.connectors.platform import ensure_platform_connectors
     from app.debug_ndjson import dbg as _dbg_start
@@ -2807,8 +3108,28 @@ async def run_deep_agent(
     # #region agent log
     _dbg_start("C", "deep.py:run_deep_agent", "agent start", {"query": (query or "")[:80], "n_history": len(history or [])})
     # #endregion
+    import time as _time
+
+    from app.agent import fast_path
+    from app.agent.coding import is_coding_agent as _coding_agent
+
+    timer = fast_path.TurnTimer()
+    plan = fast_path.classify_turn(
+        query,
+        has_uploads="attachment_key=" in (query or ""),
+        confirmations=bool(confirmations),
+        coding_agent=_coding_agent(workspace_agent),
+    )
+    if not getattr(get_settings(), "fast_path_enabled", True) or teammate_depth or job is not None:
+        plan = fast_path.TurnPlan(fast_path.DEEP, "fast path off for this run")
+    timer.kind = plan.kind
+    if progress is not None and not teammate_depth:
+        # Something visible right away, before connectors, memory and skills load.
+        await progress.emit("Looking this up on the web" if plan.kind == fast_path.QUICK_WEB else "Reading your message", kind="start")
+        timer.status()
+    _t = _time.monotonic()
     await ensure_platform_connectors(db, user)
-    conns = await user_connectors(db, user.id)
+    conns = await with_computer(db, user, await user_connectors(db, user.id))
     assignments = await connector_assignment_map(db, user)
     toolkits = await toolkit_assignment_map(db, user) if db is not None else {}
     teammate_ids = [getattr(peer, "id", None) for peer in (teammates or [])]
@@ -2845,10 +3166,31 @@ async def run_deep_agent(
     from app.agent import scratchpad as pad
 
     await pad.load(ctx)
-    callbacks = _progress_callbacks(ctx, conns, query)
-    if progress is not None:
+    timer.mark("setup", _t)
+    from app.agent import cancel as run_cancel
+
+    callbacks = _progress_callbacks(ctx, conns, query) + [fast_path.TimingCallback(timer)]
+    if run_cancel.current.get() is not None:
+        callbacks.append(run_cancel.callback())
+    all_skills: list = []
+    skills_task = None
+    if db is not None:
+        # Skill routing (embeddings + a confirm call) needs no DB once the index is loaded: run it while memory loads.
+        from app.skills.service import list_skills
+
+        _t = _time.monotonic()
+        try:
+            all_skills = await list_skills(db, user, getattr(workspace_agent, "id", None))
+        except Exception:  # noqa: BLE001
+            log.info("skills: loading the skill index failed", exc_info=True)
+            await db.rollback()
+        skills_task = asyncio.create_task(_route_and_confirm(all_skills, query))
+        timer.mark("skills_index", _t)
+    if progress is not None and plan.kind != fast_path.QUICK_WEB:
         await progress.emit("Recalling what I know about this" if not teammate_depth else "Picking up the task", kind="memory")
+    _t = _time.monotonic()
     memory = await load_memory(db, user, query, workspace_agent)
+    timer.mark("memory", _t)
     pad_bit = pad.as_prompt(ctx.scratchpad)
     if pad_bit:
         memory = ((memory or "").rstrip() + "\n\n" + pad_bit).strip()
@@ -2863,15 +3205,26 @@ async def run_deep_agent(
     extra = []
     matched_skills: list = []
     if db is not None:
-        from app.skills.service import list_skills, match_skills
-
+        _t = _time.monotonic()
         try:
-            matched_skills = match_skills(
-                await list_skills(db, user, getattr(workspace_agent, "id", None)),
-                query,
-            )
+            matched_skills = await skills_task if skills_task is not None else []
         except Exception:  # noqa: BLE001
+            log.info("skills: routing failed", exc_info=True)
             matched_skills = []
+        timer.mark("skills_route", _t)
+        from app.skills import task_state as ts
+        from app.skills.profile import is_meta_question
+
+        ctx.active_skills = [{"id": s.get("id"), "name": s.get("name"), "match": s.get("match")} for s in matched_skills]
+        ctx.task_key = task_key or ts.task_key_for(
+            session_id=session_id, agent_id=getattr(workspace_agent, "id", None), job_id=getattr(job, "id", None)
+        )
+        await _begin_task_state(
+            ctx, matched_skills[0] if matched_skills else None, meta_question=is_meta_question(query)
+        )
+        if matched_skills and progress is not None and not ctx.task_state:
+            names = ", ".join(str(s.get("name")) for s in matched_skills)
+            await progress.emit(f"Skill for this task: {names}", kind="skill")
     from langchain_core.messages import HumanMessage
 
     for payload in ctx.confirmations:
@@ -2908,19 +3261,27 @@ async def run_deep_agent(
                 content=f"The user confirmed {tool} on {slug}. Result: {clip(dumps(result, 4000), 4000)}. Tell the user what happened."
             )
         )
-    graph = build_agent(
-        ctx,
-        system_prompt(
-            user,
-            conns,
-            memory,
-            agent=workspace_agent,
-            group=group,
-            teammates=teammates,
-            mentions=mentions,
-            skills=matched_skills,
-        ),
+    _t = _time.monotonic()
+    prompt = system_prompt(
+        user,
+        conns,
+        memory,
+        agent=workspace_agent,
+        group=group,
+        teammates=teammates,
+        mentions=mentions,
+        skills=all_skills,
+        matched_skills=matched_skills,
+        query=query,
+        task_state=ctx.task_state,
+        task_resumed=ctx.task_resumed,
     )
+    if not matched_skills and not ctx.task_state:
+        # A saved skill's own steps win over the fast-path hint.
+        prompt += fast_path.prompt_hint(plan)
+    graph = build_agent(ctx, prompt)
+    timer.mark("build", _t)
+    _t = _time.monotonic()
     payload = {"messages": _lc_messages(history, query, extra)}
     limit = max(80, get_settings().max_agent_steps * 8)
     from app.agent.coding import is_coding_agent
@@ -2946,6 +3307,8 @@ async def run_deep_agent(
             text = last_text(result.get("messages") if isinstance(result, dict) else [])
             break
         except Exception as exc:  # noqa: BLE001
+            if isinstance(exc, run_cancel.TurnCancelled) or run_cancel.is_cancelled():
+                raise run_cancel.TurnCancelled("stopped") from exc
             if _is_recursion_limit(exc) and attempt < 2:
                 limit = min(limit + 40, 280 if coding else 200)
                 if progress is not None:
@@ -2955,6 +3318,8 @@ async def run_deep_agent(
             log.exception("deep agent failed")
             text = f"I could not finish that request: {str(exc)[:240]}"
             break
+    timer.mark("agent", _t)
+    timer.log()
     source = ctx.sources[-1] if ctx.sources else None
     # #region agent log
     from app.debug_ndjson import dbg
@@ -2966,6 +3331,7 @@ async def run_deep_agent(
         {
             "query": (query or "")[:80],
             "used_tools": ctx.used_tools,
+            "skills_used": ctx.active_skills,
             "attachment_cards": len(ctx.attachments),
             "claimed_search_only": "only provides" in (text or "").lower() or "searching" in (text or "").lower(),
             "text_head": (text or "")[:160],
@@ -2984,6 +3350,7 @@ async def run_deep_agent(
             "id": str(workspace_agent.id),
             "name": workspace_agent.name,
             "color": getattr(workspace_agent, "color", "") or "",
+            "avatar": getattr(workspace_agent, "avatar", "") or "",
             "title": getattr(workspace_agent, "title", "") or "",
         }
     return {
@@ -2991,6 +3358,8 @@ async def run_deep_agent(
         "pending_confirms": ctx.pending,
         "attachments": ctx.attachments,
         "used_tools": ctx.used_tools,
+        "skills_used": ctx.active_skills,
+        "task_state": _task_state_out(ctx),
         "route": "deep",
         "source": source,
         "mail_threads": _mail_threads(ctx),
@@ -3006,4 +3375,5 @@ async def run_deep_agent(
         "merged": ctx.merged,
         "repo": ctx.repo,
         "thread": list(ctx.thread),
+        "timing": timer.summary(),
     }

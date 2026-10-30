@@ -1,8 +1,10 @@
 "use client";
 
 import { DeployPlatforms } from "../components/DeployPlatforms";
-import { FormEvent, memo, useEffect, useMemo, useState } from "react";
+import { FormEvent, memo, useCallback, useEffect, useMemo, useState } from "react";
 import { AppShell } from "../components/AppShell";
+import { WhatsAppConnect } from "../components/WhatsAppConnect";
+import { AgentAvatar } from "../components/AgentAvatar";
 import {
   assignConnectorAgents,
   assignToolkitAgents,
@@ -11,7 +13,9 @@ import {
   getMe,
   loadWorkspace,
   nextAssignedAgents,
+  whatsappStatus,
   type Me,
+  type WhatsAppStatus,
   type WorkspaceAgent,
 } from "../lib";
 
@@ -58,7 +62,8 @@ type RailItem =
   | { key: string; kind: "app"; title: string; logo?: string; connected: boolean; app: MarketApp }
   | { key: string; kind: "github"; title: string; connected: boolean }
   | { key: string; kind: "deploy"; title: string; connected: boolean }
-  | { key: string; kind: "mcp"; title: string; connected: boolean };
+  | { key: string; kind: "mcp"; title: string; connected: boolean }
+  | { key: string; kind: "whatsapp"; title: string; connected: boolean };
 
 export default function ConnectorsPage() {
   const [me, setMe] = useState<Me | null>(null);
@@ -84,6 +89,15 @@ export default function ConnectorsPage() {
   const [assigning, setAssigning] = useState("");
   const [github, setGithub] = useState<GithubStatus | null>(null);
   const [selected, setSelected] = useState("");
+  const [whatsapp, setWhatsapp] = useState<WhatsAppStatus | null>(null);
+
+  const loadWhatsapp = useCallback(() => {
+    void whatsappStatus().then(setWhatsapp);
+  }, []);
+
+  useEffect(() => {
+    loadWhatsapp();
+  }, [loadWhatsapp]);
 
   async function loadGithub() {
     const res = await fetch("/api/connectors/github/status", { credentials: "include" });
@@ -283,6 +297,7 @@ export default function ConnectorsPage() {
       connector: c,
     }));
     items.push({ key: "github", kind: "github", title: "GitHub", connected: Boolean(github?.connected) });
+    items.push({ key: "whatsapp", kind: "whatsapp", title: "WhatsApp", connected: Boolean(whatsapp?.links?.length) });
     items.push({ key: "deploy", kind: "deploy", title: "Deploy", connected: false });
     items.push({ key: "mcp", kind: "mcp", title: "Add MCP", connected: false });
     const taken = new Set(
@@ -303,7 +318,7 @@ export default function ConnectorsPage() {
       });
     }
     return items;
-  }, [rows, apps, github]);
+  }, [rows, apps, github, whatsapp]);
 
   const filteredRail = useMemo(() => {
     const q = marketQuery.trim().toLowerCase();
@@ -363,6 +378,8 @@ export default function ConnectorsPage() {
           <section className="conn-inspector">
             {current?.kind === "github" ? (
               <GithubDetail github={github} connecting={connecting === "github"} onConnect={connectGithub} />
+            ) : current?.kind === "whatsapp" ? (
+              <WhatsAppConnect status={whatsapp} onChange={loadWhatsapp} />
             ) : current?.kind === "deploy" ? (
               <DeployPlatforms />
             ) : current?.kind === "mcp" ? (
@@ -526,9 +543,7 @@ function AgentAssign({
                 );
               }}
             />
-            <span className="agent-avatar tiny" style={{ background: agent.color }}>
-              {(agent.name || "?").slice(0, 1).toUpperCase()}
-            </span>
+            <AgentAvatar name={agent.name} color={agent.color} avatar={agent.avatar} className="agent-avatar tiny" />
             <span className="agent-check-name">{agent.name}</span>
           </label>
         );

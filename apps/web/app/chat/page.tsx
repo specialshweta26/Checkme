@@ -1,17 +1,17 @@
 "use client";
 
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, useEffect, useRef, useState, type CSSProperties } from "react";
 import { AttachmentWidget } from "../AttachmentWidget";
 import { AppShell } from "../components/AppShell";
 import { chatAttachments, ComputerIcon, computerFromMeta, ScreenRail } from "../components/ComputerPanel";
 import { cardsFromMeta, ConnectCards } from "../components/ConnectCard";
 import { EmailThreadButton, mailRefsFromMeta } from "../components/EmailThread";
 import { Markdown } from "../components/Markdown";
-import { dismissFocusCard, focusCardDismissed, FocusOnboarding, type FocusOption } from "../components/FocusCard";
+import { dismissFocusCard, focusCardDismissed, FocusOnboarding } from "../components/FocusCard";
+import { AgentAvatar } from "../components/AgentAvatar";
 import { JobTimeline } from "../components/JobTimeline";
-import { formatPreview } from "../components/preview";
 import { Thinking } from "../components/Thinking";
-import { announceWorkspaceChanged, chatHref, updateAgent, deleteSession, getMe, listSessions, loadSession, rememberScope, uploadFiles, startTeaching, stopTeaching, type ChatSessionRow, type Me, type UploadedFile, type WorkspaceRoster } from "../lib";
+import { announceWorkspaceChanged, chatHref, deleteSession, getMe, listSessions, loadSession, rememberScope, uploadFiles, startTeaching, stopTeaching, type ChatSessionRow, type Me, type UploadedFile, type WorkspaceRoster } from "../lib";
 
 const STORE = "assistant.session";
 
@@ -31,10 +31,31 @@ function newProgressId() {
   return `turn_${Date.now().toString(36)}${rand}`;
 }
 
-/** Poll the API for live status lines of one in-flight chat turn. Returns a stop function. */
-function pollProgress(progressId: string, onSteps: (steps: string[]) => void, everyMs = 1200, onDone?: () => void) {
+/**
+ * Tools that drive the computer: when one runs, the live screen opens so the user can watch. web_fetch and
+ * web_read read pages server-side, so they no longer open the screen.
+ */
+const COMPUTER_TOOL = /^(browser_|browse_|computer_|launch_app$|open_path$|request_takeover$)/;
+
+function usesComputer(tools: string[]) {
+  return tools.some((name) => COMPUTER_TOOL.test(name));
+}
+
+/**
+ * Poll the API for live status lines (and the streaming reply draft) of one in-flight chat turn.
+ * Returns a stop function.
+ */
+function pollProgress(
+  progressId: string,
+  onSteps: (steps: string[]) => void,
+  everyMs = 700,
+  onDone?: () => void,
+  onTools?: (tools: string[]) => void,
+  onDraft?: (draft: string) => void,
+) {
   let stopped = false;
   let last = 0;
+  let lastDraft = "";
   let timer: number | undefined;
   const tick = async () => {
     if (stopped) return;
@@ -46,6 +67,13 @@ function pollProgress(progressId: string, onSteps: (steps: string[]) => void, ev
         if (!stopped && steps.length !== last) {
           last = steps.length;
           onSteps(steps);
+          const tools: string[] = (data.steps || []).map((s: any) => String(s?.tool || "")).filter(Boolean);
+          if (tools.length) onTools?.(tools);
+        }
+        const draft = typeof data.draft === "string" ? data.draft : "";
+        if (!stopped && draft !== lastDraft) {
+          lastDraft = draft;
+          onDraft?.(draft);
         }
         if (data.done) {
           onDone?.();
@@ -57,11 +85,52 @@ function pollProgress(progressId: string, onSteps: (steps: string[]) => void, ev
     }
     if (!stopped) timer = window.setTimeout(tick, everyMs);
   };
-  timer = window.setTimeout(tick, 600);
+  timer = window.setTimeout(tick, 300);
   return () => {
     stopped = true;
     if (timer) window.clearTimeout(timer);
   };
+}
+
+/** True when the chat POST died in transit (Safari "Load failed", proxy 502/504, cut stream), not on the server. */
+function lostInTransit(err: any) {
+  return err instanceof TypeError || err?.lostInTransit === true;
+}
+
+function transitError(message: string) {
+  const err: any = new Error(message);
+  err.lostInTransit = true;
+  return err;
+}
+
+/**
+ * The POST for a turn was lost, but the turn keeps running on the server. Follow its progress id until it is
+ * done, then load the stored session (retrying while the reply is still being saved). Returns null if the turn
+ * could not be found in time.
+ */
+async function recoverTurn(progressId: string, knownSessionId: string | null, maxMs = 15 * 60 * 1000) {
+  const started = Date.now();
+  let sessionId = knownSessionId;
+  let done = false;
+  while (Date.now() - started < maxMs) {
+    try {
+      const res = await fetch(`/api/chat/progress/${progressId}`, { credentials: "include", cache: "no-store" });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.session_id) sessionId = String(data.session_id);
+        if (data.done) done = true;
+      }
+    } catch {
+      // Still offline; keep waiting.
+    }
+    if (done && sessionId) {
+      const loaded = await loadSession(sessionId).catch(() => null);
+      const last = loaded?.messages?.filter((m: any) => m.role === "assistant").slice(-1)[0];
+      if (loaded?.messages && !last?.meta?.in_progress) return { sessionId, loaded };
+    }
+    await new Promise((r) => window.setTimeout(r, done ? 1500 : 3000));
+  }
+  return null;
 }
 
 function sessionInScopeRow(row: ChatSessionRow | undefined, agentId?: string | null, groupId?: string | null) {
@@ -71,6 +140,20 @@ function sessionInScopeRow(row: ChatSessionRow | undefined, agentId?: string | n
 }
 
 type Msg = { role: "user" | "assistant"; content: string; meta?: any };
+type RunningTurn = { gen: number; abort?: AbortController; progressId?: string; sessionId?: string | null; agentId?: string | null };
+
+/** No status line or draft for this long: the status row says so and points at Stop / redirect. */
+const STALL_MS = 120_000;
+
+function lastUserText(messages: Msg[], before: number): string {
+  for (let j = before - 1; j >= 0; j -= 1) {
+    if (messages[j].role === "user") {
+      const t = (messages[j].content || "").trim();
+      return t && t !== "Continue" ? t : "";
+    }
+  }
+  return "";
+}
 type Confirm = { token: string; title: string; preview: any; kind?: string };
 type AgentView = { sessionId: string | null; messages: Msg[]; pending: Confirm[] };
 
@@ -87,11 +170,15 @@ export default function ChatPage() {
   const [sessions, setSessions] = useState<ChatSessionRow[]>([]);
   const [pending, setPending] = useState<Confirm[]>([]);
   const [busyScopes, setBusyScopes] = useState<string[]>([]);
-  const [progress, setProgress] = useState<Record<string, { steps: string[]; hint: string }>>({});
+  const [progress, setProgress] = useState<Record<string, { steps: string[]; hint: string; draft?: string }>>({});
   const viewsRef = useRef<Record<string, AgentView>>({});
   const scopeRef = useRef("");
   const inflightRef = useRef<Set<string>>(new Set());
   const progressStopsRef = useRef<Record<string, () => void>>({});
+  // The running turn per scope: lets Stop cancel it on the server, and a newer turn supersede an older one.
+  const turnsRef = useRef<Record<string, RunningTurn>>({});
+  const [stopping, setStopping] = useState<string[]>([]);
+  const [stalled, setStalled] = useState<Record<string, boolean>>({});
   const [notice, setNotice] = useState("");
   const end = useRef<HTMLDivElement>(null);
   const box = useRef<HTMLTextAreaElement>(null);
@@ -99,6 +186,8 @@ export default function ChatPage() {
   const [uploads, setUploads] = useState<UploadedFile[]>([]);
   const [uploadError, setUploadError] = useState("");
   const [watching, setWatching] = useState(false);
+  // True once the running turn has called a computer tool (so the screen rail may boot the desktop).
+  const [computerTurn, setComputerTurn] = useState(false);
   const [controlling, setControlling] = useState(false);
   const [teaching, setTeaching] = useState(false);
   const [screenOpen, setScreenOpen] = useState(false);
@@ -160,6 +249,7 @@ export default function ChatPage() {
     setNotice("");
     setUploads([]);
     setWatching(false);
+    setComputerTurn(false);
     setControlling(false);
     setScreenOpen(false);
     if (key && !inflightRef.current.has(key)) {
@@ -217,11 +307,33 @@ export default function ChatPage() {
     end.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, pending, busyScopes]);
 
-  async function send(message: string, confirmations: any[] = []) {
+  async function send(message: string, confirmations: any[] = [], opts: { resumeRequestId?: string } = {}) {
     const key = scopeKey(agentId, groupId);
-    if ((!message.trim() && !uploads.length) || !key || busyScopes.includes(key)) return;
+    if ((!message.trim() && !uploads.length) || !key) return;
     const sendAgent = agentId;
     const sendGroup = groupId;
+    // A message while a turn runs interrupts and redirects it (the server stops the old turn and hands its
+    // progress to the new one). Drop the old request here so only the newest turn updates this chat.
+    const previous = turnsRef.current[key];
+    if (busyScopes.includes(key) || previous?.abort) {
+      previous?.abort?.abort();
+      progressStopsRef.current[key]?.();
+      delete progressStopsRef.current[key];
+    }
+    const gen = (previous?.gen || 0) + 1;
+    const controller = new AbortController();
+    let scopedSession = sessionInScopeRow(sessions.find((s) => s.id === sessionId), sendAgent, sendGroup) ? sessionId : null;
+    if (!scopedSession && previous?.sessionId) scopedSession = previous.sessionId;
+    if (!scopedSession && previous?.progressId) {
+      // The first turn of a new chat is still running: redirect within its session, not a new one.
+      try {
+        const res = await fetch(`/api/chat/progress/${previous.progressId}`, { credentials: "include", cache: "no-store" });
+        const data = res.ok ? await res.json() : {};
+        if (data?.session_id) scopedSession = String(data.session_id);
+      } catch {
+        // Best effort.
+      }
+    }
     const pendingFiles = uploads;
     const userTurn: Msg = { role: "user", content: message || "Attached files", meta: pendingFiles.length ? { uploads: pendingFiles } : undefined };
     const nextMessages = [...messages, userTurn];
@@ -234,19 +346,51 @@ export default function ChatPage() {
     setUploads([]);
     setUploadError("");
     const progressId = newProgressId();
+    turnsRef.current[key] = { gen, abort: controller, progressId, sessionId: scopedSession, agentId: sendGroup ? null : sendAgent };
     setProgress((all) => ({ ...all, [key]: { steps: [], hint: message || "your files" } }));
-    const stopProgress = pollProgress(progressId, (steps) =>
-      setProgress((all) => (all[key] ? { ...all, [key]: { ...all[key], steps } } : all)),
+    setStalled((all) => ({ ...all, [key]: false }));
+    let screenShown = false;
+    let lastChange = Date.now();
+    const touched = () => {
+      lastChange = Date.now();
+      setStalled((all) => (all[key] ? { ...all, [key]: false } : all));
+    };
+    const stallTimer = window.setInterval(() => {
+      if (Date.now() - lastChange > STALL_MS) setStalled((all) => (all[key] ? all : { ...all, [key]: true }));
+    }, 10_000);
+    const stopProgress = pollProgress(
+      progressId,
+      (steps) => {
+        touched();
+        setProgress((all) => (all[key] ? { ...all, [key]: { ...all[key], steps } } : all));
+      },
+      700,
+      undefined,
+      (tools) => {
+        // Open the live computer once per turn when the agent starts using it (the user can close it again).
+        if (screenShown || scopeRef.current !== key || !usesComputer(tools)) return;
+        screenShown = true;
+        setComputerTurn(true);
+        setScreenOpen(true);
+      },
+      (draft) => {
+        touched();
+        setProgress((all) => (all[key] ? { ...all, [key]: { ...all[key], draft } } : all));
+      },
     );
     progressStopsRef.current[key] = stopProgress;
+    const superseded = () => turnsRef.current[key]?.gen !== gen;
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
         body: JSON.stringify({
           message,
-          session_id: sessionInScopeRow(sessions.find((s) => s.id === sessionId), sendAgent, sendGroup) ? sessionId : null,
+          mode: "interrupt",
+          resume_request_id: opts.resumeRequestId || null,
+          session_id: scopedSession,
           confirmations,
           attachments: pendingFiles,
           agent_id: sendGroup ? null : sendAgent,
@@ -254,19 +398,23 @@ export default function ChatPage() {
           progress_id: progressId,
         }),
       });
-      const raw = await res.text();
+      // Long turns stream whitespace heartbeats before the JSON reply; JSON.parse ignores leading spaces.
+      const raw = (await res.text()).trim();
       let data: any = {};
       try {
         data = raw ? JSON.parse(raw) : {};
       } catch {
+        if (res.status >= 500 || !raw) throw transitError(raw.slice(0, 280) || "Chat failed");
         throw new Error(raw.slice(0, 280) || "Chat failed");
       }
-      if (!res.ok) {
+      if (!raw) throw transitError("Empty reply");
+      if (!res.ok || data.stream_error) {
         const detail = typeof data.detail === "string" ? data.detail : data.detail?.[0]?.msg;
         throw new Error(detail || raw.slice(0, 280) || "Chat failed");
       }
+      if (superseded()) return;
       if (data.workspace_changed) announceWorkspaceChanged();
-      const loaded = data.session_id ? await loadSession(data.session_id) : null;
+      const loaded = data.session_id ? await loadSession(data.session_id).catch(() => null) : null;
       const peerTurns: Msg[] = (data.thread || [])
         .filter((item: any) => (item?.text || "").trim())
         .map((item: any) => ({
@@ -276,6 +424,7 @@ export default function ChatPage() {
             agent_id: item.agent_id,
             agent_name: item.agent_name,
             agent_color: item.agent_color,
+            agent_avatar: item.agent_avatar,
             peer: true,
             used_tools: item.used_tools,
             computer: item.computer,
@@ -305,24 +454,54 @@ export default function ChatPage() {
       }
       await refreshSessions();
     } catch (err: any) {
-      const failView: AgentView = {
-        sessionId,
-        messages: [...nextMessages, { role: "assistant", content: err.message || "Something went wrong" }],
-        pending: [],
-      };
-      viewsRef.current[key] = failView;
-      if (scopeRef.current === key) showView(failView);
+      // Stopped by the user or replaced by a newer message: whoever did that updates the chat.
+      if (controller.signal.aborted || superseded()) return;
+      // The connection dropped (e.g. mobile Safari's "Load failed"), but the server keeps working on the turn.
+      // Follow it by progress id and show the stored reply instead of the raw network error.
+      const inScope = sessionInScopeRow(sessions.find((s) => s.id === sessionId), sendAgent, sendGroup) ? sessionId : null;
+      const recovered = lostInTransit(err) ? await recoverTurn(progressId, inScope) : null;
+      if (superseded()) return;
+      if (recovered) {
+        const msgs: Msg[] = recovered.loaded.messages
+          .filter((m: Msg) => m.role === "user" || m.role === "assistant")
+          .map((m: Msg) => ({ role: m.role, content: m.content || "", meta: m.meta }));
+        const view: AgentView = { sessionId: recovered.sessionId, messages: msgs, pending: pendingFor(msgs) };
+        viewsRef.current[key] = view;
+        window.localStorage.setItem(scopeStore(sendAgent, sendGroup), recovered.sessionId);
+        if (scopeRef.current === key) showView(view);
+        await refreshSessions().catch(() => null);
+      } else {
+        const content = lostInTransit(err)
+          ? "The connection dropped before the reply arrived. The task may still finish; reopen this chat in a moment to see it."
+          : err.message || "Something went wrong";
+        const failView: AgentView = {
+          sessionId,
+          messages: [...nextMessages, { role: "assistant", content, meta: { failed: true, can_continue: lostInTransit(err) } }],
+          pending: [],
+        };
+        viewsRef.current[key] = failView;
+        if (scopeRef.current === key) showView(failView);
+      }
     } finally {
       stopProgress();
+      window.clearInterval(stallTimer);
       if (progressStopsRef.current[key] === stopProgress) delete progressStopsRef.current[key];
-      setProgress((all) => {
-        const next = { ...all };
-        delete next[key];
-        return next;
-      });
-      inflightRef.current.delete(key);
-      setBusyScopes((keys) => keys.filter((k) => k !== key));
-      if (scopeRef.current === key) setWatching(false);
+      // A newer turn in this chat (redirect) or the Stop button owns the busy state now.
+      if (!superseded()) {
+        delete turnsRef.current[key];
+        setStalled((all) => ({ ...all, [key]: false }));
+        setProgress((all) => {
+          const next = { ...all };
+          delete next[key];
+          return next;
+        });
+        inflightRef.current.delete(key);
+        setBusyScopes((keys) => keys.filter((k) => k !== key));
+        if (scopeRef.current === key) {
+          setWatching(false);
+          setComputerTurn(false);
+        }
+      }
     }
   }
 
@@ -342,15 +521,64 @@ export default function ChatPage() {
       delete progressStopsRef.current[key];
       inflightRef.current.delete(key);
       setBusyScopes((keys) => keys.filter((item) => item !== key));
-      if (scopeRef.current === key) setWatching(false);
+      if (scopeRef.current === key) {
+        setWatching(false);
+        setComputerTurn(false);
+      }
     }
     if (scopeRef.current === key) showView(view);
+  }
+
+  /** Stop button: cancel the running turn (and its jobs) on the server, keep its partial output, free the composer. */
+  async function stopTurn(key: string) {
+    const turn = turnsRef.current[key];
+    if (stopping.includes(key)) return;
+    setStopping((keys) => [...keys, key]);
+    const sid = turn?.sessionId || (scopeRef.current === key ? sessionId : null);
+    let stoppedSession: string | null = sid;
+    try {
+      const res = await fetch("/api/chat/cancel", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ progress_id: turn?.progressId || null, session_id: sid, agent_id: turn?.agentId || null }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (data?.session_id) stoppedSession = String(data.session_id);
+    } catch {
+      // Offline: still free the composer; the server turn stops when it sees the next message or the flag.
+    } finally {
+      turn?.abort?.abort();
+      progressStopsRef.current[key]?.();
+      delete progressStopsRef.current[key];
+      delete turnsRef.current[key];
+      inflightRef.current.delete(key);
+      setBusyScopes((keys) => keys.filter((k) => k !== key));
+      setProgress((all) => {
+        const next = { ...all };
+        delete next[key];
+        return next;
+      });
+      setStalled((all) => ({ ...all, [key]: false }));
+      if (scopeRef.current === key) {
+        setWatching(false);
+        setComputerTurn(false);
+      }
+      setStopping((keys) => keys.filter((k) => k !== key));
+    }
+    if (stoppedSession) {
+      const [agentPart, groupPart] = [turn?.agentId ?? agentId, groupId];
+      window.localStorage.setItem(scopeStore(agentPart, groupPart), stoppedSession);
+      await reloadSession(stoppedSession);
+      await refreshSessions().catch(() => null);
+    }
   }
 
   function resumeProgress(key: string, id: string, loadedMessages: Msg[]) {
     const active = [...loadedMessages].reverse().find((m) => m.role === "assistant" && m.meta?.in_progress && m.meta?.progress_id);
     if (!active || progressStopsRef.current[key]) return;
     const progressId = String(active.meta.progress_id);
+    turnsRef.current[key] = { gen: (turnsRef.current[key]?.gen || 0) + 1, progressId, sessionId: id, agentId: active.meta?.agent_id || null };
     const hint = [...loadedMessages].reverse().find((m) => m.role === "user")?.content || "your request";
     inflightRef.current.add(key);
     setBusyScopes((keys) => (keys.includes(key) ? keys : [...keys, key]));
@@ -359,10 +587,12 @@ export default function ChatPage() {
     const stop = pollProgress(
       progressId,
       (steps) => setProgress((all) => (all[key] ? { ...all, [key]: { ...all[key], steps } } : all)),
-      1200,
+      700,
       () => {
         window.setTimeout(() => void reloadSession(id), 350);
       },
+      undefined,
+      (draft) => setProgress((all) => (all[key] ? { ...all, [key]: { ...all[key], draft } } : all)),
     );
     progressStopsRef.current[key] = stop;
   }
@@ -373,9 +603,15 @@ export default function ChatPage() {
     await refreshSessions();
   }
 
+  function sendComposerMessage() {
+    const reply = text.trim().toLowerCase().replace(/[.!?]+$/g, "").replace(/\s+/g, " ");
+    const yes = /^(yes|yeah|yep|sure|absolutely|of course|ok|okay|go ahead|please go ahead|go for it|do it|please do it|please do|proceed|please proceed|continue|sounds good|approved|i approve|i want you to)(\b|,)/.test(reply);
+    send(text, pending.length > 0 && yes && !/\b(but|unless|not|except)\b/.test(reply) ? pending : []);
+  }
+
   function onSubmit(e: FormEvent) {
     e.preventDefault();
-    send(text);
+    sendComposerMessage();
   }
 
   const currentKey = scopeKey(agentId, groupId);
@@ -386,6 +622,7 @@ export default function ChatPage() {
   const activeGroup = roster.groups.find((g) => g.id === groupId) || null;
   const screenName = activeGroup?.name || activeAgent?.name || "Chief";
   const screenColor = activeGroup?.members[0]?.color || activeAgent?.color || "#f97316";
+  const screenAvatar = activeGroup?.members[0]?.avatar || activeAgent?.avatar || "";
   const ownerName = activeGroup?.owner_id
     ? activeGroup.members.find((m) => m.id === activeGroup.owner_id)?.name
     : activeGroup?.members[0]?.name;
@@ -398,7 +635,6 @@ export default function ChatPage() {
     !activeGroup &&
       activeAgent &&
       (activeAgent.kind || "custom") !== "default" &&
-      !activeAgent.focus &&
       !focusHidden[activeAgent.id] &&
       !focusCardDismissed(activeAgent.id),
   );
@@ -408,18 +644,6 @@ export default function ChatPage() {
     setFocusHidden((all) => ({ ...all, [id]: true }));
   }
 
-  async function pickFocus(option: FocusOption) {
-    if (!activeAgent) return;
-    const id = activeAgent.id;
-    try {
-      const updated = await updateAgent(id, { focus: option.key });
-      setRoster((r) => ({ ...r, agents: r.agents.map((a) => (a.id === id ? updated : a)) }));
-      announceWorkspaceChanged();
-    } catch {
-      // The agent can still set its own focus from the answer (set_my_focus).
-    }
-    hideFocusCard(id);
-  }
   const scopedSessions = sessions.filter((s) => sessionInScopeRow(s, agentId, groupId));
   const computer = [...messages].reverse().map((m) => computerFromMeta(m.meta)).find(Boolean) || null;
 
@@ -427,6 +651,7 @@ export default function ChatPage() {
     persistView(scopeKey(agentId, groupId));
     setControlling(false);
     setWatching(false);
+    setComputerTurn(false);
     setAgentId(id);
     setGroupId(null);
     rememberScope(id, null);
@@ -446,6 +671,7 @@ export default function ChatPage() {
     persistView(scopeKey(agentId, groupId));
     setControlling(false);
     setWatching(false);
+    setComputerTurn(false);
     setGroupId(id);
     setAgentId(null);
     rememberScope(null, id);
@@ -506,6 +732,7 @@ export default function ChatPage() {
       headline={screenName}
       headlineMeta={screenMeta}
       headlineColor={screenColor}
+      headlineAvatar={screenAvatar}
       computerOpen={screenOpen}
       computerLive={Boolean(watching || controlling || computer?.live)}
       onToggleComputer={() => setScreenOpen((open) => !open)}
@@ -563,20 +790,22 @@ export default function ChatPage() {
           {activeGroup ? (
             <span className="group-stack chat-head-face" aria-hidden>
               {activeGroup.members.slice(0, 3).map((m) => (
-                <span key={m.id} className="agent-avatar tiny" style={{ background: m.color }}>
-                  {(m.name || "?").slice(0, 1).toUpperCase()}
-                </span>
+                <AgentAvatar key={m.id} name={m.name} color={m.color} avatar={m.avatar} className="agent-avatar tiny" />
               ))}
             </span>
           ) : (
-            <span className="agent-avatar chat-head-face" style={{ background: screenColor }}>
-              {screenName.slice(0, 1).toUpperCase()}
-            </span>
+            <AgentAvatar name={screenName} color={screenColor} avatar={screenAvatar} className="agent-avatar chat-head-face" />
           )}
           <div className="chat-head-copy">
             <strong>{screenName}</strong>
             {screenMeta ? <span className="muted">{screenMeta}</span> : null}
           </div>
+          <a className="chat-task-btn" href="/tasks" aria-label="Tasks" title="Tasks">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
+              <circle cx="12" cy="12" r="8" stroke="currentColor" strokeWidth="1.8" />
+              <path d="M12 8v4.5l3 2" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+            </svg>
+          </a>
           <button
             type="button"
             className={`chat-computer-btn${screenOpen ? " on" : ""}${watching || controlling || computer?.live ? " live" : ""}`}
@@ -592,28 +821,29 @@ export default function ChatPage() {
             {notice ? <p className="notice">{notice}</p> : null}
             {messages.length === 0 && !busyHere && showFocusCard && activeAgent ? (
               <FocusOnboarding
+                agentId={activeAgent.id}
                 userName={firstName(me)}
                 agentName={activeAgent.name}
+                agentTitle={activeAgent.title}
                 agentColor={activeAgent.color}
+                agentAvatar={activeAgent.avatar}
                 disabled={busyHere}
-                onPick={(opt) => void pickFocus(opt)}
+                onPick={(prompt) => send(prompt)}
                 onDismiss={() => hideFocusCard(activeAgent.id)}
               />
             ) : null}
-            {messages.length === 0 && !busyHere ? (
-              <div className={showFocusCard ? "welcome welcome-after-onboard" : "welcome"}>
-                {showFocusCard ? null : (
-                  <>
-                    <h1>{hello}</h1>
-                    <p>
-                      {activeGroup
-                        ? `${firstName(me)} set this group up. The kickoff owner introduces proposed roles, then each bot replies as itself. @ one bot, or @everyone, and they talk to each other in this thread.`
-                        : activeAgent?.suggested_tasks?.length
-                          ? `${activeAgent.name} is ready to work. Pick a useful first task, or describe a different one below.`
-                          : "Here's what's happening today — brief the inbox, ask a connected system, or schedule a send."}
-                    </p>
-                  </>
-                )}
+            {messages.length === 0 && !busyHere && !showFocusCard ? (
+              <div className="welcome">
+                <h1>{hello}</h1>
+                <p>
+                  {activeGroup
+                    ? `${firstName(me)} set this group up. The kickoff owner introduces proposed roles, then each bot replies as itself. @ one bot, or @everyone, and they talk to each other in this thread.`
+                    : activeAgent?.suggested_tasks?.length
+                      ? `${activeAgent.name} is ready to work. Pick a useful first task, or describe a different one below.`
+                      : activeAgent?.kind !== "default" && activeAgent
+                        ? `${activeAgent.name} is ready to help. Tell it what outcome you want, or choose an idea below.`
+                        : "Here's what's happening today — brief the inbox, ask a connected system, or schedule a send."}
+                </p>
                 <div className="hero-cards">
                   {activeGroup ? (
                     <>
@@ -651,6 +881,12 @@ export default function ChatPage() {
                         <span>{task.prompt}</span>
                       </button>
                     ))
+                  ) : activeAgent?.kind !== "default" && activeAgent ? (
+                    <button className="hero-card" onClick={() => send(`Help me choose a useful first task for you as ${activeAgent.title || activeAgent.name}. Ask one or two questions to understand the outcome I want.`)}>
+                      <span className="mark" />
+                      <strong>Choose a useful first task</strong>
+                      <span>Start a conversation about the outcomes you want this agent to own.</span>
+                    </button>
                   ) : (
                     <>
                       <button className="hero-card" onClick={() => send("What matters today? Give me my chief of staff briefing.")}>
@@ -681,26 +917,37 @@ export default function ChatPage() {
                 </div>
               ) : (
                 <div key={i} className={`turn assistant${m.meta?.agent_name ? " speaker" : ""}`}>
+                  {(() => {
+                    const responseColor = String(m.meta?.agent_color || activeAgent?.color || "#f97316");
+                    const tileStyle = { "--agent-response-color": responseColor } as CSSProperties;
+                    return (
+                      <>
                   {m.meta?.agent_name ? (
                     <div className="agent-chip">
-                      <span className="agent-avatar tiny" style={{ background: m.meta.agent_color || "#f97316" }}>
-                        {String(m.meta.agent_name).slice(0, 1)}
-                      </span>
+                      <AgentAvatar name={String(m.meta.agent_name)} color={responseColor} avatar={m.meta.agent_avatar} className="agent-avatar tiny" />
                       {m.meta.agent_name}
                     </div>
                   ) : null}
-                  {m.meta?.agent_name ? (
-                    <div className="group-bubble">
+                    <div className="group-bubble" style={tileStyle}>
                       <Markdown text={m.content} />
                     </div>
-                  ) : (
-                    <Markdown text={m.content} />
-                  )}
+                      </>
+                    );
+                  })()}
                   <ConnectCards
                     meta={m.meta}
                     agentId={m.meta?.agent_id || agentId}
                     agentName={m.meta?.agent_name}
                   />
+                  {m.meta?.task_state?.skill_name ? (
+                    <div className="skill-used" title={(m.meta.task_state.notes || []).map((n: any) => n.text).join("\n")}>
+                      Skill: {m.meta.task_state.skill_name}
+                      {m.meta.task_state.step_count
+                        ? ` · ${Math.min(m.meta.task_state.step_index || 0, m.meta.task_state.step_count)}/${m.meta.task_state.step_count} steps`
+                        : ""}
+                      {m.meta.task_state.status === "handed_off" ? " · handed over" : m.meta.task_state.status === "done" ? " · done" : ""}
+                    </div>
+                  ) : null}
                   {m.meta?.job?.id && !m.meta?.job_result ? (
                     <JobTimeline
                       jobId={String(m.meta.job.id)}
@@ -708,36 +955,27 @@ export default function ChatPage() {
                       onSettled={() => reloadSession(sessionId)}
                     />
                   ) : null}
-                  {m.meta?.choices?.options?.length && i === messages.length - 1 ? (
-                    <div className="chips choices" style={{ marginTop: 8 }}>
-                      {m.meta.choices.options.map((opt: string) => (
-                        <button
-                          key={opt}
-                          className="chip"
-                          disabled={busyHere}
-                          onClick={async () => {
-                            if (m.meta.choices.job_id) {
-                              // A background job asked: answer it directly, then show its timeline again.
-                              await fetch(`/api/jobs/${m.meta.choices.job_id}/answer`, {
-                                method: "POST",
-                                credentials: "include",
-                                headers: { "Content-Type": "application/json" },
-                                body: JSON.stringify({ text: opt }),
-                              }).catch(() => null);
-                              reloadSession(sessionId);
-                            } else {
-                              send(opt);
-                            }
-                          }}
-                        >
-                          {opt}
-                        </button>
-                      ))}
-                    </div>
-                  ) : null}
                   {sourceLabel(m.meta) ? <div className="source-chip">{sourceLabel(m.meta)}</div> : null}
                   <EmailThreadButton refs={mailRefsFromMeta(m.meta)} />
                   {chatAttachments(m.meta?.attachments).length ? <AttachmentWidget items={chatAttachments(m.meta.attachments)} /> : null}
+                  {i === messages.length - 1 && !busyHere && (m.meta?.can_continue || m.meta?.failed) ? (
+                    <div className="turn-actions">
+                      {m.meta?.can_continue ? (
+                        <button
+                          className="btn secondary small"
+                          type="button"
+                          onClick={() => send("Continue", [], m.meta?.request_id ? { resumeRequestId: String(m.meta.request_id) } : {})}
+                        >
+                          Continue
+                        </button>
+                      ) : null}
+                      {lastUserText(messages, i) ? (
+                        <button className="btn secondary small" type="button" onClick={() => send(lastUserText(messages, i))}>
+                          Retry
+                        </button>
+                      ) : null}
+                    </div>
+                  ) : null}
                   {m.meta?.clarify?.length ? (
                     <div className="chips" style={{ marginTop: 8 }}>
                       {m.meta.clarify.map((c: any) => (
@@ -750,53 +988,25 @@ export default function ChatPage() {
                 </div>
               ),
             )}
-            {busyHere ? <Thinking steps={progress[currentKey]?.steps} hint={progress[currentKey]?.hint} /> : null}
+            {busyHere ? <Thinking
+                steps={progress[currentKey]?.steps}
+                hint={progress[currentKey]?.hint}
+                draft={progress[currentKey]?.draft}
+                onStop={() => void stopTurn(currentKey)}
+                stopping={stopping.includes(currentKey)}
+                stalled={Boolean(stalled[currentKey])}
+              /> : null}
             <div ref={end} />
           </div>
         </div>
         <div className="chat-footer">
         {pending.length ? (
-          <div className="approval">
-            {pending.map((p) => (
-              <div key={p.token}>
-                <h3>{p.title || "Approve this action"}</h3>
-                <p className="muted" style={{ margin: "0 0 8px" }}>
-                  {p.kind === "handoff" || p.preview?.kind === "handoff"
-                    ? "Take control on the computer screen, finish the step, then continue."
-                    : p.kind === "git_push" || p.preview?.repo
-                      ? "Review the repo, branch and commits, then approve. Nothing is pushed, opened or merged until you do."
-                      : "Review the recipient and preview, then confirm. Nothing sends until you do."}
-                </p>
-                <pre className="approval-preview">{formatPreview(p.preview)}</pre>
-                <div className="approval-actions">
-                  {p.kind === "handoff" || p.preview?.kind === "handoff" ? (
-                    <button className="btn" type="button" onClick={() => { setControlling(true); setScreenOpen(true); }}>
-                      Take control
-                    </button>
-                  ) : null}
-                  <button
-                    className="btn"
-                    disabled={busyHere}
-                    onClick={() => {
-                      setPending([]);
-                      setControlling(false);
-                      send(
-                        p.kind === "handoff" || p.preview?.kind === "handoff"
-                          ? "I finished on the computer. Continue."
-                          : "Confirmed. Continue.",
-                        pending,
-                      );
-                    }}
-                  >
-                    {p.kind === "handoff" || p.preview?.kind === "handoff" ? "Continue" : "Confirm"}
-                  </button>
-                  <button className="btn secondary" onClick={() => setPending([])}>
-                    Cancel
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
+          <p className="chat-action-prompt" role="status">
+            I’ve prepared {pending.map((p) => p.title || "an action").join(" and ")}. Reply in your own words if you’d like me to continue{pending.length > 1 ? " with these actions" : ""}; for example, “go ahead” or “leave it”.
+            {pending.some((p) => p.kind === "handoff" || p.preview?.kind === "handoff") ? (
+              <> <button className="btn secondary small" type="button" onClick={() => { setControlling(true); setScreenOpen(true); }}>Open the computer screen</button></>
+            ) : null}
+          </p>
         ) : null}
         <div className="composer-wrap">
           {uploadError ? <p className="err">{uploadError}</p> : null}
@@ -843,7 +1053,7 @@ export default function ChatPage() {
                 }
               }}
             />
-            <button className="attach-icon" type="button" aria-label="Attach files" disabled={busyHere} onClick={() => fileRef.current?.click()}>
+            <button className="attach-icon" type="button" aria-label="Attach files" onClick={() => fileRef.current?.click()}>
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden>
                 <path d="M16 7v8.5a4 4 0 0 1-8 0V7.8A2.8 2.8 0 0 1 13.6 7v7.2" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
               </svg>
@@ -855,21 +1065,45 @@ export default function ChatPage() {
               placeholder={
                 activeGroup
                   ? "Write normally, @ a bot, or @everyone…"
-                  : "Ask about sales, mail, or schedule work…"
+                  : busyHere
+                    ? "Send a message to redirect, or tap Stop…"
+                    : pending.length
+                    ? "Reply to your agent…"
+                    : "Ask about sales, mail, or schedule work…"
               }
               rows={1}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
-                  send(text);
+                  sendComposerMessage();
                 }
               }}
             />
-            <button className="send" type="submit" disabled={busyHere || (!text.trim() && !uploads.length)} aria-label="Send">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
-                <path d="M12 19V5M12 5 6 11M12 5l6 6" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            </button>
+            {busyHere && !text.trim() && !uploads.length ? (
+              <button
+                className="send stop"
+                type="button"
+                onClick={() => void stopTurn(currentKey)}
+                disabled={stopping.includes(currentKey)}
+                aria-label="Stop the agent"
+                title="Stop"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden>
+                  <rect x="5" y="5" width="14" height="14" rx="2.5" fill="currentColor" />
+                </svg>
+              </button>
+            ) : (
+              <button
+                className="send"
+                type="submit"
+                disabled={!text.trim() && !uploads.length}
+                aria-label={busyHere ? "Send and redirect the agent" : "Send"}
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+                  <path d="M12 19V5M12 5 6 11M12 5l6 6" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </button>
+            )}
           </form>
         </div>
         </div>
@@ -879,7 +1113,10 @@ export default function ChatPage() {
           <button type="button" className="screen-scrim" aria-label="Close computer" onClick={() => setScreenOpen(false)} />
           <ScreenRail
             session={computer}
-            watching={Boolean((busyHere && watching) || controlling || computer?.live)}
+            // Only a running turn counts as "operating": an old message that once used the browser must not
+            // leave the rail stuck on "Starting computer…" with nothing booting.
+            watching={Boolean(busyHere && watching)}
+            autoBoot={Boolean(busyHere && watching && computerTurn)}
             controlling={controlling}
             agentName={screenName}
             status={busyHere ? "working" : controlling ? "you have control" : ""}
@@ -889,13 +1126,21 @@ export default function ChatPage() {
             onTeachStart={async () => {
               const group = roster.groups.find((row) => row.id === groupId);
               const skillAgentId = agentId || group?.owner_id || group?.members[0]?.id;
-              await startTeaching(skillAgentId || undefined);
+              const started = await startTeaching(skillAgentId || undefined);
               setTeaching(true);
               setControlling(true);
+              return started;
             }}
             onTeachStop={async (name) => {
-              await stopTeaching(name);
-              setTeaching(false);
+              try {
+                const saved = await stopTeaching(name);
+                setTeaching(false);
+                return saved;
+              } catch (err: any) {
+                // The session was lost (e.g. a deploy restarted the API): leave teaching mode instead of sticking.
+                if (String(err?.message || "").includes("No teaching session")) setTeaching(false);
+                throw err;
+              }
             }}
             onRelease={() => {
               const handoff = pending.filter((p) => p.kind === "handoff" || p.preview?.kind === "handoff");

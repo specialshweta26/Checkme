@@ -1,4 +1,6 @@
-import { Fragment, type ReactNode } from "react";
+"use client";
+
+import { Fragment, useState, type ReactNode } from "react";
 import { DataTable, textNodes } from "./DataTable";
 
 function inline(text: string): ReactNode[] {
@@ -40,6 +42,27 @@ function table(lines: string[], key: string) {
   const head = rows[0] || [];
   const body = rows.slice(1);
   return <DataTable key={key} head={head} body={body} cell={(text) => textNodes(text)} />;
+}
+
+function CodeBlock({ body }: { body: string }) {
+  const [copied, setCopied] = useState(false);
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(body);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1400);
+    } catch {
+      setCopied(false);
+    }
+  }
+  return (
+    <div className="code-block">
+      <button type="button" className="code-copy" onClick={copy} aria-label="Copy code">
+        {copied ? "Copied" : "Copy"}
+      </button>
+      <pre><code>{body}</code></pre>
+    </div>
+  );
 }
 
 function flushParagraph(buf: string[], out: ReactNode[], key: string) {
@@ -92,11 +115,27 @@ function renderSegment(text: string, prefix: string): ReactNode[] {
       }
       out.push(
         <ul key={`${prefix}ul${i}`}>
-          {items.map((item, n) => (
-            <li key={n}>{inline(item)}</li>
-          ))}
+          {items.map((item, n) => {
+            const checklist = item.match(/^\[([ xX])\]\s*(.*)$/);
+            return (
+              <li key={n} className={checklist ? "checklist-item" : undefined}>
+                {checklist ? <input type="checkbox" checked={checklist[1].toLowerCase() === "x"} disabled aria-label={checklist[2] || "Checklist item"} /> : null}
+                {inline(checklist ? checklist[2] : item)}
+              </li>
+            );
+          })}
         </ul>,
       );
+      continue;
+    }
+    if (/^\s*>/.test(line)) {
+      flushParagraph(buf, out, `${prefix}p${i}`);
+      const quote: string[] = [];
+      while (i < lines.length && /^\s*>/.test(lines[i])) {
+        quote.push(lines[i].replace(/^\s*>\s?/, ""));
+        i += 1;
+      }
+      out.push(<blockquote key={`${prefix}q${i}`}>{quote.map((entry, n) => <Fragment key={n}>{n ? <br /> : null}{inline(entry)}</Fragment>)}</blockquote>);
       continue;
     }
     if (/^\s*\d+\.\s+/.test(line)) {
@@ -129,15 +168,11 @@ function renderSegment(text: string, prefix: string): ReactNode[] {
 
 function blocks(text: string): ReactNode[] {
   const out: ReactNode[] = [];
-  const parts = text.replace(/\r\n/g, "\n").split(/(```[\s\S]*?```)/g);
+  const parts = text.replace(/\r\n/g, "\n").split(/(```[\s\S]*?(?:```|$))/g);
   parts.forEach((part, idx) => {
     if (part.startsWith("```")) {
       const body = part.replace(/^```[a-zA-Z0-9_-]*\n?/, "").replace(/```$/, "");
-      out.push(
-        <pre key={`c${idx}`}>
-          <code>{body}</code>
-        </pre>,
-      );
+      out.push(<CodeBlock key={`c${idx}`} body={body} />);
       return;
     }
     out.push(...renderSegment(part, `s${idx}`));

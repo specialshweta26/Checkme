@@ -69,14 +69,32 @@ async def _migrate() -> None:
         )
         await conn.execute(text("ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS agent_id UUID"))
         await conn.execute(text("ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS group_id UUID"))
+        await conn.execute(
+            text(
+                "ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS "
+                "chat_session_id UUID REFERENCES chat_sessions(id) ON DELETE SET NULL"
+            )
+        )
+        await conn.execute(text("ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS interval_minutes INTEGER"))
         await conn.execute(text("ALTER TABLE workspace_agents ADD COLUMN IF NOT EXISTS pinned BOOLEAN DEFAULT false"))
         await conn.execute(text("ALTER TABLE workspace_agents ADD COLUMN IF NOT EXISTS archived BOOLEAN DEFAULT false"))
         await conn.execute(text("ALTER TABLE workspace_agents ADD COLUMN IF NOT EXISTS unread BOOLEAN DEFAULT false"))
         await conn.execute(text("ALTER TABLE workspace_agents ADD COLUMN IF NOT EXISTS focus VARCHAR(40) DEFAULT ''"))
+        await conn.execute(text("ALTER TABLE workspace_agents ADD COLUMN IF NOT EXISTS avatar TEXT DEFAULT ''"))
         await conn.execute(text("ALTER TABLE agent_groups ADD COLUMN IF NOT EXISTS outcome TEXT DEFAULT ''"))
         await conn.execute(text("ALTER TABLE agent_groups ADD COLUMN IF NOT EXISTS owner_id UUID"))
         await conn.execute(text("ALTER TABLE automations ADD COLUMN IF NOT EXISTS trigger_type VARCHAR(20) DEFAULT 'schedule'"))
         await conn.execute(text("ALTER TABLE automations ADD COLUMN IF NOT EXISTS webhook_secret_hash VARCHAR(64)"))
+        for ddl in (
+            "status VARCHAR(20) DEFAULT 'ready'",
+            "error TEXT DEFAULT ''",
+            "transcript JSONB DEFAULT '[]'::jsonb",
+            "frames JSONB DEFAULT '[]'::jsonb",
+            "notes JSONB DEFAULT '[]'::jsonb",
+            "auto_named BOOLEAN DEFAULT false",
+            "updated_at TIMESTAMPTZ",
+        ):
+            await conn.execute(text(f"ALTER TABLE agent_skills ADD COLUMN IF NOT EXISTS {ddl}"))
         await _migrate_github(conn)
         await _migrate_jobs(conn)
         await _migrate_agent_scope(conn)

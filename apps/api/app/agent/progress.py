@@ -22,6 +22,8 @@ from langchain_core.callbacks import AsyncCallbackHandler
 log = logging.getLogger(__name__)
 
 PROGRESS_TTL_S = 900
+DRAFT_EVERY_S = 0.25
+DRAFT_MAX_CHARS = 20000
 MAX_STEPS = 60
 PROGRESS_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 
@@ -238,7 +240,7 @@ def describe_tool(name: str, args: dict | None, connector_names: dict[str, str] 
         return f"Committing: {_clip(a.get('message'), 60)}"
     if n == "push_branch":
         return f"Asking to push {_clip(a.get('branch'), 40)} to {_clip(a.get('repo'), 40)}"
-    if n == "start_coding_job":
+    if n in {"start_coding_job", "start_background_task"}:
         return f"Starting a background job: {_clip(a.get('title') or a.get('task'), 60)}"
     if n == "delegate":
         return f"Handing off to a {_clip(a.get('role') or 'teammate', 12)}: {_clip(a.get('title') or a.get('task'), 60)}"
@@ -246,6 +248,22 @@ def describe_tool(name: str, args: dict | None, connector_names: dict[str, str] 
         return f"Running `{_clip(a.get('command'), 70)}` on the computer"
     if n == "user_computer_shell":
         return f"Running `{_clip(a.get('command'), 70)}` on your computer"
+    if n == "research_crawl":
+        return f"Researching: {_clip(a.get('goal'), 60)}" if a.get("goal") else "Continuing the research crawl"
+    if n == "research_notes":
+        return "Reading research notes"
+    if n == "research_memory_search":
+        return f"Checking earlier research: {_clip(a.get('query'), 50)}"
+    if n == "research_save_summary":
+        return "Saving the research conclusion"
+    if n == "browser_new_tab":
+        return f"Opening a new tab: {_host(a.get('url'))}" if a.get("url") else "Opening a new browser tab"
+    if n == "browser_switch_tab":
+        return f"Switching to tab {_clip(a.get('tab'), 8)}"
+    if n == "browser_close_tab":
+        return "Closing a browser tab"
+    if n == "browser_tabs":
+        return "Checking open browser tabs"
     if n == "browser_navigate":
         return f"Opening {_host(a.get('url'))} in the browser" if a.get("url") else "Opening a page in the browser"
     if n == "browser_snapshot":
@@ -260,8 +278,13 @@ def describe_tool(name: str, args: dict | None, connector_names: dict[str, str] 
         return "Handing the computer to you"
     if n == "web_search":
         return f"Searching the web for {_quote(a.get('query'))}" if a.get("query") else "Searching the web"
+    if n == "browser_search":
+        return f"Searching in the browser for {_quote(a.get('query'))}" if a.get("query") else "Searching in the browser"
     if n == "web_fetch":
         return f"Fetching {_host(a.get('url'))}" if a.get("url") else "Fetching a page"
+    if n == "web_read":
+        hosts = [_host(u) for u in (a.get("urls") or [])[:5] if u]
+        return f"Reading {', '.join(h for h in hosts if h)}" if hosts else "Reading pages"
     if n == "list_files":
         return f"Listing files in {_clip(a.get('path') or '/', 40)}"
     if n == "attach_file":
@@ -365,6 +388,9 @@ class ProgressReporter:
         self.steps: list[dict] = []
         self._redis = redis_client
         self._parent: ProgressReporter | None = None
+        self.draft_text = ""
+        self._draft_sent_at = 0.0
+        self._draft_sent = ""
 
     @property
     def enabled(self) -> bool:
@@ -404,8 +430,54 @@ class ProgressReporter:
         except Exception as exc:  # noqa: BLE001
             log.debug("progress emit failed: %s", exc)
 
+    async def draft(self, text: str, *, force: bool = False) -> None:
+        """The reply as it streams from the model, mirrored to Redis at most every DRAFT_EVERY_S (the web app
+        shows it in the working bubble). Teammate runs do not stream into the lead's bubble."""
+        if self._parent is not None:
+            return
+        self.draft_text = text or ""
+        if not self.enabled or self.draft_text == self._draft_sent:
+            return
+        now = time.monotonic()
+        if not force and now - self._draft_sent_at < DRAFT_EVERY_S:
+            return
+        self._draft_sent_at = now
+        self._draft_sent = self.draft_text
+        try:
+            r = self._client()
+            await r.set(_key(self.user_id, self.progress_id) + ":draft", self.draft_text[-DRAFT_MAX_CHARS:], ex=PROGRESS_TTL_S)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("progress draft failed: %s", exc)
+
     async def finish(self) -> None:
         await self.emit("Done", kind="done")
+
+    async def set_session(self, session_id: Any) -> None:
+        """Remember which chat session this turn writes to, so a client whose POST dropped can recover it."""
+        if not self.enabled or not session_id:
+            return
+        try:
+            r = self._client()
+            await r.set(_key(self.user_id, self.progress_id) + ":session", str(session_id), ex=PROGRESS_TTL_S)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("progress session save failed: %s", exc)
+
+
+async def read_progress_session(user_id: Any, progress_id: str, redis_client: Any = None) -> str:
+    if not valid_progress_id(progress_id):
+        return ""
+    if redis_client is None:
+        from app.cache import get_redis
+
+        redis_client = get_redis()
+    try:
+        raw = await redis_client.get(_key(user_id, progress_id) + ":session")
+    except Exception as exc:  # noqa: BLE001
+        log.debug("progress session read failed: %s", exc)
+        return ""
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", "ignore")
+    return str(raw or "")
 
 
 async def read_progress(user_id: Any, progress_id: str, redis_client: Any = None) -> list[dict]:
@@ -427,6 +499,24 @@ async def read_progress(user_id: Any, progress_id: str, redis_client: Any = None
         except Exception:  # noqa: BLE001
             continue
     return out
+
+
+async def read_progress_draft(user_id: Any, progress_id: str, redis_client: Any = None) -> str:
+    """The streamed reply so far ('' when none)."""
+    if not valid_progress_id(progress_id):
+        return ""
+    if redis_client is None:
+        from app.cache import get_redis
+
+        redis_client = get_redis()
+    try:
+        raw = await redis_client.get(_key(user_id, progress_id) + ":draft")
+    except Exception as exc:  # noqa: BLE001
+        log.debug("progress draft read failed: %s", exc)
+        return ""
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", "replace")
+    return str(raw or "")
 
 
 def _parse_inputs(input_str: str, inputs: Any) -> dict:
@@ -468,6 +558,8 @@ class ProgressCallback(AsyncCallbackHandler):
         self.model_calls = 0
         self.last_tool = ""
         self.tools_since_model = 0
+        self._tokens: list[str] = []
+        self._fresh = False
 
     async def _model_start(self) -> None:
         self.model_calls += 1
@@ -477,6 +569,8 @@ class ProgressCallback(AsyncCallbackHandler):
         elif self.tools_since_model and self.last_tool:
             await self.reporter.emit(f"Going over what {self.last_tool} returned", kind="model")
         self.tools_since_model = 0
+        # A new model step: its tokens replace the previous step's draft once they arrive (no flicker to empty).
+        self._fresh = True
 
     async def on_chat_model_start(self, serialized, messages, **kwargs) -> None:  # noqa: ANN001
         await self._model_start()
@@ -484,15 +578,33 @@ class ProgressCallback(AsyncCallbackHandler):
     async def on_llm_start(self, serialized, prompts, **kwargs) -> None:  # noqa: ANN001
         await self._model_start()
 
+    async def on_llm_new_token(self, token, **kwargs) -> None:  # noqa: ANN001
+        text = token if isinstance(token, str) else ""
+        if not text:
+            return
+        if self._fresh:
+            self._tokens = []
+            self._fresh = False
+        self._tokens.append(text)
+        draft = getattr(self.reporter, "draft", None)
+        if draft is not None:
+            await draft("".join(self._tokens))
+
     async def on_llm_end(self, response, **kwargs) -> None:  # noqa: ANN001
         try:
             gen = response.generations[-1][-1]
             msg = getattr(gen, "message", None)
         except Exception:  # noqa: BLE001
-            return
+            msg = None
+        calls = (getattr(msg, "tool_calls", None) or []) if msg is not None else []
+        draft = getattr(self.reporter, "draft", None)
+        if draft is not None and self._tokens and not self._fresh:
+            # A step that goes on to call tools only narrated (shown as a status line): clear it from the bubble.
+            await draft("" if calls else "".join(self._tokens), force=True)
+            if calls:
+                self._tokens = []
         if msg is None:
             return
-        calls = getattr(msg, "tool_calls", None) or []
         text = _ai_text(msg)
         if calls and text:
             # The model narrated its own next step ("I'll check your calendar…"): show it.

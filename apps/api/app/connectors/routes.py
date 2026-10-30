@@ -4,7 +4,6 @@ import asyncio
 import json
 import logging
 import secrets
-import time
 import uuid
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
@@ -212,40 +211,73 @@ async def computer_screen(user: User = Depends(current_user), db: AsyncSession =
 @router.get("/computer/status")
 async def computer_status(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     """Whether the live computer is stopped, asleep, or running."""
+    backend = get_settings().computer_backend
+    stopped = {"state": "stopped", "screenAvailable": False, "url": "", "title": "", "screen_agent": "", "provider": backend or "none"}
+    if not backend:
+        return {**stopped, "error": "No computer is configured on the server (set E2B_API_KEY)."}
     try:
         row = await _computer_row(db, user, provision=False)
     except HTTPException:
-        return {"state": "stopped", "screenAvailable": False, "url": "", "title": "", "screen_agent": ""}
+        return stopped
     from app.connectors.daytona_box import call_daytona
 
     try:
         data = await call_daytona(row, "status", {})
-    except Exception:  # noqa: BLE001
-        return {"state": "stopped", "screenAvailable": False, "url": "", "title": "", "screen_agent": ""}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("computer status failed (%s): %s: %s", backend, type(exc).__name__, str(exc)[:200])
+        return {**stopped, "error": str(exc)[:240]}
     if not isinstance(data, dict):
-        return {"state": "stopped", "screenAvailable": False, "url": "", "title": "", "screen_agent": ""}
+        return stopped
     return {
         "state": data.get("state") or "stopped",
         "screenAvailable": bool(data.get("screenAvailable")),
         "url": data.get("url") or "",
         "title": data.get("title") or "",
         "screen_agent": data.get("screen_agent") or "",
+        **({"error": str(data["error"])[:300]} if data.get("error") else {}),
+        **({"booting_for": data["booting_for"]} if data.get("booting_for") else {}),
+        **_stream_fields(data),
     }
+
+
+BOOT_TIMEOUT = 90.0
+
+
+def _stream_fields(data: dict) -> dict:
+    """Live desktop stream (E2B noVNC). Only for the signed-in owner: the URLs carry the stream password."""
+    out = {"provider": data.get("provider") or "daytona"}
+    for key in ("stream_url", "control_url"):
+        url = str(data.get(key) or "")
+        if url.startswith("https://"):
+            out[key] = url
+    return out
 
 
 @router.post("/computer/boot")
 async def computer_boot(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
-    """Wake the Daytona computer and Chromium tab so the right-rail screen can stream."""
+    """Wake the computer (E2B desktop or Daytona) and its Chromium so the right-rail screen can stream."""
     row = await _computer_row(db, user, provision=True)
     from app.connectors.daytona_box import call_daytona
 
+    backend = get_settings().computer_backend
+    if not backend:
+        raise HTTPException(503, "No computer is configured on the server (set E2B_API_KEY).")
+    log.info("computer boot requested user=%s provider=%s", user.id, backend)
     try:
-        data = await call_daytona(row, "boot", {})
+        # E2B work runs in a thread, so a timeout here only stops waiting; a slow boot still finishes and
+        # the status poll picks the stream up.
+        data = await asyncio.wait_for(asyncio.shield(call_daytona(row, "boot", {})), timeout=BOOT_TIMEOUT)
+    except asyncio.TimeoutError as vis_exc:
+        log.warning("computer boot timed out after %.0fs user=%s provider=%s", BOOT_TIMEOUT, user.id, backend)
+        raise HTTPException(
+            504, f"The computer did not start within {int(BOOT_TIMEOUT)} seconds. It may still come up; check again shortly."
+        ) from vis_exc
     except Exception as vis_exc:  # noqa: BLE001
+        log.warning("computer boot failed user=%s provider=%s: %s", user.id, backend, str(vis_exc)[:240])
         raise HTTPException(400, str(vis_exc)[:240]) from vis_exc
+    await db.commit()  # keeps a newly created sandbox id
     if not isinstance(data, dict):
         return {"state": "running", "screenAvailable": True, "url": "", "title": ""}
-    await db.commit()
     return {
         "ok": data.get("ok", True),
         "state": data.get("state") or "running",
@@ -253,6 +285,7 @@ async def computer_boot(user: User = Depends(current_user), db: AsyncSession = D
         "url": data.get("url") or "",
         "title": data.get("title") or "Computer",
         "error": data.get("error") or "",
+        **_stream_fields(data),
     }
 
 
@@ -290,6 +323,9 @@ async def computer_control(body: ComputerControlBody, user: User = Depends(curre
         "dy": body.dy,
         "ms": body.ms,
     }
+    from app.skills.service import record_user_input
+
+    record_user_input(user.id, "control", **{"action": step["kind"], **{k: v for k, v in step.items() if k != "kind"}})
     try:
         data = await call_daytona(row, "computer_act", {"actions": [step]})
     except Exception as vis_exc:  # noqa: BLE001
@@ -302,6 +338,61 @@ async def computer_control(body: ComputerControlBody, user: User = Depends(curre
         "title": data.get("title") or "",
         "error": data.get("error") or "",
     }
+
+
+def _playwright_key(raw: str) -> str:
+    """'ctrl+a' / 'Cmd+V' / 'Left' -> Playwright names ('Control+A', 'ArrowLeft') for the Daytona browser."""
+    names = {"ctrl": "Control", "control": "Control", "cmd": "Meta", "meta": "Meta", "shift": "Shift", "alt": "Alt",
+             "left": "ArrowLeft", "right": "ArrowRight", "up": "ArrowUp", "down": "ArrowDown", "esc": "Escape",
+             "escape": "Escape", "enter": "Enter", "tab": "Tab", "backspace": "Backspace"}  # fmt: skip
+    parts = [p.strip() for p in raw.split("+") if p.strip()]
+    return "+".join(names.get(p.lower(), p.upper() if len(p) == 1 else p) for p in parts)
+
+
+class ComputerInputBody(BaseModel):
+    text: str | None = Field(default=None, max_length=2000)
+    key: str | None = Field(default=None, max_length=40)
+
+
+@router.post("/computer/input")
+async def computer_input(body: ComputerInputBody, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Type text and/or press a key on the live computer. Used by the rail's input bar (phones cannot type into
+    the noVNC iframe). E2B: the desktop SDK's write/press (xdotool on the whole desktop). Daytona: the browser's
+    keyboard via computer_act."""
+    if not (body.text or body.key):
+        raise HTTPException(400, "Send text or a key.")
+    backend = get_settings().computer_backend
+    if not backend:
+        raise HTTPException(503, "No computer is configured on the server (set E2B_API_KEY).")
+    row = await _computer_row(db, user)
+    from connector_core import ToolError
+
+    from app.skills.service import record_user_input
+
+    record_user_input(user.id, "input", text=body.text, key=body.key)
+
+    try:
+        if backend == "e2b":
+            from app.connectors import e2b_box
+
+            data = await e2b_box.send_input(row, body.text, body.key)
+            await db.commit()
+            return data
+        from app.connectors.daytona_box import call_daytona
+
+        steps = []
+        if body.text:
+            steps.append({"kind": "type", "text": body.text})
+        if body.key:
+            steps.append({"kind": "key", "key": _playwright_key(body.key)})
+        data = await call_daytona(row, "computer_act", {"actions": steps})
+    except ToolError as vis_exc:
+        raise HTTPException(400, str(vis_exc)[:240]) from vis_exc
+    except Exception as vis_exc:  # noqa: BLE001
+        log.warning("computer input failed: %s: %s", type(vis_exc).__name__, str(vis_exc)[:200])
+        raise HTTPException(400, str(vis_exc)[:240]) from vis_exc
+    error = data.get("error") if isinstance(data, dict) else ""
+    return {"ok": not error, "error": error or ""}
 
 
 @router.get("")

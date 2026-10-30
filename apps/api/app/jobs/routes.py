@@ -18,6 +18,12 @@ class TokenIn(BaseModel):
     token: str
 
 
+class AnswerIn(BaseModel):
+    text: str
+    action_title: str | None = None
+    token: str | None = None
+
+
 async def _owned(db, user, job_id) -> AgentJob:
     try:
         return await service.get_job(db, user, job_id)
@@ -70,8 +76,26 @@ async def decline(job_id: str, body: TokenIn, user: User = Depends(current_user)
     return await _decide(job_id, body, user, db, False)
 
 
-class AnswerIn(BaseModel):
-    text: str
+@router.post("/{job_id}/respond")
+async def respond(job_id: str, body: AnswerIn, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Accept a plain-language response to the agent's conversational action request."""
+    from app.models import ChatMessage
+
+    job = await _owned(db, user, job_id)
+    try:
+        events = service.respond_to_approval(job, body.text, body.action_title, body.token)
+    except service.JobError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    for ev in events:
+        db.add(ev)
+    if job.session_id is not None:
+        db.add(ChatMessage(
+            session_id=job.session_id, user_id=user.id, role="user", content=body.text.strip()[:2000],
+            meta={"job_answer": str(job.id)}, request_id=f"answer-{str(job.id)[:8]}",
+        ))
+    await db.commit()
+    wake()
+    return service.serialize_job(job)
 
 
 @router.post("/{job_id}/answer")
@@ -100,25 +124,8 @@ async def answer(job_id: str, body: AnswerIn, user: User = Depends(current_user)
 
 @router.post("/{job_id}/cancel")
 async def cancel(job_id: str, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
-    """Cancel the job and everything under it in the tree."""
+    """Cancel the job and everything under it in the tree (running steps stop at once, approvals are cleared)."""
     job = await _owned(db, user, job_id)
-    rows = (
-        await db.execute(select(AgentJob).where(AgentJob.user_id == user.id, AgentJob.root_id == (job.root_id or job.id)))
-    ).scalars().all()
-    by_parent: dict = {}
-    for row in rows:
-        by_parent.setdefault(row.parent_id, []).append(row)
-    stack, hit = [job], []
-    while stack:
-        cur = stack.pop()
-        hit.append(cur)
-        stack.extend(by_parent.get(cur.id, []))
-    for row in hit:
-        for ev in service.cancel(row):
-            db.add(ev)
-    if job.parent_id is None:
-        await service.post_to_chat(db, job, "Cancelled the background job.")
-    else:
-        await service.after_terminal(db, job)
+    await service.cancel_tree(db, job)
     await db.commit()
     return service.serialize_job(job)

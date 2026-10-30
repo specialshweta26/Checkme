@@ -25,6 +25,7 @@ export type WorkspaceAgent = {
   focus_label?: string;
   suggested_tasks?: { title: string; prompt: string }[];
   color: string;
+  avatar?: string;
   kind?: string;
   pinned?: boolean;
   archived?: boolean;
@@ -45,15 +46,59 @@ export type AgentGroup = {
   updated_at?: string;
 };
 
+export type SkillStatus = "recording" | "writing" | "ready";
+
+export type SkillStep = {
+  t?: number;
+  kind?: string;
+  text?: string;
+  window?: string;
+  key?: string;
+  x?: number;
+  y?: number;
+  tool?: string;
+  said?: string;
+  masked?: boolean;
+  [key: string]: unknown;
+};
+
 export type AgentSkill = {
   id: string;
   agent_id?: string | null;
   name: string;
   kind: string;
+  status?: SkillStatus | string;
+  error?: string;
   instruction?: string;
-  steps?: unknown[];
+  steps?: SkillStep[];
   duration_ms?: number;
+  created_at?: string;
+  updated_at?: string;
+  step_count?: number;
+  frame_count?: number;
+  has_transcript?: boolean;
+  transcript?: { t?: number; text?: string }[];
+  notes?: string[];
+  frames?: { index: number; t?: number }[];
 };
+
+export function skillBusy(skill: Pick<AgentSkill, "status"> | null | undefined) {
+  return skill?.status === "recording" || skill?.status === "writing";
+}
+
+/** One recorded step as a short line (mirrors the API's narration.describe). */
+export function describeSkillStep(step: SkillStep) {
+  const kind = String(step.kind || "");
+  const where = step.window ? ` in “${step.window}”` : "";
+  if (kind === "say") return `said “${step.text || ""}”`;
+  if (kind === "click") return `clicked${typeof step.x === "number" ? ` at (${step.x}, ${step.y})` : ""}${where}`;
+  if (kind === "type" || kind === "input") return `typed “${step.text || ""}”${where}`;
+  if (kind === "key") return `pressed ${step.key || step.text || "a key"}${where}`;
+  if (kind === "scroll") return `scrolled${where}`;
+  if (kind === "window") return `switched to “${step.window || step.text || "a window"}”`;
+  if (kind === "tool") return `ran ${step.tool || "a tool"}`;
+  return `${kind || "step"}${step.text ? ` “${step.text}”` : ""}${where}`;
+}
 
 export type WorkspaceRoster = {
   agents: WorkspaceAgent[];
@@ -95,7 +140,7 @@ export function apiError(data: unknown, fallback: string) {
   return fallback;
 }
 
-export async function createAgent(body: { name: string; title?: string; instructions?: string; color?: string }) {
+export async function createAgent(body: { name: string; title?: string; instructions?: string; color?: string; avatar?: string }) {
   const res = await fetch("/api/agents", {
     method: "POST",
     credentials: "include",
@@ -134,12 +179,27 @@ export async function updateAgent(
     instructions?: string;
     focus?: string;
     color?: string;
+    avatar?: string;
     pinned?: boolean;
     archived?: boolean;
     unread?: boolean;
   },
 ) {
   return agentAction(`/api/agents/${id}`, "PATCH", body) as Promise<WorkspaceAgent>;
+}
+
+export type AgentOnboarding = {
+  greeting: string;
+  questions: string[];
+  tasks: { title: string; prompt: string }[];
+  skills: { title: string; prompt: string }[];
+};
+
+export async function getAgentOnboarding(id: string): Promise<AgentOnboarding> {
+  const res = await fetch(`/api/agents/${id}/onboarding`, { credentials: "include" });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(apiError(data, "Could not prepare agent onboarding"));
+  return data as AgentOnboarding;
 }
 
 export async function duplicateAgent(id: string) {
@@ -236,12 +296,66 @@ export async function saveSkill(body: { name: string; agent_id?: string; instruc
   return agentAction("/api/skills", "POST", body) as Promise<AgentSkill>;
 }
 
+export async function getSkill(id: string) {
+  const res = await fetch(`/api/skills/${encodeURIComponent(id)}`, { credentials: "include", cache: "no-store" });
+  const data = await res.json().catch(() => ({}));
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(apiError(data, "Could not load the skill"));
+  return data as AgentSkill;
+}
+
+export async function updateSkill(id: string, body: { name?: string; instruction?: string }) {
+  return agentAction(`/api/skills/${encodeURIComponent(id)}`, "PATCH", body) as Promise<AgentSkill>;
+}
+
+export async function deleteSkill(id: string) {
+  return agentAction(`/api/skills/${encodeURIComponent(id)}`, "DELETE") as Promise<{ ok: boolean }>;
+}
+
+export async function rewriteSkill(id: string) {
+  return agentAction(`/api/skills/${encodeURIComponent(id)}/rewrite`, "POST") as Promise<AgentSkill>;
+}
+
+export function skillFrameUrl(id: string, index: number) {
+  return `/api/skills/${encodeURIComponent(id)}/frames/${index}`;
+}
+
+export type TeachStart = { ok?: boolean; teaching?: boolean; max_seconds?: number; elapsed?: number; audio_optional?: boolean; skill_id?: string | null };
+
 export async function startTeaching(agentId?: string) {
-  return agentAction("/api/skills/teach/start", "POST", { agent_id: agentId });
+  return agentAction("/api/skills/teach/start", "POST", { agent_id: agentId }) as Promise<TeachStart>;
 }
 
 export async function stopTeaching(name?: string) {
-  return agentAction("/api/skills/teach/stop", "POST", { name: name || "" }) as Promise<AgentSkill>;
+  return agentAction("/api/skills/teach/stop", "POST", { name: name || "" }) as Promise<AgentSkill & { writing?: boolean; narrated?: boolean; recovered?: boolean }>;
+}
+
+export async function teachingStatus() {
+  const res = await fetch("/api/skills/teach/status", { credentials: "include", cache: "no-store" });
+  if (!res.ok) return { teaching: false } as { teaching: boolean; max_seconds?: number; elapsed?: number; remaining?: number };
+  return res.json() as Promise<{ teaching: boolean; max_seconds?: number; elapsed?: number; remaining?: number }>;
+}
+
+/** File extension the API (and OpenAI transcription) accepts for a MediaRecorder blob type. */
+export function audioExtension(type: string) {
+  const base = (type || "").split(";")[0].trim().toLowerCase();
+  if (base.endsWith("/webm")) return "webm";
+  if (base.endsWith("/ogg")) return "ogg";
+  if (base === "audio/aac" || base === "audio/x-m4a") return "m4a";
+  if (base.endsWith("/mpeg")) return "mp3";
+  if (base.endsWith("/wav")) return "wav";
+  return "mp4"; // iOS Safari records audio/mp4 (AAC)
+}
+
+/** Upload one narration clip recorded while teaching. offsetMs = when the clip started, since teaching began. */
+export async function uploadNarration(blob: Blob, offsetMs: number, index = 0) {
+  const form = new FormData();
+  form.append("audio", blob, `narration-${index}.${audioExtension(blob.type)}`);
+  form.append("offset_ms", String(Math.max(0, Math.round(offsetMs))));
+  const res = await fetch("/api/skills/teach/audio", { method: "POST", credentials: "include", body: form });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(apiError(data, "Could not upload the narration"));
+  return data as { ok: boolean; clips: number };
 }
 
 export async function deleteGroup(id: string) {
@@ -462,4 +576,40 @@ export function errorFromQuery(search: string) {
     missing_connector: "That MCP connection was not found.",
   };
   return map[err] || err.replaceAll("_", " ");
+}
+
+export type WhatsAppLink = {
+  id: string;
+  channel: string;
+  address: string;
+  display_name: string;
+  sticky_agent: string | null;
+  linked_at: string;
+  last_inbound_at: string;
+  window_open: boolean;
+  queued: number;
+};
+
+export type WhatsAppStatus = { enabled: boolean; business_number: string; wa_link: string; links: WhatsAppLink[] };
+
+export type WhatsAppCode = { code: string; message: string; expires_at: string; wa_link: string; business_number: string };
+
+export async function whatsappStatus(): Promise<WhatsAppStatus | null> {
+  const res = await fetch("/api/channels/whatsapp", { credentials: "include", cache: "no-store" });
+  if (!res.ok) return null;
+  return res.json() as Promise<WhatsAppStatus>;
+}
+
+export async function whatsappLinkCode(): Promise<WhatsAppCode> {
+  const res = await fetch("/api/channels/whatsapp/link-code", { method: "POST", credentials: "include" });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(apiError(data, "Could not create a link code"));
+  return data as WhatsAppCode;
+}
+
+export async function whatsappUnlink(id: string) {
+  const res = await fetch(`/api/channels/whatsapp/links/${encodeURIComponent(id)}`, { method: "DELETE", credentials: "include" });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(apiError(data, "Could not disconnect WhatsApp"));
+  return true;
 }

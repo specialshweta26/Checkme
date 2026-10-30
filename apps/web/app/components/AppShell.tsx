@@ -18,16 +18,9 @@ import {
 } from "../lib";
 import { AgentsNav } from "./AgentsNav";
 import { BrandMark } from "./BrandMark";
+import { AgentAvatar } from "./AgentAvatar";
 
 type Nav = "chat" | "inbox" | "tasks" | "connectors";
-
-function IconChat() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
-      <path d="M5 6.5h14v9H9l-4 3v-12Z" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
-    </svg>
-  );
-}
 
 function IconInbox() {
   return (
@@ -140,7 +133,6 @@ export function AppShell({
   activeId,
   activeAgentId,
   activeGroupId,
-  onNewChat,
   onOpenChat,
   onDeleteChat,
   onSelectAgent,
@@ -151,6 +143,7 @@ export function AppShell({
   headline,
   headlineMeta,
   headlineColor,
+  headlineAvatar,
   onToggleComputer,
   computerOpen,
   computerLive,
@@ -174,6 +167,7 @@ export function AppShell({
   headline?: string;
   headlineMeta?: string;
   headlineColor?: string;
+  headlineAvatar?: string;
   onToggleComputer?: () => void;
   computerOpen?: boolean;
   computerLive?: boolean;
@@ -186,6 +180,7 @@ export function AppShell({
   const [pending, setPending] = useState(0);
   const [alerts, setAlerts] = useState<InboxAlert[]>([]);
   const [alertsOpen, setAlertsOpen] = useState(false);
+  const [profileOpen, setProfileOpen] = useState(false);
   const [toast, setToast] = useState("");
   const last = useRef(-1);
   const seenGen = useRef(0);
@@ -246,6 +241,16 @@ export function AppShell({
     document.addEventListener("mousedown", close);
     return () => document.removeEventListener("mousedown", close);
   }, [alertsOpen]);
+
+  useEffect(() => {
+    if (!profileOpen) return;
+    function close(ev: MouseEvent) {
+      const target = ev.target as HTMLElement | null;
+      if (!target?.closest(".profile-wrap")) setProfileOpen(false);
+    }
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [profileOpen]);
 
   function toggleAlerts() {
     setAlertsOpen((open) => {
@@ -313,16 +318,6 @@ export function AppShell({
     visit(chatHref({ group: id }));
   }
 
-  function goNew(e: { preventDefault: () => void }) {
-    e.preventDefault();
-    if (onNewChat && current === "chat") {
-      onNewChat();
-      closeMenu();
-      return;
-    }
-    visit(chatUrl({ fresh: true }));
-  }
-
   function goOpen(e: { preventDefault: () => void }, id: string) {
     e.preventDefault();
     if (onOpenChat && current === "chat") {
@@ -357,22 +352,10 @@ export function AppShell({
           </a>
           <NotifyBell count={badge} items={alerts} toast={toast} open={alertsOpen} onToggle={toggleAlerts} />
         </div>
-        <a className="side-new" href={chatUrl({ fresh: true })} onClick={goNew}>
-          New chat
-        </a>
         <nav className="side-nav">
-          <a className={`side-link${current === "chat" ? " on" : ""}`} href={chatUrl()} onClick={(e) => { e.preventDefault(); visit(chatUrl()); }}>
-            <IconChat /> Chat
-          </a>
           <a className={`side-link${current === "inbox" ? " on" : ""}`} href="/inbox" onClick={(e) => { e.preventDefault(); visit("/inbox"); }}>
             <IconInbox /> Inbox
             {pending > 0 ? <span className="nav-count">{pending > 9 ? "9+" : pending}</span> : null}
-          </a>
-          <a className={`side-link${current === "tasks" ? " on" : ""}`} href="/tasks" onClick={(e) => { e.preventDefault(); visit("/tasks"); }}>
-            <IconClock /> Tasks
-          </a>
-          <a className={`side-link${current === "connectors" ? " on" : ""}`} href="/connectors" onClick={(e) => { e.preventDefault(); visit("/connectors"); }}>
-            <IconPlug /> Connectors
           </a>
         </nav>
         <AgentsNav
@@ -405,27 +388,31 @@ export function AppShell({
           ))}
         </div>
         <div className="side-user">
-          <div className="who">
-            <span className="avatar">{me ? initials(me.name, me.email) : "…"}</span>
-            <div>
-              <strong>{me?.name || "Workspace"}</strong>
-              <span>{me?.email || "Loading…"}</span>
-            </div>
-          </div>
-          <form action="/api/auth/logout" method="post">
-            <button className="logout" type="submit">
-              Sign out
+          <a className={`side-bottom-link${current === "connectors" ? " on" : ""}`} href="/connectors" onClick={(e) => { e.preventDefault(); visit("/connectors"); }}>
+            <IconPlug /> Connectors
+          </a>
+          <div className="profile-wrap">
+            <button className={`profile-button${profileOpen ? " on" : ""}`} type="button" aria-label="Profile" aria-expanded={profileOpen} onClick={() => setProfileOpen((value) => !value)}>
+              <span className="avatar">{me ? initials(me.name, me.email) : "…"}</span>
+              <span>Profile</span>
             </button>
-          </form>
+            {profileOpen ? (
+              <div className="profile-menu">
+                <strong>{me?.name || "Workspace"}</strong>
+                <span>{me?.email || "Loading…"}</span>
+                <form action="/api/auth/logout" method="post">
+                  <button className="logout" type="submit">Sign out</button>
+                </form>
+              </div>
+            ) : null}
+          </div>
         </div>
       </aside>
       <div className="main">
         <header className="topbar">
           <button className="ghost topbar-who" type="button" onClick={() => setOpen(true)} aria-label="Open menu">
             {headlineColor ? (
-              <span className="agent-avatar tiny" style={{ background: headlineColor }}>
-                {(headline || "?").slice(0, 1).toUpperCase()}
-              </span>
+              <AgentAvatar name={headline || "?"} color={headlineColor} avatar={headlineAvatar} className="agent-avatar tiny" />
             ) : (
               <BrandMark size={22} />
             )}
@@ -446,6 +433,9 @@ export function AppShell({
                 <IconComputer />
               </button>
             ) : null}
+            <a className={`topbar-icon${current === "tasks" ? " on" : ""}`} href="/tasks" aria-label="Tasks" title="Tasks" aria-current={current === "tasks" ? "page" : undefined}>
+              <IconClock />
+            </a>
             <NotifyBell count={badge} items={alerts} toast={toast} open={alertsOpen} onToggle={toggleAlerts} />
           </div>
         </header>

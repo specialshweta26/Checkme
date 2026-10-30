@@ -166,9 +166,11 @@ def test_research_focus_prompt_cites_sources():
     assert "Focus: Research and writing" in p and "Sources list" in p and "at least three" in p
 
 
-def test_unset_custom_agent_is_told_to_set_focus_from_a_free_answer():
+def test_unset_custom_agent_gets_role_specific_open_onboarding():
     p = system_prompt(_user(), [], "", agent=_agent())
-    assert "set_my_focus" in p and "Coding and deployments" in p
+    assert "Infer your role from your name, title" in p
+    assert "save_skill" in p and "schedule_task" in p
+    assert "set_my_focus" not in p and "Coding and deployments" not in p
 
 
 def test_chief_and_configured_agents_get_no_onboarding_prompt():
@@ -232,14 +234,19 @@ async def test_sandbox_shell_runs_exec_on_the_computer(monkeypatch):
     tool = next(t for t in harness_tools(ctx) if t.name == "sandbox_shell")
     out = json.loads(await tool.ainvoke({"command": "pytest -q", "cwd": "~/work/app", "timeout": 5000}))
     assert out["exit_code"] == 0
-    assert calls == [("computer", "exec", {"command": "pytest -q", "timeout": coding.SHELL_TIMEOUT_MAX, "cwd": "~/work/app"})]
+    assert len(calls) == 1
+    slug, tool_name, args = calls[0]
+    assert (slug, tool_name, args["timeout"], args["cwd"]) == ("computer", "exec", coding.SHELL_TIMEOUT_MAX, "~/work/app")
+    # Runs in bash with the toolchain PATH (npm -g prefix, ~/.local/bin), then the agent's own command.
+    assert args["command"].startswith("bash -c ") and "pytest -q' checkme-run-" in args["command"]
+    assert ".npm-global" in args["command"]
 
 
 async def test_sandbox_shell_says_what_is_missing_without_a_computer():
     ctx = _ctx(_agent(focus="coding"), {})
     tool = next(t for t in harness_tools(ctx) if t.name == "sandbox_shell")
     out = json.loads(await tool.ainvoke({"command": "ls"}))
-    assert "Daytona" in out["error"]
+    assert "E2B_API_KEY" in out["error"]
 
 
 def _conn(slug, name, provider="", tags=()):
@@ -269,7 +276,7 @@ def test_readiness_names_exactly_what_is_missing():
     out = coding.readiness({})
     joined = " ".join(out["missing"])
     assert out["computer"] == "missing"
-    assert "Daytona" in joined
+    assert "E2B_API_KEY" in joined
     # GitHub and deploy access are never "missing": the CLI sign-in link covers them.
     assert "GitHub" not in joined and "deploy" not in joined
     assert any("GitHub CLI" in c for c in out["can"]) and any("deploy with the platform CLI" in c for c in out["can"])

@@ -83,9 +83,76 @@ services:
         value: https://app.daytona.io/api
       - key: DAYTONA_TARGET
         value: us
+      # Agent computer: E2B Desktop (live desktop stream) when E2B_API_KEY is set; Daytona is the fallback.
+      - key: COMPUTER_PROVIDER
+        value: e2b
+      - key: E2B_API_KEY
+        sync: false
+      - key: E2B_SANDBOX_TIMEOUT
+        value: "3600"
+      # Web search order: paid APIs (Tavily first; only keyed ones run), then the computer's browser, then keyless
+      # server engines. Stage time budgets: SEARCH_PAID_TIMEOUT_S, SEARCH_BROWSER_TIMEOUT_S, SEARCH_FREE_TIMEOUT_S.
+      - key: SEARCH_ORDER
+        value: paid,browser,free
+      # Resilient browsing (docs/BROWSING.md). All optional; defaults need no account.
+      # Residential/ISP proxy for the computer browser and the server fetch: http://user:pass@host:port
+      - key: BROWSER_PROXY_URL
+        sync: false
+      # Hosted browser fallback: browserbase or steel, with its key (and BROWSERBASE_PROJECT_ID).
+      - key: REMOTE_BROWSER_PROVIDER
+        sync: false
+      - key: BROWSERBASE_API_KEY
+        sync: false
+      - key: BROWSERBASE_PROJECT_ID
+        sync: false
+      - key: STEEL_API_KEY
+        sync: false
+      # Optional: higher rate limit for the r.jina.ai reader step.
+      - key: JINA_API_KEY
+        sync: false
+      # Optional web search APIs.
+      - key: TAVILY_API_KEY
+        sync: false
+      - key: BRAVE_SEARCH_API_KEY
+        sync: false
+      - key: SERPER_API_KEY
+        sync: false
+      - key: EXA_API_KEY
+        sync: false
       - key: COMPOSIO_API_KEY
         sync: false
       - key: COMPOSIO_GITHUB_AUTH_CONFIG_ID
+        sync: false
+      # WhatsApp channel (docs/WHATSAPP.md). Twilio when TWILIO_ACCOUNT_SID is set, else Meta (first four below).
+      - key: WHATSAPP_PROVIDER
+        sync: false
+      - key: WHATSAPP_PUBLIC_BASE_URL
+        sync: false
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_API_KEY_SID
+        sync: false
+      - key: TWILIO_API_KEY_SECRET
+        sync: false
+      - key: TWILIO_WHATSAPP_NUMBER
+        sync: false
+      - key: TWILIO_CONTENT_SID_APPROVAL
+        sync: false
+      - key: TWILIO_CONTENT_SID_NOTIFY
+        sync: false
+      - key: WHATSAPP_PHONE_NUMBER_ID
+        sync: false
+      - key: WHATSAPP_ACCESS_TOKEN
+        sync: false
+      - key: WHATSAPP_APP_SECRET
+        sync: false
+      - key: WHATSAPP_VERIFY_TOKEN
+        sync: false
+      - key: WHATSAPP_BUSINESS_NUMBER
+        sync: false
+      - key: WHATSAPP_TEMPLATE_NOTIFY
         sync: false
       - fromGroup: checkme-secrets
 
@@ -144,6 +211,8 @@ envVarGroups:
       - key: ALLOW_PRIVATE_MCP_URLS
         value: "false"
       - key: DAYTONA_API_KEY
+        sync: false
+      - key: E2B_API_KEY
         sync: false
       - key: COMPOSIO_API_KEY
         sync: false

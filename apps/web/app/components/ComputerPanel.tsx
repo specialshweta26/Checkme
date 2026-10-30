@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState, type MouseEvent } from "react";
+import { getSkill, rewriteSkill, teachingStatus, uploadNarration, type AgentSkill, type TeachStart } from "../lib";
+import { useNarration } from "./useNarration";
 
 export type ComputerSession = {
   live?: boolean;
@@ -50,6 +52,9 @@ function useCredentialedImage(src: string | undefined) {
   }, [src]);
   return url;
 }
+
+// Matches the API's boot timeout (routes.BOOT_TIMEOUT).
+const BOOT_TIMEOUT_S = 90;
 
 function useLiveScreen(active: boolean) {
   const [url, setUrl] = useState("");
@@ -162,6 +167,114 @@ async function sendControl(payload: Record<string, unknown>) {
   }
 }
 
+async function sendInput(payload: { text?: string; key?: string }) {
+  const res = await fetch("/api/connectors/computer/input", {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = (await res.json().catch(() => ({}))) as { detail?: string; error?: string };
+  if (!res.ok || data.error) throw new Error(String(data.detail || data.error || `Typing failed (${res.status})`).slice(0, 180));
+}
+
+const QUICK_KEYS: Array<{ label: string; key: string; title: string }> = [
+  { label: "Enter", key: "Enter", title: "Press Enter" },
+  { label: "Tab", key: "Tab", title: "Press Tab" },
+  { label: "⌫", key: "Backspace", title: "Backspace" },
+  { label: "Esc", key: "Escape", title: "Escape" },
+  { label: "←", key: "Left", title: "Left arrow" },
+  { label: "↑", key: "Up", title: "Up arrow" },
+  { label: "↓", key: "Down", title: "Down arrow" },
+  { label: "→", key: "Right", title: "Right arrow" },
+  { label: "Ctrl+A", key: "ctrl+a", title: "Select all (Ctrl/Cmd+A)" },
+  { label: "Ctrl+C", key: "ctrl+c", title: "Copy (Ctrl/Cmd+C)" },
+  { label: "Ctrl+V", key: "ctrl+v", title: "Paste the desktop clipboard (Ctrl/Cmd+V)" },
+];
+
+/** Phones cannot raise the keyboard inside the noVNC iframe, so text and keys go through the API instead.
+ *  Never autofocuses, so desktop typing straight into the iframe keeps working. */
+export function ComputerInputBar({ onError }: { onError?: (message: string) => void }) {
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const run = async (payload: { text?: string; key?: string }) => {
+    setBusy(true);
+    setError("");
+    try {
+      await sendInput(payload);
+      return true;
+    } catch (exc) {
+      const message = exc instanceof Error ? exc.message : String(exc);
+      setError(message);
+      onError?.(message);
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  };
+  const submit = async (e?: { preventDefault: () => void }) => {
+    e?.preventDefault();
+    if (!text || busy) return;
+    if (await run({ text })) setText("");
+  };
+  return (
+    <form
+      className="screen-input-bar"
+      onSubmit={(e) => void submit(e)}
+      style={{
+        position: "sticky",
+        bottom: 0,
+        zIndex: 2,
+        display: "flex",
+        flexDirection: "column",
+        gap: 6,
+        padding: "8px 8px calc(8px + env(safe-area-inset-bottom))",
+        background: "var(--panel, #fff)",
+        borderTop: "1px solid var(--line, rgba(0,0,0,0.1))",
+      }}
+    >
+      <div style={{ display: "flex", gap: 6 }}>
+        <input
+          type="text"
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder="Type on the computer…"
+          aria-label="Type on the computer"
+          enterKeyHint="send"
+          autoCapitalize="off"
+          autoCorrect="off"
+          autoComplete="off"
+          spellCheck={false}
+          maxLength={2000}
+          style={{ flex: 1, minWidth: 0, fontSize: 16, padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line, #ccc)" }}
+        />
+        <button type="submit" className="btn" disabled={busy || !text} aria-label="Send text to the computer">
+          Send
+        </button>
+      </div>
+      <div style={{ display: "flex", gap: 4, overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
+        {QUICK_KEYS.map((k) => (
+          <button
+            key={k.key}
+            type="button"
+            className="screen-control-btn"
+            title={k.title}
+            aria-label={k.title}
+            disabled={busy}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => void run({ key: k.key })}
+            style={{ flex: "0 0 auto" }}
+          >
+            {k.label}
+          </button>
+        ))}
+      </div>
+      {error ? <p className="screen-notice" role="alert">{error}</p> : null}
+    </form>
+  );
+}
+
 export function ComputerIcon() {
   return (
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden>
@@ -174,6 +287,7 @@ export function ComputerIcon() {
 export function ScreenRail({
   session,
   watching = false,
+  autoBoot = false,
   controlling = false,
   agentName = "Chief",
   status = "",
@@ -186,14 +300,15 @@ export function ScreenRail({
 }: {
   session?: ComputerSession | null;
   watching?: boolean;
+  autoBoot?: boolean;
   controlling?: boolean;
   agentName?: string;
   status?: string;
   teaching?: boolean;
   onTakeControl?: () => void;
   onRelease?: () => void;
-  onTeachStart?: () => Promise<void>;
-  onTeachStop?: (name: string) => Promise<void>;
+  onTeachStart?: () => Promise<TeachStart | void>;
+  onTeachStop?: (name: string) => Promise<{ id?: string | null; name?: string; writing?: boolean; narrated?: boolean } | void>;
   onClose?: () => void;
 }) {
   const still = useCredentialedImage(session?.preview_url || session?.download_url);
@@ -201,10 +316,24 @@ export function ScreenRail({
   const [pageUrl, setPageUrl] = useState(session?.url || "");
   const [pageTitle, setPageTitle] = useState(session?.title || "");
   const [screenAgent, setScreenAgent] = useState("");
+  // E2B desktops expose a live noVNC stream (view-only URL + a control URL). Daytona has none: poll PNG frames.
+  const [stream, setStream] = useState<{ view: string; control: string }>({ view: "", control: "" });
+  // "" until the first status reply; "e2b" streams over noVNC and never serves PNG frames.
+  const [provider, setProvider] = useState("");
+  const [bootError, setBootError] = useState("");
+  const [bootStarted, setBootStarted] = useState(0);
+  const [now, setNow] = useState(() => Date.now());
+  const autoBooted = useRef(false);
   const liveActive = Boolean(watching || controlling || machine === "running");
-  const liveScreen = useLiveScreen(liveActive);
+  // Teaching uses the same live noVNC stream as "Take control"; the server records input inside the desktop.
+  const streaming = Boolean(stream.view) && machine === "running";
+  const interactive = controlling || teaching;
+  const framesSupported = provider !== "" && provider !== "e2b" && provider !== "none";
+  const liveScreen = useLiveScreen(liveActive && !streaming && framesSupported);
+  const bootSeconds = machine === "booting" && bootStarted ? Math.max(0, Math.round((now - bootStarted) / 1000)) : 0;
+  const bootSlow = bootSeconds >= BOOT_TIMEOUT_S;
   // A saved task preview can be stale or blank; only use it before a live session starts.
-  const frame = liveScreen.url || (!liveActive ? still : "");
+  const frame = streaming ? "" : liveScreen.url || (!liveActive ? still : "");
   const href = session?.url || pageUrl || "";
   const asleep = machine !== "running" && machine !== "booting" && !watching && !controlling && !frame;
   const previewRef = useRef<HTMLDivElement>(null);
@@ -214,6 +343,44 @@ export function ScreenRail({
   const waking = useRef(false);
   const [teachingBusy, setTeachingBusy] = useState(false);
   const [notice, setNotice] = useState("");
+  // The skill just taught: polled until its write-up finishes (never blocks the panel).
+  const [taught, setTaught] = useState<{ id: string; prefix: string; skill?: AgentSkill | null; gone?: boolean } | null>(null);
+  // Teaching clock: when the session started (ms epoch) and how long it may run.
+  const [teachStarted, setTeachStarted] = useState(0);
+  const [teachLimit, setTeachLimit] = useState(600);
+  const [teachNow, setTeachNow] = useState(() => Date.now());
+  const autoStopped = useRef(false);
+  const narration = useNarration(teachStarted);
+  const teachLeft = teaching && teachStarted ? Math.max(0, Math.ceil(teachLimit - (teachNow - teachStarted) / 1000)) : 0;
+  useEffect(() => {
+    if (!teaching) {
+      autoStopped.current = false;
+      setTeachStarted(0);
+      narration.reset();
+      return;
+    }
+    // Reopened while a session is running (or the parent started it): pick up the server's clock.
+    if (!teachStarted) {
+      void teachingStatus().then((data) => {
+        if (!data?.teaching) return;
+        const limit = Number(data.max_seconds) || 600;
+        setTeachLimit(limit);
+        setTeachStarted((prev) => prev || Date.now() - Number(data.elapsed || 0) * 1000);
+      });
+    }
+    const timer = window.setInterval(() => setTeachNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [teaching]);
+  useEffect(() => {
+    if (!teaching || !teachStarted || teachingBusy || autoStopped.current) return;
+    if (teachLeft === 60) setNotice("One minute of teaching left. It stops and saves automatically.");
+    if (teachLeft <= 0) {
+      autoStopped.current = true;
+      void finishTeaching(true);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [teachLeft, teaching, teachStarted, teachingBusy]);
   useEffect(() => {
     if (controlling) previewRef.current?.focus();
   }, [controlling]);
@@ -225,7 +392,18 @@ export function ScreenRail({
     const ac = new AbortController();
     const apply = (data: any) => {
       if (!data?.state) return;
-      setMachine(data.state);
+      if (typeof data.provider === "string") setProvider(data.provider);
+      if (!waking.current) {
+        setMachine(data.state);
+        if (data.state === "booting") {
+          const since = Date.now() - Number(data.booting_for || 0) * 1000;
+          setBootStarted((prev) => prev || since);
+        } else {
+          setBootStarted(0);
+        }
+        setBootError(data.state !== "running" && typeof data.error === "string" ? data.error : "");
+      }
+      applyStream(data);
       if (data.url) setPageUrl(data.url);
       if (data.title) setPageTitle(data.title);
       if (typeof data.screen_agent === "string") setScreenAgent(data.screen_agent);
@@ -243,6 +421,23 @@ export function ScreenRail({
       window.clearInterval(timer);
     };
   }, []);
+  useEffect(() => {
+    if (machine !== "booting") return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [machine]);
+  useEffect(() => {
+    // The agent is using the computer in this turn but no desktop is up yet: boot it once.
+    if (!autoBoot) {
+      autoBooted.current = false;
+      return;
+    }
+    if (autoBooted.current || provider !== "e2b" || controlling) return;
+    if (machine !== "stopped" && machine !== "suspended") return;
+    autoBooted.current = true;
+    void wake();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoBoot, provider, machine, controlling, teaching]);
   let host = "";
   try {
     if (href) host = new URL(href).hostname;
@@ -255,37 +450,63 @@ export function ScreenRail({
     host = "loading the page…";
   }
   const label = teaching
-    ? "recording task"
+    ? teachStarted
+      ? `recording task · ${clock(teachLeft)} left`
+      : "recording task"
     : controlling
       ? "you have control"
       : machine === "booting"
-        ? "Booting live desktop…"
-        : watching
+        ? "Starting computer…"
+        : watching && machine === "running"
           ? status || "Operating the computer"
+          : watching
+            ? status || "working"
           : machine === "running"
             ? host || "live"
             : asleep
               ? "suspended"
               : host || status || "idle";
 
+  function applyStream(data: any) {
+    const view = typeof data?.stream_url === "string" && data.stream_url.startsWith("https://") ? data.stream_url : "";
+    const control = typeof data?.control_url === "string" && data.control_url.startsWith("https://") ? data.control_url : "";
+    if (view) setStream((prev) => (prev.view === view && prev.control === control ? prev : { view, control: control || view }));
+    else if (data?.state && data.state !== "running") setStream((prev) => (prev.view ? { view: "", control: "" } : prev));
+  }
+
   async function wake() {
     if (waking.current) return false;
     waking.current = true;
     setNotice("");
+    setBootError("");
     setMachine("booting");
+    setBootStarted(Date.now());
+    setNow(Date.now());
+    const ac = new AbortController();
+    const timer = window.setTimeout(() => ac.abort(), (BOOT_TIMEOUT_S + 5) * 1000);
     try {
-      const res = await fetch("/api/connectors/computer/boot", { method: "POST", credentials: "include" });
+      let res: Response;
+      try {
+        res = await fetch("/api/connectors/computer/boot", { method: "POST", credentials: "include", signal: ac.signal });
+      } catch (err: any) {
+        if (ac.signal.aborted) throw new Error(`The computer did not start within ${BOOT_TIMEOUT_S} seconds. Try again.`);
+        throw err;
+      }
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : "Could not wake the computer");
+      if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : `Could not wake the computer (${res.status})`);
+      if (typeof data.provider === "string") setProvider(data.provider);
       setMachine("running");
+      applyStream(data);
       if (data.url) setPageUrl(data.url);
       if (data.title) setPageTitle(data.title);
       return true;
     } catch (err: any) {
       setMachine("suspended");
-      setNotice(err?.message || "Could not wake the computer");
+      setBootError(err?.message || "Could not wake the computer");
       return false;
     } finally {
+      window.clearTimeout(timer);
+      setBootStarted(0);
       waking.current = false;
     }
   }
@@ -305,7 +526,11 @@ export function ScreenRail({
     setTeachingBusy(true);
     try {
       if (machine !== "running" && !(await wake())) return;
-      await onTeachStart();
+      const started = await onTeachStart();
+      setTeachLimit(Number(started && started.max_seconds) || 600);
+      setTeachStarted(Date.now() - Number((started && started.elapsed) || 0) * 1000);
+      setTeachNow(Date.now());
+      setNotice("Recording. Use the screen as usual; tap Mic to narrate what you are doing.");
     } catch (err: any) {
       setNotice(err?.message || "Could not start teaching");
     } finally {
@@ -313,20 +538,94 @@ export function ScreenRail({
     }
   }
 
-  async function finishTeaching() {
+  async function finishTeaching(auto = false) {
     if (!onTeachStop || teachingBusy) return;
-    const name = window.prompt("Name this skill", "Taught workflow");
+    // At the time limit there is nobody to answer a prompt: save with the default name (the write-up renames it).
+    const name = auto ? "Taught workflow" : window.prompt("Name this skill", "Taught workflow");
     if (name === null) return;
     setTeachingBusy(true);
     try {
-      await onTeachStop(name.trim() || "Taught workflow");
-      setNotice("Skill saved. Your agent can reuse this task.");
+      const clips = await narration.collect();
+      let uploaded = 0;
+      for (const [index, clip] of clips.entries()) {
+        try {
+          await uploadNarration(clip.blob, clip.offsetMs, index);
+          uploaded += 1;
+        } catch (err: any) {
+          setNotice(err?.message || "Could not upload the narration");
+        }
+      }
+      const saved = await onTeachStop(name.trim() || "Taught workflow");
+      const prefix = auto ? "Time limit reached. " : "";
+      if (saved && saved.id) {
+        setTaught({ id: saved.id, prefix });
+        setNotice(`${prefix}Skill saved with every recorded step. Writing it up${uploaded ? " with your narration" : ""}…`);
+      } else {
+        setNotice(`${prefix}Teaching stopped.`);
+      }
       onRelease?.();
     } catch (err: any) {
-      setNotice(err?.message || "Could not save the skill");
+      const msg = String(err?.message || "Could not save the skill");
+      setNotice(msg.includes("No teaching session") ? "Teaching had already stopped (the server restarted). What was recorded is saved in the agent's Skills." : msg);
     } finally {
       setTeachingBusy(false);
     }
+  }
+
+  useEffect(() => {
+    if (!taught || taught.gone || (taught.skill && taught.skill.status === "ready")) return;
+    let stop = false;
+    const started = Date.now();
+    const tick = async () => {
+      try {
+        const row = await getSkill(taught.id);
+        if (stop) return;
+        if (!row) {
+          setTaught((t) => (t && t.id === taught.id ? { ...t, gone: true } : t));
+          setNotice("Nothing was recorded, so no skill was saved.");
+          return;
+        }
+        setTaught((t) => (t && t.id === taught.id ? { ...t, skill: row } : t));
+        if (row.status === "ready") {
+          setNotice(row.error ? `Saved “${row.name}” with its recorded steps, but the write-up failed.` : `Skill “${row.name}” is ready. Open it from the agent's Skills to view or edit.`);
+        } else if (Date.now() - started > 4 * 60_000) {
+          setNotice(`“${row.name}” is saved; the write-up is still running. Check the agent's Skills.`);
+          stop = true;
+        }
+      } catch {
+        /* keep polling */
+      }
+    };
+    const timer = window.setInterval(() => {
+      if (stop) window.clearInterval(timer);
+      else void tick();
+    }, 3000);
+    void tick();
+    return () => {
+      stop = true;
+      window.clearInterval(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [taught?.id, taught?.skill?.status, taught?.gone]);
+
+  async function retryWriteUp() {
+    if (!taught) return;
+    try {
+      const row = await rewriteSkill(taught.id);
+      setTaught({ ...taught, skill: row });
+      setNotice("Writing the skill up again…");
+    } catch (err: any) {
+      setNotice(err?.message || "Could not restart the write-up");
+    }
+  }
+
+  async function toggleMic() {
+    if (narration.on) {
+      await narration.stop();
+      return;
+    }
+    // Called straight from the tap so iOS Safari treats it as a user gesture.
+    await narration.start();
   }
 
   function flushType() {
@@ -351,16 +650,28 @@ export function ScreenRail({
           </button>
         ) : null}
         {teaching ? (
+          <button
+            type="button"
+            className={`screen-control-btn screen-mic${narration.on ? " on" : ""}`}
+            disabled={teachingBusy}
+            aria-pressed={narration.on}
+            aria-label={narration.on ? "Stop narrating" : "Narrate with microphone"}
+            onClick={() => void toggleMic()}
+          >
+            {narration.on ? `● Mic ${clock(narration.seconds)}` : "Mic"}
+          </button>
+        ) : null}
+        {teaching ? (
           <button type="button" className="screen-control-btn primary" disabled={teachingBusy} onClick={() => void finishTeaching()}>
             {teachingBusy ? "Saving…" : "Stop & save skill"}
           </button>
         ) : null}
-        {!controlling && !frame && machine !== "booting" ? (
+        {!controlling && !frame && !streaming && (machine !== "booting" || bootSlow) ? (
           <button type="button" className="screen-control-btn primary" onClick={() => void wake()}>
-            Open
+            {liveScreen.error ? "Reconnect" : "Open"}
           </button>
         ) : null}
-        {onTakeControl && !controlling && (Boolean(frame) || machine === "running") ? (
+        {onTakeControl && !interactive && (Boolean(frame) || streaming || machine === "running") ? (
           <button type="button" className="screen-control-btn" onClick={onTakeControl}>
             Take control
           </button>
@@ -379,10 +690,10 @@ export function ScreenRail({
       </div>
       <div
         ref={previewRef}
-        className={`screen-preview fullscreen${asleep ? " asleep" : ""}${controlling ? " controlling" : ""}`}
-        tabIndex={controlling ? 0 : -1}
+        className={`screen-preview fullscreen${asleep ? " asleep" : ""}${controlling ? " controlling" : ""}${streaming ? " streaming" : ""}`}
+        tabIndex={controlling && !streaming ? 0 : -1}
         onWheel={
-          controlling
+          controlling && !streaming
             ? (e) => {
                 e.preventDefault();
                 void act({ kind: "scroll", dx: Math.round(e.deltaX), dy: Math.round(e.deltaY) });
@@ -390,7 +701,7 @@ export function ScreenRail({
             : undefined
         }
         onKeyDown={
-          controlling
+          controlling && !streaming
             ? (e) => {
                 if (e.metaKey || e.ctrlKey) {
                   if (e.key === "a" || e.key === "A") {
@@ -417,7 +728,18 @@ export function ScreenRail({
             : undefined
         }
       >
-        {frame ? (
+        {streaming ? (
+          <iframe
+            // View-only until the user takes control; noVNC then forwards mouse and keyboard to the desktop.
+            key={interactive ? "control" : "view"}
+            src={interactive ? stream.control : stream.view}
+            title={`${agentName}'s live desktop`}
+            className="screen-stream"
+            allow="clipboard-read; clipboard-write; fullscreen"
+            referrerPolicy="no-referrer"
+            style={{ width: "100%", height: "100%", border: 0, display: "block", background: "#111", pointerEvents: interactive ? "auto" : "none" }}
+          />
+        ) : frame ? (
           <img
             src={frame}
             alt={`${agentName}'s screen`}
@@ -434,24 +756,55 @@ export function ScreenRail({
           />
         ) : (
           <p className="screen-placeholder">
-            {machine === "booting"
-              ? "Booting live desktop…"
-              : watching || controlling || machine === "running"
-                ? liveScreen.error
-                  ? `Live screen unavailable. Retrying… ${liveScreen.error}`
-                  : "Connecting to the live desktop…"
-                : "Computer is asleep. Open it to wake."}
+            {bootError && machine !== "running" && machine !== "booting"
+              ? `Computer failed to start: ${bootError}`
+              : machine === "booting"
+                ? bootSlow
+                  ? `Still starting after ${bootSeconds}s. The desktop provider is slow or stuck; it may still come up, or click Open to retry.`
+                  : `Starting computer… ${bootSeconds ? `${bootSeconds}s` : ""} The screen appears as soon as the desktop is up.`
+                : machine === "running"
+                  ? liveScreen.error && !watching
+                    ? `Live screen unavailable. Retrying… ${liveScreen.error}`
+                    : "Connecting to the live desktop…"
+                  : controlling
+                    ? "Connecting to the live desktop…"
+                    : watching
+                      ? `${agentName} has not opened the computer in this task. Click Open to start it.`
+                      : "Computer is asleep. Open it to wake."}
           </p>
         )}
       </div>
       <p className="screen-caption">
         {teaching
-          ? "Recording your clicks, typing, and scrolling. No audio is recorded."
+          ? narration.on
+            ? "Recording your clicks, typing, scrolling, and your voice. Explain what you are doing as you go."
+            : "Recording your clicks, typing, and scrolling. Tap Mic to add spoken instructions (optional)."
           : controlling
             ? session?.handoff_reason || "Click, type, and scroll on this screen."
+            : streaming
+              ? `${agentName}'s screen (live, view only). Take control to use it.`
             : `${agentName}'s screen`}
       </p>
-      {notice ? <p className="screen-notice">{notice}</p> : null}
+      {teaching && narration.error ? <p className="screen-notice">{narration.error}</p> : null}
+      {notice ? (
+        <p className="screen-notice">
+          {notice}
+          {taught?.skill?.status === "ready" && taught.skill.error ? (
+            <>
+              {" "}
+              <button type="button" className="btn secondary" onClick={retryWriteUp}>
+                Retry write-up
+              </button>
+            </>
+          ) : null}
+        </p>
+      ) : null}
+      {interactive || streaming || machine === "running" ? <ComputerInputBar /> : null}
     </aside>
   );
+}
+
+function clock(seconds: number) {
+  const total = Math.max(0, Math.floor(seconds));
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
 }

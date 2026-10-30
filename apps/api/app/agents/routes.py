@@ -21,6 +21,7 @@ class AgentIn(BaseModel):
     instructions: str = ""
     focus: str | None = None
     color: str | None = None
+    avatar: str | None = None
 
 
 class AgentPatch(BaseModel):
@@ -29,6 +30,7 @@ class AgentPatch(BaseModel):
     instructions: str | None = None
     focus: str | None = None
     color: str | None = None
+    avatar: str | None = None
     pinned: bool | None = None
     archived: bool | None = None
     unread: bool | None = None
@@ -77,6 +79,17 @@ async def get_agent_memory(agent_id: uuid.UUID, user: User = Depends(current_use
         return await list_agent_memory(db, user, agent_id)
     except service.AgentError as exc:
         raise HTTPException(404, str(exc)) from exc
+
+
+@router.get("/{agent_id}/onboarding")
+async def get_agent_onboarding(agent_id: uuid.UUID, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    try:
+        agent = await service.get_agent(db, user, agent_id)
+    except service.AgentError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    from app.agents.onboarding import generate_onboarding
+
+    return await generate_onboarding(agent)
 
 
 @router.post("")

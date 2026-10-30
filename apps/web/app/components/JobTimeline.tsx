@@ -4,14 +4,11 @@
  * Live timeline for a background agent job (and the jobs it delegated to).
  *
  * Polls `GET /api/jobs/{id}/events?after=` (the same short-poll pattern as chat progress)
- * and renders plan / step / test / diff / PR / approval / result entries. Approval entries
- * get Approve and Decline buttons that call `POST /api/jobs/{id}/approve|decline`; nothing
- * is pushed, opened, merged or deployed until the user approves. Questions (e.g. "Merge it?")
- * get option buttons that call `POST /api/jobs/{id}/answer`. The latest write_todos plan is
+ * and renders plan / step / test / diff / PR / result entries. Action requests and questions
+ * appear as conversation prompts and accept plain-language replies. The latest write_todos plan is
  * shown as a checklist, and check runs show their results table.
  */
 import { useEffect, useRef, useState } from "react";
-import { formatPreview } from "./preview";
 
 type JobRow = {
   id: string;
@@ -30,9 +27,9 @@ type JobEvent = { id: number; job_id: string; agent_name: string; kind: string; 
 const STATUS_LABEL: Record<string, string> = {
   queued: "Queued",
   running: "Working",
-  waiting_approval: "Needs your approval",
+  waiting_approval: "Waiting for your reply",
   waiting_children: "Delegated",
-  waiting_input: "Needs your answer",
+  waiting_input: "Waiting for your reply",
   done: "Done",
   failed: "Failed",
   cancelled: "Cancelled",
@@ -54,6 +51,13 @@ const ICON: Record<string, string> = {
 };
 const TODO_MARK: Record<string, string> = { completed: "✓", in_progress: "▸", pending: "○" };
 
+function skillStep(st: { step_index?: number; step_count?: number }) {
+  const done = st.step_index || 0;
+  const total = st.step_count || 0;
+  if (!total) return `step ${done + 1}`;
+  return done >= total ? `all ${total} steps done` : `step ${done + 1}/${total}`;
+}
+
 async function post(path: string, body?: any) {
   const res = await fetch(path, {
     method: "POST",
@@ -74,6 +78,7 @@ export function JobTimeline({ jobId, after: startAfter = 0, onSettled }: { jobId
   const [err, setErr] = useState("");
   const [nudge, setNudge] = useState(0);
   const [loginCode, setLoginCode] = useState("");
+  const [conversationReply, setConversationReply] = useState("");
   const after = useRef(startAfter);
   const settled = useRef(false);
   const sawActive = useRef(false);
@@ -120,14 +125,19 @@ export function JobTimeline({ jobId, after: startAfter = 0, onSettled }: { jobId
   const root = jobs.find((j) => j.id === jobId) || jobs.find((j) => !j.parent_id);
   const status = root?.status || "queued";
 
-  async function decide(job: string, token: string, approve: boolean) {
-    setBusy(token);
+  async function respond(job: string, text: string, approval: boolean, actionTitle?: string, actionToken?: string) {
+    setBusy(`answer:${job}`);
     setErr("");
     try {
-      await post(`/api/jobs/${job}/${approve ? "approve" : "decline"}`, { token });
+      await post(`/api/jobs/${job}/${approval ? "respond" : "answer"}`, {
+        text,
+        ...(actionTitle ? { action_title: actionTitle } : {}),
+        ...(actionToken ? { token: actionToken } : {}),
+      });
+      setConversationReply("");
       setNudge((n) => n + 1);
     } catch (e: any) {
-      setErr(e.message || "Could not update the job");
+      setErr(e.message || "Could not send your reply");
     } finally {
       setBusy("");
     }
@@ -148,6 +158,14 @@ export function JobTimeline({ jobId, after: startAfter = 0, onSettled }: { jobId
 
   const planEvent = [...events].reverse().find((ev) => ev.kind === "plan" && Array.isArray(ev.data?.todos) && ev.data.todos.length);
   const todos: Todo[] = planEvent ? planEvent.data.todos : [];
+  // Latest skill state per agent in this job tree: which skill each task follows and its step.
+  const skillStates = Object.values(
+    events.reduce<Record<string, any>>((acc, ev) => {
+      const st = ev.data?.skill_state;
+      if (st && st.id) acc[st.id] = { ...st, who: ev.agent_name };
+      return acc;
+    }, {}),
+  ).filter((st: any) => st.status !== "dropped");
 
   async function cancel() {
     setBusy("cancel");
@@ -177,6 +195,16 @@ export function JobTimeline({ jobId, after: startAfter = 0, onSettled }: { jobId
           {jobs.map((j) => (
             <span key={j.id} className={`job-chip ${j.status}`}>
               {j.agent_name || j.role} · {j.role} · {STATUS_LABEL[j.status] || j.status}
+            </span>
+          ))}
+        </div>
+      ) : null}
+      {skillStates.length ? (
+        <div className="job-tree job-skills" aria-label="Skills in use">
+          {skillStates.map((st: any) => (
+            <span key={st.id} className={`job-chip skill ${st.status}`} title={(st.notes || []).map((n: any) => n.text).join("\n")}>
+              {st.who ? `${st.who} · ` : ""}Skill: {st.skill_name} · {skillStep(st)}
+              {st.status === "handed_off" ? " · handed over" : st.status === "done" ? " · done" : ""}
             </span>
           ))}
         </div>
@@ -252,13 +280,10 @@ export function JobTimeline({ jobId, after: startAfter = 0, onSettled }: { jobId
                   </details>
                 ) : null}
                 {openQuestion ? (
-                  <div className="approval-actions job-choices">
-                    {(owner?.question?.options || []).map((opt) => (
-                      <button key={opt} className="btn secondary" type="button" disabled={!!busy} onClick={() => reply(ev.job_id, opt)}>
-                        {opt}
-                      </button>
-                    ))}
-                  </div>
+                  <form className="job-conversation-reply" onSubmit={(e) => { e.preventDefault(); const text = conversationReply.trim(); if (text) void respond(ev.job_id, text, false); }}>
+                    <input className="input" value={conversationReply} onChange={(e) => setConversationReply(e.target.value)} placeholder="Reply in your own words…" aria-label="Reply to the agent" />
+                    <button className="btn secondary" type="submit" disabled={!!busy || !conversationReply.trim()}>Send</button>
+                  </form>
                 ) : null}
                 {(ev.kind === "diff" || ev.kind === "test" || ev.kind === "deploy") && ev.data?.output ? (
                   <details>
@@ -267,17 +292,13 @@ export function JobTimeline({ jobId, after: startAfter = 0, onSettled }: { jobId
                   </details>
                 ) : null}
                 {ev.kind === "approval" ? (
-                  <div className="job-approval">
-                    <pre className="approval-preview">{formatPreview(ev.data?.preview)}</pre>
+                  <div className="job-conversation">
+                    {stillPending ? <p>I’ve prepared <strong>{ev.data?.title || ev.text}</strong>. Would you like me to go ahead? Reply naturally, for example “go ahead” or “leave it”.</p> : null}
                     {stillPending ? (
-                      <div className="approval-actions">
-                        <button className="btn" type="button" disabled={!!busy} onClick={() => decide(ev.job_id, ev.data.token, true)}>
-                          Approve
-                        </button>
-                        <button className="btn secondary" type="button" disabled={!!busy} onClick={() => decide(ev.job_id, ev.data.token, false)}>
-                          Decline
-                        </button>
-                      </div>
+                      <form className="job-conversation-reply" onSubmit={(e) => { e.preventDefault(); const text = conversationReply.trim(); if (text) void respond(ev.job_id, text, true, String(ev.data?.title || ev.text), String(ev.data?.token || "")); }}>
+                        <input className="input" value={conversationReply} onChange={(e) => setConversationReply(e.target.value)} placeholder="Write a reply…" aria-label="Reply to the agent" />
+                        <button className="btn secondary" type="submit" disabled={!!busy || !conversationReply.trim()}>Send</button>
+                      </form>
                     ) : null}
                   </div>
                 ) : null}

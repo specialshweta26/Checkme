@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from datetime import datetime, timezone
@@ -22,9 +23,9 @@ ROLE_BRIEF = {
         "PR, delegate(role='reviewer', ...) naming the repo and PR number. If the reviewer asks for changes, delegate one fix "
         "round to the coder, then review again. Do not merge by default: the job ends by asking the user 'Merge it?'. Merge "
         "only after an explicit yes (or when the task says to merge): check_merge first, then composio-github "
-        "merge_pull_request with its head_sha, whose approval card the user must approve; never say it is merged until the result says so. "
+        "merge_pull_request with its head_sha, which asks the user conversationally before acting; never say it is merged until the result says so. "
         "If the task asks to deploy, do it after the merge (or on the branch the user named): detect_deploy_targets, then "
-        "deploy (it signs in and shows one approval card), then fix and retry on failure; report the live URL or the error. "
+        "deploy (it signs in and asks for a clear reply before the write), then fix and retry on failure; report the live URL or the error. "
         "Never ask the user to configure or connect anything: when a tool returns status=awaiting_user_login, reply with "
         "only its link in one sentence and end the turn (the job resumes after they sign in). "
         "Finish with the PR link, what changed, the checks, the review verdict, any deploy and any caveats."
@@ -37,6 +38,24 @@ ROLE_BRIEF = {
         "waits for the user's approval; pr_number updates an existing PR). Merge only if the task explicitly says the user "
         "said yes. If a tool returns status=awaiting_user_login, give only its link in one sentence and end the turn. "
         "Finish with the PR link, what changed and the check results."
+    ),
+    "worker": (
+        "You are running a long task in the background for the user (no chat timeout; the user watches your timeline "
+        "and may close the chat). write_todos first with a short plan, then work the list step by step and update it as "
+        "you go. Cheapest path first: connectors and APIs, then web_search + web_fetch; for many sources use research_crawl (parallel fetch, "
+        "relevance-ranked link following, per-page notes, resumable by crawl_id, reuses pages read in earlier jobs) and research_notes; "
+        "check research_memory_search first for earlier research on the topic, call out the crawl's 'conflicts' (both "
+        "sources) instead of picking one silently, and research_save_summary the conclusion at the end; "
+        "use the computer browser only for pages that need interaction or only render in a browser, and drive it in a "
+        "loop: act, read the returned snapshot, decide, act again; use browser tabs (browser_new_tab, tab=) to keep several "
+        "sites open and compare them. When a site blocks automated access (blocked_source), name it plainly in your notes "
+        "and final answer and get the same facts from equivalent sources; never invent blocked content. For work over many pages or items, keep short notes per "
+        "page in files on the computer (for example notes/<topic>.md) instead of holding everything in context, then "
+        "synthesize from the notes. If a tool returns status=awaiting_user_login, reply with only its link in one sentence "
+        "and end the turn. For a written deliverable (report, wiki, comparison), write markdown files with write_file (one "
+        "page per topic plus an index that links them, sources cited per claim) and attach or publish them. "
+        "Finish with the answer or deliverable (attach or link any files you produced), what you "
+        "checked, and caveats."
     ),
     "reviewer": (
         "You are the reviewer for this background job. Read the pull request (get_pull_request, compare_refs, "
@@ -97,6 +116,13 @@ class JobProgress:
                 await db.commit()
         except Exception as exc:  # noqa: BLE001
             log.debug("job event write failed: %s", exc)
+        if (self.job.meta or {}).get("channel"):
+            try:
+                from app.channels.service import progress as channel_progress
+
+                await channel_progress(self.job, kind, text)
+            except Exception as exc:  # noqa: BLE001 - a channel update must never break the job
+                log.debug("channel progress failed: %s", exc)
 
     async def emit(self, text: str | None, kind: str = "step", tool: str = "") -> None:
         if not text:
@@ -174,7 +200,20 @@ async def run_job(job_id, session_factory: Callable | None = None, agent_impl: C
                 progress=progress,
                 job=job,
             )
+        except asyncio.CancelledError:
+            from app.agent import cancel as run_cancel
+
+            if not run_cancel.is_cancelled():
+                raise  # the worker is shutting down: let the stale-job recovery requeue it
+            task = asyncio.current_task()
+            if task is not None and hasattr(task, "uncancel"):
+                task.uncancel()
+            return await _stopped(db, job)
         except Exception as exc:  # noqa: BLE001
+            from app.agent import cancel as run_cancel
+
+            if isinstance(exc, run_cancel.TurnCancelled) or run_cancel.is_cancelled():
+                return await _stopped(db, job)
             log.exception("job %s failed", job.id)
             await db.rollback()
             await db.refresh(job)
@@ -184,6 +223,7 @@ async def run_job(job_id, session_factory: Callable | None = None, agent_impl: C
             db.add(service.fail(job, str(exc)[:500]))
             await service.after_terminal(db, job)
             await db.commit()
+            await _notify_channel(db, job)
             return job.status
         await db.refresh(job)  # picks up a cancel (and heartbeats) written by other sessions
         if job.status == "cancelled":
@@ -220,4 +260,30 @@ async def run_job(job_id, session_factory: Callable | None = None, agent_impl: C
                 await mem_db.commit()
         except Exception as mem_exc:  # noqa: BLE001
             log.warning("memory extract enqueue skipped for job %s: %s", job.id, mem_exc)
+        await _notify_channel(db, job, result.get("attachments") if isinstance(result, dict) else None)
         return job.status
+
+
+async def _stopped(db, job: AgentJob) -> str:
+    """The user stopped this job mid-run: keep it cancelled (approvals cleared), never failed."""
+    await db.rollback()
+    await db.refresh(job)
+    if job.status != "cancelled":
+        for ev in service.cancel(job):
+            db.add(ev)
+    await db.commit()
+    return job.status
+
+
+async def _notify_channel(db, job: AgentJob, attachments: list | None = None) -> None:
+    """Jobs that came from WhatsApp send their answer, approval buttons or question back there."""
+    if not (job.meta or {}).get("channel"):
+        return
+    try:
+        from app.channels.service import after_run
+
+        await after_run(db, job, attachments)
+        await db.commit()  # the outbox, when the 24h window is closed
+    except Exception as exc:  # noqa: BLE001 - the job itself already finished
+        log.warning("channel notify for job %s failed: %s", job.id, type(exc).__name__)
+        await db.rollback()

@@ -1,11 +1,19 @@
-"""First-class computer/browser/file verbs. They wrap this user's Daytona sandbox."""
+"""First-class computer/browser/file verbs. They wrap this user's cloud computer (E2B Desktop, or Daytona).
+
+shell always runs on the cloud computer; user_computer_shell (the user's own machine) is only offered when a
+local computer is connected. See docs/COMPUTER.md."""
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import re
+import secrets
 from typing import Any
 
 from app.agent.coding import COMPUTER_SLUG
+
+log = logging.getLogger(__name__)
 
 LOCAL_PROVIDERS = {"local", "trusted_local", "computer_local"}
 CLOUD_PROVIDERS = {"daytona"}
@@ -40,12 +48,20 @@ def local_slug(ctx) -> str | None:
 
 
 def computer_missing() -> dict:
-    return {
-        "error": (
-            "The computer (cloud sandbox) is not available for this agent. "
-            "It needs DAYTONA_API_KEY on the server, or the computer connector assigned to this agent."
+    """Only reached when the server has no computer backend, or the user's computer row could not be loaded."""
+    from app.config import get_settings
+
+    if not get_settings().computer_backend:
+        reason = (
+            "No cloud computer is configured on the server: E2B_API_KEY (or DAYTONA_API_KEY) is not set. "
+            "Tell the user exactly this so the operator can add the key."
         )
-    }
+    else:
+        reason = (
+            "The cloud computer is configured on the server, but this user's computer connector could not be loaded "
+            "for this run. Tell the user this exact reason and suggest opening the Computer panel once to set it up."
+        )
+    return {"error": reason, "computer_unavailable": True}
 
 
 async def run_computer(ctx, tool_name: str, args: dict | None = None) -> Any:
@@ -61,8 +77,14 @@ async def run_computer(ctx, tool_name: str, args: dict | None = None) -> Any:
     annotate_page(result)
     if tool_name in {"browser_handoff", "computer_handoff"}:
         return result
+    if result.get("bot_wall") and result.get("handoff", True) is not False:
+        return await _handoff_wall(ctx, result)  # a CAPTCHA only a person can solve
     if result.get("bot_wall"):
-        return await _handoff_wall(ctx, result)
+        host = result.get("blocked_source") or (result.get("block") or {}).get("host") or "This site"
+        result["note"] = (
+            f"{host} blocked automated access and no read-only copy worked. Say so plainly and continue with other "
+            "sources; do not invent what the page says."
+        )
     return result
 
 
@@ -82,29 +104,126 @@ async def _handoff_wall(ctx, result: dict) -> dict:
     return result
 
 
-async def shell(ctx, command: str, cwd: str | None = None, timeout: int = 60) -> Any:
+def _exec_parts(result: Any) -> tuple[Any, str]:
+    if not isinstance(result, dict):
+        return None, str(result or "")
+    inner = result.get("data") if isinstance(result.get("data"), dict) else result
+    return inner.get("exit_code"), str(inner.get("stdout") or inner.get("output") or inner.get("result") or "")
+
+
+async def cloud_exec(ctx, command: str, cwd: str | None = None, timeout: int = 60) -> Any:
+    """Run a command on the cloud computer with the toolchain PATH, healing a missing known tool once.
+
+    On exit 127 ("command not found") for a tool in ``toolchain.TOOLS`` (node/npm, pnpm, yarn, python/pip, git,
+    gh, vercel, render, uv, ...), install it non-interactively in user space and re-run the command once.
+    """
+    from app.agent import toolchain
+    from app.config import get_settings
+
     if not (command or "").strip():
         return {"error": "command is required"}
-    args: dict[str, Any] = {"command": command, "timeout": max(10, min(int(timeout or 60), 900))}
+    s = get_settings()
+    tag = secrets.token_hex(6)
+    wrapped = toolchain.wrap(command, tag) if getattr(s, "computer_toolchain_env", True) else command
+    args: dict[str, Any] = {"command": wrapped, "timeout": max(10, min(int(timeout or 60), 900))}
     if cwd:
         args["cwd"] = cwd
-    return await run_computer(ctx, "exec", args)
+    result = await _exec_stoppable(ctx, args, tag)
+    code, out = _exec_parts(result)
+    if code != 127 or not getattr(s, "computer_auto_install", True):
+        return result
+    tool = toolchain.missing_tool(out, command)
+    if not tool:
+        if isinstance(result, dict):
+            result["note"] = (
+                "A command was not found on the cloud computer. Install it yourself (ensure_toolchain for known tools, "
+                "else apt via sudo -n, pip --user, npm -g or a release download into ~/.local/bin) and run again. "
+                "Do not ask the user to install anything on their own machine."
+            )
+        return result
+    installed = await toolchain.ensure_tools(ctx, [tool])
+    if not installed.get("ok"):
+        if isinstance(result, dict):
+            result["auto_install"] = {"tool": tool, "ok": False, "failed": installed.get("failed"), "error": installed.get("error", "")}
+            result["note"] = installed.get("note") or (
+                f"{tool} is missing on the cloud computer and the automatic install failed. Try another install route with "
+                "shell; do not ask the user to install it on their own machine."
+            )
+        return result
+    retry = await _exec_stoppable(ctx, args, tag)
+    if isinstance(retry, dict):
+        retry["auto_installed"] = [t for t in installed.get("installed", [])] or [tool]
+        retry["note"] = f"{tool} was missing on the cloud computer, so it was installed and the command was run again."
+    return retry
+
+
+async def _exec_stoppable(ctx, args: dict, tag: str) -> Any:
+    """``exec`` on the computer; if the turn is stopped mid-command, kill that command's processes there."""
+    try:
+        return await run_computer(ctx, "exec", args)
+    except asyncio.CancelledError:
+        await _kill_tagged(ctx, tag)
+        raise
+
+
+async def _kill_tagged(ctx, tag: str) -> None:
+    from app.agent import toolchain
+
+    slug = computer_slug(ctx)
+    if not slug or not tag:
+        return
+    conns = getattr(ctx, "connectors", None) or {}
+    conn = conns.get(slug) if hasattr(conns, "get") else None
+    if conn is None:
+        return
+    try:
+        # Shielded and short: the turn is being cancelled, but this cleanup must still reach the computer.
+        await asyncio.shield(asyncio.wait_for(_raw_exec(ctx, conn, toolchain.kill_script(tag)), timeout=20))
+    except BaseException as exc:  # noqa: BLE001
+        log.debug("could not stop the cloud command: %s", type(exc).__name__)
+
+
+async def _raw_exec(ctx, conn, command: str) -> Any:
+    # Bypass call_user_tool's stop check (the run is already marked stopped) but keep the same connector path.
+    args = {"command": command, "timeout": 15}
+    impl = getattr(ctx, "call_impl", None)
+    if impl is not None:
+        return await impl(conn.slug if hasattr(conn, "slug") else COMPUTER_SLUG, "exec", args)
+    from app.connectors.runtime import RuntimeConnector
+
+    return await RuntimeConnector(conn).call("exec", args)
+
+
+async def shell(ctx, command: str, cwd: str | None = None, timeout: int = 60) -> Any:
+    return await cloud_exec(ctx, command, cwd, timeout)
 
 
 async def user_computer_shell(ctx, command: str, cwd: str | None = None, timeout: int = 60) -> Any:
     from app.agent.confirm import sign_confirm
     from app.agent.deep import call_user_tool
     from app.agent.invoke import confirmed
+    from app.config import get_settings
 
     if not (command or "").strip():
         return {"error": "command is required"}
     slug = local_slug(ctx)
     if not slug:
+        if getattr(get_settings(), "local_shell_fallback_to_cloud", True) and computer_slug(ctx):
+            result = await cloud_exec(ctx, command, cwd, timeout)
+            if isinstance(result, dict):
+                result["ran_on"] = "cloud_computer"
+                result["note"] = (
+                    "No local computer is connected, so this ran on the user's cloud computer instead (use shell for "
+                    "cloud commands). Only if the user explicitly wanted their own machine, say it ran in the cloud "
+                    "and that their own machine needs the Checkme local agent connected."
+                )
+            return result
         return {
             "error": (
                 "No trusted local computer is connected. user_computer_shell runs on the user's real machine, "
-                "not the cloud sandbox. Connect a local computer agent first. Use shell for the cloud computer."
-            )
+                "not the cloud computer. Use shell instead: it runs on the cloud computer and installs missing tools."
+            ),
+            "use_instead": "shell",
         }
     args: dict[str, Any] = {"command": command, "timeout": max(10, min(int(timeout or 60), 900))}
     if cwd:
@@ -120,6 +239,14 @@ async def user_computer_shell(ctx, command: str, cwd: str | None = None, timeout
         ctx.pending.append(pending)
         return {"status": "awaiting_user_confirmation", "preview": pending["preview"]}
     return await call_user_tool(ctx, slug, "exec", args)
+
+
+async def ensure_toolchain(ctx, tools: list[str] | None = None, force: bool = False) -> Any:
+    from app.agent import toolchain
+
+    if not computer_slug(ctx):
+        return computer_missing()
+    return await toolchain.ensure_tools(ctx, list(tools or ["dev"]), force=force)
 
 
 async def list_files(ctx, path: str = "") -> Any:
@@ -178,7 +305,7 @@ async def launch_app(ctx, name: str) -> Any:
     if key in _EDITOR_APPS:
         cmd = (
             "if command -v code >/dev/null 2>&1; then "
-            "nohup code --no-sandbox /home/daytona/work >/tmp/lumio-app.log 2>&1 & echo started=code; "
+            'mkdir -p "$HOME/work"; nohup code --no-sandbox "$HOME/work" >/tmp/lumio-app.log 2>&1 & echo started=code; '
             "else echo started=missing; fi"
         )
         return await run_computer(ctx, "exec", {"command": cmd, "timeout": 30})
