@@ -552,3 +552,10 @@ async def test_teach_trace_is_saved_for_the_skill(monkeypatch):
     assert saved["source"] == "teach" and saved["skill_id"] == "abc12345-skill" and saved["host"] == "acme.test"
     assert 'browser_replay(skill_id="abc12345-skill"' in fb.teach_replay_line("abc12345-skill")
     assert await fb.save_teach_trace(uuid.uuid4(), "s", "x", []) is None
+
+
+def test_page_brief_keeps_the_end_of_a_long_page_and_a_draft():
+    brief = fb.page_brief({"text": "sidebar " + ("x" * 4000) + " Hello", "composer": "Hello", "tree": "- e0 textbox"}, text_chars=800)
+    text = brief.split("Text:\n", 1)[1].split("\nElements:", 1)[0]
+    assert "Composer still holds: Hello" in brief
+    assert "\n…\n" in text and text.rstrip().endswith("Hello")

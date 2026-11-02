@@ -440,6 +440,21 @@ def _dump(page):
         text = page.inner_text("body")
     except Exception:
         text = ""
+    raw = text or ""
+    if len(raw) > 12000:
+        raw = raw[:6000] + "\n…\n" + raw[-6000:]
+    try:
+        composer = page.evaluate(
+            """() => {
+              const el = document.activeElement;
+              if (!el) return '';
+              if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') return String(el.value || '').slice(0, 500);
+              if (el.isContentEditable) return String(el.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 500);
+              return '';
+            }"""
+        )
+    except Exception:
+        composer = ""
     Path(LAST).write_text(
         json.dumps({"url": page.url, "title": page.title(), "viewport": {"width": VIEW_W, "height": VIEW_H}})
     )
@@ -448,7 +463,8 @@ def _dump(page):
             "ok": True,
             "url": page.url,
             "title": page.title(),
-            "text": (text or "")[:12000],
+            "text": raw,
+            "composer": composer or "",
             "viewport": {"width": VIEW_W, "height": VIEW_H},
             "screenshot_path": SHOT,
             "screenshot_name": "page.png",
@@ -1247,6 +1263,32 @@ def _type_keys(page, text: str, replace: bool) -> None:
     page.keyboard.type(text, delay=random.randint(35, 70))
 
 
+def _click_send_if_draft(page) -> None:
+    """If the focused field still holds a draft, click a visible Send or Submit button."""
+    try:
+        draft = page.evaluate(
+            """() => {
+              const el = document.activeElement;
+              if (!el) return '';
+              if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') return String(el.value || '');
+              if (el.isContentEditable) return String(el.innerText || '').trim();
+              return '';
+            }"""
+        )
+    except Exception:
+        return
+    if not str(draft or "").strip():
+        return
+    for name in ("Send", "Submit"):
+        try:
+            loc = page.get_by_role("button", name=name)
+            if loc.count() > 0:
+                loc.first.click(timeout=2000)
+                return
+        except Exception:
+            continue
+
+
 def _type_into(page, loc, node, text: str, replace: bool) -> None:
     info = _combobox_info(loc)
     suggest = looks_combobox(node, info)
@@ -1442,6 +1484,10 @@ def _act_step(page, step: dict) -> dict | None:
             raise RuntimeError(f"unknown ref {ref}; take a new browser_snapshot")
     elif kind in {"fill", "type"}:
         _type_into(page, loc, node, str(step.get("text") or ""), kind == "fill")
+        if kind == "type":
+            page.keyboard.press("Enter")
+            page.wait_for_timeout(400)
+            _click_send_if_draft(page)
     elif kind in {"select", "select_option", "pick"}:
         if loc is None and node is None:
             raise RuntimeError(f"unknown select ref {ref}; take a new browser_snapshot")

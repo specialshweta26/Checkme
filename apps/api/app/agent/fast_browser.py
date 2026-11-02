@@ -89,8 +89,14 @@ def page_brief(state: dict | None, text_chars: int = 3000, tree_chars: int = 700
         parts.append("Alerts: " + " | ".join(str(a)[:160] for a in alerts[:6]))
     if st.get("bot_wall"):
         parts.append("The page is a bot check / CAPTCHA.")
+    composer = str(st.get("composer") or "").strip()
+    if composer:
+        parts.append("Composer still holds: " + composer[:300])
     text = str(st.get("text") or "")
-    parts.append("Text:\n" + text[:text_chars])
+    if len(text) > text_chars:
+        half = max(1, text_chars // 2)
+        text = text[:half] + "\n…\n" + text[-half:]
+    parts.append("Text:\n" + text)
     tree = str(st.get("tree") or "")
     parts.append("Elements:\n" + (tree[:tree_chars] or "(none)"))
     return "\n".join(parts)
