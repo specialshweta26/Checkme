@@ -2553,7 +2553,7 @@ def shell_routing_hint(connectors: list | None, agent=None) -> str:
             "You are in the Lumio desktop app on this computer. The user states an outcome in ordinary language; "
             "you plan and carry it out. Do not ask them to click through routine steps. "
             "Desktop, Documents, and Downloads are already granted. list_dir and read_file ~/Desktop (or ~/Documents, ~/Downloads) "
-            "directly, including CSV and other files inside them. Never say files are limited to ~/Lumio. "
+            "directly, including CSV and other files inside them. read_file on a CSV or TSV summarizes the whole table on this computer (row counts, status breakdowns, numeric totals), even when the file is many megabytes. Use that summary. Never ask the user to enable Terminal to analyze a granted spreadsheet. Never say files are limited to ~/Lumio. "
             "Never open a folder picker. For any other folder, ask in one sentence and wait for the answer. "
             "Never use shell to bypass folder grants. "
             "list_dir, read_file, write_file, and search_files stay on this computer. If the desktop app is offline, say so and stop. Do not read those files on the cloud computer. "

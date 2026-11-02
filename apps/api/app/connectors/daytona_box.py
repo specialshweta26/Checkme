@@ -61,6 +61,13 @@ def live_screen_png(user_id: str | None = None) -> bytes:
     return _LIVE_PNG.get(str(user_id or _SCREEN_USER.get() or "default"), b"")
 
 
+def forget_screen(user_id: str | None = None) -> None:
+    """Drop a stale browser picture so a teaching session does not inherit it."""
+    user_key = str(user_id or _SCREEN_USER.get() or "default")
+    _LIVE_PNG.pop(user_key, None)
+    _LIVE_AT.pop(user_key, None)
+
+
 def live_screen_agent(user_id: str | None = None) -> str:
     return _LIVE_AGENT.get(str(user_id or _SCREEN_USER.get() or "default"), "")
 

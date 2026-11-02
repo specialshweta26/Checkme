@@ -14,6 +14,7 @@ static TEACH: OnceLock<Mutex<Vec<Value>>> = OnceLock::new();
 static MOUSE: OnceLock<Mutex<(i32, i32)>> = OnceLock::new();
 static TITLE: OnceLock<Mutex<String>> = OnceLock::new();
 static LISTENING: AtomicBool = AtomicBool::new(false);
+static TEACHING: AtomicBool = AtomicBool::new(false);
 
 fn teach_buf() -> &'static Mutex<Vec<Value>> {
     TEACH.get_or_init(|| Mutex::new(Vec::new()))
@@ -83,7 +84,18 @@ pub fn start_input_listen() {
     });
 }
 
-fn cached_title() -> String {
+pub fn set_teaching(on: bool) {
+    TEACHING.store(on, Ordering::SeqCst);
+    if on {
+        start_input_listen();
+    }
+}
+
+pub fn teaching() -> bool {
+    TEACHING.load(Ordering::SeqCst)
+}
+
+pub fn cached_title() -> String {
     TITLE
         .get_or_init(|| Mutex::new(String::new()))
         .lock()
@@ -472,7 +484,7 @@ pub async fn boot() -> Result<Value, String> {
         "url": "",
         "title": "This computer",
         "folders": crate::grants::snapshot().folders,
-        "note": "Desktop, Documents, and Downloads are granted. Use list_dir on ~/Desktop. Do not say access is limited to ~/Lumio. Teaching records clicks without mirroring the screen.",
+        "note": "Desktop, Documents, and Downloads are granted. Use list_dir on ~/Desktop. Do not say access is limited to ~/Lumio. Teaching records this computer's own apps and does not open a page.",
     }))
 }
 

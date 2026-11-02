@@ -83,6 +83,12 @@ async def test_stop_after_restart_recovers_the_saved_draft(skill_store, quiet, m
     assert any("server restarted" in n for n in row["notes"])
 
 
+def test_writer_does_not_invent_a_homepage():
+    text = service.SKILL_WRITER.lower()
+    assert "do not invent steps" in text
+    assert "do not substitute a browser homepage" in text
+
+
 async def test_writer_puts_json_in_the_input(monkeypatch):
     seen = {}
 

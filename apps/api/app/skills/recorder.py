@@ -2,9 +2,10 @@
 
 On the website the live desktop is an E2B noVNC stream: clicks go to the sandbox X server, so capture
 runs inside the sandbox (``xinput test-xi2 --root``). On the Lumio desktop app the live screen is the
-user's real desktop (Finder, files, apps, browser): the sidecar captures the OS display, listens for
-mouse/keys, and posts click/key/scroll events to ``POST /api/desktop/teach-events``. Screenshots come
-from the local PNG cache. Chrome listeners are an extra source when a website is open.
+user's real desktop (Finder, files, apps, browser): the sidecar listens for mouse/keys, posts
+click/key/scroll events to ``POST /api/desktop/teach-events``, and while teaching uploads screenshots
+of this computer. A picture left over from an earlier browser page is discarded at the start.
+Chrome listeners are an extra source only when that browser is already open.
 
 The API also keeps key frames (changed screenshots) and records rail typing / agent tools via
 ``service.record_computer_step``. Every event carries ``t``: seconds since the teaching session started.
@@ -279,6 +280,7 @@ async def _using_local(rec: Recorder) -> bool:
 
 
 async def _snapshot_cached(rec: Recorder) -> None:
+    """Desktop frames only. An empty cache means we are waiting for this computer, not an old page."""
     from app.connectors.daytona_box import live_screen_png
 
     png = live_screen_png(rec.user_key)

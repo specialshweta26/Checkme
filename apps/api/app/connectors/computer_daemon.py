@@ -15,7 +15,7 @@ from pathlib import Path
 
 HOST = "127.0.0.1"
 PORT = 18765
-VERSION = "21"
+VERSION = "22"
 _HOME = Path(os.environ.get("CHECKME_BROWSER_HOME") or "/tmp")
 SHOT = "/tmp/checkme-browser.png"
 PROFILE = str(_HOME / "profile")
@@ -30,7 +30,6 @@ CONFIG_PATH = "/tmp/checkme_browser_config.json"
 FRESH_MARK = str(_HOME / "profile" / ".checkme-created")
 VIEW_W = 1280
 VIEW_H = 800
-GOOGLE_HOME = "https://www.google.com/"
 READY_HTML = (
     "<!doctype html><html><head><meta charset='utf-8'><title>Computer</title>"
     "<style>"
@@ -1572,17 +1571,16 @@ def _needs_desktop(page) -> bool:
 
 
 def _paint_desktop(page):
+    """An empty tab stays the idle desktop. Do not open a homepage; teaching must record the user's own work."""
     try:
-        page.goto(GOOGLE_HOME, wait_until="domcontentloaded", timeout=25000)
-        page.wait_for_timeout(250)
-        _dump(page)
-        return
-    except Exception:
         page.set_content(READY_HTML, wait_until="domcontentloaded", timeout=10000)
         page.wait_for_timeout(150)
         Path(LAST).write_text(
             json.dumps({"url": "about:blank", "title": "Computer", "viewport": {"width": VIEW_W, "height": VIEW_H}})
         )
+        _dump(page)
+    except Exception:
+        return
 
 
 def browser_headed() -> bool:
@@ -1721,11 +1719,11 @@ def _ensure_page():
     headed = browser_headed()
     version = "" if headed else _browser_version(_pw, CONFIG)
     opts = launch_options(headed, CONFIG, version)
+    if "channel" not in opts:
+        opts["channel"] = "chrome"
     try:
         _browser_context = _pw.chromium.launch_persistent_context(PROFILE, **opts)
     except Exception:
-        if "channel" not in opts:
-            raise
         opts.pop("channel", None)  # Google Chrome not installed: the bundled Chromium still works
         _browser_context = _pw.chromium.launch_persistent_context(PROFILE, **opts)
     harden_context(_browser_context)

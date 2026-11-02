@@ -8,7 +8,8 @@ use std::time::Duration;
 use base64::Engine;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::webview::NewWindowResponse;
+use tauri::{Manager, Url, WebviewUrl, WebviewWindowBuilder};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::sync::Mutex;
@@ -19,6 +20,7 @@ mod os;
 
 const STDOUT_LIMIT: usize = 200_000;
 const FILE_TEXT_LIMIT: usize = 80_000;
+const TABLE_MAX: u64 = 64 * 1024 * 1024;
 const PUBLISH_LIMIT: usize = 8 * 1024 * 1024;
 
 struct Sidecar {
@@ -26,6 +28,34 @@ struct Sidecar {
     api_base: Mutex<Option<String>>,
     chrome: Mutex<Option<browser::Chrome>>,
     started: AtomicBool,
+}
+
+fn app_host() -> String {
+    Url::parse(&lumio_url())
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+        .unwrap_or_default()
+}
+
+fn stays_in_lumio(url: &Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return true;
+    };
+    host == app_host() || host == "localhost" || host == "127.0.0.1"
+}
+
+fn open_in_browser(url: &str) {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg(url).spawn();
+    }
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("cmd").args(["/C", "start", "", url]).spawn();
+    }
 }
 
 fn lumio_url() -> String {
@@ -104,8 +134,16 @@ fn run_read_file(args: &Value) -> Value {
     }
 }
 
+fn is_table(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|ext| ext.to_str()).map(|ext| ext.to_ascii_lowercase()).as_deref(),
+        Some("csv" | "tsv")
+    )
+}
+
 fn read_granted(file: &Path) -> Value {
-    let max = grants::max_read_bytes();
+    let table = is_table(file);
+    let max = if table { TABLE_MAX } else { grants::max_read_bytes() };
     let bytes = match fs::metadata(file) {
         Ok(meta) if meta.len() > max => {
             return json!({
@@ -114,11 +152,18 @@ fn read_granted(file: &Path) -> Value {
                 "ran_on": "local_computer"
             });
         }
-        Ok(_) => fs::read(file).map_err(|err| err.to_string()),
+        Ok(_) => match fs::read(file) {
+            Ok(bytes) => Ok(bytes),
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied || err.raw_os_error() == Some(1) => {
+                os::finder_read(file, max)
+            }
+            Err(err) => Err(err.to_string()),
+        },
         Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied || err.raw_os_error() == Some(1) => os::finder_read(file, max),
         Err(err) => Err(err.to_string()),
     };
     match bytes {
+        Ok(bytes) if table => table_report(file, &bytes),
         Ok(bytes) => json!({
             "ok": true,
             "path": file.to_string_lossy(),
@@ -128,6 +173,174 @@ fn read_granted(file: &Path) -> Value {
         }),
         Err(err) => json!({ "ok": false, "error": err, "ran_on": "local_computer" }),
     }
+}
+
+fn table_report(file: &Path, bytes: &[u8]) -> Value {
+    let text = String::from_utf8_lossy(bytes);
+    let text = text.trim_start_matches('\u{feff}');
+    let delim = if file.extension().and_then(|ext| ext.to_str()).unwrap_or("").eq_ignore_ascii_case("tsv") { '\t' } else { ',' };
+    let summary = summarize_table(text, delim);
+    json!({
+        "ok": true,
+        "path": file.to_string_lossy(),
+        "bytes": bytes.len(),
+        "summarized": true,
+        "summary": summary,
+        "note": "This table was summarized on this computer, including files too large to paste into chat. Use summary for row counts, status breakdowns, and numeric totals. Do not ask the user to enable Terminal.",
+        "ran_on": "local_computer"
+    })
+}
+
+fn summarize_table(text: &str, delim: char) -> Value {
+    let mut rows = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    for ch in text.chars() {
+        if ch == '"' {
+            in_quotes = !in_quotes;
+            current.push(ch);
+        } else if ch == '\n' && !in_quotes {
+            if !current.trim().is_empty() {
+                rows.push(std::mem::take(&mut current));
+            } else {
+                current.clear();
+            }
+        } else if ch != '\r' {
+            current.push(ch);
+        }
+        if rows.len() >= 400_000 {
+            break;
+        }
+    }
+    if !current.trim().is_empty() && rows.len() < 400_000 {
+        rows.push(current);
+    }
+    if rows.is_empty() {
+        return json!({ "rows": 0, "columns": [] });
+    }
+    let header = split_delimited(&rows[0], delim);
+    let mut cols: Vec<ColStat> = header.iter().map(|name| ColStat::new(name.clone())).collect();
+    let mut samples = Vec::new();
+    let data_rows = &rows[1..];
+    for (i, row) in data_rows.iter().enumerate() {
+        let cells = split_delimited(row, delim);
+        if i < 3 {
+            let mut obj = serde_json::Map::new();
+            for (idx, name) in header.iter().enumerate() {
+                obj.insert(name.clone(), json!(cells.get(idx).map(|c| clip(c.clone(), 80)).unwrap_or_default()));
+            }
+            samples.push(Value::Object(obj));
+        }
+        for (idx, col) in cols.iter_mut().enumerate() {
+            col.add(cells.get(idx).map(String::as_str).unwrap_or(""));
+        }
+    }
+    json!({
+        "rows": data_rows.len(),
+        "truncated": rows.len() >= 400_000,
+        "columns": cols.iter().map(ColStat::to_json).collect::<Vec<_>>(),
+        "sample_rows": samples,
+    })
+}
+
+struct ColStat {
+    name: String,
+    empty: u64,
+    filled: u64,
+    numeric_n: u64,
+    sum: f64,
+    min: f64,
+    max: f64,
+    counts: std::collections::BTreeMap<String, u64>,
+    too_many: bool,
+}
+
+impl ColStat {
+    fn new(name: String) -> Self {
+        Self {
+            name,
+            empty: 0,
+            filled: 0,
+            numeric_n: 0,
+            sum: 0.0,
+            min: f64::MAX,
+            max: f64::MIN,
+            counts: std::collections::BTreeMap::new(),
+            too_many: false,
+        }
+    }
+
+    fn add(&mut self, raw: &str) {
+        let value = raw.trim();
+        if value.is_empty() {
+            self.empty += 1;
+            return;
+        }
+        self.filled += 1;
+        if let Some(n) = parse_number(value) {
+            self.numeric_n += 1;
+            self.sum += n;
+            self.min = self.min.min(n);
+            self.max = self.max.max(n);
+        }
+        if self.too_many {
+            return;
+        }
+        if self.counts.len() >= 40 && !self.counts.contains_key(value) {
+            self.too_many = true;
+            self.counts.clear();
+            return;
+        }
+        *self.counts.entry(value.to_string()).or_insert(0) += 1;
+    }
+
+    fn to_json(&self) -> Value {
+        let mut row = json!({
+            "name": self.name,
+            "filled": self.filled,
+            "empty": self.empty,
+        });
+        if self.numeric_n > 0 && self.numeric_n * 2 >= self.filled {
+            row["numeric"] = json!({
+                "count": self.numeric_n,
+                "sum": self.sum,
+                "min": self.min,
+                "max": self.max,
+            });
+        }
+        if !self.too_many && !self.counts.is_empty() {
+            let mut pairs: Vec<_> = self.counts.iter().collect();
+            pairs.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+            row["breakdown"] = json!(pairs.into_iter().take(20).map(|(k, v)| json!({ "value": k, "count": v })).collect::<Vec<_>>());
+        }
+        row
+    }
+}
+
+fn parse_number(raw: &str) -> Option<f64> {
+    let cleaned: String = raw.chars().filter(|ch| *ch != ',' && *ch != '₹' && *ch != '$' && !ch.is_whitespace()).collect();
+    if cleaned.is_empty() || cleaned.chars().any(|ch| !(ch.is_ascii_digit() || ch == '.' || ch == '-' || ch == '+')) {
+        return None;
+    }
+    cleaned.parse().ok()
+}
+
+fn split_delimited(line: &str, delim: char) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quotes = false;
+    for ch in line.chars() {
+        if ch == '"' {
+            quotes = !quotes;
+        } else if ch == delim && !quotes {
+            out.push(cur.trim().trim_matches('"').to_string());
+            cur.clear();
+        } else {
+            cur.push(ch);
+        }
+    }
+    out.push(cur.trim().trim_matches('"').to_string());
+    out
 }
 
 fn run_write_file(args: &Value) -> Value {
@@ -427,7 +640,7 @@ async fn run_code(code: &str, timeout_s: u64) -> Value {
         return json!({
             "ok": false,
             "need": "terminal_grant",
-            "error": "Python execution is off until the user enables Terminal in This computer settings.",
+            "error": "Full Python is off. Read a CSV or TSV with read_file: this computer summarizes row counts, status breakdowns, and numeric totals without Terminal.",
             "ran_on": "local_computer",
         });
     }
@@ -549,10 +762,16 @@ async fn run_job(tool: &str, args: &Value, chrome: &Mutex<Option<browser::Chrome
         "publish_file" => run_publish_file(args),
         "open_path" => run_open_path(args),
         "launch_app" => run_launch_app(args),
-        "boot" => match os::boot().await {
-            Ok(v) => v,
-            Err(err) => json!({ "ok": false, "error": err, "ran_on": "local_computer" }),
-        },
+        "boot" => {
+            // Missing `teach` means an older server: recording starts with boot so a teaching
+            // session still captures this computer instead of a leftover browser page.
+            let on = args.get("teach").and_then(Value::as_bool).unwrap_or(true);
+            os::set_teaching(on);
+            match os::boot().await {
+                Ok(v) => v,
+                Err(err) => json!({ "ok": false, "error": err, "ran_on": "local_computer" }),
+            }
+        }
         "status" | "touch" | "screen_png" | "computer_observe" => match os::snapshot().await {
             Ok(v) => v,
             Err(err) => json!({ "ok": false, "error": err, "ran_on": "local_computer" }),
@@ -720,6 +939,8 @@ async fn screenshot_loop(state: Arc<Sidecar>) {
         Ok(c) => c,
         Err(_) => return,
     };
+    let mut last_shot = tokio::time::Instant::now() - Duration::from_secs(30);
+    let mut last_window = String::new();
     loop {
         tokio::time::sleep(Duration::from_millis(400)).await;
         let (token, api_base) = {
@@ -735,12 +956,35 @@ async fn screenshot_loop(state: Arc<Sidecar>) {
                 events.extend(c.drain_teach().await);
             }
         }
+        if os::teaching() {
+            let title = os::cached_title();
+            if !title.is_empty() && title != "This computer" && title != last_window {
+                events.push(json!({ "kind": "window", "window": &title }));
+                last_window = title.clone();
+            }
+            if last_shot.elapsed() >= Duration::from_secs(6) {
+                last_shot = tokio::time::Instant::now();
+                let shot = tokio::time::timeout(
+                    Duration::from_secs(8),
+                    tokio::task::spawn_blocking(os::screenshot_b64),
+                )
+                .await;
+                if let Ok(Ok(Ok(png))) = shot {
+                    let _ = client
+                        .post(format!("{api_base}/api/desktop/screen"))
+                        .header("X-Lumio-Agent", &token)
+                        .json(&json!({ "png_b64": png, "url": "", "title": title }))
+                        .send()
+                        .await;
+                }
+            }
+        } else {
+            last_window.clear();
+        }
         if events.is_empty() {
             continue;
         }
-        let title = tokio::task::spawn_blocking(os::front_title)
-            .await
-            .unwrap_or_else(|_| "This computer".into());
+        let title = os::cached_title();
         let _ = client
             .post(format!("{api_base}/api/desktop/teach-events"))
             .header("X-Lumio-Agent", &token)
@@ -777,6 +1021,20 @@ pub fn run() {
                 .inner_size(1280.0, 840.0)
                 .min_inner_size(900.0, 600.0)
                 .initialization_script(include_str!("inject.js"))
+                .on_navigation(|url| {
+                    if stays_in_lumio(url) {
+                        true
+                    } else {
+                        open_in_browser(url.as_str());
+                        false
+                    }
+                })
+                .on_new_window(|url, _features| {
+                    if !stays_in_lumio(&url) {
+                        open_in_browser(url.as_str());
+                    }
+                    NewWindowResponse::Deny
+                })
                 .build()?;
             Ok(())
         })

@@ -3,6 +3,11 @@
 import { Fragment, useState, type ReactNode } from "react";
 import { DataTable, textNodes } from "./DataTable";
 
+function openLink(event: { preventDefault: () => void }, href: string) {
+  event.preventDefault();
+  window.open(href, "_blank", "noopener,noreferrer");
+}
+
 function inline(text: string): ReactNode[] {
   const parts = text.split(/(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`|!\[[^\]]*\]\([^)]+\)|\[[^\]]+\]\([^)]+\)|https?:\/\/[^\s<>]+)/g);
   return parts.map((part, i) => {
@@ -13,10 +18,11 @@ function inline(text: string): ReactNode[] {
     if (image) {
       return <img key={i} src={image[2]} alt={image[1]} />;
     }
-    const link = part.match(/^\[([^\]]+)\]\((https?:[^)]+)\)$/);
+    const link = part.match(/^\[([^\]]+)\]\((https?:\/\/.+)\)$/);
     if (link) {
+      const href = link[2].replace(/[.,;:!?]+$/, "");
       return (
-        <a key={i} href={link[2]} target="_blank" rel="noreferrer">
+        <a key={i} href={href} target="_blank" rel="noreferrer" onClick={(event) => openLink(event, href)}>
           {link[1]}
         </a>
       );
@@ -24,7 +30,7 @@ function inline(text: string): ReactNode[] {
     if (/^https?:\/\//.test(part)) {
       const href = part.replace(/[.,;:!?)]+$/, "");
       return (
-        <a key={i} href={href} target="_blank" rel="noreferrer">
+        <a key={i} href={href} target="_blank" rel="noreferrer" onClick={(event) => openLink(event, href)}>
           {part}
         </a>
       );

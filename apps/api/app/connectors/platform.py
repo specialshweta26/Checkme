@@ -104,7 +104,7 @@ LOCAL_COMPUTER_TOOLS = [
     ),
     ToolSpec(
         name="read_file",
-        description="Read a UTF-8 file on this computer. Desktop, Documents, and Downloads are already allowed, including CSV files inside them. Never falls back to the cloud computer.",
+        description="Read a file on this computer. Desktop, Documents, and Downloads are already allowed. CSV and TSV files are summarized here (counts, breakdowns, totals) even when they are too large to paste into chat. Never falls back to the cloud computer. Does not require Terminal.",
         input_schema={"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
         group="computer",
         tags=("computer", "files", "local"),
