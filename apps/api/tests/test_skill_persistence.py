@@ -56,6 +56,26 @@ async def test_stop_returns_immediately_and_falls_back_when_the_writer_fails(ski
     assert row["name"] == "Workflow: Login"  # renamed from the default
 
 
+async def test_open_page_is_kept_when_nothing_else_was_captured(skill_store, quiet, monkeypatch):
+    async def stop(key):
+        return {"events": [], "frames": [], "notes": []}
+
+    async def offline(*a, **k):
+        raise RuntimeError("offline")
+
+    monkeypatch.setattr(recorder, "stop", stop)
+    monkeypatch.setattr(recorder, "peek", lambda key: {"events": [], "frames": [], "notes": []})
+    monkeypatch.setattr(service, "_write_skill", offline)
+    started = await service.start_teaching(USER, None, page_url="https://www.myntra.com/", page_title="Myntra")
+    out = await service.stop_teaching(None, USER, "")
+    await skill_store.settle()
+    row = skill_store.rows[started["skill_id"]]
+    assert out["id"] == started["skill_id"]
+    assert row["status"] == "ready"
+    assert any(step.get("kind") == "navigate" and "myntra.com" in step.get("url", "") for step in row["steps"])
+    assert "myntra.com" in row["instruction"]
+
+
 async def test_empty_recording_is_not_kept(skill_store, quiet, monkeypatch):
     async def stop(key):
         return {"events": [], "frames": [], "notes": []}

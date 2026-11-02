@@ -326,8 +326,12 @@ export function isLumioDesktop() {
 
 export type TeachStart = { ok?: boolean; teaching?: boolean; max_seconds?: number; elapsed?: number; audio_optional?: boolean; skill_id?: string | null };
 
-export async function startTeaching(agentId?: string) {
-  return agentAction("/api/skills/teach/start", "POST", { agent_id: agentId }) as Promise<TeachStart>;
+export async function startTeaching(agentId?: string, page?: { url?: string; title?: string }) {
+  return agentAction("/api/skills/teach/start", "POST", {
+    agent_id: agentId,
+    page_url: page?.url || "",
+    page_title: page?.title || "",
+  }) as Promise<TeachStart>;
 }
 
 export async function stopTeaching(name?: string) {

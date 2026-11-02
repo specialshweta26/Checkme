@@ -411,17 +411,30 @@ def mask_secrets(timeline: list[dict]) -> list[dict]:
 # --- Teaching ----------------------------------------------------------------------------------------------
 
 
+def _note_open_page(row: dict, url: str, title: str = "") -> None:
+    """The page already on screen is part of the demonstration."""
+    page = (url or "").strip()
+    if not page.startswith(("http://", "https://")):
+        return
+    steps = row.setdefault("steps", [])
+    if any(s.get("kind") == "navigate" and s.get("url") == page for s in steps):
+        return
+    steps.append({
+        "t": round(_elapsed(row), 2),
+        "kind": "navigate",
+        "url": page[:400],
+        "window": (title or "").strip()[:200],
+        "source": "screen",
+    })
+
+
 def _arm_local_teach(user_id, on: bool) -> None:
-    """On the desktop app, record this Mac and drop any leftover browser picture. Never opens a page."""
+    """On the desktop app, record this Mac. Keep the page already on screen. Never opens a page."""
     try:
         from app.desktop.client import prefer_local
 
         if not prefer_local():
             return
-        if on:
-            from app.connectors.daytona_box import forget_screen
-
-            forget_screen(str(user_id))
         from app.desktop.agent import call_local
 
         asyncio.create_task(call_local(user_id, "boot", {"teach": on}))
@@ -429,7 +442,7 @@ def _arm_local_teach(user_id, on: bool) -> None:
         log.info("teach: local arm skipped user=%s on=%s: %s", user_id, on, type(exc).__name__)
 
 
-async def start_teaching(user: User, agent_id: uuid.UUID | None = None, name: str = "") -> dict:
+async def start_teaching(user: User, agent_id: uuid.UUID | None = None, name: str = "", page_url: str = "", page_title: str = "") -> dict:
     """Record a demonstration on the computer for up to ``teach_limit()`` seconds.
 
     The skill is created immediately (status "recording") and filled in as the user works: steps, narration
@@ -457,6 +470,16 @@ async def start_teaching(user: User, agent_id: uuid.UUID | None = None, name: st
         "flushed": {},
     }
     _TEACH[key] = row
+    if not (page_url or "").strip():
+        try:
+            from app.connectors.daytona_box import live_page
+
+            known = live_page(str(user.id))
+            page_url = known.get("url") or ""
+            page_title = page_title or known.get("title") or ""
+        except Exception:  # noqa: BLE001
+            pass
+    _note_open_page(row, page_url, page_title)
     try:
         row["skill_id"] = await _store_create(user.id, agent_id, chosen or DEFAULT_NAME, auto_named=not chosen)
     except Exception as exc:  # noqa: BLE001 - keep recording in memory; the skill is created at stop

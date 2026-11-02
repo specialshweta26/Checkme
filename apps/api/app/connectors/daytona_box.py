@@ -20,6 +20,7 @@ log = logging.getLogger(__name__)
 _LIVE_PNG: dict[str, bytes] = {}
 _LIVE_AT: dict[str, float] = {}
 _LIVE_AGENT: dict[str, str] = {}
+_LIVE_PAGE: dict[str, dict[str, str]] = {}
 _COMPUTER_BUSY: dict[str, str] = {}
 _COMPUTER_AGENT: ContextVar[tuple[str, str]] = ContextVar("computer_agent", default=("", ""))
 _SCREEN_USER: ContextVar[str] = ContextVar("computer_screen_user", default="")
@@ -59,6 +60,19 @@ def remember_screen(raw: bytes, user_id: str | None = None) -> None:
 
 def live_screen_png(user_id: str | None = None) -> bytes:
     return _LIVE_PNG.get(str(user_id or _SCREEN_USER.get() or "default"), b"")
+
+
+def remember_page(user_id: str | None, url: str = "", title: str = "") -> None:
+    """The page the desktop computer is actually on, so teaching can save it."""
+    page = (url or "").strip()
+    if not page.startswith(("http://", "https://")):
+        return
+    key = str(user_id or _SCREEN_USER.get() or "default")
+    _LIVE_PAGE[key] = {"url": page[:400], "title": (title or "").strip()[:200]}
+
+
+def live_page(user_id: str | None = None) -> dict[str, str]:
+    return dict(_LIVE_PAGE.get(str(user_id or _SCREEN_USER.get() or "default"), {}))
 
 
 def forget_screen(user_id: str | None = None) -> None:
