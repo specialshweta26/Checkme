@@ -51,6 +51,7 @@ LOCAL_TOOLS = {
     "computer_control",
     "open_path",
     "launch_app",
+    "app_discover",
     "list_grants",
     "list_folder_grants",
     "grant_folder",

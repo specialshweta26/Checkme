@@ -762,6 +762,7 @@ async fn run_job(tool: &str, args: &Value, chrome: &Mutex<Option<browser::Chrome
         "publish_file" => run_publish_file(args),
         "open_path" => run_open_path(args),
         "launch_app" => run_launch_app(args),
+        "app_discover" => os::discover_apps(),
         "boot" => {
             // Missing `teach` means an older server: recording starts with boot so a teaching
             // session still captures this computer instead of a leftover browser page.

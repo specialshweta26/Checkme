@@ -295,6 +295,8 @@ def describe_tool(name: str, args: dict | None, connector_names: dict[str, str] 
         return f"Opening {_clip(a.get('path'), 50)}"
     if n == "launch_app":
         return f"Opening {_clip(a.get('name'), 30)} on the computer"
+    if n == "computer_use":
+        return f"Checking this computer: {_clip(a.get('action') or a.get('target'), 40)}"
     if n == "render_plot":
         return f"Drawing a chart: {_clip(a.get('title'), 50)}"
     if n == "generate_image":

@@ -116,6 +116,36 @@ function useLiveScreen(active: boolean) {
   return { url, error };
 }
 
+function useComputerTask(active: boolean) {
+  const [task, setTask] = useState<{ status: string; front: string; active: string; steps: { action: string; target?: string; status: string }[] }>({
+    status: "idle",
+    front: "",
+    active: "",
+    steps: [],
+  });
+  useEffect(() => {
+    if (!active) return;
+    let stop = false;
+    const tick = async () => {
+      try {
+        const res = await fetch("/api/desktop/computer-task", { credentials: "include", cache: "no-store" });
+        if (!res.ok || stop) return;
+        const data = await res.json();
+        if (!stop && data && typeof data === "object") setTask(data);
+      } catch {
+        /* the panel still shows the screen */
+      }
+    };
+    void tick();
+    const timer = window.setInterval(tick, 2000);
+    return () => {
+      stop = true;
+      window.clearInterval(timer);
+    };
+  }, [active]);
+  return task;
+}
+
 export function computerFromMeta(meta: any): ComputerSession | null {
   const given = meta?.computer && typeof meta.computer === "object" ? meta.computer : {};
   const views = Array.isArray(meta?.browser) ? meta.browser : [];
@@ -329,6 +359,15 @@ export function ScreenRail({
   const streaming = Boolean(stream.view) && machine === "running";
   const localDesktop = provider === "local" || isLumioDesktop();
   const recordingMac = teaching && (localDesktop || isLumioDesktop());
+  const computerTask = useComputerTask(true);
+  async function setComputerTask(op: "pause" | "resume" | "stop") {
+    await fetch("/api/desktop/computer-task", {
+      method: "POST",
+      credentials: "include",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ op }),
+    }).catch(() => undefined);
+  }
   const interactive = controlling && !recordingMac;
   const framesSupported = provider !== "" && provider !== "e2b" && provider !== "none";
   const liveScreen = useLiveScreen(liveActive && !streaming && framesSupported && !recordingMac);
@@ -715,6 +754,35 @@ export function ScreenRail({
         ) : null}
         </div>
       </div>
+      {computerTask.status !== "idle" ? (
+        <div className="screen-caption">
+          <p>
+            {computerTask.front ? `Active: ${computerTask.front}. ` : ""}
+            {computerTask.active ? `Last step: ${computerTask.active}. ` : ""}
+            Status: {computerTask.status}.
+          </p>
+          {computerTask.steps.slice(-4).map((step, index) => (
+            <p key={`${step.action}-${index}`}>
+              {step.status}: {step.action}
+              {step.target ? ` ${step.target}` : ""}
+            </p>
+          ))}
+          <p>
+            {computerTask.status === "paused" ? (
+              <button type="button" className="screen-control-btn" onClick={() => void setComputerTask("resume")}>
+                Resume
+              </button>
+            ) : (
+              <button type="button" className="screen-control-btn" onClick={() => void setComputerTask("pause")}>
+                Pause
+              </button>
+            )}{" "}
+            <button type="button" className="screen-control-btn" onClick={() => void setComputerTask("stop")}>
+              Stop
+            </button>
+          </p>
+        </div>
+      ) : null}
       {recordingMac ? (
         <p className="screen-caption">
           Recording this Mac, not the panel. Leave Lumio and do the task in the app you actually use — Excel, Word, Finder, Mail, a browser, or anything else. Lumio writes down each app you open and the document or sheet you work in. Come back and tap Stop & save skill.
