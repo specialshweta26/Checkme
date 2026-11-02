@@ -25,6 +25,7 @@ hostname = "0.4"
 base64 = "0.22"
 enigo = "=0.1.3"
 rdev = "0.5"
+rfd = "0.15"
 
 [profile.release]
 panic = "abort"

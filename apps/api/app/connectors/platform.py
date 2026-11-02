@@ -53,8 +53,30 @@ PLATFORM["github_app"] = PLATFORM[GITHUB_PROVIDER]
 
 LOCAL_COMPUTER_TOOLS = [
     ToolSpec(
+        name="list_grants",
+        description="List folders this computer has granted Lumio, and whether terminal access is on.",
+        input_schema={"type": "object", "properties": {}},
+        group="computer",
+        tags=("computer", "files", "local"),
+    ),
+    ToolSpec(
+        name="grant_folder",
+        description="Open a native folder picker on this computer so the user can grant Lumio access. Optional path is a starting directory hint.",
+        input_schema={"type": "object", "properties": {"path": {"type": "string"}}},
+        group="computer",
+        read_only=False,
+        tags=("computer", "files", "local"),
+    ),
+    ToolSpec(
+        name="search_files",
+        description="Search file names inside granted folders on this computer.",
+        input_schema={"type": "object", "properties": {"query": {"type": "string"}, "path": {"type": "string"}}},
+        group="computer",
+        tags=("computer", "files", "local"),
+    ),
+    ToolSpec(
         name="exec",
-        description="Run a shell command on this computer (Lumio desktop app, jailed to ~/Lumio).",
+        description="Run a shell command on this computer. Disabled unless the user enabled Terminal in This computer settings. Do not use this to read files.",
         input_schema={
             "type": "object",
             "properties": {
@@ -70,7 +92,7 @@ LOCAL_COMPUTER_TOOLS = [
     ),
     ToolSpec(
         name="run_code",
-        description="Run a Python snippet on this computer (jailed to ~/Lumio).",
+        description="Run a Python snippet on this computer. Disabled unless the user enabled Terminal.",
         input_schema={
             "type": "object",
             "properties": {"code": {"type": "string"}, "timeout": {"type": "integer"}},
@@ -82,17 +104,21 @@ LOCAL_COMPUTER_TOOLS = [
     ),
     ToolSpec(
         name="read_file",
-        description="Read a UTF-8 file from this computer (under the user's home folder).",
+        description="Read a UTF-8 file inside a folder the user granted to Lumio.",
         input_schema={"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
         group="computer",
         tags=("computer", "files", "local"),
     ),
     ToolSpec(
         name="write_file",
-        description="Write a UTF-8 file under ~/Lumio.",
+        description="Write a UTF-8 file inside a granted folder. If the file exists, set overwrite=true only after the user confirms.",
         input_schema={
             "type": "object",
-            "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+            "properties": {
+                "path": {"type": "string"},
+                "content": {"type": "string"},
+                "overwrite": {"type": "boolean"},
+            },
             "required": ["path", "content"],
         },
         group="computer",
@@ -100,15 +126,51 @@ LOCAL_COMPUTER_TOOLS = [
         tags=("computer", "files", "local"),
     ),
     ToolSpec(
+        name="copy_file",
+        description="Copy a file inside granted folders. overwrite=true only after the user confirms.",
+        input_schema={
+            "type": "object",
+            "properties": {"src": {"type": "string"}, "dest": {"type": "string"}, "overwrite": {"type": "boolean"}},
+            "required": ["src", "dest"],
+        },
+        group="computer",
+        read_only=False,
+        tags=("computer", "files", "local"),
+    ),
+    ToolSpec(
+        name="move_file",
+        description="Move or rename a file inside granted folders. overwrite=true only after the user confirms.",
+        input_schema={
+            "type": "object",
+            "properties": {"src": {"type": "string"}, "dest": {"type": "string"}, "overwrite": {"type": "boolean"}},
+            "required": ["src", "dest"],
+        },
+        group="computer",
+        read_only=False,
+        tags=("computer", "files", "local"),
+    ),
+    ToolSpec(
+        name="delete_file",
+        description="Delete a file or folder inside a grant. Requires confirm=true after the user agrees.",
+        input_schema={
+            "type": "object",
+            "properties": {"path": {"type": "string"}, "confirm": {"type": "boolean"}},
+            "required": ["path"],
+        },
+        group="computer",
+        read_only=False,
+        tags=("computer", "files", "local"),
+    ),
+    ToolSpec(
         name="list_dir",
-        description="List files on this computer (under the user's home folder).",
+        description="List files inside a granted folder. With no path, lists the grants themselves.",
         input_schema={"type": "object", "properties": {"path": {"type": "string"}}},
         group="computer",
         tags=("computer", "files", "local"),
     ),
     ToolSpec(
         name="publish_file",
-        description="Copy a file from this computer into a chat download link.",
+        description="Copy a granted local file into a chat download. Ask the user first — this uploads file bytes.",
         input_schema={
             "type": "object",
             "properties": {"path": {"type": "string"}, "filename": {"type": "string"}},

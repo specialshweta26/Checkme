@@ -235,6 +235,24 @@ async def test_desktop_files_use_laptop(monkeypatch, as_desktop):
     assert out["ran_on"] == "local_computer"
 
 
+async def test_desktop_grant_folder_stays_local(monkeypatch, as_desktop):
+    calls = []
+
+    async def fake(slug, tool, args):
+        calls.append((slug, tool))
+        return {"ok": False, "need": "folder_grant", "path": args.get("path"), "ran_on": "local_computer"}
+
+    async def online(_uid):
+        return True
+
+    monkeypatch.setattr("app.desktop.agent.is_online", online)
+    ctx = _ctx([_computer(), _local()], fake)
+    out = await computer_harness.run_computer(ctx, "grant_folder", {"path": "/Users/me/Downloads"})
+    assert calls == [("laptop", "grant_folder")]
+    assert out["need"] == "folder_grant"
+    assert out["ran_on"] == "local_computer"
+
+
 async def test_desktop_open_path_uses_laptop(monkeypatch, as_desktop):
     calls = []
 

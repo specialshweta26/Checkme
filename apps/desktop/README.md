@@ -3,7 +3,7 @@
 Wraps the Lumio website in a Tauri 2 window and runs a sidecar on this machine.
 
 - **Website:** always the cloud computer (E2B).
-- **This app:** shell, files, `run_code`, Chrome, live screen, and teaching run here (jailed to `~/Lumio`). Shell/files fall back to E2B if the sidecar is offline. Browser, boot, and teaching never open E2B from this app.
+- **This app:** files inside user-granted folders, Lumio's own Chrome profile, live screen, and teaching on this computer. Terminal is off unless enabled. Shell/files fall back to E2B if the sidecar is offline. Browser, boot, and teaching never open E2B from this app.
 
 The sidecar polls `/api/desktop/jobs` (outbound), so it works behind NAT. Sign in inside the window; pairing is automatic.
 
@@ -34,10 +34,10 @@ Same codebase. Build on the OS you want the installer for (Tauri does not cross-
 LUMIO_URL=https://checkme-web-kw68.onrender.com npm run build
 ```
 
-Artifacts land in `src-tauri/target/release/bundle/`. Shell uses `bash` on Mac and `cmd.exe` on Windows; files stay under `~/Lumio` (or `%USERPROFILE%\Lumio` on Windows).
+Artifacts land in `src-tauri/target/release/bundle/`. File tools stay inside granted folders. Terminal uses `bash` on Mac and `cmd.exe` on Windows only when the user has enabled it.
 
 macOS Gatekeeper treats a browser-downloaded unsigned app as damaged. Install with `curl -fsSL <site>/install-mac.sh | bash`, or after copying to Applications run `xattr -cr /Applications/Lumio.app`.
 
-## Jail
+## Folder grants
 
-Reads and writes stay under `~/Lumio` (created on first run). Shell starts in that folder. Do not put secrets you would not want an agent to see in `~/Lumio`.
+There is no automatic home-folder or `~/Lumio` jail. The user grants folders with the native picker (**This computer** in the app, or the agent calls `grant_folder`). List, search, read, write, copy, move, and delete run only inside those folders. Terminal and Python stay off until enabled in settings. The Lumio browser uses a separate profile under the app data directory; it does not read Chrome/Edge/Safari profiles.

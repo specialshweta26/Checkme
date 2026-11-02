@@ -1,8 +1,8 @@
 """First-class computer/browser/file verbs. They wrap this user's computer.
 
-The website always uses the cloud computer (E2B Desktop, or Daytona). The Lumio desktop app runs shell, files,
-the browser, and teaching on this machine. Shell/files fall back to E2B if the sidecar is offline; browser,
-boot, live screen, and teaching never open E2B from the desktop app.
+The website always uses the cloud computer (E2B Desktop, or Daytona). The Lumio desktop app runs files,
+the browser, and teaching on this machine inside user-granted folders. Shell/files fall back to E2B if the sidecar
+is offline; browser, boot, live screen, and teaching never open E2B from the desktop app.
 Toolchain installs stay on the cloud computer. See docs/COMPUTER.md."""
 
 from __future__ import annotations
@@ -133,6 +133,14 @@ def _stay_on_this_computer(tool_name: str) -> bool:
         "screen_png",
         "open_path",
         "launch_app",
+        "grant_folder",
+        "list_grants",
+        "list_folder_grants",
+        "search_files",
+        "copy_file",
+        "move_file",
+        "rename_file",
+        "delete_file",
     }
 
 

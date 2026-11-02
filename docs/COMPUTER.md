@@ -1,20 +1,22 @@
 # The cloud computer: shell, toolchain and template
 
 Every agent has a cloud computer: an E2B Desktop sandbox per user (or Daytona when configured, see LLD §7.2).
-The website always uses that cloud computer. The Lumio desktop app (Mac/Windows, `apps/desktop`) runs shell, files,
-the browser, and teaching on this machine (Chrome window + `~/Lumio`). Shell/files fall back to E2B if the sidecar is
-offline; browser, live screen, boot, and teaching never open E2B from the desktop app.
+The website always uses that cloud computer. The Lumio desktop app (Mac/Windows, `apps/desktop`) runs files, the
+browser, and teaching on this machine. File tools only work inside folders the user granted (native picker; review/revoke
+in **This computer**). Terminal and `run_code` stay off unless the user enables them. Shell/files fall back to E2B if
+the sidecar is offline; browser, live screen, boot, and teaching never open E2B from the desktop app.
 
 ## Routing
 
 | Tool | Who has it | Website | Desktop app (sidecar online) |
 | --- | --- | --- | --- |
-| `shell` | every agent | cloud computer | this computer (`~/Lumio`); E2B if the sidecar is offline |
+| `shell` | every agent | cloud computer | this computer only if Terminal is enabled; else `need: terminal_grant`. E2B if sidecar offline |
 | `sandbox_shell` | coding agents | cloud computer | cloud computer (toolchain wrapping) |
 | `ensure_toolchain(tools)` | every agent | cloud computer | cloud computer |
-| files / `run_code` | every agent | cloud computer | this computer; E2B if offline |
-| browser / live screen | every agent | cloud computer | Chrome on this computer (never E2B from the desktop app) |
-| teach a skill | every agent | cloud computer (xinput in the sandbox) | Chrome on this computer (sidecar click/key capture) |
+| files | every agent | cloud computer | granted folders on this computer; E2B if sidecar offline |
+| `run_code` | every agent | cloud computer | same as shell (Terminal grant) |
+| browser / live screen | every agent | cloud computer | Lumio Chrome profile on this computer (never the user's Chrome profile; never E2B from the desktop app) |
+| teach a skill | every agent | cloud computer (xinput in the sandbox) | this computer (OS clicks + Lumio browser) |
 | `user_computer_shell` | only when a local computer is paired | the user's machine (approval required) | same machine with extra confirmation |
 
 - The website never uses the laptop, even if the desktop app is paired and online (`X-Lumio-Client` is `web` unless the
@@ -31,7 +33,14 @@ offline; browser, live screen, boot, and teaching never open E2B from the deskto
 
 The Tauri app wraps the Lumio web UI and runs a sidecar that polls `/api/desktop/jobs` (outbound, works behind NAT).
 Pairing (`POST /api/desktop/pair`) creates a `laptop` connector (`trusted_local`). Jobs are queued in Redis; the sidecar
-executes them under `~/Lumio` and posts results. See `apps/desktop/README.md`.
+enforces folder grants on every path (canonicalize; deny `..` / symlink / reparse escape). See `apps/desktop/README.md`.
+
+### Security gaps still open
+
+- Pairing token lives in the connector row, not the OS credential store; one `laptop` row per user (devices can clobber).
+- Screenshots and `publish_file` still send bytes to the API; the agent must ask before `publish_file`.
+- OS-wide `computer_act` is not yet limited to an app allowlist.
+- PowerPoint generation, durable task replay, and signed/notarized Mac builds are not in this slice.
 - Turns like "install vercel cli", "install all requirements", "npm i", "pip install -r requirements.txt", and "run the
   tests" are classified as `computer` turns (`fast_path._SHELL`), so they skip the quick-web hint.
 

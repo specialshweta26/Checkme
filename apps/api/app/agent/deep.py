@@ -2550,14 +2550,19 @@ def shell_routing_hint(connectors: list | None, agent=None) -> str:
     local = any(getattr(c, "provider", "") in LOCAL_PROVIDERS for c in (connectors or []))
     if prefer_local() and local:
         text = (
-            "You are in the Lumio desktop app. shell, files, run_code, open_path, computer_act, and the live "
-            "screen are the user's real desktop (Finder/Explorer, files, apps). Browser tools still open Chrome "
-            "when a website is needed. "
-            "If the desktop agent is offline they fall back to the cloud computer. "
+            "You are in the Lumio desktop app on this computer. The user states an outcome in ordinary language; "
+            "you plan and carry it out. Do not ask them to click through routine steps. "
+            "Files only work inside folders they granted (list_grants). If a path is not granted, call grant_folder "
+            "so the native picker opens, then continue. Never use shell to bypass folder grants. "
+            "Terminal/run_code stay off unless they enabled Terminal in This computer settings. "
+            "Ask before overwrite, delete, bulk changes, sending forms, purchasing, or publishing. "
+            "Ask before publish_file (that uploads local bytes into chat). "
+            "Browser tools use Lumio's own Chrome profile on this computer, not the user's Chrome/Edge/Safari. "
+            "Never ask for a password in chat; hand the site to the user (browser_handoff) for sign-in, MFA, or CAPTCHA. "
+            "Verify outputs exist (read or open_path) before saying a file was saved. "
+            "If the desktop agent is offline, shell/files may fall back to the cloud computer; browser, boot, and teaching never do. "
             "Toolchain installs (ensure_toolchain) stay on the cloud computer. "
             "Never tell the user to install something unless they asked. "
-            "user_computer_shell is the same machine with an extra confirmation; use it when the user wants an "
-            "explicit approval before a command. "
         )
     else:
         text = (

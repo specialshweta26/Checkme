@@ -39,10 +39,7 @@ fn chrome_candidates() -> Vec<PathBuf> {
 }
 
 fn profile_dir() -> PathBuf {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    let dir = home.join("Lumio").join("chrome-profile");
-    let _ = std::fs::create_dir_all(&dir);
-    dir
+    crate::grants::browser_profile_dir()
 }
 
 async fn wait_debug(http: &reqwest::Client, port: u16) -> Result<(), String> {
@@ -61,7 +58,8 @@ pub async fn launch() -> Result<Chrome, String> {
         .timeout(Duration::from_secs(20))
         .build()
         .map_err(|e| e.to_string())?;
-    let port = 9222u16;
+    // Dedicated port + Lumio profile. Never attach to 9222 (that is often the user's own Chrome).
+    let port = 9333u16;
     if wait_debug(&http, port).await.is_ok() {
         return Ok(Chrome { _child: None, port, http });
     }
