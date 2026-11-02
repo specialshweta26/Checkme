@@ -148,6 +148,16 @@ def describe(ev: dict) -> str:
         return f"scrolled {ev.get('direction', 'down')} ×{ev.get('amount', 1)}"
     if kind == "window":
         return f"focused window “{ev.get('window', '')}”"
+    if kind == "navigate":
+        title = f" “{ev['window']}”" if ev.get("window") else ""
+        return f"opened {ev.get('url', '')}{title}"
+    if kind == "folder":
+        return f"opened folder {ev.get('path', '')}"
+    if kind == "file":
+        action = ev.get("action") or "changed"
+        if action == "renamed" and ev.get("text"):
+            return f"renamed {ev.get('text')} to {ev.get('path', '')}"
+        return f"{action} {ev.get('path', '')}"
     if kind == "tool":
         return f"agent tool {ev.get('tool')} {str(ev.get('args') or '')[:160]}"
     if kind == "input":

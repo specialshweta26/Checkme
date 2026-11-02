@@ -15,6 +15,7 @@ static MOUSE: OnceLock<Mutex<(i32, i32)>> = OnceLock::new();
 static TITLE: OnceLock<Mutex<String>> = OnceLock::new();
 static LISTENING: AtomicBool = AtomicBool::new(false);
 static TEACHING: AtomicBool = AtomicBool::new(false);
+static WATCHING: AtomicBool = AtomicBool::new(false);
 
 fn teach_buf() -> &'static Mutex<Vec<Value>> {
     TEACH.get_or_init(|| Mutex::new(Vec::new()))
@@ -93,6 +94,7 @@ pub fn set_teaching(on: bool) {
     TEACHING.store(on, Ordering::SeqCst);
     if on {
         start_input_listen();
+        start_activity_watch();
     }
 }
 
@@ -131,6 +133,231 @@ fn map_key(key: rdev::Key) -> Option<Value> {
             None
         }
     }
+}
+
+fn run_osascript_fast(script: &str, args: &[&str]) -> Result<String, String> {
+    use std::io::Write;
+    use std::process::Stdio;
+    use std::sync::mpsc;
+    let mut cmd = Command::new("osascript");
+    cmd.arg("-");
+    for arg in args {
+        cmd.arg(arg);
+    }
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| err.to_string())?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(script.as_bytes());
+    }
+    let pid = child.id();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+    let output = match rx.recv_timeout(Duration::from_secs(2)) {
+        Ok(Ok(output)) => output,
+        _ => {
+            let _ = Command::new("kill").arg(pid.to_string()).status();
+            return Err("timed out".into());
+        }
+    };
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn browser_app(name: &str) -> Option<&'static str> {
+    match name.to_ascii_lowercase().as_str() {
+        "google chrome" | "chrome" => Some("Google Chrome"),
+        "chromium" => Some("Chromium"),
+        "microsoft edge" | "edge" => Some("Microsoft Edge"),
+        "brave browser" | "brave" => Some("Brave Browser"),
+        "arc" => Some("Arc"),
+        "safari" => Some("Safari"),
+        _ => None,
+    }
+}
+
+fn front_browser(app: &str) -> Option<(String, String)> {
+    let script = if app == "Safari" {
+        "tell application \"Safari\"\n  if (count of windows) is 0 then return \"\"\n  set u to URL of current tab of front window\n  set t to name of current tab of front window\n  return u & linefeed & t\nend tell".to_string()
+    } else {
+        format!(
+            "tell application \"{app}\"\n  if (count of windows) is 0 then return \"\"\n  set u to URL of active tab of front window\n  set t to title of active tab of front window\n  return u & linefeed & t\nend tell"
+        )
+    };
+    let out = run_osascript_fast(&script, &[]).ok()?;
+    let mut lines = out.lines();
+    let url = lines.next().unwrap_or("").trim();
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return None;
+    }
+    let title = lines.next().unwrap_or("").trim();
+    Some((url.to_string(), if title.is_empty() { app.to_string() } else { title.to_string() }))
+}
+
+fn front_finder_folder() -> Option<String> {
+    let script = r#"tell application "Finder"
+  if (count of Finder windows) is 0 then return ""
+  POSIX path of (target of front Finder window as alias)
+end tell"#;
+    let path = run_osascript_fast(script, &[]).ok()?;
+    let path = path.trim().trim_end_matches('/').to_string();
+    if path.starts_with('/') { Some(path) } else { None }
+}
+
+fn watch_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        for name in ["Desktop", "Documents", "Downloads"] {
+            let path = home.join(name);
+            if path.is_dir() {
+                roots.push(path);
+            }
+        }
+    }
+    roots
+}
+
+fn list_tree(root: &Path, depth: u8, into: &mut std::collections::BTreeSet<String>) {
+    if depth > 5 || into.len() > 4000 {
+        return;
+    }
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for entry in entries.flatten() {
+            if into.len() > 4000 {
+                return;
+            }
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with('.') {
+                continue;
+            }
+            let path = entry.path();
+            let text = path.to_string_lossy().to_string();
+            if path.is_dir() {
+                into.insert(format!("{text}/"));
+                list_tree(&path, depth + 1, into);
+            } else {
+                into.insert(text);
+            }
+        }
+        return;
+    }
+    let script = r#"on run argv
+  set rootPath to item 1 of argv
+  do shell script "find " & quoted form of rootPath & " -maxdepth 5 \\( -type f -o -type d \\) ! -name '.*' 2>/dev/null"
+end run"#;
+    let Ok(out) = run_osascript_fast(script, &[&root.to_string_lossy()]) else { return };
+    for line in out.lines() {
+        if into.len() > 4000 {
+            return;
+        }
+        let line = line.trim();
+        if line.is_empty() || line == root.to_string_lossy() {
+            continue;
+        }
+        into.insert(line.to_string());
+    }
+}
+
+fn snapshot_files(extra: Option<&Path>) -> std::collections::BTreeSet<String> {
+    let mut files = std::collections::BTreeSet::new();
+    let mut roots = watch_roots();
+    if let Some(extra) = extra {
+        if extra.is_dir() && !roots.iter().any(|root| extra.starts_with(root)) {
+            roots.push(extra.to_path_buf());
+        }
+    }
+    for root in roots {
+        list_tree(&root, 0, &mut files);
+    }
+    files
+}
+
+fn emit_file_changes(before: &std::collections::BTreeSet<String>, after: &std::collections::BTreeSet<String>) {
+    let created: Vec<&String> = after.difference(before).collect();
+    let deleted: Vec<&String> = before.difference(after).collect();
+    let mut used_created = vec![false; created.len()];
+    for gone in &deleted {
+        let gone_name = Path::new(gone.trim_end_matches('/')).file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if let Some(idx) = created.iter().enumerate().position(|(idx, path)| {
+            !used_created[idx]
+                && !gone_name.is_empty()
+                && Path::new(path.trim_end_matches('/')).file_name().and_then(|n| n.to_str()) == Some(gone_name)
+        }) {
+            if !used_created[idx] {
+                used_created[idx] = true;
+                push_event(json!({
+                    "kind": "file",
+                    "action": "renamed",
+                    "path": created[idx],
+                    "text": gone,
+                }));
+                continue;
+            }
+        }
+        push_event(json!({ "kind": "file", "action": "deleted", "path": gone }));
+    }
+    for (idx, path) in created.iter().enumerate() {
+        if used_created[idx] {
+            continue;
+        }
+        push_event(json!({ "kind": "file", "action": "created", "path": path }));
+    }
+}
+
+fn start_activity_watch() {
+    if WATCHING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    std::thread::spawn(|| {
+        let mut files = std::collections::BTreeSet::new();
+        let mut last_url = String::new();
+        let mut last_folder = String::new();
+        let mut was_teaching = false;
+        loop {
+            let on = teaching();
+            if on && !was_teaching {
+                files = snapshot_files(None);
+                last_url.clear();
+                last_folder.clear();
+            }
+            was_teaching = on;
+            if on {
+                let app = cached_title();
+                if let Some(browser) = browser_app(&app) {
+                    if let Some((url, title)) = front_browser(browser) {
+                        if url != last_url {
+                            last_url = url.clone();
+                            push_event(json!({
+                                "kind": "navigate",
+                                "url": url,
+                                "window": title,
+                                "text": browser,
+                            }));
+                        }
+                    }
+                }
+                let folder = if app.eq_ignore_ascii_case("finder") { front_finder_folder() } else { None };
+                if let Some(path) = folder.clone() {
+                    if path != last_folder {
+                        last_folder = path.clone();
+                        push_event(json!({ "kind": "folder", "path": path, "window": "Finder" }));
+                    }
+                }
+                let now = snapshot_files(folder.as_deref().map(Path::new));
+                emit_file_changes(&files, &now);
+                files = now;
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    });
 }
 
 pub fn drain_teach() -> Vec<Value> {

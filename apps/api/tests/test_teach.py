@@ -181,6 +181,25 @@ def test_segments_and_alignment():
     assert "[00:15] typed “BLR”" in text
 
 
+def test_browser_folder_and_file_actions_are_kept():
+    raw = "\n".join(
+        [
+            json.dumps({"kind": "navigate", "t": 1, "url": "https://www.myntra.com/", "window": "Myntra", "text": "Google Chrome"}),
+            json.dumps({"kind": "folder", "t": 2, "path": "/Users/me/Desktop", "window": "Finder"}),
+            json.dumps({"kind": "file", "t": 3, "action": "created", "path": "/Users/me/Desktop/orders.csv"}),
+            json.dumps({"kind": "file", "t": 4, "action": "deleted", "path": "/Users/me/Desktop/old.csv"}),
+        ]
+    )
+    events, notes = recorder.parse_capture(raw, 0.0)
+    assert notes == []
+    assert [ev["kind"] for ev in events] == ["navigate", "folder", "file", "file"]
+    text = narration.timeline_text(events)
+    assert "opened https://www.myntra.com/" in text
+    assert "opened folder /Users/me/Desktop" in text
+    assert "created /Users/me/Desktop/orders.csv" in text
+    assert "deleted /Users/me/Desktop/old.csv" in text
+
+
 def test_unavailable_input_is_a_note_and_the_app_switch_is_kept():
     raw = "\n".join(
         [
