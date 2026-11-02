@@ -9,12 +9,13 @@ import queue
 import random
 import re
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 HOST = "127.0.0.1"
 PORT = 18765
-VERSION = "20"
+VERSION = "21"
 _HOME = Path(os.environ.get("CHECKME_BROWSER_HOME") or "/tmp")
 SHOT = "/tmp/checkme-browser.png"
 PROFILE = str(_HOME / "profile")
@@ -296,21 +297,50 @@ def _dismiss_consent(page) -> str:
                             page.wait_for_load_state("domcontentloaded", timeout=8000)
                         except Exception:
                             pass
-                        page.wait_for_timeout(600)
+                        if smart_waits():
+                            wait_ready(page, "click")
+                        else:
+                            page.wait_for_timeout(600)
                         return label or "consent"
                 except Exception:
                     continue
     return ""
 
 
+# Ready after DOM quiet: plenty of text, or a visible form field (short sign-in / OTP / search pages never grow).
+_READY_JS = """() => {
+  const n = (document.body && document.body.innerText || '').length;
+  if (n >= 180) return true;
+  for (const el of document.querySelectorAll('input:not([type=hidden]), textarea, select, [contenteditable="true"]')) {
+    const r = el.getBoundingClientRect();
+    if (r.width > 0 && r.height > 0) return true;
+  }
+  return false;
+}"""
+
+
+def _has_fields(data: dict) -> bool:
+    roles = {"textbox", "searchbox", "combobox", "checkbox", "radio", "file"}
+    return any(isinstance(e, dict) and str(e.get("role") or "") in roles for e in data.get("elements") or [])
+
+
 def _wait_content(page, max_ms: int = 8000) -> None:
     """Wait until the page's text stops growing (JS apps, maps and listings render after DOMContentLoaded)."""
     if max_ms <= 0:
         return
-    try:
-        page.wait_for_load_state("networkidle", timeout=min(4000, max_ms))
-    except Exception:
-        pass
+    if smart_waits():
+        try:
+            page.evaluate(_QUIET_JS, [300, min(3000, max_ms)])
+            # Enough text, or a short page that is a form (sign-in, OTP, search): it is ready once the DOM is quiet.
+            if page.evaluate(_READY_JS):
+                return
+        except Exception:
+            pass
+    else:
+        try:
+            page.wait_for_load_state("networkidle", timeout=min(4000, max_ms))
+        except Exception:
+            pass
     last, stable, waited = -1, 0, 0
     while waited < max_ms:
         try:
@@ -481,8 +511,12 @@ _SNAPSHOT_JS = """(start) => {
   return ordered.slice(0, 150).map((el, i) => {
     const ref = 'e' + (origin + i);
     try { el.setAttribute('data-checkme-ref', ref); } catch (e) {}
-    const name = (el.getAttribute('aria-label') || el.innerText || el.getAttribute('placeholder') || el.value || el.getAttribute('title') || el.getAttribute('name') || '').replace(/\\s+/g, ' ').trim().slice(0, 80);
+    const secretField = el.tagName === 'INPUT' && (el.getAttribute('type') || '').toLowerCase() === 'password';
+    const name = (el.getAttribute('aria-label') || el.innerText || el.getAttribute('placeholder') || (secretField ? '' : el.value) || el.getAttribute('title') || el.getAttribute('name') || '').replace(/\\s+/g, ' ').trim().slice(0, 80);
     const r = el.getBoundingClientRect();
+    const attr = (k) => (el.getAttribute(k) || '').slice(0, 120);
+    let label = '';
+    try { if (el.labels && el.labels.length) label = (el.labels[0].innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 80); } catch (e) {}
     const role = (el.getAttribute('role') || (el.tagName === 'INPUT' && inputRole[(el.getAttribute('type') || '').toLowerCase()]) || tags[el.tagName] || el.tagName.toLowerCase());
     return {
       ref, role, name,
@@ -491,6 +525,14 @@ _SNAPSHOT_JS = """(start) => {
       input_type: el.getAttribute('type') || '',
       in_view: inView(el),
       overlay: suggest.includes(el),
+      id: attr('id'),
+      name_attr: attr('name'),
+      placeholder: attr('placeholder'),
+      aria_label: attr('aria-label'),
+      testid: attr('data-testid') || attr('data-test') || attr('data-qa') || attr('data-cy'),
+      label,
+      autocomplete: attr('autocomplete'),
+      download: el.hasAttribute('download') ? (attr('download') || '1') : '',
       x: Math.round(r.x + r.width / 2),
       y: Math.round(r.y + r.height / 2),
     };
@@ -576,7 +618,7 @@ def _snapshot(page):
     _elements = nodes
     _elements_url = page.url
     _tab_refs[id(page)] = (_elements, _elements_url)
-    tree = "\n".join(f"- {n.get('ref')} {n.get('role')} {n.get('name') or ''}".strip() for n in _elements)
+    tree = "\n".join(tree_line(n) for n in _elements)
     data = _dump(page)
     data["tree"] = tree
     data["elements"] = _elements
@@ -696,24 +738,364 @@ def _page_facts(page) -> dict:
     return row if isinstance(row, dict) else {}
 
 
-def _act_page(page, actions: list):
+# Fast browser (docs/BROWSING.md "Fast browser"): event-based waits, stable targets, verified replay, direct
+# downloads and a DOM recorder for teach mode. Every piece falls back to the older behaviour on any error.
+def smart_waits() -> bool:
+    return bool(CONFIG.get("smart_waits", True))
+
+
+def direct_downloads() -> bool:
+    return bool(CONFIG.get("direct_downloads", True))
+
+
+# Resolves once the DOM has had no mutations for ``quiet`` ms (or after ``cap`` ms): replaces fixed sleeps.
+_QUIET_JS = """([quiet, cap]) => new Promise((resolve) => {
+  let timer = null, done = false, obs = null;
+  const finish = () => { if (done) return; done = true; try { obs && obs.disconnect(); } catch (e) {} resolve(true); };
+  try {
+    obs = new MutationObserver(() => { clearTimeout(timer); timer = setTimeout(finish, quiet); });
+    obs.observe(document.documentElement || document, {subtree: true, childList: true, attributes: true, characterData: true});
+  } catch (e) { finish(); return; }
+  timer = setTimeout(finish, quiet);
+  setTimeout(finish, cap);
+})"""
+
+# Steps that usually trigger navigation or async UI (menus, validation, XHR) get a longer quiet window.
+_CLICKY = {"click", "dblclick", "double_click", "doubleclick", "press", "key", "select", "select_option", "pick", "check", "uncheck"}
+
+
+def wait_ready(page, kind: str = "", before_url: str | None = None) -> int:
+    """Wait for the page to be ready after a step instead of a fixed pause. Returns the ms waited.
+    DOMContentLoaded when the URL changed, then DOM quiet (no mutations for 150-250 ms, capped)."""
+    started = time.monotonic()
+    clicky = kind in _CLICKY
+    quiet, cap = (250, 2500) if clicky else (80, 900)
+    try:
+        if before_url is not None and str(page.url) != before_url:
+            page.wait_for_load_state("domcontentloaded", timeout=8000)
+    except Exception:
+        pass
+    navigated = False
+    try:
+        page.evaluate(_QUIET_JS, [quiet, cap])
+        navigated = before_url is not None and str(page.url) != before_url
+    except Exception:
+        navigated = True  # the step navigated while we waited (execution context destroyed)
+    if navigated:
+        # Wait for the new document, then for it to settle too.
+        try:
+            page.wait_for_load_state("domcontentloaded", timeout=8000)
+            page.evaluate(_QUIET_JS, [quiet, cap])
+        except Exception:
+            pass
+    return int((time.monotonic() - started) * 1000)
+
+
+def tree_line(node: dict) -> str:
+    """One snapshot line for the model: ref, role, name, plus the input type and a download hint."""
+    parts = [f"- {node.get('ref')} {node.get('role')} {node.get('name') or ''}".strip()]
+    kind = str(node.get("input_type") or "").lower()
+    if kind and kind not in {"text", "submit", "button"}:
+        parts.append(f"[{kind}]")
+    if node.get("download") or (node.get("role") == "link" and looks_like_file_url(str(node.get("href") or ""))):
+        parts.append("[file]")
+    return " ".join(parts)
+
+
+_FILE_EXT = re.compile(
+    r"\.(pdf|csv|xlsx?|docx?|pptx?|zip|gz|tgz|rar|7z|json|xml|txt|ics|png|jpe?g|gif|webp|svg|mp3|mp4|mov|apk|dmg|exe|msi|ofx|qif)(?:$|[?#])",
+    re.I,
+)
+
+
+def looks_like_file_url(url: str) -> bool:
+    text = str(url or "").strip()
+    if not text.lower().startswith(("http://", "https://")):
+        return False
+    path = text.split("://", 1)[1]
+    path = path.split("/", 1)[1] if "/" in path else ""
+    return bool(_FILE_EXT.search("/" + path)) or bool(re.search(r"[?&](download|export|attachment)=", text, re.I))
+
+
+_SECRET_HINT = re.compile(r"pass|pwd|otp|one.?time|cvv|cvc|pin\b|secret|security.?code|card.?number|cc-number|cc-csc", re.I)
+
+
+def is_secret_target(target: dict | None) -> bool:
+    """A field whose value must never be stored or echoed (password, OTP, card security code...)."""
+    t = target or {}
+    if str(t.get("input_type") or "").lower() == "password":
+        return True
+    blob = " ".join(str(t.get(k) or "") for k in ("name_attr", "id", "autocomplete", "label", "placeholder", "aria_label"))
+    return bool(_SECRET_HINT.search(blob))
+
+
+_DESCRIPTOR_KEYS = ("role", "name", "tag", "id", "name_attr", "placeholder", "aria_label", "testid", "label", "input_type", "autocomplete", "href")
+
+
+def descriptor(node: dict | None) -> dict:
+    """Stable, ref-free description of a snapshot element, for replay on a later visit (refs change every load)."""
+    out: dict = {}
+    for key in _DESCRIPTOR_KEYS:
+        value = (node or {}).get(key)
+        if value not in (None, "", False):
+            out[key] = str(value)[:200]
+    return out
+
+
+_GENERATED_ID = re.compile(r"(^:r|\d{4,}|[0-9a-f]{8,}|^ember\d|^react-|^mui-|^radix-|^headlessui-)", re.I)
+
+
+def _css_value(value: str) -> str:
+    return str(value).replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _target_candidates(page, target: dict):
+    """Locator factories for a stored descriptor, most stable first."""
+    t = target or {}
+    tag = str(t.get("tag") or "").lower()
+    role = str(t.get("role") or "")
+    name = str(t.get("name") or "")
+    out = []
+    if t.get("testid"):
+        v = _css_value(t["testid"])
+        out.append(("testid", lambda: page.locator(f'[data-testid="{v}"], [data-test="{v}"], [data-qa="{v}"], [data-cy="{v}"]')))
+    if t.get("id") and not _GENERATED_ID.search(str(t["id"])):
+        v = _css_value(t["id"])
+        out.append(("id", lambda: page.locator(f'[id="{v}"]')))
+    if t.get("name_attr"):
+        v = _css_value(t["name_attr"])
+        sel = f'{tag}[name="{v}"]' if tag in {"input", "select", "textarea", "button"} else f'[name="{v}"]'
+        out.append(("name", lambda: page.locator(sel)))
+    if t.get("aria_label"):
+        v = _css_value(t["aria_label"])
+        out.append(("aria", lambda: page.locator(f'[aria-label="{v}"]')))
+    if t.get("label"):
+        out.append(("label", lambda: page.get_by_label(str(t["label"]), exact=True)))
+    if t.get("placeholder"):
+        out.append(("placeholder", lambda: page.get_by_placeholder(str(t["placeholder"]), exact=True)))
+    if name and role and role not in {"label", "generic", "div", "span", "li"}:
+        out.append(("role", lambda: page.get_by_role(role, name=name, exact=True)))
+    if t.get("href") and tag == "a":
+        v = _css_value(t["href"])
+        out.append(("href", lambda: page.locator(f'a[href="{v}"]')))
+    if name and tag in {"a", "button", "summary", "label", "li", "option"}:
+        out.append(("text", lambda: page.get_by_text(name, exact=True)))
+    return out
+
+
+def locate_target(page, target: dict):
+    """(locator, how) for a stored descriptor: the first strategy matching exactly one element wins; failing that,
+    the first strategy matching any. (None, "") when nothing on the page matches."""
+    loose = None
+    for frame in _frames_of(page):
+        for how, factory in _target_candidates(frame, target):
+            try:
+                loc = factory()
+                n = loc.count()
+            except Exception:
+                continue
+            if n == 1:
+                return loc.first, how
+            if n > 1 and loose is None:
+                loose = (loc.first, how + "*")
+    return loose if loose is not None else (None, "")
+
+
+def _verify_step(page, loc, step: dict, target: dict) -> None:
+    """Replay check after a step: a typed value must have stuck (password fields: only that it is non-empty)."""
+    kind = str(step.get("kind") or "").lower()
+    if kind != "fill" or loc is None:
+        return
+    try:
+        value = loc.input_value(timeout=2000)
+    except Exception:
+        return  # contenteditable or custom widget: nothing to compare
+    want = str(step.get("text") or "")
+    if is_secret_target(target) or step.get("secret"):
+        if want and not value:
+            raise RuntimeError("mismatch: the secret field is still empty")
+        return
+    if want and value.strip() != want.strip():
+        raise RuntimeError("mismatch: the field did not keep the typed value")
+
+
+def _fetch_file(url: str, name_hint: str = "") -> dict:
+    """Fetch a file with the browser's own cookies (no click, no download dialog) and save it to DOWNLOAD_DIR."""
+    if _browser_context is None:
+        raise RuntimeError("no browser context")
+    resp = _browser_context.request.get(url, timeout=60000, max_redirects=10)
+    if not resp.ok:
+        raise RuntimeError(f"HTTP {resp.status}")
+    headers = {str(k).lower(): str(v) for k, v in (resp.headers or {}).items()}
+    ctype = headers.get("content-type", "")
+    disp = headers.get("content-disposition", "")
+    if "text/html" in ctype.lower() and "attachment" not in disp.lower():
+        raise RuntimeError("the link returns a web page, not a file")
+    body = resp.body()
+    if len(body) > 200 * 1024 * 1024:
+        raise RuntimeError("file is larger than 200 MB")
+    name = filename_from_headers(disp) or name_hint or url.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1] or "download"
+    dest = _unique_download(name)
+    dest.write_bytes(body)
+    row = remember_download(str(dest), dest.name, url)
+    return {**row, "bytes": len(body), "content_type": ctype[:80], "via": "direct"}
+
+
+def filename_from_headers(disposition: str) -> str:
+    text = str(disposition or "")
+    m = re.search(r"filename\*\s*=\s*(?:UTF-8|utf-8)''([^;]+)", text)
+    if m:
+        from urllib.parse import unquote
+
+        return unquote(m.group(1).strip().strip('"'))[:180]
+    m = re.search(r'filename\s*=\s*"([^"]+)"', text) or re.search(r"filename\s*=\s*([^;]+)", text)
+    return m.group(1).strip()[:180] if m else ""
+
+
+# DOM recorder for teach mode: selectors instead of screen coordinates. Secret values are never sent.
+_REC_JS = r"""() => {
+  if (window.__checkmeRecOn) return; window.__checkmeRecOn = 1;
+  const BASE = 'a, button, input, textarea, select, option, label, summary, [role="button"], [role="link"], [role="textbox"], [role="searchbox"], [role="checkbox"], [role="radio"], [role="combobox"], [role="option"], [role="tab"], [role="menuitem"], [contenteditable="true"]';
+  const tags = {A: 'link', BUTTON: 'button', INPUT: 'textbox', TEXTAREA: 'textbox', SELECT: 'combobox', OPTION: 'option', LABEL: 'label', SUMMARY: 'button'};
+  const inputRole = {submit: 'button', button: 'button', reset: 'button', image: 'button', checkbox: 'checkbox', radio: 'radio', search: 'searchbox', file: 'file'};
+  const secretRe = /pass|pwd|otp|one.?time|cvv|cvc|pin\b|secret|security.?code|card.?number|cc-number|cc-csc/i;
+  const desc = (el) => {
+    const a = (k) => (el.getAttribute && el.getAttribute(k) || '').slice(0, 120);
+    const type = (a('type') || '').toLowerCase();
+    const secret = type === 'password';
+    let label = '';
+    try { if (el.labels && el.labels.length) label = (el.labels[0].innerText || '').replace(/\s+/g, ' ').trim().slice(0, 80); } catch (e) {}
+    const name = (a('aria-label') || (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' ? '' : el.innerText) || a('placeholder') || a('title') || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+    return {
+      role: a('role') || (el.tagName === 'INPUT' && inputRole[type]) || tags[el.tagName] || (el.tagName || '').toLowerCase(),
+      name: secret ? '' : name, tag: (el.tagName || '').toLowerCase(), id: a('id'), name_attr: a('name'),
+      placeholder: a('placeholder'), aria_label: a('aria-label'), label, input_type: type, autocomplete: a('autocomplete'),
+      testid: a('data-testid') || a('data-test') || a('data-qa') || a('data-cy'), href: el.tagName === 'A' ? (el.href || '') : '',
+    };
+  };
+  const send = (row) => { try { window.__checkmeRecord(Object.assign({url: location.href}, row)); } catch (e) {} };
+  const isField = (el) => el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable);
+  document.addEventListener('click', (e) => {
+    const el = (e.target && e.target.closest) ? (e.target.closest(BASE) || e.target) : e.target;
+    if (!el || (isField(el) && !['checkbox', 'radio', 'submit', 'button', 'image', 'file'].includes((el.getAttribute('type') || '').toLowerCase()) && el.tagName !== 'SELECT')) return;
+    const type = (el.getAttribute && el.getAttribute('type') || '').toLowerCase();
+    if (type === 'checkbox' || type === 'radio' || el.tagName === 'SELECT') return;
+    send({kind: 'click', target: desc(el)});
+  }, true);
+  document.addEventListener('change', (e) => {
+    const el = e.target;
+    if (!isField(el)) return;
+    const t = desc(el);
+    const type = t.input_type;
+    if (type === 'file') return;
+    const secret = type === 'password' || secretRe.test([t.name_attr, t.id, t.autocomplete, t.label, t.placeholder, t.aria_label].join(' '));
+    if (el.tagName === 'SELECT') { send({kind: 'select', target: t, text: String(el.value || '').slice(0, 200)}); return; }
+    if (type === 'checkbox' || type === 'radio') { send({kind: el.checked ? 'check' : 'uncheck', target: t}); return; }
+    const value = el.isContentEditable ? el.innerText : el.value;
+    send({kind: 'fill', target: t, secret, text: secret ? '' : String(value || '').slice(0, 500)});
+  }, true);
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && isField(e.target) && e.target.tagName !== 'TEXTAREA') send({kind: 'press', text: 'Enter', target: desc(e.target)});
+  }, true);
+}"""
+
+_recording = False
+_rec_events: list[dict] = []
+_rec_bound: set = set()
+
+
+def _on_record(source, row) -> None:
+    if not _recording or not isinstance(row, dict) or len(_rec_events) >= 500:
+        return
+    item = {k: row.get(k) for k in ("kind", "target", "text", "secret", "url") if row.get(k) not in (None, "")}
+    if item.get("secret"):
+        item.pop("text", None)
+    item["t"] = round(time.time(), 2)
+    _rec_events.append(item)
+
+
+def _rec_start() -> dict:
+    global _recording
+    page = _ensure_page()
+    ctx = _browser_context
+    if ctx is not None and id(ctx) not in _rec_bound:
+        ctx.expose_binding("__checkmeRecord", _on_record)
+        ctx.add_init_script("(" + _REC_JS + ")()")
+        _rec_bound.add(id(ctx))
+    for tab in list(_tabs.values()) or [page]:
+        try:
+            tab.evaluate(_REC_JS)
+        except Exception:
+            pass
+    _rec_events.clear()
+    _recording = True
+    return {"ok": True, "recording": True, "url": page.url}
+
+
+def _rec_drain(stop: bool = False) -> dict:
+    global _recording
+    try:
+        _ensure_page().evaluate("1")  # lets queued binding calls arrive
+    except Exception:
+        pass
+    events = list(_rec_events)
+    _rec_events.clear()
+    if stop:
+        _recording = False
+    return {"ok": True, "events": events, "recording": _recording}
+
+
+def _step_target(step: dict) -> dict:
+    target = step.get("target")
+    return target if isinstance(target, dict) else {}
+
+
+def _act_page(page, actions: list, verify: bool = False):
+    """Run steps in order; stop at the first failure and return a fresh snapshot. ``verify`` (replay) also checks
+    each step's target was found by its stored descriptor and typed values stuck."""
     completed = 0
     extras: list[dict] = []
+    timings: list[dict] = []
+    trace: list[dict] = []
+    started = time.monotonic()
+    smart = smart_waits()
     try:
         for step in actions:
+            kind = str(step.get("kind") or "").lower()
+            t0 = time.monotonic()
+            before = str(getattr(page, "url", "") or "")
+            ref = str(step.get("ref") or step.get("selector") or "").strip()
+            node = _find(ref) if ref else None
+            if verify and _step_target(step) and kind not in {"press", "key", "scroll", "wait", "reload", "back", "forward"}:
+                loc, how = locate_target(page, _step_target(step))
+                if loc is None:
+                    raise RuntimeError("mismatch: the recorded element is not on this page")
+                step = {**step, "_loc": loc, "_how": how}
             extra = _act_step(page, step)
+            if verify:
+                _verify_step(page, step.get("_loc"), step, _step_target(step))
             if extra:
                 extras.append(extra)
             completed += 1
-            kind = str(step.get("kind") or "").lower()
-            pause = 700 if kind in {"fill", "type", "select", "pick", "select_option", "upload", "download"} else 250
-            page.wait_for_timeout(pause)
+            target = descriptor(node) if node else _step_target(step)
+            trace.append({"i": completed - 1, "kind": kind, "target": target, "secret": is_secret_target(target), **({"how": step["_how"]} if step.get("_how") else {})})
+            act_ms = int((time.monotonic() - t0) * 1000)
+            if smart:
+                wait_ms = wait_ready(page, kind, before)
+            else:
+                pause = 700 if kind in {"fill", "type", "select", "pick", "select_option", "upload", "download"} else 250
+                page.wait_for_timeout(pause)
+                wait_ms = pause
+            timings.append({"kind": kind, "act_ms": act_ms, "wait_ms": wait_ms})
     except Exception as exc:
         _settle(page)
         data = _snapshot(page)
         data["ok"] = False
         data["completed"] = completed
-        data["error"] = f"step {completed + 1} failed: {str(exc)[:400]}"
+        message = str(exc)[:400]
+        data["error"] = f"step {completed + 1} failed: {message}"
+        if message.startswith("mismatch"):
+            data["mismatch"] = True
         data["hint"] = (
             "The page may have changed. Use the refs in this fresh snapshot (tree) and try again. "
             "For a type-ahead list, type into the field, wait, then click the matching option "
@@ -722,11 +1104,15 @@ def _act_page(page, actions: list):
             "Check verified.alerts after a failed fill."
         )
         _merge_extras(data, extras)
+        data["trace"] = trace
+        data["timing"] = {"steps": timings, "total_ms": int((time.monotonic() - started) * 1000)}
         return data
     _settle(page)
     data = _snapshot(page)
     data["completed"] = completed
     _merge_extras(data, extras)
+    data["trace"] = trace
+    data["timing"] = {"steps": timings, "total_ms": int((time.monotonic() - started) * 1000)}
     return data
 
 
@@ -1003,6 +1389,12 @@ def _save_download(download) -> dict:
 
 
 def _click_download(page, loc, node, step: dict) -> dict:
+    href = str(step.get("url") or (node or {}).get("href") or _step_target(step).get("href") or "")
+    if direct_downloads() and href and ((node or {}).get("download") or looks_like_file_url(href) or step.get("direct")):
+        try:
+            return {"download": _fetch_file(href, str((node or {}).get("download") or "") if (node or {}).get("download") not in (None, "", "1") else "")}
+        except Exception:
+            pass  # not a plain file link (needs JS, POST, or a fresh token): click through below
     expect = getattr(page, "expect_download", None)
     if callable(expect):
         try:
@@ -1023,7 +1415,11 @@ def _act_step(page, step: dict) -> dict | None:
     kind = str(step.get("kind") or "").lower()
     ref = str(step.get("ref") or step.get("selector") or "").strip()
     node = _find(ref) if ref else None
-    loc = _locator(page, step, node)
+    loc = step.get("_loc")
+    if loc is None:
+        loc = _locator(page, step, node) if ref else None
+    if loc is None and _step_target(step):
+        loc, _how = locate_target(page, _step_target(step))
     if loc is None and node is not None and page.url != _elements_url:
         # The page changed since the snapshot: its coordinates belong to another page.
         node = None
@@ -1533,7 +1929,10 @@ def _tab_command(command: str, cmd: dict) -> dict:
         url = str(cmd.get("url") or "").strip()
         if url:
             page.goto(url, wait_until="domcontentloaded", timeout=60000)
-            page.wait_for_timeout(int(cmd.get("wait_ms") or 1200))
+            if smart_waits():
+                _wait_content(page, int(cmd.get("wait_ms") or 3000))
+            else:
+                page.wait_for_timeout(int(cmd.get("wait_ms") or 1200))
             return _with_tab(_snapshot(page), tid)
         return {"ok": True, "tab": tid, "active": _active_tab, "tabs": _tab_list()}
     if command == "switch_tab":
@@ -1577,7 +1976,17 @@ def handle(cmd: dict) -> dict:
             return _remote_fetch(cmd)
         if command in TAB_COMMANDS:
             return _tab_command(command, cmd)
-        if command in {"navigate", "goto", "snapshot", "act", "observe", "screenshot", "load_html"}:
+        if command == "fetch_download":
+            url = str(cmd.get("url") or "").strip()
+            if not url.lower().startswith(("http://", "https://")):
+                raise RuntimeError("fetch_download needs an http(s) url")
+            row = _fetch_file(url, str(cmd.get("filename") or ""))
+            return {"ok": True, "download": row, "downloads": [row]}
+        if command == "rec_start":
+            return _rec_start()
+        if command in {"rec_drain", "rec_stop"}:
+            return _rec_drain(stop=command == "rec_stop")
+        if command in {"navigate", "goto", "snapshot", "act", "replay", "observe", "screenshot", "load_html"}:
             tid, page = _page_for(cmd)
             data = _handle_page(command, cmd, page)
             return _with_tab(data, tid) if isinstance(data, dict) else data
@@ -1593,11 +2002,23 @@ def _handle_page(command: str, cmd: dict, page) -> dict:
         try:
             resp = page.goto(cmd["url"], wait_until="domcontentloaded", timeout=int(cmd.get("timeout_ms") or 60000))
             status = resp.status if resp is not None else None
-            page.wait_for_timeout(min(wait, 1500))
+            if smart_waits():
+                wait_ready(page, "click")
+            else:
+                page.wait_for_timeout(min(wait, 1500))
             challenge = wait_out_challenge(page)
             consent = _dismiss_consent(page)
             _wait_content(page, int(cmd.get("settle_ms") if cmd.get("settle_ms") is not None else 8000))
         except Exception as vis_exc:
+            if "download is starting" in str(vis_exc).lower():
+                # The URL is a file: the context's download handler saves it (drained below).
+                drain_browser_events()
+                data = _dump(page)
+                data["downloads"] = list(_downloads[-8:])
+                data["ok"] = bool(_downloads)
+                if not _downloads:
+                    data["error"] = "the URL started a download that did not finish"
+                return annotate_page(data)
             data = _dump(page)
             data["ok"] = False
             data["error"] = str(vis_exc)[:500]
@@ -1607,9 +2028,14 @@ def _handle_page(command: str, cmd: dict, page) -> dict:
         for _ in range(2):
             if data.get("bot_wall") or not page_is_thin(str(data.get("text") or "")):
                 break
+            if smart_waits() and _has_fields(data):
+                break  # a short form page (sign-in, OTP): scrolling will not load more
             try:
                 page.mouse.wheel(0, 900)
-                page.wait_for_timeout(3000)
+                if smart_waits():
+                    _wait_content(page, 3000)
+                else:
+                    page.wait_for_timeout(3000)
             except Exception:
                 break
             data = _snapshot(page)
@@ -1630,13 +2056,18 @@ def _handle_page(command: str, cmd: dict, page) -> dict:
         return _snapshot(page)
     if command == "act":
         return _act_page(page, cmd.get("actions") or [])
+    if command == "replay":
+        return _act_page(page, cmd.get("steps") or cmd.get("actions") or [], verify=True)
     if command in {"observe", "screenshot"}:
         return _dump(page)
     if command == "load_html":
         html = str(cmd.get("html") or "")
         target = str(cmd.get("url") or "about:blank")
         page.set_content(html, wait_until="domcontentloaded", timeout=20000)
-        page.wait_for_timeout(400)
+        if smart_waits():
+            wait_ready(page)
+        else:
+            page.wait_for_timeout(400)
         data = _snapshot(page)
         data["url"] = target
         data["ok"] = True

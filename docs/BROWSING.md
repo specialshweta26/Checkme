@@ -114,6 +114,36 @@ them with the app key and stores them in `browser_profiles` (one row per user, �
 A new computer imports them when its daemon starts. Only cookies: no history, local storage or saved passwords.
 Never shared between users. `BROWSER_PROFILE_PERSIST=0` turns it off. Failures are ignored.
 
+## Fast browser
+
+Why: logins, forms and downloads were slow. Each step was a big model call reading a 150-element JSON list (plus
+screenshot paths), each browser command cost 4–6 sandbox round trips (Playwright import probe, health curl, payload
+upload, curl, screenshot download), and fixed sleeps after every action (and an 8 s settle plus two 3 s scroll
+waits on any short page such as a sign-in form) added seconds. All of the below works the same on web and mobile
+(it is server-side), is generic (no per-site code), and each piece has its own switch and falls back to the old
+behaviour on any error.
+
+| Piece | What it does | Switch |
+| --- | --- | --- |
+| DOM-first output | The model reads the numbered element tree (`- e3 textbox Email [email]`, `[password]`, `[file]`); the raw `elements` list and screenshot fields are dropped from tool output when the tree is present. `computer_observe` / `computer_act` (screenshots, x,y) stay as the fallback. | `BROWSER_COMPACT_SNAPSHOT` |
+| Batched actions | `browser_act` already runs a list of actions and stops at the first failure; the prompt now asks for one batch per step (fill email, fill password, click Sign in). Each result carries `took_ms`. | always |
+| `browser_task` | A small fast model plans a batch of actions per call from the tree, the daemon runs it; after two failed rounds it escalates to the main model, then returns `fallback` with the page so the main agent continues with `browser_act`. Values (email, password, OTP) travel as `{{name}}` placeholders: the planner sees only names, code substitutes them right before typing; results and logs are scrubbed. Never clicks Pay/Buy/Place order/Book/Send/Transfer/Delete unless `allow_final_action`. | `BROWSER_FAST_LOOP`, `BROWSER_FAST_MODEL` (default `OPENAI_MODEL`), `BROWSER_ESCALATE_MODEL` (default `OPENAI_MODEL`), `BROWSER_FAST_MAX_STEPS` (12) |
+| Saved runs + replay | A finished `browser_task` is saved in `browser_traces` (per user and site) as selector steps: test id → stable id → name → aria-label → label → placeholder → role+name → href → text, never refs or coordinates. Secret fields (password, OTP, CVV…) keep only a parameter name. The next same task replays with no model call per step; each step is verified (target found, typed value stuck; secret fields only non-empty) and a mismatch stops and hands the page to the model. `browser_replay(name / url / skill_id, values)` replays explicitly. | `BROWSER_REPLAY` |
+| Teach recordings | While a skill is taught, a DOM recorder in the page browser logs clicks, field edits (never secret values), selects and Enter with the same stable descriptors. On finish they become a replay trace for that skill and its instructions say to call `browser_replay(skill_id=…)` first. Only starts when the page browser is already running. The screen/xinput recording is unchanged. | `BROWSER_TEACH_DOM` |
+| Direct downloads | `browser_download(url or ref)` fetches the file with the browser context's cookies (`context.request`, no click, no dialog); a `download` step on a file-looking link does the same first. HTML answers or errors fall back to clicking and capturing the Playwright download. | `BROWSER_DIRECT_DOWNLOADS` |
+| Warm browser | A turn classified as computer work (§7.7) starts the daemon and restores the saved cookies (`browser_profiles`) in the background while the model plans. After a step that typed into a secret field succeeds, cookies are saved soon (4 s later) so the next session stays signed in. | `BROWSER_PREWARM` (`computer` boots if needed, `warm` only when already running, `off`) |
+| Fewer round trips | A daemon proven healthy for this sandbox, release and settings is trusted for `BROWSER_READY_TTL_S` (600 s): no Playwright import probe or health curl per command (the helper was effectively re-checked on every call). Small payloads go inline in the curl command (one exec instead of upload + exec); the screenshot is cached in the background. Any delivery failure drops the cache entry. | `BROWSER_FAST_RPC`, `BROWSER_READY_TTL_S` |
+| Event waits | After each action: DOMContentLoaded when the URL changed, then DOM quiet (no mutations for 80–250 ms, capped at 0.9–2.5 s), instead of fixed pauses. A page is ready once quiet and it has enough text **or** a visible form field, so sign-in and OTP pages no longer wait the full settle and scroll time. | `BROWSER_SMART_WAITS` |
+| Timing logs | `browser.timing command=… steps=<kinds> ensure_ms rpc_ms total_ms` per command, `browser.task step=… plan_ms act_ms actions ok` per fast-loop round, `browser.replay … ms`. Kinds and times only, never typed values. | `BROWSER_TIMING_LOGS` |
+
+The live screen still follows the active tab: every path drives the same tabs as `browser_act`.
+
+Local measurement (headless Chromium on the dev box, a local sign-in form whose submit waits 150 ms for an API and
+a dashboard that renders 300 ms after load; median of 5, not E2B): navigate to the sign-in page 15.5 s → 0.64 s;
+fill email + password + click Sign in 1.79 s → 0.70 s (and the new page was rendered in the result, it was not
+before); open the dashboard 2.3–3.2 s → 0.65 s; a direct file download 4 ms. Not measured: E2B round trips and
+model latency.
+
 ## Configuration
 
 All optional. Defaults need no new account.
@@ -139,6 +169,17 @@ All optional. Defaults need no new account.
 | `BROWSE_READER_URL` | `https://r.jina.ai/` | Reader step (empty disables) |
 | `JINA_API_KEY` | – | Higher reader rate limit |
 | `BROWSE_STEP_TIMEOUT_S` / `BROWSE_TOTAL_TIMEOUT_S` / `BROWSE_REMOTE_TIMEOUT_S` | `20` / `60` / `60` | Ladder limits |
+| `BROWSER_FAST_RPC` / `BROWSER_READY_TTL_S` | `true` / `600` | Ready cache and inline commands |
+| `BROWSER_SMART_WAITS` | `true` | Event waits instead of fixed sleeps |
+| `BROWSER_COMPACT_SNAPSHOT` | `true` | Element tree only in tool output |
+| `BROWSER_FAST_LOOP` | `true` | `browser_task` tool |
+| `BROWSER_FAST_MODEL` / `BROWSER_ESCALATE_MODEL` | `OPENAI_MODEL` / `OPENAI_MODEL` | Planner model / model after repeated failures |
+| `BROWSER_FAST_MAX_STEPS` | `12` | Planner rounds per `browser_task` |
+| `BROWSER_REPLAY` | `true` | Save and replay runs (`browser_replay`) |
+| `BROWSER_TEACH_DOM` | `true` | DOM recording while teaching a skill |
+| `BROWSER_DIRECT_DOWNLOADS` | `true` | `browser_download` and direct file fetches |
+| `BROWSER_PREWARM` | `computer` | `computer`, `warm` or `off` |
+| `BROWSER_TIMING_LOGS` | `true` | Per-command timing lines |
 
 ## Providers and costs
 

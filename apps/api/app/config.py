@@ -182,6 +182,21 @@ class Settings(BaseSettings):
     browse_total_timeout_s: float = 60.0  # the whole read-only ladder for one URL
     browse_remote_timeout_s: float = 60.0  # one hosted-browser read
 
+    # Fast browser (docs/BROWSING.md "Fast browser"). Each switch falls back to the older path on any error.
+    browser_fast_rpc: bool = True  # cache "daemon ready" per sandbox, send commands inline, live frame off the hot path
+    browser_ready_ttl_s: float = 600.0  # how long a healthy daemon is trusted without a health probe
+    browser_smart_waits: bool = True  # DOM-quiet / load-state waits instead of fixed sleeps in the daemon
+    browser_compact_snapshot: bool = True  # model sees the numbered tree, not the 150-element JSON list
+    browser_fast_loop: bool = True  # browser_task: a small model plans batches of actions, escalates on failure
+    browser_fast_model: str = ""  # model for routine browser steps; empty = OPENAI_MODEL
+    browser_escalate_model: str = ""  # model after repeated failures; empty = OPENAI_MODEL
+    browser_fast_max_steps: int = 12  # model rounds per browser_task
+    browser_replay: bool = True  # save successful browser_task runs and replay them without model calls
+    browser_direct_downloads: bool = True  # fetch file links with the session cookies instead of clicking through
+    browser_teach_dom: bool = True  # teach mode also records selectors (not just screen coordinates)
+    browser_prewarm: str = "computer"  # computer = boot/warm the browser when a turn needs it; warm = only if running; off
+    browser_timing_logs: bool = True  # one log line per browser command and per fast-loop step (no typed values)
+
     # Optional: pin the Composio GitHub auth config used for Connect GitHub (docs/GITHUB.md). Leave empty to use the
     # first enabled GitHub auth config (Composio creates a managed one if none exists).
     composio_github_auth_config_id: str = ""
