@@ -26,6 +26,6 @@
     const role = (el.getAttribute('role') || (el.tagName === 'INPUT' && inputRole[(el.getAttribute('type') || '').toLowerCase()]) || tags[el.tagName] || el.tagName.toLowerCase());
     return { ref, role, name, tag: el.tagName.toLowerCase(), href: el.href || '', in_view: inView(el), x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
   });
-  const tree = elements.map((n) => ('- ' + n.ref + ' ' + n.role + ' ' + (n.name || '')).trim()).join('\n');
+    const tree = elements.map((n) => ('- ' + n.ref + ' ' + n.role + ' ' + (n.name || '') + (n.href ? ' ' + n.href : '')).trim()).join('\n');
   return { url: location.href, title: document.title || '', text: (document.body && document.body.innerText || '').slice(0, 12000), tree, elements };
 })()

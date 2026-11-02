@@ -53,11 +53,22 @@ async fn wait_debug(http: &reqwest::Client, port: u16) -> Result<(), String> {
     Err("Chrome did not open its debug port".into())
 }
 
-pub async fn launch() -> Result<Chrome, String> {
-    let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(20))
-        .build()
-        .map_err(|e| e.to_string())?;
+fn http_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder().timeout(Duration::from_secs(20)).build().map_err(|e| e.to_string())
+}
+
+pub async fn attach() -> Result<Chrome, String> {
+    let http = http_client()?;
+    let port = 9333u16;
+    wait_debug(&http, port).await?;
+    Ok(Chrome { _child: None, port, http })
+}
+
+pub async fn launch(start_url: &str) -> Result<Chrome, String> {
+    if !(start_url.starts_with("https://") || start_url.starts_with("http://")) {
+        return Err("A full https address is required before opening Chrome.".into());
+    }
+    let http = http_client()?;
     // Dedicated port + Lumio profile. Never attach to 9222 (that is often the user's own Chrome).
     let port = 9333u16;
     if wait_debug(&http, port).await.is_ok() {
@@ -68,18 +79,16 @@ pub async fn launch() -> Result<Chrome, String> {
         .next()
         .ok_or_else(|| "Install Google Chrome (or Edge) to use this computer's browser.".to_string())?;
     let mut cmd = Command::new(&bin);
-    cmd.args([
-        &format!("--remote-debugging-port={port}"),
-        &format!("--user-data-dir={}", profile_dir().display()),
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--disable-sync",
-        "--window-size=1280,800",
-        "about:blank",
-    ])
-    .stdout(Stdio::null())
-    .stderr(Stdio::null())
-    .kill_on_drop(false);
+    cmd.arg(format!("--remote-debugging-port={port}"))
+        .arg(format!("--user-data-dir={}", profile_dir().display()))
+        .arg("--no-first-run")
+        .arg("--no-default-browser-check")
+        .arg("--disable-sync")
+        .arg("--window-size=1280,800")
+        .arg(start_url)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(false);
     let child = cmd.spawn().map_err(|e| format!("could not start Chrome: {e}"))?;
     wait_debug(&http, port).await?;
     Ok(Chrome { _child: Some(child), port, http })
@@ -94,20 +103,21 @@ impl Chrome {
 
     async fn page_ws(&self) -> Result<String, String> {
         let pages = self.pages().await?;
-        for page in pages {
-            if page.get("type").and_then(Value::as_str) == Some("page") {
-                if let Some(ws) = page.get("webSocketDebuggerUrl").and_then(Value::as_str) {
-                    return Ok(ws.to_string());
-                }
+        let mut blank = None;
+        for page in &pages {
+            if page.get("type").and_then(Value::as_str) != Some("page") {
+                continue;
+            }
+            let Some(ws) = page.get("webSocketDebuggerUrl").and_then(Value::as_str) else { continue };
+            let url = page.get("url").and_then(Value::as_str).unwrap_or("");
+            if url.starts_with("http://") || url.starts_with("https://") {
+                return Ok(ws.to_string());
+            }
+            if blank.is_none() {
+                blank = Some(ws.to_string());
             }
         }
-        let url = format!("http://127.0.0.1:{}/json/new?about:blank", self.port);
-        let created: Value = self.http.put(&url).send().await.map_err(|e| e.to_string())?.json().await.map_err(|e| e.to_string())?;
-        created
-            .get("webSocketDebuggerUrl")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .ok_or_else(|| "Chrome has no tab".into())
+        blank.ok_or_else(|| "Chrome has no page open. Navigate to an https address first.".to_string())
     }
 
     async fn cdp(&self, method: &str, params: Value) -> Result<Value, String> {
@@ -149,7 +159,10 @@ impl Chrome {
     }
 
     pub async fn navigate(&self, url: &str, wait_ms: u64) -> Result<Value, String> {
-        let target = if url.is_empty() { "about:blank" } else { url };
+        let target = url.trim();
+        if !(target.starts_with("https://") || target.starts_with("http://")) {
+            return Err("A full https address is required. Refusing to open a blank page.".into());
+        }
         self.cdp("Page.enable", json!({})).await.ok();
         self.cdp("Page.navigate", json!({ "url": target })).await?;
         tokio::time::sleep(Duration::from_millis(wait_ms.max(800))).await;

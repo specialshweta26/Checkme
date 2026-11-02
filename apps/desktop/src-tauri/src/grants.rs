@@ -39,7 +39,7 @@ impl AccessError {
                 "ok": false,
                 "need": "folder_grant",
                 "path": path,
-                "error": format!("This folder is not granted. Ask the user to pick it (grant_folder). Path: {path}"),
+                "error": format!("Ask the user in one sentence whether Lumio may use this folder, then wait for their answer. Do not open a dialog. Path: {path}"),
                 "ran_on": "local_computer",
             }),
             AccessError::Io(err) => json!({
@@ -130,6 +130,63 @@ fn new_id() -> String {
     format!("g{t:x}")
 }
 
+pub fn ensure_common_folders() {
+    let Some(home) = dirs::home_dir() else { return };
+    for name in ["Desktop", "Documents", "Downloads"] {
+        let _ = add_folder_loose(&home.join(name));
+    }
+}
+
+fn add_folder_loose(path: &Path) -> Result<FolderGrant, String> {
+    match canonical(path) {
+        Ok(resolved) if resolved.is_dir() => add_folder(&resolved),
+        Ok(_) => Err("not a folder".into()),
+        Err(err) if crate::os::is_denied_message(&err) => store_grant_path(path),
+        Err(err) => Err(err),
+    }
+}
+
+fn store_grant_path(path: &Path) -> Result<FolderGrant, String> {
+    let text = path.to_string_lossy().into_owned();
+    with_grants(|g| {
+        if let Some(existing) = g.folders.iter().find(|f| f.path == text) {
+            return Ok(existing.clone());
+        }
+        let grant = FolderGrant { id: new_id(), path: text };
+        g.folders.push(grant.clone());
+        persist(g)?;
+        Ok(grant)
+    })
+}
+
+fn expand_user_path(raw: &str) -> PathBuf {
+    let t = raw.trim();
+    let Some(home) = dirs::home_dir() else {
+        return PathBuf::from(t);
+    };
+    if t == "~" {
+        return home;
+    }
+    if let Some(rest) = t.strip_prefix("~/").or_else(|| t.strip_prefix("~\\")) {
+        return home.join(rest);
+    }
+    let path = PathBuf::from(t);
+    if path.is_absolute() {
+        return path;
+    }
+    let under_home = home.join(&path);
+    if under_home.exists() {
+        return under_home;
+    }
+    for grant in snapshot().folders {
+        let candidate = PathBuf::from(&grant.path).join(&path);
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    under_home
+}
+
 pub fn add_folder(path: &Path) -> Result<FolderGrant, String> {
     let resolved = canonical(path)?;
     if !resolved.is_dir() {
@@ -169,7 +226,7 @@ pub fn pick_folder(start: Option<&Path>) -> Result<FolderGrant, String> {
         }
     }
     let chosen = dialog.pick_folder().ok_or_else(|| "The folder picker was cancelled.".to_string())?;
-    add_folder(&chosen)
+    add_folder_loose(&chosen)
 }
 
 fn under_grant(resolved: &Path, grants: &Grants) -> bool {
@@ -182,25 +239,47 @@ fn under_grant(resolved: &Path, grants: &Grants) -> bool {
 /// Resolve a user-supplied path that must already exist, inside a granted folder.
 pub fn resolve_existing(raw: &str) -> Result<PathBuf, AccessError> {
     let grants = snapshot();
-    if grants.folders.is_empty() {
-        return Err(AccessError::NeedGrant {
-            path: if raw.trim().is_empty() { "(no folders granted)".into() } else { raw.trim().into() },
-        });
-    }
     if raw.trim().is_empty() {
         return Err(AccessError::NeedGrant {
-            path: grants.folders[0].path.clone(),
+            path: grants.folders.first().map(|f| f.path.clone()).unwrap_or_else(|| "(no folders granted)".into()),
         });
     }
-    let given = PathBuf::from(raw.trim());
-    let resolved = canonical(&given).map_err(AccessError::Io)?;
-    if under_grant(&resolved, &grants) {
-        Ok(resolved)
-    } else {
-        Err(AccessError::NeedGrant {
-            path: resolved.to_string_lossy().into_owned(),
-        })
+    let given = expand_user_path(raw);
+    if grants.folders.is_empty() && !home_protected(&given) {
+        return Err(AccessError::NeedGrant {
+            path: given.to_string_lossy().into_owned(),
+        });
     }
+    match canonical(&given) {
+        Ok(resolved) => {
+            if under_grant(&resolved, &grants) {
+                Ok(resolved)
+            } else {
+                Err(AccessError::NeedGrant {
+                    path: resolved.to_string_lossy().into_owned(),
+                })
+            }
+        }
+        Err(err) if crate::os::is_denied_message(&err) && (under_grant_text(&given, &grants) || home_protected(&given)) => Ok(given),
+        Err(err) => Err(AccessError::Io(err)),
+    }
+}
+
+fn under_grant_text(path: &Path, grants: &Grants) -> bool {
+    let text = path.to_string_lossy();
+    grants.folders.iter().any(|g| text == g.path.as_str() || text.starts_with(&(g.path.clone() + "/")) || text.starts_with(&(g.path.clone() + "\\")))
+}
+
+pub fn is_common_home_folder(raw: &str) -> bool {
+    home_protected(&expand_user_path(raw))
+}
+
+fn home_protected(path: &Path) -> bool {
+    let Some(home) = dirs::home_dir() else { return false };
+    ["Desktop", "Documents", "Downloads"].iter().any(|name| {
+        let root = home.join(name);
+        path == root || path.starts_with(&root)
+    })
 }
 
 /// Resolve a path for create/write. Parent must exist and be granted; file may be new.
@@ -211,7 +290,7 @@ pub fn resolve_writable(raw: &str) -> Result<PathBuf, AccessError> {
             path: raw.trim().to_string(),
         });
     }
-    let given = PathBuf::from(raw.trim());
+    let given = expand_user_path(raw);
     if given.as_os_str().is_empty() {
         return Err(AccessError::Io("path is required".into()));
     }
@@ -235,7 +314,7 @@ pub fn list_roots() -> Value {
         "folders": grants.folders,
         "terminal": grants.terminal,
         "ran_on": "local_computer",
-        "note": "File tools only work inside these folders. Call grant_folder to add one.",
+        "note": "Desktop, Documents, and Downloads are already allowed. List and read them directly. Ask in the chat before using any other folder.",
     })
 }
 
@@ -276,7 +355,31 @@ fn walk_search(dir: &Path, q: &str, hits: &mut Vec<Value>) {
     if hits.len() >= SEARCH_CAP {
         return;
     }
-    let Ok(entries) = fs::read_dir(dir) else { return };
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied || err.raw_os_error() == Some(1) => {
+            if let Ok(rows) = crate::os::finder_entries(dir) {
+                for (name, is_dir) in rows {
+                    if hits.len() >= SEARCH_CAP {
+                        return;
+                    }
+                    if name.starts_with('.') || name == "node_modules" || name == "browser-profile" {
+                        continue;
+                    }
+                    let path = dir.join(&name);
+                    if q.is_empty() || name.to_ascii_lowercase().contains(q) || path.to_string_lossy().to_ascii_lowercase().contains(q) {
+                        hits.push(json!({
+                            "path": path.to_string_lossy(),
+                            "name": name,
+                            "dir": is_dir,
+                        }));
+                    }
+                }
+            }
+            return;
+        }
+        Err(_) => return,
+    };
     let mut rows: Vec<_> = entries.filter_map(|e| e.ok()).collect();
     rows.sort_by_key(|e| e.file_name());
     for entry in rows {

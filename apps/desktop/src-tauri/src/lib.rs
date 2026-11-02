@@ -69,6 +69,16 @@ fn listed(dir: &Path) -> Value {
             names.sort();
             json!({ "ok": true, "path": dir.to_string_lossy(), "entries": names, "ran_on": "local_computer" })
         }
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied || err.raw_os_error() == Some(1) => match os::finder_entries(dir) {
+            Ok(rows) => {
+                let names: Vec<String> = rows
+                    .into_iter()
+                    .map(|(name, is_dir)| if is_dir { format!("{name}/") } else { name })
+                    .collect();
+                json!({ "ok": true, "path": dir.to_string_lossy(), "entries": names, "via": "finder", "ran_on": "local_computer" })
+            }
+            Err(msg) => json!({ "ok": false, "error": msg, "ran_on": "local_computer" }),
+        },
         Err(err) => json!({ "ok": false, "error": err.to_string(), "ran_on": "local_computer" }),
     }
 }
@@ -89,25 +99,34 @@ fn run_read_file(args: &Value) -> Value {
         return json!({ "ok": false, "error": "path is required", "ran_on": "local_computer" });
     };
     match grants::resolve_existing(path) {
-        Ok(file) => match fs::metadata(&file) {
-            Ok(meta) if meta.len() > grants::max_read_bytes() => json!({
-                "ok": false,
-                "error": format!("{} is larger than {} bytes", file.display(), grants::max_read_bytes()),
-                "ran_on": "local_computer"
-            }),
-            Ok(_) => match fs::read(&file) {
-                Ok(bytes) => json!({
-                    "ok": true,
-                    "path": file.to_string_lossy(),
-                    "bytes": bytes.len(),
-                    "content": clip(String::from_utf8_lossy(&bytes).into_owned(), FILE_TEXT_LIMIT),
-                    "ran_on": "local_computer"
-                }),
-                Err(err) => json!({ "ok": false, "error": err.to_string(), "ran_on": "local_computer" }),
-            },
-            Err(err) => json!({ "ok": false, "error": err.to_string(), "ran_on": "local_computer" }),
-        },
+        Ok(file) => read_granted(&file),
         Err(err) => err.to_json(),
+    }
+}
+
+fn read_granted(file: &Path) -> Value {
+    let max = grants::max_read_bytes();
+    let bytes = match fs::metadata(file) {
+        Ok(meta) if meta.len() > max => {
+            return json!({
+                "ok": false,
+                "error": format!("{} is larger than {max} bytes", file.display()),
+                "ran_on": "local_computer"
+            });
+        }
+        Ok(_) => fs::read(file).map_err(|err| err.to_string()),
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied || err.raw_os_error() == Some(1) => os::finder_read(file, max),
+        Err(err) => Err(err.to_string()),
+    };
+    match bytes {
+        Ok(bytes) => json!({
+            "ok": true,
+            "path": file.to_string_lossy(),
+            "bytes": bytes.len(),
+            "content": clip(String::from_utf8_lossy(&bytes).into_owned(), FILE_TEXT_LIMIT),
+            "ran_on": "local_computer"
+        }),
+        Err(err) => json!({ "ok": false, "error": err, "ran_on": "local_computer" }),
     }
 }
 
@@ -265,16 +284,23 @@ fn run_delete_file(args: &Value) -> Value {
 }
 
 fn run_grant_folder(args: &Value) -> Value {
-    let start = args.get("path").and_then(Value::as_str).map(PathBuf::from);
-    match grants::pick_folder(start.as_deref()) {
-        Ok(grant) => json!({
+    grants::ensure_common_folders();
+    let raw = args.get("path").and_then(Value::as_str).unwrap_or("").trim().to_string();
+    if raw.is_empty() || grants::is_common_home_folder(&raw) {
+        return json!({
             "ok": true,
-            "grant": grant,
             "folders": grants::snapshot().folders,
+            "note": "Desktop, Documents, and Downloads are already allowed. List or read the file directly. Do not ask again and do not open a dialog.",
             "ran_on": "local_computer",
-        }),
-        Err(err) => json!({ "ok": false, "error": err, "need": "folder_grant", "ran_on": "local_computer" }),
+        });
     }
+    json!({
+        "ok": false,
+        "need": "ask_user",
+        "path": raw,
+        "error": "Ask the user in one sentence whether Lumio may use this folder, then wait for their answer. Do not open a system dialog.",
+        "ran_on": "local_computer",
+    })
 }
 
 fn run_launch_app(args: &Value) -> Value {
@@ -416,17 +442,45 @@ async fn run_code(code: &str, timeout_s: u64) -> Value {
     out
 }
 
-async fn ensure_chrome(slot: &Mutex<Option<browser::Chrome>>) -> Result<(), String> {
+fn web_url(raw: &str) -> Option<&str> {
+    let url = raw.trim();
+    if url.starts_with("https://") || url.starts_with("http://") {
+        Some(url)
+    } else {
+        None
+    }
+}
+
+async fn ensure_chrome(slot: &Mutex<Option<browser::Chrome>>, start_url: Option<&str>) -> Result<(), String> {
     if slot.lock().await.is_some() {
         return Ok(());
     }
-    let chrome = browser::launch().await?;
-    *slot.lock().await = Some(chrome);
-    Ok(())
+    if let Some(url) = start_url.and_then(web_url) {
+        let chrome = browser::launch(url).await?;
+        *slot.lock().await = Some(chrome);
+        return Ok(());
+    }
+    if let Ok(chrome) = browser::attach().await {
+        *slot.lock().await = Some(chrome);
+        return Ok(());
+    }
+    Err("Open a site with browser_navigate and a full https address. Do not open a blank page.".into())
 }
 
 async fn run_browser(slot: &Mutex<Option<browser::Chrome>>, tool: &str, args: &Value) -> Value {
-    if let Err(err) = ensure_chrome(slot).await {
+    let start_url = match tool {
+        "browser_navigate" | "browse_open" => args.get("url").and_then(Value::as_str).and_then(web_url),
+        "browser_search" => Some("https://www.google.com"),
+        _ => None,
+    };
+    if matches!(tool, "browser_navigate" | "browse_open") && start_url.is_none() {
+        return json!({
+            "ok": false,
+            "error": "A full https address is required. Do not open Chrome on a blank page.",
+            "ran_on": "local_computer"
+        });
+    }
+    if let Err(err) = ensure_chrome(slot, start_url).await {
         return json!({ "ok": false, "error": err, "ran_on": "local_computer" });
     }
     let chrome = slot.lock().await;
@@ -435,7 +489,7 @@ async fn run_browser(slot: &Mutex<Option<browser::Chrome>>, tool: &str, args: &V
     };
     let out = match tool {
         "browser_navigate" | "browse_open" => {
-            let url = args.get("url").and_then(Value::as_str).unwrap_or("");
+            let url = start_url.unwrap_or("");
             let wait_ms = args.get("wait_ms").and_then(Value::as_u64).unwrap_or(1200);
             chrome.navigate(url, wait_ms).await
         }
@@ -549,14 +603,20 @@ async fn poll_loop(state: Arc<Sidecar>) {
             Ok(res) if res.status().is_success() => {
                 let body = res.json::<JobsBody>().await.ok();
                 if let Some(job) = body.and_then(|b| b.job) {
-                    let result = run_job(&job.tool, &job.args, &state.chrome).await;
-                    let put = format!("{api_base}/api/desktop/jobs/result");
-                    let _ = client
-                        .post(&put)
-                        .header("X-Lumio-Agent", &token)
-                        .json(&json!({ "id": job.id, "result": result }))
-                        .send()
-                        .await;
+                    let state = state.clone();
+                    let client = client.clone();
+                    let token = token.clone();
+                    let api_base = api_base.clone();
+                    tokio::spawn(async move {
+                        let result = run_job(&job.tool, &job.args, &state.chrome).await;
+                        let put = format!("{api_base}/api/desktop/jobs/result");
+                        let _ = client
+                            .post(&put)
+                            .header("X-Lumio-Agent", &token)
+                            .json(&json!({ "id": job.id, "result": result }))
+                            .send()
+                            .await;
+                    });
                 }
             }
             Ok(res) if res.status().as_u16() == 401 => {
@@ -586,6 +646,27 @@ fn machine_info() -> Value {
 #[tauri::command]
 fn list_folder_grants() -> Value {
     grants::list_roots()
+}
+
+#[tauri::command]
+fn open_external(url: String) -> Result<(), String> {
+    let url = url.trim();
+    if web_url(url).is_none() || url.chars().any(|c| c.is_control()) {
+        return Err("Only http and https links can be opened.".into());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open").arg(url).spawn().map_err(|err| err.to_string())?;
+    }
+    #[cfg(windows)]
+    {
+        std::process::Command::new("cmd").args(["/C", "start", "", url]).spawn().map_err(|err| err.to_string())?;
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        return Err("Opening links is not supported here.".into());
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -622,7 +703,7 @@ async fn start_sidecar(app: tauri::AppHandle, token: String, api_base: String) -
     if state.started.swap(true, Ordering::SeqCst) {
         return Ok(());
     }
-    os::start_input_listen();
+    let _ = tokio::task::spawn_blocking(grants::ensure_common_folders).await;
     let clone = state.inner().clone();
     let shots = state.inner().clone();
     tauri::async_runtime::spawn(async move {
@@ -683,6 +764,7 @@ pub fn run() {
             machine_info,
             list_folder_grants,
             grant_folder_ui,
+            open_external,
             revoke_folder_grant,
             set_terminal_grant,
             reset_browser_profile
