@@ -1,95 +1,127 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { BrandMark } from "./components/BrandMark";
-import { errorFromQuery, getMe } from "./lib";
+import Link from "next/link";
+import { SiteFooter, SiteNav } from "./components/SiteChrome";
+import { detectPlatform, latestInstallers, type Installers, type Platform } from "./downloads";
+import { getMe } from "./lib";
 
 export default function Home() {
-  const [error, setError] = useState("");
+  const [signedIn, setSignedIn] = useState(false);
+  const [os, setOs] = useState<Platform>("other");
+  const [installers, setInstallers] = useState<Installers>({ page: "/download" });
 
   useEffect(() => {
-    setError(errorFromQuery(window.location.search));
-    getMe().then((me) => {
-      if (me) window.location.replace("/chat");
-    });
+    setOs(detectPlatform());
+    void latestInstallers().then(setInstallers);
+    getMe().then((me) => setSignedIn(Boolean(me)));
   }, []);
 
+  const downloadHref = os === "windows" ? installers.windows || "/download" : os === "mac" ? installers.mac || "/download" : "/download";
+  const downloadLabel = os === "windows" ? "Download for Windows" : os === "mac" ? "Download for Mac" : "Download the app";
+
   return (
-    <div className="auth">
-      <main className="auth-shell">
-        <section className="auth-visual" aria-label="Lumio">
-          <div className="auth-brand">
-            <span className="auth-mark">
-              <BrandMark size={22} />
-            </span>
-            lumio
+    <div className="site">
+      <SiteNav signedIn={signedIn} />
+      <main>
+        <section className="site-hero">
+          <p className="site-kicker">Personal assistant</p>
+          <h1>
+            Work in the browser.
+            <br />
+            Or on the computer in front of you.
+          </h1>
+          <p className="site-lead">
+            Lumio is your private chief of staff for mail, calendar, files, and the live screen. Sign in, open the web app,
+            or install on Mac and Windows — same assistant, the computer you choose.
+          </p>
+          <div className="site-cta">
+            {signedIn ? (
+              <Link className="site-btn primary" href="/chat">
+                Open Lumio
+              </Link>
+            ) : (
+              <>
+                <Link className="site-btn primary" href="/login">
+                  Sign in
+                </Link>
+                <Link className="site-btn" href="/chat">
+                  Use the web app
+                </Link>
+              </>
+            )}
+            <a className="site-btn ghost" href={downloadHref}>
+              {downloadLabel}
+            </a>
           </div>
-          <div className="auth-hero-copy">
-            <h1>Your personal assistant, ready when you are.</h1>
-            <p>Bring your day into focus. Lumio helps you think, plan, and get things done—one conversation at a time.</p>
-          </div>
-          <div className="auth-quote">
-            <div className="auth-quote-top">
-              <span className="auth-quote-avatar">✦</span>
-              <span>Lumio assistant</span>
-              <span className="auth-online" aria-hidden />
+          <p className="site-hero-note">Google or Microsoft · Web, macOS, Windows · Your accounts stay yours</p>
+          <div className="site-stage" aria-hidden>
+            <div className="site-window">
+              <div className="site-window-bar">
+                <span />
+                <span />
+                <span />
+                <em>Lumio</em>
+              </div>
+              <div className="site-window-body">
+                <aside>
+                  <b>Chief</b>
+                  <small>Inbox · Calendar · Computer</small>
+                </aside>
+                <div>
+                  <p className="you">Book Mumbai to Goa, 22 Nov, one way.</p>
+                  <p className="bot">On it. Opening Booking.com in Chrome on this computer.</p>
+                  <div className="site-screen-chip">this computer · Chrome</div>
+                </div>
+              </div>
             </div>
-            <p>“Good to see you. What would you like to work on today?”</p>
           </div>
-          <p className="auth-foot">A little more clarity, every day.</p>
-          <div className="auth-orbit" aria-hidden />
         </section>
-        <section className="auth-action">
-          <div className="auth-form">
-            <div className="auth-eyebrow">Welcome back</div>
-            <h2>Sign in to Lumio</h2>
-            <p className="auth-intro">Your personal assistant is just a sign-in away.</p>
-            {error ? <p className="err">{error}</p> : null}
-            <div className="providers">
-              <a className="provider" href="/api/auth/google/login">
-                <GoogleMark />
-                Continue with Google
-              </a>
-              <a className="provider" href="/api/auth/microsoft/login">
-                <MicrosoftMark />
-                Continue with Microsoft
-              </a>
-            </div>
-            <details className="trouble">
-              <summary>Having trouble?</summary>
-              <p>
-                Google: if the Cloud app is in Testing, add your account under Auth Platform → Audience → Test users.
-                Outlook: Azure Application (client) ID must be a full GUID. Supported account types must include personal
-                Microsoft accounts. Redirect URI: <code>http://localhost:3000/api/auth/microsoft/callback</code>. Use the
-                client secret Value, not the Secret ID.
-              </p>
-            </details>
-            <p className="trust">By signing in, you agree this is a private workspace for your accounts.</p>
+
+        <section className="site-paths" id="start">
+          <h2>Start the way you work</h2>
+          <div className="site-path-grid">
+            <Link className="site-path" href="/login">
+              <strong>Sign in</strong>
+              <span>Google or Microsoft. One private workspace for mail, calendar, and connected apps.</span>
+              <em>Continue →</em>
+            </Link>
+            <Link className="site-path" href="/chat">
+              <strong>Use the web app</strong>
+              <span>Open Lumio in the browser. The assistant uses a cloud computer with a live screen.</span>
+              <em>Open in browser →</em>
+            </Link>
+            <Link className="site-path featured" href="/download">
+              <strong>Download the app</strong>
+              <span>Mac and Windows. Chrome, files, and taught skills run on this machine.</span>
+              <em>Get Mac or Windows →</em>
+            </Link>
+          </div>
+        </section>
+
+        <section className="site-product" id="product">
+          <h2>One assistant. Every surface.</h2>
+          <div className="site-feature-grid">
+            <article>
+              <strong>A computer that works with you</strong>
+              <p>Watch the live screen, take control, or hand a booking to Lumio. On the web it is a secure cloud desktop. In the app it is your Chrome.</p>
+            </article>
+            <article>
+              <strong>Mail and calendar, in the conversation</strong>
+              <p>Read, draft, and send with confirmation. Schedule the next step. Inbox cards stay in one place.</p>
+            </article>
+            <article>
+              <strong>Teach a task once</strong>
+              <p>Show Lumio the clicks. Narrate if you want. It writes a skill you can run again — on the web or on this computer.</p>
+            </article>
+            <article>
+              <strong>Yours, not a shared inbox</strong>
+              <p>Sign in with the account you already use. Connectors, files, and the desktop jail stay in your workspace.</p>
+            </article>
           </div>
         </section>
       </main>
+      <SiteFooter />
     </div>
-  );
-}
-
-function GoogleMark() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden>
-      <path fill="#4285F4" d="M23.5 12.3c0-.8-.1-1.6-.2-2.3H12v4.4h6.5c-.3 1.5-1.1 2.8-2.4 3.7v3h3.9c2.3-2.1 3.5-5.2 3.5-8.8z" />
-      <path fill="#34A853" d="M12 24c3.2 0 5.9-1 7.9-2.9l-3.9-3c-1.1.7-2.4 1.2-4 1.2-3.1 0-5.7-2.1-6.6-4.9H1.4v3.1C3.4 21.4 7.4 24 12 24z" />
-      <path fill="#FBBC05" d="M5.4 14.4c-.2-.7-.4-1.4-.4-2.4s.1-1.7.4-2.4V6.5H1.4C.5 8.3 0 10.1 0 12s.5 3.7 1.4 5.5l4-3.1z" />
-      <path fill="#EA4335" d="M12 4.8c1.7 0 3.3.6 4.5 1.8l3.4-3.4C17.9 1.1 15.2 0 12 0 7.4 0 3.4 2.6 1.4 6.5l4 3.1C6.3 6.8 8.9 4.8 12 4.8z" />
-    </svg>
-  );
-}
-
-function MicrosoftMark() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden>
-      <path fill="#F25022" d="M1 1h10v10H1z" />
-      <path fill="#7FBA00" d="M13 1h10v10H13z" />
-      <path fill="#00A4EF" d="M1 13h10v10H1z" />
-      <path fill="#FFB900" d="M13 13h10v10H13z" />
-    </svg>
   );
 }

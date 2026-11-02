@@ -4,7 +4,7 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.agents.routes import router as agents_router
@@ -16,6 +16,7 @@ from app.config import get_settings
 from app.connectors.routes import router as connectors_router
 from app.connectors.deploy_routes import router as deploy_router
 from app.connectors.github_status import router as github_router
+from app.desktop.routes import router as desktop_router
 from app.files import router as files_router
 from app.db import init_db
 from app.inbox.routes import router as inbox_router
@@ -116,11 +117,24 @@ app = FastAPI(title="Lumio", lifespan=lifespan)
 s = get_settings()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[s.public_web_url, "http://localhost:3000"],
+    allow_origins=[s.public_web_url, "http://localhost:3000", "tauri://localhost", "https://tauri.localhost"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def lumio_client_kind(request: Request, call_next):
+    from app.desktop.client import reset_client_kind, set_client_kind
+
+    token = set_client_kind(request.headers.get("x-lumio-client") or "")
+    try:
+        return await call_next(request)
+    finally:
+        reset_client_kind(token)
+
+
 app.include_router(auth_router, prefix="/api")
 app.include_router(me_router, prefix="/api")
 app.include_router(chat_router, prefix="/api")
@@ -136,6 +150,7 @@ app.include_router(jobs_router, prefix="/api")
 app.include_router(skills_router, prefix="/api")
 app.include_router(inbox_router, prefix="/api")
 app.include_router(files_router, prefix="/api")
+app.include_router(desktop_router, prefix="/api")
 
 
 @app.get("/health")

@@ -1,7 +1,9 @@
-"""First-class computer/browser/file verbs. They wrap this user's cloud computer (E2B Desktop, or Daytona).
+"""First-class computer/browser/file verbs. They wrap this user's computer.
 
-shell always runs on the cloud computer; user_computer_shell (the user's own machine) is only offered when a
-local computer is connected. See docs/COMPUTER.md."""
+The website always uses the cloud computer (E2B Desktop, or Daytona). The Lumio desktop app runs shell, files,
+the browser, and teaching on this machine. Shell/files fall back to E2B if the sidecar is offline; browser,
+boot, live screen, and teaching never open E2B from the desktop app.
+Toolchain installs stay on the cloud computer. See docs/COMPUTER.md."""
 
 from __future__ import annotations
 
@@ -12,6 +14,7 @@ import secrets
 from typing import Any
 
 from app.agent.coding import COMPUTER_SLUG
+from app.desktop.agent import LOCAL_TOOLS
 
 log = logging.getLogger(__name__)
 
@@ -100,14 +103,108 @@ async def _publish_downloads(ctx, result: dict) -> dict:
     return result
 
 
-async def run_computer(ctx, tool_name: str, args: dict | None = None) -> Any:
+async def _use_local(ctx, tool_name: str) -> bool:
+    from app.desktop.agent import is_online, stored_prefer
+    from app.desktop.client import prefer_local
+
+    if not prefer_local() or tool_name not in LOCAL_TOOLS:
+        return False
+    slug = local_slug(ctx)
+    if not slug:
+        return False
+    conn = ctx.connectors.get(slug) if hasattr(ctx.connectors, "get") else None
+    if conn is None:
+        return False
+    try:
+        if stored_prefer(conn) == "cloud":
+            return False
+    except Exception:  # noqa: BLE001
+        pass
+    user_id = getattr(getattr(ctx, "user", None), "id", None) or getattr(conn, "user_id", None)
+    return bool(user_id) and await is_online(user_id)
+
+
+def _stay_on_this_computer(tool_name: str) -> bool:
+    """Browser, boot, and live-screen tools must not open E2B from the desktop app."""
+    return tool_name.startswith(("browser", "browse_", "computer_")) or tool_name in {
+        "boot",
+        "status",
+        "touch",
+        "screen_png",
+    }
+
+
+def _local_unavailable(tool_name: str, reason: str) -> dict:
+    return {
+        "ok": False,
+        "error": reason,
+        "computer_unavailable": True,
+        "ran_on": "local_computer",
+        "tool": tool_name,
+    }
+
+
+async def _try_local(ctx, tool_name: str, args: dict | None = None) -> Any | None:
+    """Run on the paired laptop. None means the caller should use the cloud computer."""
+    from app.agent.deep import call_user_tool
+    from app.desktop.agent import LocalOffline
+    from app.desktop.client import prefer_local
+    from connector_core import ToolError
+
+    if not prefer_local() or tool_name not in LOCAL_TOOLS:
+        return None
+    slug = local_slug(ctx)
+    conn = ctx.connectors.get(slug) if slug and hasattr(ctx.connectors, "get") else None
+    if conn is not None:
+        try:
+            from app.desktop.agent import stored_prefer
+
+            if stored_prefer(conn) == "cloud":
+                return None
+        except Exception:  # noqa: BLE001
+            pass
+    if not await _use_local(ctx, tool_name):
+        if _stay_on_this_computer(tool_name):
+            return _local_unavailable(tool_name, "The Lumio desktop app is not connected.")
+        return None
+    try:
+        result = await call_user_tool(ctx, slug, tool_name, args or {})
+    except (LocalOffline, ToolError) as vis_exc:
+        log.info("desktop local %s missed sidecar: %s", tool_name, vis_exc)
+        if _stay_on_this_computer(tool_name):
+            return _local_unavailable(tool_name, str(vis_exc)[:240])
+        return None
+    err = str((result or {}).get("error") or "").lower() if isinstance(result, dict) else ""
+    if isinstance(result, dict) and (
+        result.get("fallback_cloud") or "not connected" in err or "did not return" in err or "not paired" in err
+    ):
+        log.info("desktop local %s offline; %s", tool_name, "stay local" if _stay_on_this_computer(tool_name) else "using cloud")
+        if _stay_on_this_computer(tool_name):
+            result["fallback_cloud"] = False
+            result["computer_unavailable"] = True
+            result.setdefault("ran_on", "local_computer")
+            return result
+        return None
+    if isinstance(result, dict):
+        result.setdefault("ran_on", "local_computer")
+    return result
+
+
+async def run_computer(ctx, tool_name: str, args: dict | None = None, *, force_cloud: bool = False) -> Any:
     from app.agent.deep import call_user_tool
     from app.connectors.computer_daemon import annotate_page
+
+    if not force_cloud:
+        local = await _try_local(ctx, tool_name, args or {})
+        if local is not None:
+            return local
 
     slug = computer_slug(ctx)
     if not slug:
         return computer_missing()
     result = await call_user_tool(ctx, slug, tool_name, args or {})
+    if isinstance(result, dict) and result.get("ran_on") is None:
+        result["ran_on"] = "cloud_computer"
     if not isinstance(result, dict):
         return result
     annotate_page(result)
@@ -206,7 +303,7 @@ async def cloud_exec(ctx, command: str, cwd: str | None = None, timeout: int = 6
 async def _exec_stoppable(ctx, args: dict, tag: str) -> Any:
     """``exec`` on the computer; if the turn is stopped mid-command, kill that command's processes there."""
     try:
-        return await run_computer(ctx, "exec", args)
+        return await run_computer(ctx, "exec", args, force_cloud=True)
     except asyncio.CancelledError:
         await _kill_tagged(ctx, tag)
         raise
@@ -241,6 +338,14 @@ async def _raw_exec(ctx, conn, command: str) -> Any:
 
 
 async def shell(ctx, command: str, cwd: str | None = None, timeout: int = 60) -> Any:
+    if not (command or "").strip():
+        return {"error": "command is required"}
+    args: dict[str, Any] = {"command": command, "timeout": max(10, min(int(timeout or 60), 900))}
+    if cwd:
+        args["cwd"] = cwd
+    local = await _try_local(ctx, "exec", args)
+    if local is not None:
+        return local
     return await cloud_exec(ctx, command, cwd, timeout)
 
 

@@ -42,7 +42,7 @@ export default function TasksPage() {
   useEffect(() => {
     getMe().then((u) => {
       if (!u) {
-        window.location.replace("/");
+        window.location.replace("/login");
         return;
       }
       setMe(u);
@@ -64,7 +64,7 @@ export default function TasksPage() {
     const agentQuery = agentFilter !== "all" ? `?agent_id=${encodeURIComponent(agentFilter)}` : "";
     const res = await fetch(`/api/tasks${agentQuery}`, { credentials: "include" });
     if (res.status === 401) {
-      window.location.replace("/");
+      window.location.replace("/login");
       return;
     }
     const data = await res.json().catch(() => ({}));

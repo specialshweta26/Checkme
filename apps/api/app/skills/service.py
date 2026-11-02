@@ -444,6 +444,15 @@ async def start_teaching(user: User, agent_id: uuid.UUID | None = None, name: st
     except Exception as exc:  # noqa: BLE001 - keep recording in memory; the skill is created at stop
         log.warning("teach: could not create the draft skill user=%s: %s", key, type(exc).__name__)
     recorder.start(key, row["started_at"], limit)
+    from app.desktop.client import prefer_local
+
+    if prefer_local():
+        try:
+            from app.desktop.agent import call_local
+
+            await call_local(user.id, "boot", {})
+        except Exception as exc:  # noqa: BLE001 - teaching still records rail input if Chrome is slow
+            log.info("teach: local computer boot skipped user=%s: %s", key, type(exc).__name__)
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:

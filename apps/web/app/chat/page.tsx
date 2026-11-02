@@ -266,7 +266,7 @@ export default function ChatPage() {
   useEffect(() => {
     getMe().then(async (u) => {
       if (!u) {
-        window.location.replace("/");
+        window.location.replace("/login");
         return;
       }
       if (!u.timezone || u.timezone === "UTC") {

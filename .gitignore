@@ -10,6 +10,8 @@ __pycache__/
 node_modules/
 .next/
 out/
+apps/desktop/src-tauri/target/
+apps/desktop/dist/
 *.egg-info/
 .DS_Store
 .cursor-debug-daee2b.log

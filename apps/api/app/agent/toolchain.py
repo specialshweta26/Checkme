@@ -313,7 +313,12 @@ async def ensure_tools(ctx, tools: list[str], *, force: bool = False, timeout: i
     s = _settings()
     limit = int(timeout or getattr(s, "computer_install_timeout_s", 600) or 600)
     script = install_script(order, force=force, node_major=int(getattr(s, "computer_node_major", 22) or 22))
-    raw = await computer.run_computer(ctx, "exec", {"command": "bash -c " + shlex.quote(script), "timeout": max(60, min(limit, 900))})
+    raw = await computer.run_computer(
+        ctx,
+        "exec",
+        {"command": "bash -c " + shlex.quote(script), "timeout": max(60, min(limit, 900))},
+        force_cloud=True,
+    )
     if isinstance(raw, dict) and raw.get("error"):
         return {"ok": False, "error": str(raw["error"])[:600], "tools": order}
     code, out = _stdout(raw)

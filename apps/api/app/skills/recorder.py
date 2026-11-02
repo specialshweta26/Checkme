@@ -1,17 +1,12 @@
 """What the user does on the computer while teaching a skill.
 
-The live desktop is an E2B noVNC stream: the user's clicks and keys go straight from the browser to the
-sandbox's X server, so the API never sees them. Recording therefore happens in two places:
+On the website the live desktop is an E2B noVNC stream: clicks go to the sandbox X server, so capture
+runs inside the sandbox (``xinput test-xi2 --root``). On the Lumio desktop app, Chrome on this computer
+is the live screen: the sidecar injects listeners and posts click/key/scroll events to
+``POST /api/desktop/teach-events``, and screenshots come from the local PNG cache.
 
-- inside the sandbox, a small capture script listens to X input (``xinput test-xi2 --root``) and writes
-  clicks (with pointer position and the focused window title), key presses and scrolls to a JSON-lines
-  file, plus focused-window changes. It is generic: no site- or task-specific logic;
-- on the API, a loop keeps the sandbox alive and grabs a screenshot every few seconds, keeping only frames
-  that changed (key frames for the skill writer). Input sent through the rail's typing bar and agent tool
-  calls are recorded by the routes themselves (``service.record_computer_step``).
-
-Every event carries ``t``: seconds since the teaching session started, so actions line up with spoken
-narration (``narration.py``).
+The API also keeps key frames (changed screenshots) and records rail typing / agent tools via
+``service.record_computer_step``. Every event carries ``t``: seconds since the teaching session started.
 """
 
 from __future__ import annotations
@@ -153,6 +148,8 @@ class Recorder:
     notes: list[str] = field(default_factory=list)
     capture_attempts: int = 0
     events_text: str = ""  # latest copy of the in-sandbox capture file (read without stopping it)
+    local_mode: bool = False
+    local_lines: list[str] = field(default_factory=list)
     dom_on: bool = False  # the page browser's DOM recorder is running (BROWSER_TEACH_DOM)
     dom_attempts: int = 0
     dom_events: list[dict] = field(default_factory=list)  # selector-level steps for deterministic replay
@@ -264,10 +261,76 @@ async def _snapshot(rec: Recorder, box) -> None:
     rec.frames.append(frame)
 
 
+async def _using_local(rec: Recorder) -> bool:
+    if rec.local_mode:
+        return True
+    try:
+        from app.desktop.agent import is_online
+
+        if await is_online(rec.user_key):
+            rec.local_mode = True
+            if rec.capture_offset is None:
+                rec.capture_offset = 0.0
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    return False
+
+
+async def _snapshot_cached(rec: Recorder) -> None:
+    from app.connectors.daytona_box import live_screen_png
+
+    png = live_screen_png(rec.user_key)
+    if not png:
+        return
+    bits, jpeg = await asyncio.to_thread(frame_hash, png)
+    if not changed(rec.last_hash, bits):
+        return
+    rec.last_hash = bits
+    frame = {"t": elapsed(rec.started), "jpeg": jpeg}
+    if len(rec.frames) >= MAX_FRAMES:
+        rec.frames = rec.frames[:1] + rec.frames[2::2]
+    rec.frames.append(frame)
+
+
+def add_local_events(user_key: str, events: list) -> int:
+    """Clicks/keys from the desktop sidecar's Chrome listeners. No-op if teaching is not running."""
+    rec = _RECORDERS.get(user_key)
+    if rec is None:
+        return 0
+    rec.local_mode = True
+    if rec.capture_offset is None:
+        rec.capture_offset = 0.0
+    n = 0
+    for item in events or []:
+        if not isinstance(item, dict):
+            continue
+        kind = item.get("kind")
+        if kind not in {"click", "char", "key", "scroll", "window", "capture_started"}:
+            continue
+        row = {"kind": kind, "t": elapsed(rec.started)}
+        for key in ("x", "y", "button", "char", "key", "direction", "window"):
+            if item.get(key) not in (None, ""):
+                row[key] = item[key]
+        rec.local_lines.append(json.dumps(row))
+        n += 1
+        if len(rec.local_lines) >= MAX_EVENTS * 4:
+            break
+    rec.events_text = "\n".join(rec.local_lines) + ("\n" if rec.local_lines else "")
+    return n
+
+
 async def _loop(rec: Recorder, limit: float) -> None:
     from app.connectors import e2b_box
 
     while elapsed(rec.started) < limit:
+        if await _using_local(rec):
+            try:
+                await _snapshot_cached(rec)
+            except Exception as exc:  # noqa: BLE001
+                log.info("teach: local snapshot failed user=%s: %s", rec.user_key, type(exc).__name__)
+            await asyncio.sleep(SNAPSHOT_EVERY)
+            continue
         if rec.sandbox is None:
             rec.sandbox = await _live_sandbox(rec)
         if rec.sandbox is not None and rec.capture_offset is None and rec.capture_attempts < CAPTURE_ATTEMPTS:
@@ -439,6 +502,14 @@ async def stop(user_key: str) -> dict:
             log.info("teach: stopping the DOM recorder failed user=%s: %s", user_key, type(exc).__name__)
     events: list[dict] = []
     notes = list(rec.notes)
+    if rec.local_mode:
+        try:
+            await asyncio.wait_for(_snapshot_cached(rec), timeout=12)
+        except Exception:  # noqa: BLE001
+            pass
+        events, more = parse_capture("\n".join(rec.local_lines), 0.0)
+        notes.extend(more)
+        return {"events": events, "frames": rec.frames, "notes": notes, "dom_events": list(rec.dom_events)}
     box = rec.sandbox
     if box is not None:
         try:

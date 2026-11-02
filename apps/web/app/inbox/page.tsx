@@ -66,7 +66,7 @@ export default function InboxPage() {
   useEffect(() => {
     getMe().then((u) => {
       if (!u) {
-        window.location.replace("/");
+        window.location.replace("/login");
         return;
       }
       setMe(u);
@@ -78,7 +78,7 @@ export default function InboxPage() {
     try {
       const res = await fetch(`/api/inbox${opts.live ? "?live=1" : ""}`, { credentials: "include" });
       if (res.status === 401) {
-        window.location.replace("/");
+        window.location.replace("/login");
         return;
       }
       if (!res.ok) {

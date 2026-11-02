@@ -183,6 +183,13 @@ async def _computer_row(db: AsyncSession, user: User, provision: bool = True):
 async def computer_screen(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     """Capture the current Chromium frame, using a user-scoped cache on capture failure."""
     from app.connectors.daytona_box import call_daytona, live_screen_png
+    from app.desktop.agent import wants_local_computer
+
+    if await wants_local_computer(db, user):
+        cached = live_screen_png(str(user.id))
+        if cached:
+            return Response(content=cached, media_type="image/png", headers={"Cache-Control": "no-store"})
+        raise HTTPException(404, "Waiting for this computer's screen")
 
     row = await _computer_row(db, user, provision=False)
     user_key = str(user.id)
@@ -211,6 +218,20 @@ async def computer_screen(user: User = Depends(current_user), db: AsyncSession =
 @router.get("/computer/status")
 async def computer_status(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     """Whether the live computer is stopped, asleep, or running."""
+    from app.connectors.daytona_box import live_screen_png
+    from app.desktop.agent import is_online, wants_local_computer
+
+    if await wants_local_computer(db, user):
+        png = live_screen_png(str(user.id))
+        online = await is_online(user.id)
+        return {
+            "state": "running" if online else "stopped",
+            "screenAvailable": bool(png),
+            "url": "",
+            "title": "",
+            "screen_agent": "",
+            "provider": "local",
+        }
     backend = get_settings().computer_backend
     stopped = {"state": "stopped", "screenAvailable": False, "url": "", "title": "", "screen_agent": "", "provider": backend or "none"}
     if not backend:
@@ -256,6 +277,16 @@ def _stream_fields(data: dict) -> dict:
 @router.post("/computer/touch")
 async def computer_touch(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     """Extend the live desktop timeout while the user (or a handoff) is on the screen. Resumes if asleep."""
+    from app.desktop.agent import is_online, wants_local_computer
+
+    if await wants_local_computer(db, user):
+        online = await is_online(user.id)
+        return {
+            "ok": online,
+            "state": "running" if online else "stopped",
+            "screenAvailable": online,
+            "provider": "local",
+        }
     backend = get_settings().computer_backend
     if not backend:
         raise HTTPException(503, "No computer is configured on the server (set E2B_API_KEY).")
@@ -286,7 +317,30 @@ async def computer_touch(user: User = Depends(current_user), db: AsyncSession = 
 
 @router.post("/computer/boot")
 async def computer_boot(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
-    """Wake the computer (E2B desktop or Daytona) and its Chromium so the right-rail screen can stream."""
+    """Wake the computer (this machine in the desktop app, otherwise E2B/Daytona)."""
+    from app.desktop.agent import LocalOffline, call_local, wait_online, wants_local_computer
+
+    if await wants_local_computer(db, user):
+        if not await wait_online(user.id, 20):
+            raise HTTPException(
+                503,
+                "This computer is not connected yet. Keep the Lumio desktop app open and signed in.",
+            )
+        try:
+            data = await call_local(user.id, "boot", {})
+        except LocalOffline as vis_exc:
+            raise HTTPException(503, str(vis_exc)[:240]) from vis_exc
+        if not isinstance(data, dict):
+            data = {}
+        return {
+            "ok": data.get("ok", True),
+            "state": data.get("state") or "running",
+            "screenAvailable": True,
+            "url": data.get("url") or "",
+            "title": data.get("title") or "This computer",
+            "provider": "local",
+            "error": data.get("error") or "",
+        }
     row = await _computer_row(db, user, provision=True)
     from app.connectors.daytona_box import call_daytona
 
@@ -339,7 +393,6 @@ async def computer_control(body: ComputerControlBody, user: User = Depends(curre
     kind = (body.kind or "").strip().lower()
     if kind not in {"click", "type", "fill", "key", "press", "scroll", "wait", "move"}:
         raise HTTPException(400, "unsupported action")
-    row = await _computer_row(db, user)
     from app.connectors.daytona_box import call_daytona
 
     step = {
@@ -357,6 +410,17 @@ async def computer_control(body: ComputerControlBody, user: User = Depends(curre
     from app.skills.service import record_user_input
 
     record_user_input(user.id, "control", **{"action": step["kind"], **{k: v for k, v in step.items() if k != "kind"}})
+    from app.desktop.agent import LocalOffline, call_local, wants_local_computer
+
+    if await wants_local_computer(db, user):
+        try:
+            data = await call_local(user.id, "computer_act", {"actions": [step]})
+        except LocalOffline as vis_exc:
+            raise HTTPException(503, str(vis_exc)[:240]) from vis_exc
+        if not isinstance(data, dict):
+            return {"ok": True, "provider": "local"}
+        return {**data, "provider": "local"}
+    row = await _computer_row(db, user)
     try:
         data = await call_daytona(row, "computer_act", {"actions": [step]})
     except Exception as vis_exc:  # noqa: BLE001
@@ -401,6 +465,21 @@ async def computer_input(body: ComputerInputBody, user: User = Depends(current_u
     from app.skills.service import record_user_input
 
     record_user_input(user.id, "input", text=body.text, key=body.key)
+
+    from app.desktop.agent import LocalOffline, call_local, wants_local_computer
+
+    if await wants_local_computer(db, user):
+        steps = []
+        if body.text:
+            steps.append({"kind": "type", "text": body.text})
+        if body.key:
+            steps.append({"kind": "key", "key": _playwright_key(body.key)})
+        try:
+            data = await call_local(user.id, "computer_act", {"actions": steps})
+        except LocalOffline as vis_exc:
+            raise HTTPException(503, str(vis_exc)[:240]) from vis_exc
+        error = data.get("error") if isinstance(data, dict) else ""
+        return {"ok": not error, "error": error or "", "provider": "local"}
 
     try:
         if backend == "e2b":

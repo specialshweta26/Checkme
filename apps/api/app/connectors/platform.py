@@ -8,6 +8,8 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from connector_core import ToolSpec
+
 from app.config import get_settings
 from app.connectors.composio_box import COMPOSIO_TOOLS
 from app.connectors.daytona_box import DAYTONA_TOOLS
@@ -48,6 +50,81 @@ PLATFORM = {
 }
 # Rows the removed GitHub App created keep working (runtime routes them to Composio) until replaced.
 PLATFORM["github_app"] = PLATFORM[GITHUB_PROVIDER]
+
+LOCAL_COMPUTER_TOOLS = [
+    ToolSpec(
+        name="exec",
+        description="Run a shell command on this computer (Lumio desktop app, jailed to ~/Lumio).",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "command": {"type": "string"},
+                "cwd": {"type": "string"},
+                "timeout": {"type": "integer"},
+            },
+            "required": ["command"],
+        },
+        group="computer",
+        read_only=False,
+        tags=("computer", "shell", "local"),
+    ),
+    ToolSpec(
+        name="run_code",
+        description="Run a Python snippet on this computer (jailed to ~/Lumio).",
+        input_schema={
+            "type": "object",
+            "properties": {"code": {"type": "string"}, "timeout": {"type": "integer"}},
+            "required": ["code"],
+        },
+        group="computer",
+        read_only=False,
+        tags=("computer", "python", "local"),
+    ),
+    ToolSpec(
+        name="read_file",
+        description="Read a UTF-8 file from ~/Lumio.",
+        input_schema={"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+        group="computer",
+        tags=("computer", "files", "local"),
+    ),
+    ToolSpec(
+        name="write_file",
+        description="Write a UTF-8 file under ~/Lumio.",
+        input_schema={
+            "type": "object",
+            "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+            "required": ["path", "content"],
+        },
+        group="computer",
+        read_only=False,
+        tags=("computer", "files", "local"),
+    ),
+    ToolSpec(
+        name="list_dir",
+        description="List files under ~/Lumio.",
+        input_schema={"type": "object", "properties": {"path": {"type": "string"}}},
+        group="computer",
+        tags=("computer", "files", "local"),
+    ),
+    ToolSpec(
+        name="publish_file",
+        description="Copy a ~/Lumio file into a chat download link.",
+        input_schema={
+            "type": "object",
+            "properties": {"path": {"type": "string"}, "filename": {"type": "string"}},
+            "required": ["path"],
+        },
+        group="computer",
+        tags=("computer", "files", "local"),
+    ),
+]
+PLATFORM["trusted_local"] = {
+    "name": "This computer",
+    "slug": "laptop",
+    "tags": ["computer", "local", "desktop"],
+    "description": "The Lumio desktop app on this machine: shell, files, and a real Chrome window. Cloud computer is the fallback.",
+    "tools": LOCAL_COMPUTER_TOOLS,
+}
 
 
 def platform_specs(provider: str):

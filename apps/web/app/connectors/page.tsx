@@ -123,7 +123,7 @@ export default function ConnectorsPage() {
   async function refresh() {
     const [res, roster] = await Promise.all([fetch("/api/connectors", { credentials: "include" }), loadWorkspace()]);
     if (res.status === 401) {
-      window.location.replace("/");
+      window.location.replace("/login");
       return;
     }
     const data = await res.json();
@@ -136,7 +136,7 @@ export default function ConnectorsPage() {
   useEffect(() => {
     getMe().then((user) => {
       if (!user) {
-        window.location.replace("/");
+        window.location.replace("/login");
         return;
       }
       setMe(user);
