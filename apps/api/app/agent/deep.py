@@ -2533,28 +2533,40 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
 
 
 def shell_routing_hint(connectors: list | None, agent=None) -> str:
-    """Prompt lines that route installs/commands to the cloud computer (docs/COMPUTER.md)."""
+    """Prompt lines that route installs/commands to the right computer (docs/COMPUTER.md)."""
     from app.agent.coding import is_coding_agent
     from app.agent.computer_harness import LOCAL_PROVIDERS
+    from app.desktop.client import prefer_local
 
     local = any(getattr(c, "provider", "") in LOCAL_PROVIDERS for c in (connectors or []))
-    text = (
-        "Commands, installs and CLIs ('install X', 'run Y', 'set up the requirements') run on the cloud computer with "
-        "shell, which every agent has. If a runtime or CLI is missing (node/npm, pnpm, python/pip, gh, vercel, render, "
-        "...), install it yourself (ensure_toolchain, or shell: npm -g, pip --user, ~/.local/bin; shell also auto-installs "
-        "known tools on 'command not found') and carry on. Never tell the user to install something on their own "
-        "machine unless they asked you to use their own machine. "
-    )
-    if local:
-        text += (
-            "user_computer_shell runs on the user's own connected computer (with their confirmation): use it only when "
-            "the user explicitly asks for their own machine. "
+    if prefer_local() and local:
+        text = (
+            "You are in the Lumio desktop app. shell, files, run_code, and the browser (browser_navigate / "
+            "browser_act / the live screen) run on this computer — a real Chrome window on the user's machine. "
+            "If the desktop agent is offline they fall back to the cloud computer. "
+            "Toolchain installs (ensure_toolchain) stay on the cloud computer. "
+            "Never tell the user to install something unless they asked. "
+            "user_computer_shell is the same machine with an extra confirmation; use it when the user wants an "
+            "explicit approval before a command. "
         )
     else:
-        text += (
-            "No local computer is connected, so everything runs on the cloud computer; if the user explicitly wants "
-            "their own laptop, say it needs the Checkme local agent connected and offer to do it in the cloud now. "
+        text = (
+            "Commands, installs and CLIs ('install X', 'run Y', 'set up the requirements') run on the cloud computer with "
+            "shell, which every agent has. If a runtime or CLI is missing (node/npm, pnpm, python/pip, gh, vercel, render, "
+            "...), install it yourself (ensure_toolchain, or shell: npm -g, pip --user, ~/.local/bin; shell also auto-installs "
+            "known tools on 'command not found') and carry on. Never tell the user to install something on their own "
+            "machine unless they asked you to use their own machine. "
         )
+        if local:
+            text += (
+                "user_computer_shell runs on the user's own connected computer (with their confirmation): use it only when "
+                "the user explicitly asks for their own machine. "
+            )
+        else:
+            text += (
+                "No local computer is connected, so everything runs on the cloud computer; if the user explicitly wants "
+                "their own laptop, say they can use the Lumio desktop app (Mac/Windows) and offer to do it in the cloud now. "
+            )
     if not is_coding_agent(agent):
         text += (
             "Repo changes, pull requests, merges and deploys belong to a coding agent: hand them over (ask_teammate a "
@@ -3010,21 +3022,32 @@ async def with_computer(db: AsyncSession, user, conns: list) -> list:
 
     if db is None or not get_settings().computer_backend:
         return conns
-    if any(getattr(c, "slug", "") == COMPUTER_SLUG for c in conns):
+    from app.desktop.agent import LOCAL_SLUG
+
+    have = {getattr(c, "slug", "") for c in conns}
+    extra = []
+    if COMPUTER_SLUG in have and LOCAL_SLUG in have:
         return conns
     try:
         row = (
             await db.execute(select(Connector).where(Connector.user_id == user.id, Connector.slug == COMPUTER_SLUG))
         ).scalar_one_or_none()
+        laptop = (
+            await db.execute(select(Connector).where(Connector.user_id == user.id, Connector.slug == LOCAL_SLUG))
+        ).scalar_one_or_none()
     except Exception as exc:  # noqa: BLE001
         log.warning("computer connector lookup failed: %s", exc)
         return conns
-    if row is None:
-        return conns
-    log.info(
-        "computer connector added for this run (enabled=%s health=%s)", getattr(row, "enabled", None), getattr(row, "health", None)
-    )
-    return [*conns, row]
+    if row is not None and COMPUTER_SLUG not in have:
+        extra.append(row)
+        log.info(
+            "computer connector added for this run (enabled=%s health=%s)",
+            getattr(row, "enabled", None),
+            getattr(row, "health", None),
+        )
+    if laptop is not None and laptop.enabled and LOCAL_SLUG not in have:
+        extra.append(laptop)
+    return [*conns, *extra] if extra else conns
 
 
 async def _begin_task_state(ctx: RunContext, skill: dict | None, meta_question: bool = False, resumed_ok: bool = True) -> None:

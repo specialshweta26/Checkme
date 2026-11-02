@@ -184,6 +184,8 @@ me_router = APIRouter(tags=["me"])
 
 @me_router.get("/me")
 async def me(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    from app.desktop.agent import status as desktop_status
+
     conns = (await db.execute(select(Connector).where(Connector.user_id == user.id))).scalars().all()
     accounts = (await db.execute(select(Account).where(Account.user_id == user.id))).scalars().all()
     return {
@@ -197,6 +199,7 @@ async def me(user: User = Depends(current_user), db: AsyncSession = Depends(get_
             {"id": str(c.id), "name": c.alias or c.name, "slug": c.slug, "provider": c.provider, "health": c.health, "enabled": c.enabled}
             for c in conns
         ],
+        "desktop": await desktop_status(db, user),
     }
 
 

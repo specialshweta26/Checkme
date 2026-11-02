@@ -54,6 +54,8 @@ async def ensure_builtin_connector(db: AsyncSession, user: User, account: Accoun
 
 async def sync_builtin(db: AsyncSession, connector: Connector) -> None:
     provider = connector.provider
+    if provider in ("trusted_local", "local", "computer_local"):
+        return
     if provider in PLATFORM:
         await sync_platform(db, connector)
         return

@@ -7,6 +7,7 @@ import os
 import stat
 import subprocess
 import sys
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -99,6 +100,29 @@ def test_parse_capture_merges_and_notes_missing_xinput():
     scroll = next(e for e in events if e["kind"] == "scroll")
     assert scroll["amount"] == 2 and scroll["t"] == 3.0
     assert [e["window"] for e in events if e["kind"] == "window"] == ["Desktop", "Mail"]
+
+
+def test_local_chrome_events_are_recorded():
+    key = "local-teach-user"
+    rec = recorder.Recorder(user_key=key, started=time.monotonic())
+    recorder._RECORDERS[key] = rec
+    try:
+        n = recorder.add_local_events(
+            key,
+            [
+                {"kind": "click", "x": 12, "y": 40, "window": "Booking.com"},
+                {"kind": "char", "char": "G"},
+                {"kind": "char", "char": "o"},
+                {"kind": "key", "key": "Enter"},
+            ],
+        )
+        assert n == 4 and rec.local_mode is True
+        peeked = recorder.peek(key)
+        kinds = [e["kind"] for e in peeked["events"]]
+        assert "click" in kinds and "type" in kinds and "key" in kinds
+        assert peeked["events"][0]["window"] == "Booking.com"
+    finally:
+        recorder._RECORDERS.pop(key, None)
 
 
 def test_frame_hash_detects_change():

@@ -1,23 +1,37 @@
 # The cloud computer: shell, toolchain and template
 
 Every agent has a cloud computer: an E2B Desktop sandbox per user (or Daytona when configured, see LLD §7.2).
-Agents run commands and install tools there. The user's own laptop is only used when they connect it as a local computer.
+The website always uses that cloud computer. The Lumio desktop app (Mac/Windows, `apps/desktop`) runs shell, files,
+the browser, and teaching on this machine (Chrome window + `~/Lumio`). Shell/files fall back to E2B if the sidecar is
+offline; browser, live screen, boot, and teaching never open E2B from the desktop app.
 
 ## Routing
 
-| Tool | Who has it | Where it runs |
-| --- | --- | --- |
-| `shell` | every agent | cloud computer (`computer_harness.cloud_exec`) |
-| `sandbox_shell` | coding agents | cloud computer (same path) |
-| `ensure_toolchain(tools)` | every agent | cloud computer |
-| `user_computer_shell` | only when a local computer is connected | the user's machine (approval required) |
+| Tool | Who has it | Website | Desktop app (sidecar online) |
+| --- | --- | --- | --- |
+| `shell` | every agent | cloud computer | this computer (`~/Lumio`); E2B if the sidecar is offline |
+| `sandbox_shell` | coding agents | cloud computer | cloud computer (toolchain wrapping) |
+| `ensure_toolchain(tools)` | every agent | cloud computer | cloud computer |
+| files / `run_code` | every agent | cloud computer | this computer; E2B if offline |
+| browser / live screen | every agent | cloud computer | Chrome on this computer (never E2B from the desktop app) |
+| teach a skill | every agent | cloud computer (xinput in the sandbox) | Chrome on this computer (sidecar click/key capture) |
+| `user_computer_shell` | only when a local computer is paired | the user's machine (approval required) | same machine with extra confirmation |
 
+- The website never uses the laptop, even if the desktop app is paired and online (`X-Lumio-Client` is `web` unless the
+  Tauri app injects `desktop`).
+- When the sidecar is offline, desktop shell/files fall back to E2B (`ran_on: cloud_computer`).
 - When no local computer is connected, `user_computer_shell` is not offered. If an older prompt or skill still calls it, the
   command runs on the cloud computer (`LOCAL_SHELL_FALLBACK_TO_CLOUD=1`) and the result says `ran_on: cloud_computer`.
-- The system prompt (`deep.shell_routing_hint`) says: install CLIs and dependencies on the cloud computer, never tell the
-  user to install anything locally. Non-coding agents keep shell, files and the toolchain. Repo, PR, merge and deploy
-  tools stay with coding agents, so non-coding agents hand that work to a coding agent (`ask_teammate`, or `delegate`
+- The system prompt (`deep.shell_routing_hint`) says: on the website, install CLIs on the cloud computer; in the desktop
+  app, use this machine for shell/files and the cloud computer for browser and toolchain installs. Non-coding agents keep
+  shell, files and the toolchain. Repo, PR, merge and deploy tools stay with coding agents (`ask_teammate`, or `delegate`
   inside a background job). Approval cards are unchanged.
+
+## Desktop app
+
+The Tauri app wraps the Lumio web UI and runs a sidecar that polls `/api/desktop/jobs` (outbound, works behind NAT).
+Pairing (`POST /api/desktop/pair`) creates a `laptop` connector (`trusted_local`). Jobs are queued in Redis; the sidecar
+executes them under `~/Lumio` and posts results. See `apps/desktop/README.md`.
 - Turns like "install vercel cli", "install all requirements", "npm i", "pip install -r requirements.txt", and "run the
   tests" are classified as `computer` turns (`fast_path._SHELL`), so they skip the quick-web hint.
 

@@ -13,6 +13,7 @@ Design docs:
 | Surface | What it does |
 | --- | --- |
 | **Chat** | Ask about mail, calendar, attachments, or any connected MCP. Open threads, summarize, send (with in-app confirm, including **Cc/Bcc**), schedule later work. **See full email** on mail answers. |
+| **Desktop app** | Mac/Windows Tauri app (`apps/desktop`): shell, files, Chrome, and teaching on this computer (`~/Lumio`). The website always stays on E2B. |
 | **Agents and groups** | Create persistent specialists, give each private instructions and skills, then run group work in a shared thread with explicit handoffs between agents. |
 | **Inbox** | Background ingest of Gmail/Outlook **To and Cc** (Bcc when the mailbox exposes it). Newest 40 pending cards. Classify reply / respond / discard, draft a thread-aware reply, rephrase, attach files, add **Cc/Bcc/Reply all**, send, or delete. **See full email** on every summary. |
 | **Connectors** | Link the other mailbox, or add an MCP URL (OAuth, bearer, or none). |
@@ -47,6 +48,7 @@ flowchart LR
 
 ```
 apps/web          Next.js PWA (chat, inbox, connectors, tasks)
+apps/desktop      Tauri app (Mac/Windows): this computer's Chrome, shell, files, and teaching
 apps/api          FastAPI, agent, OAuth, workers
 packages/connector_core   Shared ToolSpec, mail/calendar catalog, text helpers
 packages/gmail_mcp        Gmail + Google Calendar connector

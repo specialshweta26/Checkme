@@ -325,7 +325,7 @@ export function ScreenRail({
   const [now, setNow] = useState(() => Date.now());
   const autoBooted = useRef(false);
   const liveActive = Boolean(watching || controlling || machine === "running");
-  // Teaching uses the same live noVNC stream as "Take control"; the server records input inside the desktop.
+  // Teaching: E2B records inside the sandbox; the desktop app records Chrome on this computer.
   const streaming = Boolean(stream.view) && machine === "running";
   const interactive = controlling || teaching;
   const framesSupported = provider !== "" && provider !== "e2b" && provider !== "none";
@@ -451,7 +451,8 @@ export function ScreenRail({
       autoBooted.current = false;
       return;
     }
-    if (autoBooted.current || provider !== "e2b" || controlling) return;
+    if (autoBooted.current || controlling) return;
+    if (provider !== "e2b" && provider !== "local") return;
     if (machine !== "stopped" && machine !== "suspended") return;
     autoBooted.current = true;
     void wake();
@@ -549,7 +550,11 @@ export function ScreenRail({
       setTeachLimit(Number(started && started.max_seconds) || 600);
       setTeachStarted(Date.now() - Number((started && started.elapsed) || 0) * 1000);
       setTeachNow(Date.now());
-      setNotice("Recording. Use the screen as usual; tap Mic to narrate what you are doing.");
+      setNotice(
+        provider === "local"
+          ? "Recording on this computer. Use the Chrome window as usual; tap Mic to narrate."
+          : "Recording. Use the screen as usual; tap Mic to narrate what you are doing.",
+      );
     } catch (err: any) {
       setNotice(err?.message || "Could not start teaching");
     } finally {

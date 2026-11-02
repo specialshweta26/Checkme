@@ -29,6 +29,26 @@ class RuntimeConnector:
                 from app.connectors.daytona_box import call_daytona
 
                 return await call_daytona(self.row, name, args)
+            if self.provider in ("trusted_local", "local", "computer_local"):
+                from app.desktop.agent import LocalOffline, call_local
+
+                try:
+                    result = await call_local(self.row.user_id, name, args)
+                except LocalOffline as vis_exc:
+                    raise ToolError(str(vis_exc) or "desktop app is not connected") from vis_exc
+                if name == "publish_file" and isinstance(result, dict) and result.get("content_b64"):
+                    import base64
+
+                    from app.storage import guess_media_type
+
+                    raw = base64.b64decode(result["content_b64"])
+                    filename = str(result.get("filename") or "file")
+                    return BinaryResult(
+                        filename=filename,
+                        content_type=str(result.get("content_type") or guess_media_type(filename)),
+                        data=raw,
+                    )
+                return result
             if self.provider in ("composio_github", "github_app"):
                 from app.connectors.github import call_github
 

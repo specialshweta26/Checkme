@@ -1,0 +1,13 @@
+{
+  "identifier": "default",
+  "description": "Lumio desktop window (local computer sidecar)",
+  "windows": ["main"],
+  "remote": {
+    "urls": [
+      "http://localhost:*/*",
+      "http://127.0.0.1:*/*",
+      "https://*/*"
+    ]
+  },
+  "permissions": ["core:default"]
+}
