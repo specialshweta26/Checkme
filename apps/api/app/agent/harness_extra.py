@@ -353,7 +353,7 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         return _dumps(await computer.list_files(ctx, path))
 
     async def read_file(path: str) -> str:
-        """Read a UTF-8 file on this computer. In the desktop app, Desktop, Documents, and Downloads are already allowed. Stays on this computer."""
+        """Read a file on this computer. Desktop, Documents, and Downloads are already allowed. CSV and TSV files return a full-table summary (counts, breakdowns, totals) without Terminal."""
         ctx.used_tools.append("read_file")
         return _dumps(await computer.read_file(ctx, path), 32000)
 

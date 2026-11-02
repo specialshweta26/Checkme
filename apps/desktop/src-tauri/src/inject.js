@@ -47,9 +47,17 @@
       if (!link) return;
       var href = link.href || "";
       if (!/^https?:\/\//i.test(href)) return;
+      var here = location.host;
+      try {
+        if (new URL(href).host === here) return;
+      } catch (e) {
+        return;
+      }
       ev.preventDefault();
       ev.stopPropagation();
-      invoke("open_external", { url: href }).catch(function () {});
+      invoke("open_external", { url: href }).catch(function () {
+        window.open(href, "_blank", "noopener");
+      });
     },
     true
   );

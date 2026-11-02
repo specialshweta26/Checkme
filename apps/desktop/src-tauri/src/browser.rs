@@ -84,6 +84,7 @@ pub async fn launch(start_url: &str) -> Result<Chrome, String> {
         .arg("--no-first-run")
         .arg("--no-default-browser-check")
         .arg("--disable-sync")
+        .arg("--disable-blink-features=AutomationControlled")
         .arg("--window-size=1280,800")
         .arg(start_url)
         .stdout(Stdio::null())
@@ -158,14 +159,42 @@ impl Chrome {
         Ok(result.pointer("/result/value").cloned().unwrap_or(Value::Null))
     }
 
+    async fn prepare_page(&self) {
+        const HIDE_WEBDRIVER: &str = r#"(() => { try { Object.defineProperty(Navigator.prototype, 'webdriver', { get: () => undefined }); } catch (e) {} })();"#;
+        self.cdp("Page.enable", json!({})).await.ok();
+        self.cdp(
+            "Page.addScriptToEvaluateOnNewDocument",
+            json!({ "source": HIDE_WEBDRIVER }),
+        )
+        .await
+        .ok();
+    }
+
+    async fn wait_for_page(&self, wait_ms: u64) {
+        let budget = wait_ms.max(8000).min(20000);
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(budget);
+        loop {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let ready = self
+                .eval("(() => { const t = (document.body && document.body.innerText || '').replace(/\\s+/g, ' ').trim(); return t.length > 180 && document.readyState !== 'loading'; })()")
+                .await
+                .ok()
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if ready || tokio::time::Instant::now() >= deadline {
+                break;
+            }
+        }
+    }
+
     pub async fn navigate(&self, url: &str, wait_ms: u64) -> Result<Value, String> {
         let target = url.trim();
         if !(target.starts_with("https://") || target.starts_with("http://")) {
             return Err("A full https address is required. Refusing to open a blank page.".into());
         }
-        self.cdp("Page.enable", json!({})).await.ok();
+        self.prepare_page().await;
         self.cdp("Page.navigate", json!({ "url": target })).await?;
-        tokio::time::sleep(Duration::from_millis(wait_ms.max(800))).await;
+        self.wait_for_page(wait_ms).await;
         self.snapshot().await
     }
 

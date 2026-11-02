@@ -411,6 +411,24 @@ def mask_secrets(timeline: list[dict]) -> list[dict]:
 # --- Teaching ----------------------------------------------------------------------------------------------
 
 
+def _arm_local_teach(user_id, on: bool) -> None:
+    """On the desktop app, record this Mac and drop any leftover browser picture. Never opens a page."""
+    try:
+        from app.desktop.client import prefer_local
+
+        if not prefer_local():
+            return
+        if on:
+            from app.connectors.daytona_box import forget_screen
+
+            forget_screen(str(user_id))
+        from app.desktop.agent import call_local
+
+        asyncio.create_task(call_local(user_id, "boot", {"teach": on}))
+    except Exception as exc:  # noqa: BLE001 - teaching still records if the sidecar is slow
+        log.info("teach: local arm skipped user=%s on=%s: %s", user_id, on, type(exc).__name__)
+
+
 async def start_teaching(user: User, agent_id: uuid.UUID | None = None, name: str = "") -> dict:
     """Record a demonstration on the computer for up to ``teach_limit()`` seconds.
 
@@ -443,17 +461,8 @@ async def start_teaching(user: User, agent_id: uuid.UUID | None = None, name: st
         row["skill_id"] = await _store_create(user.id, agent_id, chosen or DEFAULT_NAME, auto_named=not chosen)
     except Exception as exc:  # noqa: BLE001 - keep recording in memory; the skill is created at stop
         log.warning("teach: could not create the draft skill user=%s: %s", key, type(exc).__name__)
+    _arm_local_teach(user.id, True)
     recorder.start(key, row["started_at"], limit)
-    from app.desktop.client import prefer_local
-
-    if prefer_local():
-        try:
-            from app.desktop.agent import call_local
-
-            # Do not wait — a screenshot/boot round-trip freezes Teach on the desktop app.
-            asyncio.create_task(call_local(user.id, "boot", {}))
-        except Exception as exc:  # noqa: BLE001 - teaching still records OS input if the sidecar is slow
-            log.info("teach: local computer boot skipped user=%s: %s", key, type(exc).__name__)
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
@@ -608,9 +617,10 @@ def _cancel_session_tasks(row: dict) -> None:
 
 
 SKILL_WRITER = """You turn a recorded demonstration on a computer into a reusable skill for an AI agent that will run on the same kind of computer (the user's Mac or Windows desktop in the Lumio app, or a Linux cloud desktop with a browser).
-You get a timeline of what the user did (clicks with window titles, typing, keys, scrolls, window changes) and what they said out loud, plus a few screenshots.
+You get a timeline of what the user did (clicks with window titles, typing, keys, scrolls, window changes) and what they said out loud, plus a few screenshots of their own screen.
+The recording is whatever they actually did: Finder, Excel, a desktop app, or a site they opened themselves. Describe only those actions and screens. Do not invent steps, and do not substitute a browser homepage or any site that is not in the timeline or screenshots.
 Spoken instructions explain intent: prefer them over raw coordinates. Generalize: name the goal, the inputs that will change between runs (as {placeholders}), the steps in order (which app or site, what to open, what to look for, what to click or type), and how to tell it worked.
-On the user's own computer prefer open_path, launch_app, list_dir, and computer_act; use browser tools only for websites. Describe targets by visible label or purpose, not pixel coordinates. Never include passwords, one-time codes, card numbers or other secrets; write {password} etc. instead.
+On the user's own computer prefer open_path, launch_app, list_dir, and computer_act; use browser tools only for websites they opened. Describe targets by visible label or purpose, not pixel coordinates. Never include passwords, one-time codes, card numbers or other secrets; write {password} etc. instead.
 Reply with JSON: {"name": "<short skill name, max 60 chars>", "instruction": "<the skill, plain text with numbered steps, max 2500 chars>"}"""
 
 # The Responses API only allows json_object output when the *input* mentions JSON (instructions don't count).
@@ -866,6 +876,7 @@ async def _auto_save(user_id, row: dict, after: float) -> None:
     _TEACH.pop(key, None)
     _cancel_session_tasks(row)
     row.setdefault("user_id", user_id)
+    _arm_local_teach(user_id, False)
     log.info("teach: time limit reached, saving user=%s", key)
     await _finalize(key, row)
 
@@ -876,6 +887,7 @@ async def stop_teaching(db: AsyncSession | None, user: User, name: str = "") -> 
     chosen = " ".join((name or "").split())
     custom = bool(chosen) and chosen.lower() != DEFAULT_NAME.lower()
     row = _TEACH.pop(key, None)
+    _arm_local_teach(user.id, False)
     if row is None:
         skill_id = await _store_find_recording(user.id)
         if not skill_id:

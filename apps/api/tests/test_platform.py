@@ -12,7 +12,14 @@ from app.connectors.computer_daemon import (
     page_is_thin,
     should_paint_desktop,
 )
-from app.connectors.daytona_box import DAYTONA_TOOLS, decode_screen_b64, live_screen_png, remember_screen, safe_http_url
+from app.connectors.daytona_box import (
+    DAYTONA_TOOLS,
+    decode_screen_b64,
+    forget_screen,
+    live_screen_png,
+    remember_screen,
+    safe_http_url,
+)
 from app.connectors.platform import PLATFORM
 from app.routing.describe import catalog_lines
 from app.routing.retrieve import GATEWAY_EXECUTE_NAMES, GATEWAY_SEARCH_NAMES, is_catalog_tool, wrap_through_execute
@@ -123,7 +130,7 @@ def test_catalog_lines_label_computer_and_marketplace():
 
 
 def test_daemon_version_is_current():
-    assert DAEMON_VERSION == "21"
+    assert DAEMON_VERSION == "22"
 
 
 def test_bot_wall_detects_sorry_and_skips_cookie_consent():
@@ -165,6 +172,8 @@ def test_live_screen_cache_keeps_last_good_png():
     assert live_screen_png() == png
     remember_screen(b"not a png")
     assert live_screen_png() == png
+    forget_screen()
+    assert live_screen_png() == b""
 
 
 def test_decode_screen_b64_requires_png():
