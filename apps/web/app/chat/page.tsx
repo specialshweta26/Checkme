@@ -1130,7 +1130,7 @@ export default function ChatPage() {
               const skillAgentId = agentId || group?.owner_id || group?.members[0]?.id;
               const started = await startTeaching(skillAgentId || undefined, page);
               setTeaching(true);
-              setControlling(true);
+              if (!isLumioDesktop()) setControlling(true);
               return started;
             }}
             onTeachStop={async (name) => {

@@ -200,6 +200,25 @@ def test_browser_folder_and_file_actions_are_kept():
     assert "deleted /Users/me/Desktop/old.csv" in text
 
 
+def test_app_and_document_actions_are_kept():
+    raw = "\n".join(
+        [
+            json.dumps({"kind": "work", "t": 1, "text": "Lumio", "action": "opened"}),
+            json.dumps({"kind": "work", "t": 2, "text": "Microsoft Excel", "action": "opened"}),
+            json.dumps({"kind": "work", "t": 3, "text": "Microsoft Excel", "window": "Budget.xlsx — Sheet1", "action": "using"}),
+            json.dumps({"kind": "work", "t": 4, "text": "Microsoft Excel", "window": "Budget.xlsx — Sheet1", "action": "using"}),
+        ]
+    )
+    events, _notes = recorder.parse_capture(raw, 0.0)
+    assert [(ev["text"], ev.get("window") or "") for ev in events] == [
+        ("Microsoft Excel", ""),
+        ("Microsoft Excel", "Budget.xlsx — Sheet1"),
+    ]
+    text = narration.timeline_text(events)
+    assert "opened Microsoft Excel" in text
+    assert "worked in Microsoft Excel: Budget.xlsx — Sheet1" in text
+
+
 def test_unavailable_input_is_a_note_and_the_app_switch_is_kept():
     raw = "\n".join(
         [

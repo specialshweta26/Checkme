@@ -153,6 +153,11 @@ def describe(ev: dict) -> str:
         return f"opened {ev.get('url', '')}{title}"
     if kind == "folder":
         return f"opened folder {ev.get('path', '')}"
+    if kind == "work":
+        app = ev.get("text") or "an app"
+        if ev.get("window"):
+            return f"worked in {app}: {ev['window']}"
+        return f"opened {app}"
     if kind == "file":
         action = ev.get("action") or "changed"
         if action == "renamed" and ev.get("text"):
