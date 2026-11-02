@@ -309,10 +309,10 @@ def add_local_events(user_key: str, events: list) -> int:
         if not isinstance(item, dict):
             continue
         kind = item.get("kind")
-        if kind not in {"click", "char", "key", "scroll", "window", "capture_started", "capture_unavailable"}:
+        if kind not in {"click", "char", "key", "scroll", "window", "capture_started", "capture_unavailable", "navigate", "folder", "file"}:
             continue
         row = {"kind": kind, "t": elapsed(rec.started)}
-        for key in ("x", "y", "button", "char", "key", "direction", "window", "reason"):
+        for key in ("x", "y", "button", "char", "key", "direction", "window", "reason", "url", "path", "action", "text"):
             if item.get(key) not in (None, ""):
                 row[key] = item[key]
         rec.local_lines.append(json.dumps(row))
@@ -483,6 +483,26 @@ def parse_capture(text: str, offset: float) -> tuple[list[dict], list[str]]:
                 continue
             last_window = title
             events.append({"t": t, "kind": "window", "window": title, "source": "screen"})
+        elif kind == "navigate":
+            url = str(row.get("url") or "")[:400]
+            title = str(row.get("window") or "")[:200]
+            if not url or (prev and prev.get("kind") == "navigate" and prev.get("url") == url):
+                continue
+            events.append({"t": t, "kind": "navigate", "url": url, "window": title, "text": str(row.get("text") or "")[:80], "source": "screen"})
+        elif kind == "folder":
+            path = str(row.get("path") or "")[:400]
+            if not path or (prev and prev.get("kind") == "folder" and prev.get("path") == path):
+                continue
+            events.append({"t": t, "kind": "folder", "path": path, "window": "Finder", "source": "screen"})
+        elif kind == "file":
+            path = str(row.get("path") or "")[:400]
+            action = str(row.get("action") or "changed")[:20]
+            if not path:
+                continue
+            events.append({
+                "t": t, "kind": "file", "action": action, "path": path,
+                "text": str(row.get("text") or "")[:400], "source": "screen",
+            })
         if len(events) >= MAX_EVENTS:
             break
     for ev in events:

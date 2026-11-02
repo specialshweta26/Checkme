@@ -617,7 +617,7 @@ def _cancel_session_tasks(row: dict) -> None:
 
 
 SKILL_WRITER = """You turn a recorded demonstration on a computer into a reusable skill for an AI agent that will run on the same kind of computer (the user's Mac or Windows desktop in the Lumio app, or a Linux cloud desktop with a browser).
-You get a timeline of what the user did (clicks with window titles, typing, keys, scrolls, window changes) and what they said out loud, plus a few screenshots of their own screen.
+You get a timeline of what the user did (browser addresses, Finder folders, files created deleted or renamed, clicks, typing, keys, scrolls, window changes) and what they said out loud, plus a few screenshots of their own screen.
 The recording is whatever they actually did: Finder, Excel, a desktop app, or a site they opened themselves. Describe only those actions and screens. Do not invent steps, and do not substitute a browser homepage or any site that is not in the timeline or screenshots.
 Spoken instructions explain intent: prefer them over raw coordinates. Generalize: name the goal, the inputs that will change between runs (as {placeholders}), the steps in order (which app or site, what to open, what to look for, what to click or type), and how to tell it worked.
 On the user's own computer prefer open_path, launch_app, list_dir, and computer_act; use browser tools only for websites they opened. Describe targets by visible label or purpose, not pixel coordinates. Never include passwords, one-time codes, card numbers or other secrets; write {password} etc. instead.
