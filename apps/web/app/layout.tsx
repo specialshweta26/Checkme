@@ -2,8 +2,9 @@ import type { Metadata, Viewport } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Lumio",
-  description: "Your private chief of staff for mail, calendar, and connected systems.",
+  title: "Lumio — your personal assistant",
+  description:
+    "Sign in, use Lumio in the browser, or download for Mac and Windows. A private assistant for mail, calendar, and the computer in front of you.",
   applicationName: "Lumio",
   appleWebApp: { capable: true, title: "Lumio", statusBarStyle: "default" },
   icons: { icon: "/icon.svg", apple: "/icon.svg" },

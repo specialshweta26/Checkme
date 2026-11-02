@@ -60,7 +60,7 @@ async def login(provider: str, request: Request, mode: str = "signin", user: Use
             f"{provider} OAuth is not configured on the server. Set {needed} on the checkme-api service (not only the env group), then redeploy checkme-api.",
         )
     if mode == "link" and user is None:
-        return RedirectResponse(_web("/?error=signin_required"))
+        return RedirectResponse(_web("/login?error=signin_required"))
     state = secrets.token_urlsafe(24)
     verifier, challenge = pkce_pair()
     cookie = sign_state(
@@ -84,10 +84,10 @@ async def callback(
     db: AsyncSession = Depends(get_db),
 ):
     if error:
-        return RedirectResponse(_web(f"/?error={error}"))
+        return RedirectResponse(_web(f"/login?error={error}"))
     saved = load_state(request.cookies.get(OAUTH_COOKIE, ""))
     if not saved or not code or saved.get("state") != state or saved.get("provider") != provider:
-        return RedirectResponse(_web("/?error=invalid_state"))
+        return RedirectResponse(_web("/login?error=invalid_state"))
     p = get_provider(provider)
     try:
         tokens = await p.exchange_code(code, saved["verifier"])
@@ -96,10 +96,10 @@ async def callback(
         log.warning("oauth callback failed: %s", exc)
         text = str(exc)
         if "AADSTS7000215" in text or "Invalid client secret" in text:
-            return RedirectResponse(_web("/?error=bad_client_secret"))
+            return RedirectResponse(_web("/login?error=bad_client_secret"))
         if "AADSTS700016" in text or "unauthorized_client" in text:
-            return RedirectResponse(_web("/?error=bad_redirect_uri"))
-        return RedirectResponse(_web("/?error=oauth_failed"))
+            return RedirectResponse(_web("/login?error=bad_redirect_uri"))
+        return RedirectResponse(_web("/login?error=oauth_failed"))
 
     account = (
         await db.execute(select(Account).where(Account.provider == provider, Account.subject == info["subject"]))
@@ -108,7 +108,7 @@ async def callback(
     if saved.get("mode") == "link":
         user = await db.get(User, uuid.UUID(saved["link_user"])) if saved.get("link_user") else None
         if user is None:
-            return RedirectResponse(_web("/?error=signin_required"))
+            return RedirectResponse(_web("/login?error=signin_required"))
         if account and account.user_id != user.id:
             return RedirectResponse(_web("/connectors?error=account_linked_elsewhere"))
     else:
