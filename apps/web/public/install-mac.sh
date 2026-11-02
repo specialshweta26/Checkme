@@ -36,7 +36,7 @@ url = pick(lambda n: n.endswith(".dmg") and want in n)
 if not url:
     url = pick(lambda n: n.endswith(".dmg"))
 print(url)
-' "$match")""
+' "$match")"
 
 if [[ -z "$url" ]]; then
   echo "Could not find a Mac disk image on the latest GitHub release." >&2

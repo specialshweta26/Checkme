@@ -17,8 +17,8 @@ export default function Home() {
     getMe().then((me) => setSignedIn(Boolean(me)));
   }, []);
 
-  const downloadHref = os === "windows" ? installers.windows || "/download" : os === "mac" ? installers.mac || "/download" : "/download";
-  const downloadLabel = os === "windows" ? "Download for Windows" : os === "mac" ? "Download for Mac" : "Download the app";
+  const downloadHref = os === "windows" ? installers.windows || "/download" : "/download#mac-install";
+  const downloadLabel = os === "windows" ? "Download for Windows" : os === "mac" ? "Install for Mac" : "Download the app";
 
   return (
     <div className="site">
