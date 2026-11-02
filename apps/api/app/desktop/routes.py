@@ -115,6 +115,27 @@ async def teach_events(body: TeachEventsIn, pair=Depends(_agent_user)):
     return {"ok": True, "n": n}
 
 
+class TaskControlIn(BaseModel):
+    op: str = ""
+
+
+@router.get("/computer-task")
+async def computer_task(user: User = Depends(current_user)):
+    from app.computer.runtime import task_view
+
+    return task_view(user.id)
+
+
+@router.post("/computer-task")
+async def computer_task_control(body: TaskControlIn, user: User = Depends(current_user)):
+    from app.computer.runtime import task_control
+
+    out = task_control(user.id, (body.op or "").strip().lower())
+    if out.get("status") == "failed":
+        raise HTTPException(400, out.get("error") or "Could not update computer use.")
+    return out
+
+
 @router.post("/jobs/result")
 async def job_result(body: JobResultIn, pair=Depends(_agent_user)):
     user, row = pair

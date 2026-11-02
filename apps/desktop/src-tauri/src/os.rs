@@ -655,6 +655,161 @@ pub fn reveal_home() {
     }
 }
 
+fn collect_apps(dir: &Path, into: &mut Vec<(String, bool)>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        if into.len() >= 120 {
+            return;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some(stem) = name.strip_suffix(".app") else { continue };
+        if stem.is_empty() {
+            continue;
+        }
+        let electron = entry.path().join("Contents/Frameworks/Electron Framework.framework").is_dir();
+        if !into.iter().any(|(have, _)| have == stem) {
+            into.push((stem.to_string(), electron));
+        }
+    }
+}
+
+fn running_apps() -> Vec<String> {
+    let Ok(out) = Command::new("lsappinfo").arg("list").output() else { return Vec::new() };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut names = Vec::new();
+    let mut current = String::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(start) = trimmed.find(") \"") {
+            if let Some(end) = trimmed[start + 3..].find('"') {
+                current = trimmed[start + 3..start + 3 + end].to_string();
+            }
+        }
+        if trimmed.contains("type=\"Foreground\"") && !current.is_empty() && !names.contains(&current) {
+            names.push(current.clone());
+        }
+        if names.len() >= 40 {
+            break;
+        }
+    }
+    names
+}
+
+fn lumio_tabs() -> Vec<Value> {
+    use std::io::{Read, Write};
+    use std::net::{TcpStream, SocketAddr};
+    use std::time::Duration;
+    let addr: SocketAddr = "127.0.0.1:9333".parse().unwrap_or(SocketAddr::from(([127, 0, 0, 1], 9333)));
+    let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(400)) else { return Vec::new() };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(400)));
+    if stream.write_all(b"GET /json/list HTTP/1.1\r\nHost: 127.0.0.1:9333\r\nConnection: close\r\n\r\n").is_err() {
+        return Vec::new();
+    }
+    let mut buf = Vec::new();
+    let _ = stream.read_to_end(&mut buf);
+    let text = String::from_utf8_lossy(&buf);
+    let Some(body) = text.split("\r\n\r\n").nth(1) else { return Vec::new() };
+    let Ok(pages) = serde_json::from_str::<Vec<Value>>(body) else { return Vec::new() };
+    let mut tabs = Vec::new();
+    for page in pages {
+        if page.get("type").and_then(Value::as_str) != Some("page") {
+            continue;
+        }
+        let url = page.get("url").and_then(Value::as_str).unwrap_or("").to_string();
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            continue;
+        }
+        let title = page.get("title").and_then(Value::as_str).unwrap_or("").to_string();
+        let blob = format!("{url} {title}").to_lowercase();
+        let session = if blob.contains("signin") || blob.contains("sign in") || blob.contains("accounts.google.com") || blob.contains("/login") {
+            "sign_in"
+        } else {
+            "visible"
+        };
+        tabs.push(json!({"url": url, "title": title, "session": session, "browser": "Lumio Chrome"}));
+        if tabs.len() >= 12 {
+            break;
+        }
+    }
+    tabs
+}
+
+pub fn discover_apps() -> Value {
+    #[cfg(target_os = "macos")]
+    {
+        let mut found: Vec<(String, bool)> = Vec::new();
+        collect_apps(Path::new("/Applications"), &mut found);
+        if let Some(home) = dirs::home_dir() {
+            collect_apps(&home.join("Applications"), &mut found);
+        }
+        found.sort_by(|a, b| a.0.cmp(&b.0));
+        let installed: Vec<String> = found.iter().map(|(name, _)| name.clone()).collect();
+        let electron: Vec<String> = found.iter().filter(|(_, elec)| *elec).map(|(name, _)| name.clone()).collect();
+        let front = lsappinfo_front().unwrap_or_default();
+        let tabs = lumio_tabs();
+        return json!({
+            "ok": true,
+            "platform": "macos",
+            "front": front,
+            "installed": installed,
+            "running": running_apps(),
+            "electron": electron,
+            "tabs": tabs,
+            "limitations": [
+                "Installed apps come from /Applications and ~/Applications, up to 120.",
+                "Running apps are the foreground ones lsappinfo reports.",
+                "Tabs are only from Lumio's own Chrome. Everyday Chrome and Safari tabs are not read, and cookies are never read.",
+                "A visible page is not proof of who is signed in. Passwords and session cookies stay on this Mac.",
+                "Accessibility and Screen Recording are separate permissions and are not bypassed.",
+            ],
+        });
+    }
+    #[cfg(windows)]
+    {
+        return json!({
+            "ok": true,
+            "platform": "windows",
+            "front": "",
+            "installed": [],
+            "limitations": ["Windows app discovery is not in this build. Do not claim an app was found."],
+        });
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        let mut installed = Vec::new();
+        if let Ok(entries) = std::fs::read_dir("/usr/share/applications") {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|ext| ext.to_str()) != Some("desktop") {
+                    continue;
+                }
+                if let Ok(text) = std::fs::read_to_string(&path) {
+                    if let Some(name) = text.lines().find_map(|line| line.strip_prefix("Name=")) {
+                        let name = name.trim();
+                        if !name.is_empty() && !installed.contains(&name.to_string()) {
+                            installed.push(name.to_string());
+                        }
+                    }
+                }
+                if installed.len() >= 40 {
+                    break;
+                }
+            }
+        }
+        installed.sort();
+        return json!({
+            "ok": true,
+            "platform": "linux",
+            "front": "",
+            "installed": installed,
+            "limitations": [
+                "Lists names from /usr/share/applications, up to 40.",
+                "Wayland may block global input and screen capture. Use the desktop portal. Do not weaken it.",
+            ],
+        });
+    }
+}
+
 pub fn launch_app(name: &str) -> Result<String, String> {
     let app = map_app_name(name);
     if app.is_empty() {

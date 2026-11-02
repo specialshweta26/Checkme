@@ -110,6 +110,12 @@ class LaunchAppInput(BaseModel):
     name: str = Field(description="App to open on the computer: browser, chrome, code, or a short binary name.")
 
 
+class ComputerUseInput(BaseModel):
+    action: str = Field(description="discover, inspect, launch, or observe.")
+    target: str = Field(default="", description="App name for inspect or launch, such as Excel or Visual Studio Code.")
+    text: str = Field(default="", description="What the user wants done. Used only for the safety check.")
+
+
 class TakeoverInput(BaseModel):
     reason: str = Field(description="Why the user must take over (login, 2FA, captcha, payment).")
     instruction: str = Field(default="", description="What they should do on the live screen.")
@@ -377,6 +383,15 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         ctx.used_tools.append("launch_app")
         return _dumps(await computer.launch_app(ctx, name))
 
+    async def computer_use(action: str, target: str = "", text: str = "") -> str:
+        """Discover, inspect, launch, or observe an app on this computer. Returns status succeeded, failed, needs_approval, or unsupported, plus evidence. Refuses sending, deleting, paying, publishing, and any attempt to bypass a check. Does not drive the user's everyday browser."""
+        from app.computer.runtime import run as computer_run
+
+        ctx.used_tools.append("computer_use")
+        raw = getattr(ctx, "connectors", None) or {}
+        slugs = {str(key) for key in raw} if isinstance(raw, dict) else set()
+        return _dumps(await computer_run(getattr(ctx.user, "id", None), action, target, text, connectors=slugs), 8000)
+
     async def request_takeover(reason: str, instruction: str = "") -> str:
         """Pause and give the user control of the live computer screen. Use only for login, 2FA, captcha, payment, or OS file pickers. Do not use for dropdowns or autocomplete. Same as browser_handoff."""
         ctx.used_tools.append("request_takeover")
@@ -636,6 +651,7 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         StructuredTool.from_function(coroutine=attach_file, name="attach_file", description=attach_file.__doc__, args_schema=AttachFileInput),
         StructuredTool.from_function(coroutine=open_path, name="open_path", description=open_path.__doc__, args_schema=PathInput),
         StructuredTool.from_function(coroutine=launch_app, name="launch_app", description=launch_app.__doc__, args_schema=LaunchAppInput),
+        StructuredTool.from_function(coroutine=computer_use, name="computer_use", description=computer_use.__doc__, args_schema=ComputerUseInput),
         StructuredTool.from_function(coroutine=request_takeover, name="request_takeover", description=request_takeover.__doc__, args_schema=TakeoverInput),
         StructuredTool.from_function(coroutine=web_search, name="web_search", description=web_search.__doc__, args_schema=WebSearchRecencyInput),
         StructuredTool.from_function(coroutine=web_read, name="web_read", description=web_read.__doc__, args_schema=WebReadInput),

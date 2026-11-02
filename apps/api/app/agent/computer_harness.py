@@ -133,6 +133,8 @@ def _stay_on_this_computer(tool_name: str) -> bool:
         "screen_png",
         "open_path",
         "launch_app",
+        "app_discover",
+        "computer_use",
         "grant_folder",
         "list_grants",
         "list_folder_grants",

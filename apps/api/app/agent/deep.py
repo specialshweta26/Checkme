@@ -2559,6 +2559,8 @@ def shell_routing_hint(connectors: list | None, agent=None) -> str:
             "list_dir, read_file, write_file, and search_files stay on this computer. If the desktop app is offline, say so and stop. Do not read those files on the cloud computer. "
             "Terminal/run_code stay off unless they enabled Terminal in This computer settings. "
             "Ask before overwrite, delete, bulk changes, sending forms, purchasing, or publishing. "
+            "To operate an installed app, call computer_use: discover, then inspect, then launch. Trust its status and evidence. "
+            "If status is needs_approval or unsupported, stop and say so. Do not retry a refused step through clicks or the shell. "
             "Ask before publish_file (that uploads local bytes into chat). "
             "Browser tools use Lumio's own Chrome profile on this computer, not the user's Chrome/Edge/Safari. "
             "Open Chrome only with browser_navigate to a full https address. Never open a blank page and never call launch_app for Chrome. "
