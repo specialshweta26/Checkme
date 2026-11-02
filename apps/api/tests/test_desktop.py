@@ -218,6 +218,24 @@ async def test_desktop_toolchain_force_cloud(monkeypatch, as_desktop):
     assert out["ran_on"] == "cloud_computer"
 
 
+async def test_desktop_read_file_stays_local_when_offline(monkeypatch, as_desktop):
+    calls = []
+
+    async def fake(slug, tool, args):
+        calls.append((slug, tool))
+        return {"ok": True, "content": "a,b"}
+
+    async def online(_uid):
+        return False
+
+    monkeypatch.setattr("app.desktop.agent.is_online", online)
+    ctx = _ctx([_computer(), _local()], fake)
+    out = await computer_harness.read_file(ctx, "/Users/me/Desktop/orders.csv")
+    assert calls == []
+    assert out["ran_on"] == "local_computer"
+    assert out.get("computer_unavailable") is True
+
+
 async def test_desktop_files_use_laptop(monkeypatch, as_desktop):
     calls = []
 

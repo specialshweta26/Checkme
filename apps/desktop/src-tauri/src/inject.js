@@ -39,6 +39,21 @@
     return origSend.call(this, body);
   };
 
+  document.addEventListener(
+    "click",
+    function (ev) {
+      var node = ev.target;
+      var link = node && node.closest ? node.closest("a[href]") : null;
+      if (!link) return;
+      var href = link.href || "";
+      if (!/^https?:\/\//i.test(href)) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      invoke("open_external", { url: href }).catch(function () {});
+    },
+    true
+  );
+
   function invoke(name, payload) {
     var core = window.__TAURI__ && window.__TAURI__.core;
     if (!core || !core.invoke) return Promise.reject(new Error("tauri"));
@@ -101,7 +116,7 @@
     wrap.id = "lumio-computer-settings";
     wrap.innerHTML =
       '<button type="button" id="lumio-cs-toggle">This computer</button>' +
-      '<div id="lumio-cs-panel"><h2>This computer</h2><p id="lumio-cs-note" style="margin:0 0 8px;color:#64748b">Lumio can only use folders you grant. Terminal is off unless you enable it.</p><ul id="lumio-cs-folders"></ul><label style="display:flex;gap:8px;align-items:center;margin-top:8px"><input type="checkbox" id="lumio-cs-term"/> Allow terminal / Python</label><div class="row"><button type="button" id="lumio-cs-add">Grant folder…</button><button type="button" id="lumio-cs-clear">Clear Lumio browser data</button></div></div>';
+      '<div id="lumio-cs-panel"><h2>This computer</h2><p id="lumio-cs-note" style="margin:0 0 8px;color:#64748b">Desktop, Documents, and Downloads are already available. Allow another folder only when you want Lumio to use it. Terminal stays off until you turn it on.</p><ul id="lumio-cs-folders"></ul><label style="display:flex;gap:8px;align-items:center;margin-top:8px"><input type="checkbox" id="lumio-cs-term"/> Allow terminal / Python</label><div class="row"><button type="button" id="lumio-cs-add">Allow another folder</button><button type="button" id="lumio-cs-clear">Clear Lumio browser data</button></div></div>';
     document.documentElement.appendChild(wrap);
     var panel = wrap.querySelector("#lumio-cs-panel");
     wrap.querySelector("#lumio-cs-toggle").onclick = function () {

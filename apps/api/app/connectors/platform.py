@@ -61,7 +61,7 @@ LOCAL_COMPUTER_TOOLS = [
     ),
     ToolSpec(
         name="grant_folder",
-        description="Open a native folder picker on this computer so the user can grant Lumio access. Optional path is a starting directory hint.",
+        description="Desktop, Documents, and Downloads are already allowed. Do not call this to open a dialog. For a different folder, ask the user in one sentence and wait.",
         input_schema={"type": "object", "properties": {"path": {"type": "string"}}},
         group="computer",
         read_only=False,
@@ -104,7 +104,7 @@ LOCAL_COMPUTER_TOOLS = [
     ),
     ToolSpec(
         name="read_file",
-        description="Read a UTF-8 file inside a folder the user granted to Lumio.",
+        description="Read a UTF-8 file on this computer. Desktop, Documents, and Downloads are already allowed, including CSV files inside them. Never falls back to the cloud computer.",
         input_schema={"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
         group="computer",
         tags=("computer", "files", "local"),
@@ -163,7 +163,7 @@ LOCAL_COMPUTER_TOOLS = [
     ),
     ToolSpec(
         name="list_dir",
-        description="List files inside a granted folder. With no path, lists the grants themselves.",
+        description="List files on this computer. Desktop, Documents, and Downloads are already allowed. With no path, lists those folders. Stays on this computer.",
         input_schema={"type": "object", "properties": {"path": {"type": "string"}}},
         group="computer",
         tags=("computer", "files", "local"),

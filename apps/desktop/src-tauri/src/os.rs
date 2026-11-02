@@ -12,6 +12,7 @@ use serde_json::{json, Value};
 
 static TEACH: OnceLock<Mutex<Vec<Value>>> = OnceLock::new();
 static MOUSE: OnceLock<Mutex<(i32, i32)>> = OnceLock::new();
+static TITLE: OnceLock<Mutex<String>> = OnceLock::new();
 static LISTENING: AtomicBool = AtomicBool::new(false);
 
 fn teach_buf() -> &'static Mutex<Vec<Value>> {
@@ -36,6 +37,15 @@ pub fn start_input_listen() {
         return;
     }
     std::thread::spawn(|| {
+        loop {
+            let title = front_title();
+            if let Ok(mut slot) = TITLE.get_or_init(|| Mutex::new(String::new())).lock() {
+                *slot = title;
+            }
+            std::thread::sleep(Duration::from_secs(2));
+        }
+    });
+    std::thread::spawn(|| {
         let _ = rdev::listen(move |event| {
             match event.event_type {
                 rdev::EventType::MouseMove { x, y } => {
@@ -55,12 +65,12 @@ pub fn start_input_listen() {
                         "x": x,
                         "y": y,
                         "button": button,
-                        "window": front_title(),
+                        "window": cached_title(),
                     }));
                 }
                 rdev::EventType::Wheel { delta_y, .. } => {
                     let direction = if delta_y < 0 { "down" } else { "up" };
-                    push_event(json!({ "kind": "scroll", "direction": direction, "window": front_title() }));
+                    push_event(json!({ "kind": "scroll", "direction": direction, "window": cached_title() }));
                 }
                 rdev::EventType::KeyPress(key) => {
                     if let Some(row) = map_key(key) {
@@ -73,8 +83,16 @@ pub fn start_input_listen() {
     });
 }
 
+fn cached_title() -> String {
+    TITLE
+        .get_or_init(|| Mutex::new(String::new()))
+        .lock()
+        .map(|s| s.clone())
+        .unwrap_or_default()
+}
+
 fn map_key(key: rdev::Key) -> Option<Value> {
-    let window = front_title();
+    let window = cached_title();
     match key {
         rdev::Key::Return => Some(json!({ "kind": "key", "key": "Enter", "window": window })),
         rdev::Key::Tab => Some(json!({ "kind": "key", "key": "Tab", "window": window })),
@@ -172,6 +190,109 @@ fn capture_png() -> Result<Vec<u8>, String> {
 pub fn screenshot_b64() -> Result<String, String> {
     let png = capture_png()?;
     Ok(base64::engine::general_purpose::STANDARD.encode(png))
+}
+
+pub fn is_denied_message(err: &str) -> bool {
+    let lower = err.to_lowercase();
+    lower.contains("operation not permitted") || lower.contains("permission denied") || lower.contains("os error 1")
+}
+
+fn run_osascript(script: &str, args: &[&Path]) -> Result<String, String> {
+    use std::io::Write;
+    use std::process::Stdio;
+    use std::sync::mpsc;
+    let mut cmd = Command::new("osascript");
+    cmd.arg("-");
+    for arg in args {
+        cmd.arg(arg);
+    }
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| err.to_string())?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(script.as_bytes()).map_err(|err| err.to_string())?;
+    }
+    let pid = child.id();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+    let output = match rx.recv_timeout(Duration::from_secs(25)) {
+        Ok(Ok(output)) => output,
+        Ok(Err(err)) => return Err(err.to_string()),
+        Err(_) => {
+            let _ = Command::new("kill").arg(pid.to_string()).status();
+            return Err("That file took too long to open. Ask again and I will retry it here.".into());
+        }
+    };
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        return Err(if err.trim().is_empty() { "Could not open that file on this computer.".into() } else { err.trim().to_string() });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+pub fn finder_entries(path: &Path) -> Result<Vec<(String, bool)>, String> {
+    let script = r#"on run argv
+  set p to item 1 of argv
+  set AppleScript's text item delimiters to linefeed
+  tell application "Finder"
+    set folderRef to POSIX file p as alias
+    set rows to {}
+    set theItems to every item of folderRef
+    repeat with i from 1 to count of theItems
+      set itRef to item i of theItems
+      set n to name of itRef
+      set k to class of itRef as text
+      set end of rows to (n as text) & tab & k
+    end repeat
+    return rows as text
+  end tell
+end run"#;
+    let text = run_osascript(script, &[path])?;
+    let mut rows = Vec::new();
+    for line in text.split(|c| c == '\n' || c == '\r') {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let (name, kind) = line.split_once('\t').unwrap_or((line, ""));
+        rows.push((name.to_string(), kind == "folder"));
+    }
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(rows)
+}
+
+pub fn finder_read(path: &Path, max: u64) -> Result<Vec<u8>, String> {
+    let dest = std::env::temp_dir().join(format!(
+        "lumio-read-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)
+    ));
+    let script = r#"on run argv
+  set srcPath to item 1 of argv
+  set destPath to item 2 of argv
+  do shell script "ditto " & quoted form of srcPath & " " & quoted form of destPath
+  return "ok"
+end run"#;
+    let copied = run_osascript(script, &[path, dest.as_path()]);
+    if copied.is_err() {
+        let _ = std::fs::remove_file(&dest);
+        return copied.map(|_| Vec::new());
+    }
+    if dest.is_dir() {
+        let _ = std::fs::remove_dir_all(&dest);
+        return Err("That path is a folder. List it instead of reading it as a file.".into());
+    }
+    let bytes = std::fs::read(&dest).map_err(|err| err.to_string());
+    let _ = std::fs::remove_file(&dest);
+    let bytes = bytes?;
+    if bytes.len() as u64 > max {
+        return Err(format!("{} is larger than {max} bytes", path.display()));
+    }
+    Ok(bytes)
 }
 
 pub fn reveal_home() {
@@ -342,6 +463,7 @@ pub async fn snapshot() -> Result<Value, String> {
 
 pub async fn boot() -> Result<Value, String> {
     start_input_listen();
+    let _ = tokio::task::spawn_blocking(crate::grants::ensure_common_folders).await;
     Ok(json!({
         "ok": true,
         "ran_on": "local_computer",
@@ -349,7 +471,8 @@ pub async fn boot() -> Result<Value, String> {
         "state": "running",
         "url": "",
         "title": "This computer",
-        "note": "This computer is ready. Teaching records what you do here; no live mirror.",
+        "folders": crate::grants::snapshot().folders,
+        "note": "Desktop, Documents, and Downloads are granted. Use list_dir on ~/Desktop. Do not say access is limited to ~/Lumio. Teaching records clicks without mirroring the screen.",
     }))
 }
 

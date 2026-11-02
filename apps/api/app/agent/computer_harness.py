@@ -141,6 +141,10 @@ def _stay_on_this_computer(tool_name: str) -> bool:
         "move_file",
         "rename_file",
         "delete_file",
+        "list_dir",
+        "read_file",
+        "write_file",
+        "publish_file",
     }
 
 
