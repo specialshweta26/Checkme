@@ -44,7 +44,8 @@ pub fn start_input_listen() {
             if let Ok(mut slot) = TITLE.get_or_init(|| Mutex::new(String::new())).lock() {
                 *slot = title;
             }
-            std::thread::sleep(Duration::from_secs(2));
+            let pause = if teaching() { 800 } else { 2000 };
+            std::thread::sleep(Duration::from_millis(pause));
         }
     });
     std::thread::spawn(|| {
@@ -312,6 +313,49 @@ fn emit_file_changes(before: &std::collections::BTreeSet<String>, after: &std::c
     }
 }
 
+fn own_app(app: &str) -> bool {
+    let name = app.to_ascii_lowercase();
+    name == "lumio" || name == "checkme"
+}
+
+fn safe_app_name(app: &str) -> Option<&str> {
+    if app.is_empty() || app.len() > 80 {
+        return None;
+    }
+    if app.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '.' | '-' | '_')) {
+        Some(app)
+    } else {
+        None
+    }
+}
+
+fn context_script(app: &str) -> Option<String> {
+    let name = safe_app_name(app)?;
+    let lower = name.to_ascii_lowercase();
+    let body = if lower == "microsoft excel" || lower == "excel" {
+        "tell application \"Microsoft Excel\"\n  if (count of workbooks) is 0 then return \"\"\n  return (name of active workbook) & \" — \" & (name of active sheet)\nend tell".to_string()
+    } else if lower == "microsoft word" || lower == "word" {
+        "tell application \"Microsoft Word\"\n  if (count of documents) is 0 then return \"\"\n  return name of active document\nend tell".to_string()
+    } else if lower == "microsoft powerpoint" || lower == "powerpoint" {
+        "tell application \"Microsoft PowerPoint\"\n  if (count of presentations) is 0 then return \"\"\n  return name of active presentation\nend tell".to_string()
+    } else if lower == "numbers" || lower == "pages" || lower == "keynote" {
+        format!("tell application \"{name}\"\n  if (count of documents) is 0 then return \"\"\n  return name of front document\nend tell")
+    } else if browser_app(name).is_some() || lower == "finder" {
+        return None;
+    } else {
+        format!("tell application \"{name}\"\n  try\n    return name of front window\n  end try\n  try\n    return name of document 1\n  end try\n  return \"\"\nend tell")
+    };
+    Some(body)
+}
+
+fn front_work_context(app: &str) -> Option<String> {
+    let script = context_script(app)?;
+    match run_osascript_fast(&script, &[]) {
+        Ok(text) => Some(text.trim().to_string()),
+        Err(_) => None,
+    }
+}
+
 fn start_activity_watch() {
     if WATCHING.swap(true, Ordering::SeqCst) {
         return;
@@ -320,6 +364,10 @@ fn start_activity_watch() {
         let mut files = std::collections::BTreeSet::new();
         let mut last_url = String::new();
         let mut last_folder = String::new();
+        let mut last_app = String::new();
+        let mut last_context = String::new();
+        let mut quiet_apps: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut tick: u32 = 0;
         let mut was_teaching = false;
         loop {
             let on = teaching();
@@ -327,10 +375,47 @@ fn start_activity_watch() {
                 files = snapshot_files(None);
                 last_url.clear();
                 last_folder.clear();
+                last_app.clear();
+                last_context.clear();
+                quiet_apps.clear();
+                tick = 0;
             }
             was_teaching = on;
             if on {
-                let app = cached_title();
+                tick = tick.wrapping_add(1);
+                let app = lsappinfo_front().unwrap_or_else(cached_title);
+                if !app.is_empty() && app != "This computer" && !own_app(&app) && app != last_app {
+                    last_app = app.clone();
+                    last_context.clear();
+                    push_event(json!({
+                        "kind": "work",
+                        "text": app,
+                        "action": "opened",
+                    }));
+                }
+                let due = !last_app.is_empty()
+                    && context_script(&last_app).is_some()
+                    && (!quiet_apps.contains(&last_app) || tick % 15 == 0)
+                    && (last_context.is_empty() || tick % 3 == 0);
+                if due {
+                    match front_work_context(&last_app) {
+                        Some(ctx) => {
+                            quiet_apps.remove(&last_app);
+                            if !ctx.is_empty() && ctx != last_context {
+                                last_context = ctx.clone();
+                                push_event(json!({
+                                    "kind": "work",
+                                    "text": last_app,
+                                    "window": ctx,
+                                    "action": "using",
+                                }));
+                            }
+                        }
+                        None => {
+                            quiet_apps.insert(last_app.clone());
+                        }
+                    }
+                }
                 if let Some(browser) = browser_app(&app) {
                     if let Some((url, title)) = front_browser(browser) {
                         if url != last_url {

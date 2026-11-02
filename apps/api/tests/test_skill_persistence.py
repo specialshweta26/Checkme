@@ -76,6 +76,34 @@ async def test_open_page_is_kept_when_nothing_else_was_captured(skill_store, qui
     assert "myntra.com" in row["instruction"]
 
 
+async def test_desktop_teaching_records_the_mac_not_the_in_app_page(skill_store, quiet, monkeypatch):
+    async def stop(key):
+        return {
+            "events": [{"t": 1, "kind": "work", "text": "Microsoft Excel", "window": "Budget.xlsx — Sheet1", "action": "using", "source": "screen"}],
+            "frames": [],
+            "notes": [],
+        }
+
+    async def offline(*a, **k):
+        raise RuntimeError("offline")
+
+    async def fake_call(*a, **k):
+        return {"ok": True}
+
+    monkeypatch.setattr(recorder, "stop", stop)
+    monkeypatch.setattr(recorder, "peek", lambda key: {"events": [], "frames": [], "notes": []})
+    monkeypatch.setattr(service, "_write_skill", offline)
+    monkeypatch.setattr("app.desktop.client.prefer_local", lambda: True)
+    monkeypatch.setattr("app.desktop.agent.call_local", fake_call)
+    started = await service.start_teaching(USER, None, page_url="https://www.myntra.com/", page_title="Myntra")
+    await service.stop_teaching(None, USER, "")
+    await skill_store.settle()
+    row = skill_store.rows[started["skill_id"]]
+    assert all(step.get("kind") != "navigate" for step in row["steps"])
+    assert any(step.get("text") == "Microsoft Excel" and "Budget.xlsx" in (step.get("window") or "") for step in row["steps"])
+    assert "myntra" not in row["instruction"].lower()
+
+
 async def test_empty_recording_is_not_kept(skill_store, quiet, monkeypatch):
     async def stop(key):
         return {"events": [], "frames": [], "notes": []}

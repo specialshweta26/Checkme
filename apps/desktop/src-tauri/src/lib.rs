@@ -941,7 +941,6 @@ async fn screenshot_loop(state: Arc<Sidecar>) {
         Err(_) => return,
     };
     let mut last_shot = tokio::time::Instant::now() - Duration::from_secs(30);
-    let mut last_window = String::new();
     loop {
         tokio::time::sleep(Duration::from_millis(400)).await;
         let (token, api_base) = {
@@ -960,10 +959,6 @@ async fn screenshot_loop(state: Arc<Sidecar>) {
         }
         if os::teaching() {
             let title = os::cached_title();
-            if !title.is_empty() && title != "This computer" && title != last_window {
-                events.push(json!({ "kind": "window", "window": &title }));
-                last_window = title.clone();
-            }
             if last_shot.elapsed() >= Duration::from_secs(6) {
                 last_shot = tokio::time::Instant::now();
                 let client = client.clone();
@@ -982,8 +977,6 @@ async fn screenshot_loop(state: Arc<Sidecar>) {
                     }
                 });
             }
-        } else {
-            last_window.clear();
         }
         if events.is_empty() {
             continue;

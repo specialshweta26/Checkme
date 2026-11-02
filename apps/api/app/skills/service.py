@@ -470,16 +470,24 @@ async def start_teaching(user: User, agent_id: uuid.UUID | None = None, name: st
         "flushed": {},
     }
     _TEACH[key] = row
-    if not (page_url or "").strip():
-        try:
-            from app.connectors.daytona_box import live_page
+    # The desktop app records the Mac the person is using. The in-app browser page is not that computer.
+    try:
+        from app.desktop.client import prefer_local
 
-            known = live_page(str(user.id))
-            page_url = known.get("url") or ""
-            page_title = page_title or known.get("title") or ""
-        except Exception:  # noqa: BLE001
-            pass
-    _note_open_page(row, page_url, page_title)
+        on_this_mac = prefer_local()
+    except Exception:  # noqa: BLE001
+        on_this_mac = False
+    if not on_this_mac:
+        if not (page_url or "").strip():
+            try:
+                from app.connectors.daytona_box import live_page
+
+                known = live_page(str(user.id))
+                page_url = known.get("url") or ""
+                page_title = page_title or known.get("title") or ""
+            except Exception:  # noqa: BLE001
+                pass
+        _note_open_page(row, page_url, page_title)
     try:
         row["skill_id"] = await _store_create(user.id, agent_id, chosen or DEFAULT_NAME, auto_named=not chosen)
     except Exception as exc:  # noqa: BLE001 - keep recording in memory; the skill is created at stop
@@ -640,7 +648,7 @@ def _cancel_session_tasks(row: dict) -> None:
 
 
 SKILL_WRITER = """You turn a recorded demonstration on a computer into a reusable skill for an AI agent that will run on the same kind of computer (the user's Mac or Windows desktop in the Lumio app, or a Linux cloud desktop with a browser).
-You get a timeline of what the user did (browser addresses, Finder folders, files created deleted or renamed, clicks, typing, keys, scrolls, window changes) and what they said out loud, plus a few screenshots of their own screen.
+You get a timeline of what the user did on their own computer (which app they opened, which document or sheet they worked in, browser addresses, Finder folders, files created deleted or renamed, clicks, typing, keys, scrolls) and what they said out loud, plus a few screenshots of that computer.
 The recording is whatever they actually did: Finder, Excel, a desktop app, or a site they opened themselves. Describe only those actions and screens. Do not invent steps, and do not substitute a browser homepage or any site that is not in the timeline or screenshots.
 Spoken instructions explain intent: prefer them over raw coordinates. Generalize: name the goal, the inputs that will change between runs (as {placeholders}), the steps in order (which app or site, what to open, what to look for, what to click or type), and how to tell it worked.
 On the user's own computer prefer open_path, launch_app, list_dir, and computer_act; use browser tools only for websites they opened. Describe targets by visible label or purpose, not pixel coordinates. Never include passwords, one-time codes, card numbers or other secrets; write {password} etc. instead.

@@ -309,7 +309,7 @@ def add_local_events(user_key: str, events: list) -> int:
         if not isinstance(item, dict):
             continue
         kind = item.get("kind")
-        if kind not in {"click", "char", "key", "scroll", "window", "capture_started", "capture_unavailable", "navigate", "folder", "file"}:
+        if kind not in {"click", "char", "key", "scroll", "window", "capture_started", "capture_unavailable", "navigate", "folder", "file", "work"}:
             continue
         row = {"kind": kind, "t": elapsed(rec.started)}
         for key in ("x", "y", "button", "char", "key", "direction", "window", "reason", "url", "path", "action", "text"):
@@ -502,6 +502,17 @@ def parse_capture(text: str, offset: float) -> tuple[list[dict], list[str]]:
             events.append({
                 "t": t, "kind": "file", "action": action, "path": path,
                 "text": str(row.get("text") or "")[:400], "source": "screen",
+            })
+        elif kind == "work":
+            app = str(row.get("text") or "")[:80]
+            detail = str(row.get("window") or "")[:200]
+            if not app or app.lower() in {"lumio", "checkme"}:
+                continue
+            if prev and prev.get("kind") == "work" and prev.get("text") == app and (prev.get("window") or "") == detail:
+                continue
+            events.append({
+                "t": t, "kind": "work", "text": app, "window": detail,
+                "action": str(row.get("action") or "opened")[:20], "source": "screen",
             })
         if len(events) >= MAX_EVENTS:
             break

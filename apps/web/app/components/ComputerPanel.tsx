@@ -328,9 +328,10 @@ export function ScreenRail({
   // Teaching: E2B records the cloud desktop; the Lumio app records this computer in the background.
   const streaming = Boolean(stream.view) && machine === "running";
   const localDesktop = provider === "local" || isLumioDesktop();
-  const interactive = controlling;
+  const recordingMac = teaching && (localDesktop || isLumioDesktop());
+  const interactive = controlling && !recordingMac;
   const framesSupported = provider !== "" && provider !== "e2b" && provider !== "none";
-  const liveScreen = useLiveScreen(liveActive && !streaming && framesSupported);
+  const liveScreen = useLiveScreen(liveActive && !streaming && framesSupported && !recordingMac);
   const bootSeconds = machine === "booting" && bootStarted ? Math.max(0, Math.round((now - bootStarted) / 1000)) : 0;
   const bootSlow = bootSeconds >= BOOT_TIMEOUT_S;
   // A saved task preview can be stale or blank; only use it before a live session starts.
@@ -548,13 +549,13 @@ export function ScreenRail({
     try {
       const desktop = localDesktop || isLumioDesktop();
       if (!desktop && machine !== "running" && !(await wake())) return;
-      const started = await onTeachStart({ url: href, title: pageTitle || session?.title || "" });
+      const started = await onTeachStart(desktop ? undefined : { url: href, title: pageTitle || session?.title || "" });
       setTeachLimit(Number(started && started.max_seconds) || 600);
       setTeachStarted(Date.now() - Number((started && started.elapsed) || 0) * 1000);
       setTeachNow(Date.now());
       setNotice(
         desktop
-          ? "Recording this screen. Click, type, and scroll here. Other apps on this computer are recorded too."
+          ? "Recording this Mac. Switch to Excel, Finder, a browser, or any other app and do the task there."
           : "Recording. Use the screen as usual; tap Mic to narrate what you are doing.",
       );
     } catch (err: any) {
@@ -608,7 +609,7 @@ export function ScreenRail({
         if (stop) return;
         if (!row) {
           setTaught((t) => (t && t.id === taught.id ? { ...t, gone: true } : t));
-          setNotice("Nothing was recorded, so no skill was saved.");
+          setNotice(isLumioDesktop() ? "Nothing on this Mac was recorded. Leave Lumio, do the task in the app you want to teach, then save again." : "Nothing was recorded, so no skill was saved.");
           return;
         }
         setTaught((t) => (t && t.id === taught.id ? { ...t, skill: row } : t));
@@ -714,7 +715,11 @@ export function ScreenRail({
         ) : null}
         </div>
       </div>
-      <div
+      {recordingMac ? (
+        <p className="screen-caption">
+          Recording this Mac, not the panel. Leave Lumio and do the task in the app you actually use — Excel, Word, Finder, Mail, a browser, or anything else. Lumio writes down each app you open and the document or sheet you work in. Come back and tap Stop & save skill.
+        </p>
+      ) : <div
         ref={previewRef}
         className={`screen-preview fullscreen${asleep ? " asleep" : ""}${controlling ? " controlling" : ""}${streaming ? " streaming" : ""}`}
         tabIndex={controlling && !streaming ? 0 : -1}
@@ -799,8 +804,8 @@ export function ScreenRail({
                       : "Computer is asleep. Open it to wake."}
           </p>
         )}
-      </div>
-      <p className="screen-caption">
+      </div>}
+      {!recordingMac ? <p className="screen-caption">
         {teaching
           ? narration.on
             ? "Recording your clicks, typing, scrolling, and your voice. Explain what you are doing as you go."
@@ -810,7 +815,7 @@ export function ScreenRail({
             : streaming
               ? `${agentName}'s screen (live, view only). Take control to use it.`
             : `${agentName}'s screen`}
-      </p>
+      </p> : null}
       {teaching && narration.error ? <p className="screen-notice">{narration.error}</p> : null}
       {notice ? (
         <p className="screen-notice">
@@ -825,7 +830,7 @@ export function ScreenRail({
           ) : null}
         </p>
       ) : null}
-      {interactive || teaching || streaming || machine === "running" ? <ComputerInputBar /> : null}
+      {!recordingMac && (interactive || teaching || streaming || machine === "running") ? <ComputerInputBar /> : null}
     </aside>
   );
 }
