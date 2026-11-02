@@ -52,17 +52,50 @@ echo "Downloading..."
 curl -fL --progress-bar -o "${dmg}" "${url}"
 
 echo "Installing to ${DEST}..."
-attach="$(hdiutil attach -nobrowse -readonly "${dmg}")"
-volume="$(printf '%s\n' "${attach}" | awk '/\/Volumes\//{print substr($0, index($0, "/Volumes/"))}' | tail -1)"
+attach="$(hdiutil attach -nobrowse -readonly -plist "${dmg}")"
+parsed="$(printf '%s' "${attach}" | python3 -c '
+import plistlib, sys
+data = plistlib.loads(sys.stdin.buffer.read())
+dev = ""
+mount = ""
+for ent in data.get("system-entities") or []:
+    point = ent.get("mount-point") or ""
+    if point:
+        mount = point
+        dev = ent.get("dev-entry") or dev
+print(dev)
+print(mount)
+')"
+device="$(printf '%s\n' "${parsed}" | sed -n '1p')"
+volume="$(printf '%s\n' "${parsed}" | sed -n '2p')"
 if [[ -z "${volume}" || ! -d "${volume}/Lumio.app" ]]; then
   echo "The disk image did not contain Lumio.app." >&2
-  hdiutil detach "${volume}" >/dev/null 2>&1 || true
+  if [[ -n "${device}" ]]; then
+    hdiutil detach -force "${device}" >/dev/null 2>&1 || true
+  fi
   exit 1
 fi
 mkdir -p /Applications
 rm -rf "${DEST}"
 ditto "${volume}/Lumio.app" "${DEST}"
-hdiutil detach "${volume}" >/dev/null
+sync || true
+detached=0
+target="${device:-${volume}}"
+for _try in 1 2 3 4 5; do
+  if hdiutil detach "${target}" >/dev/null 2>&1; then
+    detached=1
+    break
+  fi
+  sleep 1
+done
+if [[ "${detached}" -ne 1 ]]; then
+  if hdiutil detach -force "${target}" >/dev/null 2>&1; then
+    detached=1
+  fi
+fi
+if [[ "${detached}" -ne 1 ]]; then
+  echo "Lumio is installed. The disk image is still mounted because it was busy; eject it from Finder when you can." >&2
+fi
 xattr -cr "${DEST}" || true
 codesign --force --deep --sign - "${DEST}" >/dev/null 2>&1 || true
 
