@@ -25,7 +25,6 @@ export default function Download() {
   }, []);
 
   const installCmd = origin ? `curl -fsSL ${origin}/install-mac.sh | bash` : "curl -fsSL <site>/install-mac.sh | bash";
-  const macHref = (macArch === "intel" ? installers.macIntel : installers.macArm) || installers.mac || installers.page;
 
   function copy(kind: "install" | "fix", text: string) {
     void navigator.clipboard.writeText(text).then(() => {
@@ -44,8 +43,7 @@ export default function Download() {
           The web app runs on a cloud computer. The desktop app uses this machine — files, apps, Chrome, and teaching — so
           bookings, logins, and skills stay on your computer.
         </p>
-        {os === "mac" ? (
-          <div className="site-install-box">
+        <div className="site-install-box" id="mac-install">
             <strong>Install on this Mac</strong>
             <p>
               Do not open a browser-downloaded disk image first. macOS will say Lumio is damaged and offer Move to Bin —
@@ -62,13 +60,12 @@ export default function Download() {
               </button>
             </p>
           </div>
-        ) : null}
         <div className="site-os-grid">
           <OsCard
             title="macOS"
             hint={macArch === "intel" ? "Intel Mac, macOS 12+" : "Apple silicon, macOS 12+"}
-            href={macHref}
-            cta={installers.mac ? "Disk image (then run xattr)" : "Get the Mac build"}
+            href="#mac-install"
+            cta="Install from Terminal"
             highlight={os === "mac"}
             icon={<AppleIcon />}
           />
@@ -81,13 +78,6 @@ export default function Download() {
             icon={<WindowsIcon />}
           />
         </div>
-        {os !== "mac" ? (
-          <p className="site-download-note">
-            On a Mac, do not open the downloaded disk image first — macOS will say Lumio is damaged. Install from Terminal
-            with <code>{origin ? `curl -fsSL ${origin}/install-mac.sh | bash` : "curl -fsSL <site>/install-mac.sh | bash"}</code>, or after copying to Applications run{" "}
-            <code>xattr -cr /Applications/Lumio.app</code>.
-          </p>
-        ) : null}
         <p className="site-download-note">
           Prefer not to install? <Link href="/chat">Use Lumio in the browser</Link>
           {" · "}
