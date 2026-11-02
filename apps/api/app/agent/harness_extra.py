@@ -93,7 +93,12 @@ class ToolchainInput(BaseModel):
 
 
 class PathInput(BaseModel):
-    path: str = Field(default="", description="Absolute or workspace-relative path.")
+    path: str = Field(default="", description="Folder or file. In the desktop app, ~/Desktop, ~/Documents, and ~/Downloads are already granted. Empty lists those folders.")
+
+
+class SearchFilesInput(BaseModel):
+    query: str = Field(description="Words the user used for the file or folder name.")
+    path: str = Field(default="", description="Optional folder to search. Empty searches every granted folder on this computer.")
 
 
 class WriteFileInput(BaseModel):
@@ -339,7 +344,7 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         return _dumps(await computer.run_code(ctx, code, timeout), 40000)
 
     async def shell(command: str, cwd: str | None = None, timeout: int = 60) -> str:
-        """Run a bash command on this user's cloud computer (E2B sandbox; home ~, work in ~/work). Use it for installs, CLIs, scripts and builds. npm -g, pip --user and ~/.local/bin are on PATH without sudo (sudo -n works when the image allows it). A missing known tool (node/npm, pnpm, yarn, python/pip, git, gh, vercel, render, uv) is installed automatically and the command retried once. Install anything else yourself; never tell the user to install things on their own machine. Never put secrets in a command. Returns exit_code and stdout."""
+        """Run a bash command. In the desktop app this runs on this computer and does not move to the cloud machine. Use search_files to find the user's files. On the website this is the cloud computer (home ~, work in ~/work): installs and builds go here, and a missing known tool is installed and retried once. Never put secrets in a command."""
         ctx.used_tools.append("shell")
         return _dumps(await computer.shell(ctx, command, cwd, timeout), 40000)
 
@@ -353,8 +358,13 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         ctx.used_tools.append("ensure_toolchain")
         return _dumps(await computer.ensure_toolchain(ctx, tools, force), 8000)
 
+    async def search_files(query: str, path: str = "") -> str:
+        """Find files and folders by name. In the desktop app this searches every granted folder on this computer. Pass the words the user used. Do not use the cloud computer, and do not treat a missing cloud path as the answer."""
+        ctx.used_tools.append("search_files")
+        return _dumps(await computer.search_files(ctx, query, path))
+
     async def list_files(path: str = "") -> str:
-        """List files and folders on the computer. Default is the workspace."""
+        """List a folder. In the desktop app this is the user's computer: leave path empty for the granted folders, or pass ~/Desktop, ~/Documents, or ~/Downloads. On the website this is the cloud workspace. A path missing on the cloud machine is not a result about this Mac."""
         ctx.used_tools.append("list_files")
         return _dumps(await computer.list_files(ctx, path))
 
@@ -645,6 +655,7 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         StructuredTool.from_function(coroutine=run_code, name="run_code", description=run_code.__doc__, args_schema=RunCodeInput),
         StructuredTool.from_function(coroutine=shell, name="shell", description=shell.__doc__, args_schema=ShellInput),
         StructuredTool.from_function(coroutine=ensure_toolchain, name="ensure_toolchain", description=ensure_toolchain.__doc__, args_schema=ToolchainInput),
+        StructuredTool.from_function(coroutine=search_files, name="search_files", description=search_files.__doc__, args_schema=SearchFilesInput),
         StructuredTool.from_function(coroutine=list_files, name="list_files", description=list_files.__doc__, args_schema=PathInput),
         StructuredTool.from_function(coroutine=read_file, name="read_file", description=read_file.__doc__, args_schema=PathInput),
         StructuredTool.from_function(coroutine=write_file, name="write_file", description=write_file.__doc__, args_schema=WriteFileInput),

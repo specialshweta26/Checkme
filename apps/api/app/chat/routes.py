@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime, timezone
 
 import anyio
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import StreamingResponse
 
@@ -132,6 +132,7 @@ async def delete_session(session_id: uuid.UUID, user: User = Depends(current_use
 async def chat(
     body: ChatIn,
     background: BackgroundTasks,
+    request: Request,
     user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -317,6 +318,7 @@ async def chat(
                 teammates=teammates,
                 mentions=mentions,
                 progress=progress,
+                client_kind=(request.headers.get("x-lumio-client") or "web"),
             )
             # #region agent log
             dbg(

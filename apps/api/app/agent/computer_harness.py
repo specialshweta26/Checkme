@@ -1,8 +1,8 @@
 """First-class computer/browser/file verbs. They wrap this user's computer.
 
 The website always uses the cloud computer (E2B Desktop, or Daytona). The Lumio desktop app runs files,
-the browser, and teaching on this machine inside user-granted folders. Shell/files fall back to E2B if the sidecar
-is offline; browser, boot, live screen, and teaching never open E2B from the desktop app.
+search, shell, the browser, and teaching on this machine. Those tools do not fall through to the cloud
+machine. Browser, boot, live screen, and teaching never open E2B from the desktop app.
 Toolchain installs stay on the cloud computer. See docs/COMPUTER.md."""
 
 from __future__ import annotations
@@ -11,12 +11,14 @@ import asyncio
 import logging
 import re
 import secrets
+from contextvars import ContextVar
 from typing import Any
 
 from app.agent.coding import COMPUTER_SLUG
 from app.desktop.agent import LOCAL_TOOLS
 
 log = logging.getLogger(__name__)
+_FORCE_CLOUD: ContextVar[bool] = ContextVar("lumio_force_cloud", default=False)
 
 LOCAL_PROVIDERS = {"local", "trusted_local", "computer_local"}
 CLOUD_PROVIDERS = {"daytona"}
@@ -124,6 +126,19 @@ async def _use_local(ctx, tool_name: str) -> bool:
     return bool(user_id) and await is_online(user_id)
 
 
+def desktop_tool_slug(ctx, slug: str, tool_name: str) -> str:
+    """A desktop-app chat uses this Mac for file and computer tools, not the cloud machine."""
+    from app.desktop.agent import LOCAL_SLUG
+    from app.desktop.client import prefer_local
+
+    if _FORCE_CLOUD.get() or slug != COMPUTER_SLUG or not prefer_local() or tool_name not in LOCAL_TOOLS:
+        return slug
+    connectors = getattr(ctx, "connectors", None) or {}
+    if LOCAL_SLUG in connectors:
+        return LOCAL_SLUG
+    return slug
+
+
 def _stay_on_this_computer(tool_name: str) -> bool:
     """Browser, boot, and live-screen tools must not open E2B from the desktop app."""
     return tool_name.startswith(("browser", "browse_", "computer_")) or tool_name in {
@@ -214,11 +229,20 @@ async def run_computer(ctx, tool_name: str, args: dict | None = None, *, force_c
         local = await _try_local(ctx, tool_name, args or {})
         if local is not None:
             return local
+        from app.desktop.client import prefer_local
+
+        if prefer_local() and tool_name in LOCAL_TOOLS:
+            return _local_unavailable(tool_name, "The Lumio desktop app is not connected. This chat stays on this computer.")
 
     slug = computer_slug(ctx)
     if not slug:
         return computer_missing()
-    result = await call_user_tool(ctx, slug, tool_name, args or {})
+    token = _FORCE_CLOUD.set(True) if force_cloud else None
+    try:
+        result = await call_user_tool(ctx, slug, tool_name, args or {})
+    finally:
+        if token is not None:
+            _FORCE_CLOUD.reset(token)
     if isinstance(result, dict) and result.get("ran_on") is None:
         result["ran_on"] = "cloud_computer"
     if not isinstance(result, dict):
@@ -362,6 +386,10 @@ async def shell(ctx, command: str, cwd: str | None = None, timeout: int = 60) ->
     local = await _try_local(ctx, "exec", args)
     if local is not None:
         return local
+    from app.desktop.client import prefer_local
+
+    if prefer_local():
+        return _local_unavailable("exec", "The Lumio desktop app is not connected. This chat stays on this computer.")
     return await cloud_exec(ctx, command, cwd, timeout)
 
 
@@ -420,6 +448,16 @@ async def run_code(ctx, code: str, timeout: int = 120) -> Any:
     if not (code or "").strip():
         return {"error": "code is required"}
     return await run_computer(ctx, "run_code", {"code": code, "timeout": max(10, min(int(timeout or 120), 300))})
+
+
+async def search_files(ctx, query: str, path: str = "") -> Any:
+    text = (query or "").strip()
+    if not text:
+        return {"error": "query is required"}
+    args: dict[str, Any] = {"query": text}
+    if (path or "").strip():
+        args["path"] = path.strip()
+    return await run_computer(ctx, "search_files", args)
 
 
 async def list_files(ctx, path: str = "") -> Any:
