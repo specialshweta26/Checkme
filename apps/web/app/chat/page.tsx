@@ -1125,12 +1125,12 @@ export default function ChatPage() {
             onClose={() => setScreenOpen(false)}
             onTakeControl={() => setControlling(true)}
             teaching={teaching}
-            onTeachStart={async () => {
+            onTeachStart={async (page) => {
               const group = roster.groups.find((row) => row.id === groupId);
               const skillAgentId = agentId || group?.owner_id || group?.members[0]?.id;
-              const started = await startTeaching(skillAgentId || undefined);
+              const started = await startTeaching(skillAgentId || undefined, page);
               setTeaching(true);
-              if (!isLumioDesktop()) setControlling(true);
+              setControlling(true);
               return started;
             }}
             onTeachStop={async (name) => {

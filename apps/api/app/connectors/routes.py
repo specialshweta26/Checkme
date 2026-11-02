@@ -222,13 +222,16 @@ async def computer_status(user: User = Depends(current_user), db: AsyncSession =
     from app.desktop.agent import is_online, wants_local_computer
 
     if await wants_local_computer(db, user):
+        from app.connectors.daytona_box import live_page
+
         png = live_screen_png(str(user.id))
         online = await is_online(user.id)
+        page = live_page(str(user.id))
         return {
             "state": "running" if online else "stopped",
             "screenAvailable": bool(png),
-            "url": "",
-            "title": "",
+            "url": page.get("url") or "",
+            "title": page.get("title") or "",
             "screen_agent": "",
             "provider": "local",
         }
@@ -419,6 +422,9 @@ async def computer_control(body: ComputerControlBody, user: User = Depends(curre
             raise HTTPException(503, str(vis_exc)[:240]) from vis_exc
         if not isinstance(data, dict):
             return {"ok": True, "provider": "local"}
+        page = str(data.get("url") or "")
+        if page.startswith(("http://", "https://")):
+            record_user_input(user.id, "navigate", url=page, window=str(data.get("title") or ""))
         return {**data, "provider": "local"}
     row = await _computer_row(db, user)
     try:

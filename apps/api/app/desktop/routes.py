@@ -81,7 +81,7 @@ class ScreenIn(BaseModel):
 async def screen(body: ScreenIn, pair=Depends(_agent_user)):
     import base64
 
-    from app.connectors.daytona_box import remember_screen
+    from app.connectors.daytona_box import remember_page, remember_screen
 
     user, row = pair
     await desktop.heartbeat(user.id, desktop.stored_hash(row))
@@ -92,6 +92,7 @@ async def screen(body: ScreenIn, pair=Depends(_agent_user)):
     except Exception as vis_exc:  # noqa: BLE001
         raise HTTPException(400, "invalid png") from vis_exc
     remember_screen(png, str(user.id))
+    remember_page(str(user.id), body.url, body.title)
     return {"ok": True, "url": body.url, "title": body.title}
 
 

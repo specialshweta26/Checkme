@@ -25,6 +25,8 @@ class SkillIn(BaseModel):
 class TeachIn(BaseModel):
     agent_id: uuid.UUID | None = None
     name: str = ""
+    page_url: str = ""
+    page_title: str = ""
 
 
 class TeachStopIn(BaseModel):
@@ -65,7 +67,7 @@ async def create_skill(body: SkillIn, user: User = Depends(current_user), db: As
 
 @router.post("/teach/start")
 async def teach_start(body: TeachIn, user: User = Depends(current_user)):
-    return await service.start_teaching(user, body.agent_id, body.name)
+    return await service.start_teaching(user, body.agent_id, body.name, body.page_url, body.page_title)
 
 
 @router.get("/teach/status")

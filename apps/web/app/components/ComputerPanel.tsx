@@ -307,7 +307,7 @@ export function ScreenRail({
   teaching?: boolean;
   onTakeControl?: () => void;
   onRelease?: () => void;
-  onTeachStart?: () => Promise<TeachStart | void>;
+  onTeachStart?: (page?: { url?: string; title?: string }) => Promise<TeachStart | void>;
   onTeachStop?: (name: string) => Promise<{ id?: string | null; name?: string; writing?: boolean; narrated?: boolean } | void>;
   onClose?: () => void;
 }) {
@@ -328,10 +328,9 @@ export function ScreenRail({
   // Teaching: E2B records the cloud desktop; the Lumio app records this computer in the background.
   const streaming = Boolean(stream.view) && machine === "running";
   const localDesktop = provider === "local" || isLumioDesktop();
-  const teachHud = teaching && localDesktop;
-  const interactive = controlling && !teachHud;
+  const interactive = controlling;
   const framesSupported = provider !== "" && provider !== "e2b" && provider !== "none";
-  const liveScreen = useLiveScreen(liveActive && !streaming && framesSupported && !teachHud);
+  const liveScreen = useLiveScreen(liveActive && !streaming && framesSupported);
   const bootSeconds = machine === "booting" && bootStarted ? Math.max(0, Math.round((now - bootStarted) / 1000)) : 0;
   const bootSlow = bootSeconds >= BOOT_TIMEOUT_S;
   // A saved task preview can be stale or blank; only use it before a live session starts.
@@ -549,13 +548,13 @@ export function ScreenRail({
     try {
       const desktop = localDesktop || isLumioDesktop();
       if (!desktop && machine !== "running" && !(await wake())) return;
-      const started = await onTeachStart();
+      const started = await onTeachStart({ url: href, title: pageTitle || session?.title || "" });
       setTeachLimit(Number(started && started.max_seconds) || 600);
       setTeachStarted(Date.now() - Number((started && started.elapsed) || 0) * 1000);
       setTeachNow(Date.now());
       setNotice(
         desktop
-          ? "Recording. Switch to Finder or any app and do the task. Come back and tap Stop & save skill."
+          ? "Recording this screen. Click, type, and scroll here. Other apps on this computer are recorded too."
           : "Recording. Use the screen as usual; tap Mic to narrate what you are doing.",
       );
     } catch (err: any) {
@@ -664,10 +663,10 @@ export function ScreenRail({
   }
 
   return (
-    <aside className={`screen-rail overlay${teachHud ? " teach-hud" : " fullscreen"}`} role="dialog" aria-modal={!teachHud} aria-label={teachHud ? "Teaching" : `${screenAgent || agentName}'s screen`}>
+    <aside className="screen-rail overlay fullscreen" role="dialog" aria-modal="true" aria-label={teaching ? "Teaching" : `${screenAgent || agentName}'s screen`}>
       <div className="screen-rail-head">
         <div className="screen-rail-copy">
-          <span className="screen-bot">{teachHud ? "Recording this computer" : `${screenAgent || agentName}'s screen`}</span>
+          <span className="screen-bot">{teaching ? "Recording this computer" : `${screenAgent || agentName}'s screen`}</span>
           <span className={`screen-state${controlling || teaching ? " control" : watching ? " live" : asleep ? " asleep" : ""}`}>{label}</span>
         </div>
         <div className="screen-rail-actions">
@@ -693,12 +692,12 @@ export function ScreenRail({
             {teachingBusy ? "Saving…" : "Stop & save skill"}
           </button>
         ) : null}
-        {!teachHud && !controlling && !frame && !streaming && (machine !== "booting" || bootSlow) ? (
+        {!controlling && !frame && !streaming && (machine !== "booting" || bootSlow) ? (
           <button type="button" className="screen-control-btn primary" onClick={() => void wake()}>
             {liveScreen.error ? "Reconnect" : "Open"}
           </button>
         ) : null}
-        {!teachHud && onTakeControl && !interactive && (Boolean(frame) || streaming || machine === "running") ? (
+        {onTakeControl && !interactive && !teaching && (Boolean(frame) || streaming || machine === "running") ? (
           <button type="button" className="screen-control-btn" onClick={onTakeControl}>
             Take control
           </button>
@@ -715,7 +714,7 @@ export function ScreenRail({
         ) : null}
         </div>
       </div>
-      {!teachHud ? <div
+      <div
         ref={previewRef}
         className={`screen-preview fullscreen${asleep ? " asleep" : ""}${controlling ? " controlling" : ""}${streaming ? " streaming" : ""}`}
         tabIndex={controlling && !streaming ? 0 : -1}
@@ -800,10 +799,8 @@ export function ScreenRail({
                       : "Computer is asleep. Open it to wake."}
           </p>
         )}
-      </div> : (
-        <p className="screen-caption">Do the task on this computer — files, apps, websites. Lumio records in the background. Come back and save.</p>
-      )}
-      {!teachHud ? <p className="screen-caption">
+      </div>
+      <p className="screen-caption">
         {teaching
           ? narration.on
             ? "Recording your clicks, typing, scrolling, and your voice. Explain what you are doing as you go."
@@ -813,7 +810,7 @@ export function ScreenRail({
             : streaming
               ? `${agentName}'s screen (live, view only). Take control to use it.`
             : `${agentName}'s screen`}
-      </p> : null}
+      </p>
       {teaching && narration.error ? <p className="screen-notice">{narration.error}</p> : null}
       {notice ? (
         <p className="screen-notice">
@@ -828,7 +825,7 @@ export function ScreenRail({
           ) : null}
         </p>
       ) : null}
-      {!teachHud && (interactive || streaming || machine === "running") ? <ComputerInputBar /> : null}
+      {interactive || teaching || streaming || machine === "running" ? <ComputerInputBar /> : null}
     </aside>
   );
 }

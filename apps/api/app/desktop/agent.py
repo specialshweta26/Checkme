@@ -276,6 +276,11 @@ def _ingest_screen(user_id, result: dict) -> dict:
         if png:
             remember_screen(png, str(user_id))
             result["screenshot"] = True
+    url = str(result.get("url") or "")
+    if url.startswith(("http://", "https://")):
+        from app.connectors.daytona_box import remember_page
+
+        remember_page(str(user_id), url, str(result.get("title") or ""))
     return result
 
 
