@@ -14,6 +14,7 @@ use tokio::process::Command;
 use tokio::sync::Mutex;
 
 mod browser;
+mod os;
 
 const STDOUT_LIMIT: usize = 200_000;
 const FILE_TEXT_LIMIT: usize = 80_000;
@@ -51,31 +52,43 @@ fn strip_unc(path: &Path) -> PathBuf {
     PathBuf::from(text.strip_prefix(r"\\?\").unwrap_or(&text))
 }
 
-fn resolve_in_jail(raw: &str) -> Result<PathBuf, String> {
-    let jail = strip_unc(&jail_dir().canonicalize().unwrap_or_else(|_| jail_dir()));
+fn home_dir() -> PathBuf {
+    dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn resolve_under(root: PathBuf, raw: &str, err: &str) -> Result<PathBuf, String> {
+    let root = strip_unc(&root.canonicalize().unwrap_or(root));
     let given = raw.trim();
     let path = if given.is_empty() || given == "." {
-        jail.clone()
+        root.clone()
     } else {
         let candidate = PathBuf::from(given);
         if candidate.is_absolute() {
             candidate
         } else {
-            jail.join(candidate)
+            root.join(candidate)
         }
     };
     let resolved = if path.exists() {
-        strip_unc(&path.canonicalize().map_err(|err| err.to_string())?)
+        strip_unc(&path.canonicalize().map_err(|e| e.to_string())?)
     } else {
-        let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(&jail);
+        let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(&root);
         let _ = fs::create_dir_all(parent);
-        let parent_c = strip_unc(&parent.canonicalize().map_err(|err| err.to_string())?);
+        let parent_c = strip_unc(&parent.canonicalize().map_err(|e| e.to_string())?);
         parent_c.join(path.file_name().unwrap_or_default())
     };
-    if !resolved.starts_with(&jail) {
-        return Err("path is outside ~/Lumio".into());
+    if !resolved.starts_with(&root) {
+        return Err(err.into());
     }
     Ok(resolved)
+}
+
+fn resolve_in_jail(raw: &str) -> Result<PathBuf, String> {
+    resolve_under(jail_dir(), raw, "path is outside ~/Lumio")
+}
+
+fn resolve_in_home(raw: &str) -> Result<PathBuf, String> {
+    resolve_under(home_dir(), raw, "path is outside your home folder")
 }
 
 fn clip(text: String, limit: usize) -> String {
@@ -91,7 +104,7 @@ fn clip(text: String, limit: usize) -> String {
 
 fn run_list_dir(args: &Value) -> Value {
     let path = args.get("path").and_then(Value::as_str).unwrap_or("");
-    match resolve_in_jail(path) {
+    match resolve_in_home(path) {
         Ok(dir) => match fs::read_dir(&dir) {
             Ok(entries) => {
                 let mut names: Vec<String> = entries
@@ -118,7 +131,7 @@ fn run_read_file(args: &Value) -> Value {
     let Some(path) = args.get("path").and_then(Value::as_str) else {
         return json!({ "ok": false, "error": "path is required" });
     };
-    match resolve_in_jail(path) {
+    match resolve_in_home(path) {
         Ok(file) => match fs::read(&file) {
             Ok(bytes) => json!({
                 "ok": true,
@@ -160,7 +173,7 @@ fn run_publish_file(args: &Value) -> Value {
     let Some(path) = args.get("path").and_then(Value::as_str) else {
         return json!({ "ok": false, "error": "path is required" });
     };
-    match resolve_in_jail(path) {
+    match resolve_in_home(path) {
         Ok(file) => match fs::read(&file) {
             Ok(bytes) if bytes.len() > PUBLISH_LIMIT => {
                 json!({ "ok": false, "error": format!("{} is larger than {PUBLISH_LIMIT} bytes", file.display()) })
@@ -182,6 +195,25 @@ fn run_publish_file(args: &Value) -> Value {
             Err(err) => json!({ "ok": false, "error": err.to_string() }),
         },
         Err(err) => json!({ "ok": false, "error": err }),
+    }
+}
+
+fn run_open_path(args: &Value) -> Value {
+    let path = args.get("path").and_then(Value::as_str).unwrap_or("");
+    match resolve_in_home(path) {
+        Ok(file) => match os::open_path(&file) {
+            Ok(()) => json!({ "ok": true, "path": file.to_string_lossy(), "ran_on": "local_computer" }),
+            Err(err) => json!({ "ok": false, "error": err }),
+        },
+        Err(err) => json!({ "ok": false, "error": err }),
+    }
+}
+
+fn run_launch_app(args: &Value) -> Value {
+    let name = args.get("name").and_then(Value::as_str).unwrap_or("");
+    match os::launch_app(name) {
+        Ok(app) => json!({ "ok": true, "app": app, "ran_on": "local_computer" }),
+        Err(err) => json!({ "ok": false, "error": err, "ran_on": "local_computer" }),
     }
 }
 
@@ -306,13 +338,12 @@ async fn run_browser(slot: &Mutex<Option<browser::Chrome>>, tool: &str, args: &V
         return json!({ "ok": false, "error": "Chrome is not open" });
     };
     let out = match tool {
-        "boot" | "touch" | "status" => chrome.snapshot().await,
         "browser_navigate" | "browse_open" => {
             let url = args.get("url").and_then(Value::as_str).unwrap_or("");
             let wait_ms = args.get("wait_ms").and_then(Value::as_u64).unwrap_or(1200);
             chrome.navigate(url, wait_ms).await
         }
-        "browser_snapshot" | "computer_observe" | "browse_screenshot" | "screen_png" => chrome.snapshot().await,
+        "browser_snapshot" | "browse_screenshot" => chrome.snapshot().await,
         "browser_act" | "browse_act" => {
             let actions = args.get("actions").and_then(Value::as_array).cloned().unwrap_or_default();
             let one = args.get("action").cloned();
@@ -324,10 +355,6 @@ async fn run_browser(slot: &Mutex<Option<browser::Chrome>>, tool: &str, args: &V
                 vec![args.clone()]
             };
             chrome.act(&steps).await
-        }
-        "computer_act" | "computer_control" => {
-            let actions = args.get("actions").and_then(Value::as_array).cloned().unwrap_or_else(|| vec![args.clone()]);
-            chrome.computer_act(&actions).await
         }
         "browser_search" => {
             let q = args.get("query").and_then(Value::as_str).unwrap_or("");
@@ -364,13 +391,24 @@ async fn run_job(tool: &str, args: &Value, chrome: &Mutex<Option<browser::Chrome
         "read_file" => run_read_file(args),
         "write_file" => run_write_file(args),
         "publish_file" => run_publish_file(args),
-        other if other.starts_with("browser")
-            || other.starts_with("browse_")
-            || other.starts_with("computer_")
-            || matches!(other, "boot" | "status" | "touch" | "screen_png") =>
-        {
-            run_browser(chrome, other, args).await
+        "open_path" => run_open_path(args),
+        "launch_app" => run_launch_app(args),
+        "boot" => match os::boot().await {
+            Ok(v) => v,
+            Err(err) => json!({ "ok": false, "error": err, "ran_on": "local_computer" }),
+        },
+        "status" | "touch" | "screen_png" | "computer_observe" => match os::snapshot().await {
+            Ok(v) => v,
+            Err(err) => json!({ "ok": false, "error": err, "ran_on": "local_computer" }),
+        },
+        "computer_act" | "computer_control" => {
+            let actions = args.get("actions").and_then(Value::as_array).cloned().unwrap_or_else(|| vec![args.clone()]);
+            match os::act(&actions).await {
+                Ok(v) => v,
+                Err(err) => json!({ "ok": false, "error": err, "ran_on": "local_computer" }),
+            }
         }
+        other if other.starts_with("browser") || other.starts_with("browse_") => run_browser(chrome, other, args).await,
         _ => json!({ "ok": false, "fallback_cloud": true, "error": format!("{tool} runs on the cloud computer") }),
     }
 }
@@ -451,6 +489,7 @@ async fn start_sidecar(app: tauri::AppHandle, token: String, api_base: String) -
     if state.started.swap(true, Ordering::SeqCst) {
         return Ok(());
     }
+    os::start_input_listen();
     let clone = state.inner().clone();
     let shots = state.inner().clone();
     tauri::async_runtime::spawn(async move {
@@ -468,44 +507,32 @@ async fn screenshot_loop(state: Arc<Sidecar>) {
         Err(_) => return,
     };
     loop {
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(Duration::from_millis(400)).await;
         let (token, api_base) = {
             let token = state.token.lock().await.clone();
             let api_base = state.api_base.lock().await.clone();
             (token, api_base)
         };
         let (Some(token), Some(api_base)) = (token, api_base) else { continue };
-        let info = {
+        let mut events = os::drain_teach();
+        {
             let chrome = state.chrome.lock().await;
-            match chrome.as_ref() {
-                Some(c) => c.page_info().await.ok(),
-                None => None,
+            if let Some(c) = chrome.as_ref() {
+                events.extend(c.drain_teach().await);
             }
-        };
-        let Some((shot, url, title)) = info else { continue };
-        if !shot.is_empty() {
-            let _ = client
-                .post(format!("{api_base}/api/desktop/screen"))
-                .header("X-Lumio-Agent", &token)
-                .json(&json!({ "png_b64": shot, "url": url, "title": title }))
-                .send()
-                .await;
         }
-        let events = {
-            let chrome = state.chrome.lock().await;
-            match chrome.as_ref() {
-                Some(c) => c.drain_teach().await,
-                None => vec![],
-            }
-        };
-        if !events.is_empty() {
-            let _ = client
-                .post(format!("{api_base}/api/desktop/teach-events"))
-                .header("X-Lumio-Agent", &token)
-                .json(&json!({ "events": events, "url": url, "title": title }))
-                .send()
-                .await;
+        if events.is_empty() {
+            continue;
         }
+        let title = tokio::task::spawn_blocking(os::front_title)
+            .await
+            .unwrap_or_else(|_| "This computer".into());
+        let _ = client
+            .post(format!("{api_base}/api/desktop/teach-events"))
+            .header("X-Lumio-Agent", &token)
+            .json(&json!({ "events": events, "url": "", "title": title }))
+            .send()
+            .await;
     }
 }
 

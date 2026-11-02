@@ -80,7 +80,7 @@ def test_website_prompt_keeps_cloud_default(as_web):
 
 def test_desktop_prompt_defaults_to_this_computer(as_desktop):
     hint = shell_routing_hint([_computer(), _local()])
-    assert "Lumio desktop app" in hint and "browser" in hint.lower()
+    assert "Lumio desktop app" in hint and "desktop" in hint.lower()
     assert "cloud computer" in hint
 
 
@@ -232,4 +232,38 @@ async def test_desktop_files_use_laptop(monkeypatch, as_desktop):
     ctx = _ctx([_computer(), _local()], fake)
     out = await computer_harness.list_files(ctx, "")
     assert calls == [("laptop", "list_dir")]
+    assert out["ran_on"] == "local_computer"
+
+
+async def test_desktop_open_path_uses_laptop(monkeypatch, as_desktop):
+    calls = []
+
+    async def fake(slug, tool, args):
+        calls.append((slug, tool))
+        return {"ok": True, "path": args.get("path"), "ran_on": "local_computer"}
+
+    async def online(_uid):
+        return True
+
+    monkeypatch.setattr("app.desktop.agent.is_online", online)
+    ctx = _ctx([_computer(), _local()], fake)
+    out = await computer_harness.open_path(ctx, "/Users/me/Documents")
+    assert calls == [("laptop", "open_path")]
+    assert out["ran_on"] == "local_computer"
+
+
+async def test_desktop_launch_app_uses_laptop(monkeypatch, as_desktop):
+    calls = []
+
+    async def fake(slug, tool, args):
+        calls.append((slug, tool, args.get("name")))
+        return {"ok": True, "app": args.get("name"), "ran_on": "local_computer"}
+
+    async def online(_uid):
+        return True
+
+    monkeypatch.setattr("app.desktop.agent.is_online", online)
+    ctx = _ctx([_computer(), _local()], fake)
+    out = await computer_harness.launch_app(ctx, "Finder")
+    assert calls == [("laptop", "launch_app", "Finder")]
     assert out["ran_on"] == "local_computer"

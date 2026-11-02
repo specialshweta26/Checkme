@@ -368,12 +368,12 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         return _dumps(await computer.attach_file(ctx, path, filename))
 
     async def open_path(path: str) -> str:
-        """Open a path on the computer: list a directory, read a text file, or attach a binary so the user can download it."""
+        """Open a file or folder. In the desktop app this uses Finder/Explorer (or the usual app). On the website it lists, reads, or attaches the path on the cloud computer."""
         ctx.used_tools.append("open_path")
         return _dumps(await computer.open_path(ctx, path), 32000)
 
     async def launch_app(name: str) -> str:
-        """Open a known app on the cloud computer (browser, chrome, code). The live screen is already the browser."""
+        """Open an app on the computer (Finder, Chrome, Excel, VS Code, …). In the desktop app this is the user's machine."""
         ctx.used_tools.append("launch_app")
         return _dumps(await computer.launch_app(ctx, name))
 

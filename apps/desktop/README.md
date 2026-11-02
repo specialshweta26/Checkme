@@ -36,6 +36,8 @@ LUMIO_URL=https://checkme-web-kw68.onrender.com npm run build
 
 Artifacts land in `src-tauri/target/release/bundle/`. Shell uses `bash` on Mac and `cmd.exe` on Windows; files stay under `~/Lumio` (or `%USERPROFILE%\Lumio` on Windows).
 
+macOS Gatekeeper treats a browser-downloaded unsigned app as damaged. Install with `curl -fsSL <site>/install-mac.sh | bash`, or after copying to Applications run `xattr -cr /Applications/Lumio.app`.
+
 ## Jail
 
 Reads and writes stay under `~/Lumio` (created on first run). Shell starts in that folder. Do not put secrets you would not want an agent to see in `~/Lumio`.

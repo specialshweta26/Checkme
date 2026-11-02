@@ -17,10 +17,13 @@ jobs:
         include:
           - platform: macos-latest
             args: --target aarch64-apple-darwin
+            mac_arch: aarch64
           - platform: macos-latest
             args: --target x86_64-apple-darwin
+            mac_arch: x64
           - platform: windows-latest
             args: ""
+            mac_arch: ""
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
@@ -40,7 +43,30 @@ jobs:
           projectPath: apps/desktop
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || format('desktop-v{0}', github.run_number) }}
           releaseName: Lumio ${{ github.ref_type == 'tag' && github.ref_name || format('desktop-v{0}', github.run_number) }}
-          releaseBody: Lumio for Mac and Windows. The website always uses the cloud computer; this app uses Chrome on this machine.
+          releaseBody: |
+            Lumio for Mac and Windows. This app uses this computer (files, apps, browser). The website uses a cloud computer.
+
+            **Mac:** do not open a browser-downloaded DMG first — macOS will say Lumio is damaged (Gatekeeper quarantine). Install with Terminal from the download page, or run `xattr -cr /Applications/Lumio.app` after copying the app.
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
+      - name: Ad-hoc sign Mac app and replace the DMG
+        if: runner.os == 'macOS'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MAC_ARCH: ${{ matrix.mac_arch }}
+          TAG: ${{ github.ref_type == 'tag' && github.ref_name || format('desktop-v{0}', github.run_number) }}
+        run: |
+          set -euo pipefail
+          APP="$(find apps/desktop/src-tauri/target -path '*/release/bundle/macos/Lumio.app' -type d | head -1)"
+          test -n "$APP" && test -d "$APP"
+          xattr -cr "$APP" || true
+          codesign --force --deep --sign - "$APP"
+          VERSION="$(python3 -c "import json; print(json.load(open('apps/desktop/src-tauri/tauri.conf.json'))['version'])")"
+          STAGE="$(mktemp -d)"
+          ditto "$APP" "$STAGE/Lumio.app"
+          xattr -cr "$STAGE/Lumio.app" || true
+          DMG="Lumio_${VERSION}_${MAC_ARCH}.dmg"
+          hdiutil create -volname Lumio -srcfolder "$STAGE/Lumio.app" -ov -format UDZO "$DMG"
+          xattr -cr "$DMG" || true
+          gh release upload "$TAG" "$DMG" --clobber

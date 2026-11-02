@@ -93,7 +93,7 @@ export default function Home() {
             </Link>
             <Link className="site-path featured" href="/download">
               <strong>Download the app</strong>
-              <span>Mac and Windows. Chrome, files, and taught skills run on this machine.</span>
+              <span>Mac and Windows. This computer — files, apps, Chrome, and taught skills.</span>
               <em>Get Mac or Windows →</em>
             </Link>
           </div>
@@ -104,7 +104,7 @@ export default function Home() {
           <div className="site-feature-grid">
             <article>
               <strong>A computer that works with you</strong>
-              <p>Watch the live screen, take control, or hand a booking to Lumio. On the web it is a secure cloud desktop. In the app it is your Chrome.</p>
+              <p>Watch the live screen, take control, or hand a booking to Lumio. On the web it is a secure cloud desktop. In the app it is this computer — Finder, files, apps, and Chrome.</p>
             </article>
             <article>
               <strong>Mail and calendar, in the conversation</strong>
@@ -112,7 +112,7 @@ export default function Home() {
             </article>
             <article>
               <strong>Teach a task once</strong>
-              <p>Show Lumio the clicks. Narrate if you want. It writes a skill you can run again — on the web or on this computer.</p>
+              <p>Show Lumio on this computer: browse files, use apps, click through a site. Narrate if you want. It writes a skill you can run again.</p>
             </article>
             <article>
               <strong>Yours, not a shared inbox</strong>

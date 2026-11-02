@@ -82,7 +82,7 @@ LOCAL_COMPUTER_TOOLS = [
     ),
     ToolSpec(
         name="read_file",
-        description="Read a UTF-8 file from ~/Lumio.",
+        description="Read a UTF-8 file from this computer (under the user's home folder).",
         input_schema={"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
         group="computer",
         tags=("computer", "files", "local"),
@@ -101,14 +101,14 @@ LOCAL_COMPUTER_TOOLS = [
     ),
     ToolSpec(
         name="list_dir",
-        description="List files under ~/Lumio.",
+        description="List files on this computer (under the user's home folder).",
         input_schema={"type": "object", "properties": {"path": {"type": "string"}}},
         group="computer",
         tags=("computer", "files", "local"),
     ),
     ToolSpec(
         name="publish_file",
-        description="Copy a ~/Lumio file into a chat download link.",
+        description="Copy a file from this computer into a chat download link.",
         input_schema={
             "type": "object",
             "properties": {"path": {"type": "string"}, "filename": {"type": "string"}},
@@ -117,12 +117,28 @@ LOCAL_COMPUTER_TOOLS = [
         group="computer",
         tags=("computer", "files", "local"),
     ),
+    ToolSpec(
+        name="open_path",
+        description="Open a file or folder on this computer with the normal app (Finder, Preview, Excel, …).",
+        input_schema={"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+        group="computer",
+        read_only=False,
+        tags=("computer", "files", "local"),
+    ),
+    ToolSpec(
+        name="launch_app",
+        description="Open an app on this computer (Finder, Chrome, Excel, VS Code, …).",
+        input_schema={"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
+        group="computer",
+        read_only=False,
+        tags=("computer", "apps", "local"),
+    ),
 ]
 PLATFORM["trusted_local"] = {
     "name": "This computer",
     "slug": "laptop",
     "tags": ["computer", "local", "desktop"],
-    "description": "The Lumio desktop app on this machine: shell, files, and a real Chrome window. Cloud computer is the fallback.",
+    "description": "The Lumio desktop app on this machine: the real desktop, files, apps, and Chrome.",
     "tools": LOCAL_COMPUTER_TOOLS,
 }
 

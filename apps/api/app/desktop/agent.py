@@ -49,6 +49,8 @@ LOCAL_TOOLS = {
     "computer_observe",
     "computer_act",
     "computer_control",
+    "open_path",
+    "launch_app",
 }
 
 

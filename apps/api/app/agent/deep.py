@@ -2550,8 +2550,9 @@ def shell_routing_hint(connectors: list | None, agent=None) -> str:
     local = any(getattr(c, "provider", "") in LOCAL_PROVIDERS for c in (connectors or []))
     if prefer_local() and local:
         text = (
-            "You are in the Lumio desktop app. shell, files, run_code, and the browser (browser_navigate / "
-            "browser_act / the live screen) run on this computer — a real Chrome window on the user's machine. "
+            "You are in the Lumio desktop app. shell, files, run_code, open_path, computer_act, and the live "
+            "screen are the user's real desktop (Finder/Explorer, files, apps). Browser tools still open Chrome "
+            "when a website is needed. "
             "If the desktop agent is offline they fall back to the cloud computer. "
             "Toolchain installs (ensure_toolchain) stay on the cloud computer. "
             "Never tell the user to install something unless they asked. "
