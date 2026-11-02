@@ -665,12 +665,12 @@ fn web_url(raw: &str) -> Option<&str> {
 }
 
 async fn ensure_chrome(slot: &Mutex<Option<browser::Chrome>>, start_url: Option<&str>) -> Result<(), String> {
-    if slot.lock().await.is_some() {
-        return Ok(());
-    }
     if let Some(url) = start_url.and_then(web_url) {
         let chrome = browser::launch(url).await?;
         *slot.lock().await = Some(chrome);
+        return Ok(());
+    }
+    if slot.lock().await.is_some() {
         return Ok(());
     }
     if let Ok(chrome) = browser::attach().await {
@@ -922,6 +922,7 @@ async fn start_sidecar(app: tauri::AppHandle, token: String, api_base: String) -
     if state.started.swap(true, Ordering::SeqCst) {
         return Ok(());
     }
+    os::start_input_listen();
     let _ = tokio::task::spawn_blocking(grants::ensure_common_folders).await;
     let clone = state.inner().clone();
     let shots = state.inner().clone();
@@ -950,10 +951,11 @@ async fn screenshot_loop(state: Arc<Sidecar>) {
         };
         let (Some(token), Some(api_base)) = (token, api_base) else { continue };
         let mut events = os::drain_teach();
-        {
-            let chrome = state.chrome.lock().await;
+        if let Ok(chrome) = state.chrome.try_lock() {
             if let Some(c) = chrome.as_ref() {
-                events.extend(c.drain_teach().await);
+                if let Ok(extra) = tokio::time::timeout(Duration::from_millis(800), c.drain_teach()).await {
+                    events.extend(extra);
+                }
             }
         }
         if os::teaching() {
@@ -964,19 +966,21 @@ async fn screenshot_loop(state: Arc<Sidecar>) {
             }
             if last_shot.elapsed() >= Duration::from_secs(6) {
                 last_shot = tokio::time::Instant::now();
-                let shot = tokio::time::timeout(
-                    Duration::from_secs(8),
-                    tokio::task::spawn_blocking(os::screenshot_b64),
-                )
-                .await;
-                if let Ok(Ok(Ok(png))) = shot {
-                    let _ = client
-                        .post(format!("{api_base}/api/desktop/screen"))
-                        .header("X-Lumio-Agent", &token)
-                        .json(&json!({ "png_b64": png, "url": "", "title": title }))
-                        .send()
-                        .await;
-                }
+                let client = client.clone();
+                let token = token.clone();
+                let api_base = api_base.clone();
+                let title = title.clone();
+                tokio::spawn(async move {
+                    let shot = tokio::time::timeout(Duration::from_secs(5), tokio::task::spawn_blocking(os::screenshot_b64)).await;
+                    if let Ok(Ok(Ok(png))) = shot {
+                        let _ = client
+                            .post(format!("{api_base}/api/desktop/screen"))
+                            .header("X-Lumio-Agent", &token)
+                            .json(&json!({ "png_b64": png, "url": "", "title": title }))
+                            .send()
+                            .await;
+                    }
+                });
             }
         } else {
             last_window.clear();
