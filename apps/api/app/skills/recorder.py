@@ -309,10 +309,10 @@ def add_local_events(user_key: str, events: list) -> int:
         if not isinstance(item, dict):
             continue
         kind = item.get("kind")
-        if kind not in {"click", "char", "key", "scroll", "window", "capture_started"}:
+        if kind not in {"click", "char", "key", "scroll", "window", "capture_started", "capture_unavailable"}:
             continue
         row = {"kind": kind, "t": elapsed(rec.started)}
-        for key in ("x", "y", "button", "char", "key", "direction", "window"):
+        for key in ("x", "y", "button", "char", "key", "direction", "window", "reason"):
             if item.get(key) not in (None, ""):
                 row[key] = item[key]
         rec.local_lines.append(json.dumps(row))

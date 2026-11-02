@@ -792,6 +792,8 @@ async def _finalize(key: str, row: dict) -> None:
     skill_id = row.get("skill_id")
     captured: dict = {}
     try:
+        # The desktop app posts clicks on a short timer. Wait so the last batch is stored before we read it.
+        await asyncio.sleep(2)
         captured = await recorder.stop(key)
         clips = row.get("audio") or []
         tasks = [c["task"] for c in clips if c.get("task")]

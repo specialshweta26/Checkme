@@ -47,7 +47,7 @@ pub fn start_input_listen() {
         }
     });
     std::thread::spawn(|| {
-        let _ = rdev::listen(move |event| {
+        if let Err(err) = rdev::listen(move |event| {
             match event.event_type {
                 rdev::EventType::MouseMove { x, y } => {
                     if let Ok(mut pos) = mouse_pos().lock() {
@@ -80,7 +80,12 @@ pub fn start_input_listen() {
                 }
                 _ => {}
             }
-        });
+        }) {
+            push_event(json!({
+                "kind": "capture_unavailable",
+                "reason": format!("input capture needs Accessibility for Lumio ({err:?})"),
+            }));
+        }
     });
 }
 
@@ -132,18 +137,26 @@ pub fn drain_teach() -> Vec<Value> {
     teach_buf().lock().map(|mut buf| buf.drain(..).take(200).collect()).unwrap_or_default()
 }
 
+fn lsappinfo_front() -> Option<String> {
+    let asn = Command::new("lsappinfo").arg("front").output().ok()?;
+    let asn = String::from_utf8_lossy(&asn.stdout).trim().to_string();
+    if asn.is_empty() || asn.contains("NULL") {
+        return None;
+    }
+    let info = Command::new("lsappinfo").args(["info", "-only", "name", &asn]).output().ok()?;
+    let text = String::from_utf8_lossy(&info.stdout).to_string();
+    let marker = "\"LSDisplayName\"=\"";
+    let start = text.find(marker)? + marker.len();
+    let name = text[start..].split('"').next()?.trim();
+    if name.is_empty() { None } else { Some(name.to_string()) }
+}
+
 pub fn front_title() -> String {
     #[cfg(target_os = "macos")]
     {
-        let out = Command::new("osascript")
-            .args(["-e", "tell application \"System Events\" to get name of first application process whose frontmost is true"])
-            .output()
-            .ok();
-        if let Some(out) = out {
-            let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !text.is_empty() {
-                return text;
-            }
+        // lsappinfo does not need Accessibility. System Events does, and that prompt stalls teaching.
+        if let Some(name) = lsappinfo_front() {
+            return name;
         }
         "This computer".into()
     }
@@ -158,16 +171,27 @@ pub fn front_title() -> String {
 }
 
 fn capture_png() -> Result<Vec<u8>, String> {
-    let path = std::env::temp_dir().join("lumio-desktop.png");
+    let path = std::env::temp_dir().join(format!("lumio-desktop-{}.png", std::process::id()));
     #[cfg(target_os = "macos")]
     {
-        let status = Command::new("screencapture")
+        use std::sync::mpsc;
+        let mut child = Command::new("screencapture")
             .args(["-x", "-t", "png"])
             .arg(&path)
-            .status()
+            .spawn()
             .map_err(|err| err.to_string())?;
-        if !status.success() {
-            return Err("Allow Screen Recording for Lumio in System Settings → Privacy & Security.".into());
+        let pid = child.id();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(child.wait());
+        });
+        match rx.recv_timeout(Duration::from_secs(4)) {
+            Ok(Ok(status)) if status.success() => {}
+            Ok(Ok(_)) | Err(_) => {
+                let _ = Command::new("kill").arg(pid.to_string()).status();
+                return Err("Allow Screen Recording for Lumio in System Settings → Privacy & Security.".into());
+            }
+            Ok(Err(err)) => return Err(err.to_string()),
         }
         // Retina PNGs freeze the app if we ship them raw. 1280px is enough for skill frames.
         let _ = Command::new("sips").args(["-Z", "1280"]).arg(&path).status();

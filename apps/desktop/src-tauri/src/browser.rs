@@ -42,25 +42,33 @@ fn profile_dir() -> PathBuf {
     crate::grants::browser_profile_dir()
 }
 
-async fn wait_debug(http: &reqwest::Client, port: u16) -> Result<(), String> {
+fn http_client(timeout: Duration) -> Result<reqwest::Client, String> {
+    reqwest::Client::builder().timeout(timeout).build().map_err(|e| e.to_string())
+}
+
+async fn port_open(http: &reqwest::Client, port: u16) -> bool {
     let url = format!("http://127.0.0.1:{port}/json/version");
-    for _ in 0..40 {
-        if http.get(&url).send().await.map(|r| r.status().is_success()).unwrap_or(false) {
+    http.get(&url).send().await.map(|r| r.status().is_success()).unwrap_or(false)
+}
+
+async fn wait_debug(http: &reqwest::Client, port: u16) -> Result<(), String> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    while tokio::time::Instant::now() < deadline {
+        if port_open(http, port).await {
             return Ok(());
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
     }
     Err("Chrome did not open its debug port".into())
 }
 
-fn http_client() -> Result<reqwest::Client, String> {
-    reqwest::Client::builder().timeout(Duration::from_secs(20)).build().map_err(|e| e.to_string())
-}
-
 pub async fn attach() -> Result<Chrome, String> {
-    let http = http_client()?;
+    let probe = http_client(Duration::from_millis(500))?;
     let port = 9333u16;
-    wait_debug(&http, port).await?;
+    if !port_open(&probe, port).await {
+        return Err("Chrome is not open".into());
+    }
+    let http = http_client(Duration::from_secs(3))?;
     Ok(Chrome { _child: None, port, http })
 }
 
@@ -68,10 +76,13 @@ pub async fn launch(start_url: &str) -> Result<Chrome, String> {
     if !(start_url.starts_with("https://") || start_url.starts_with("http://")) {
         return Err("A full https address is required before opening Chrome.".into());
     }
-    let http = http_client()?;
+    let probe = http_client(Duration::from_millis(500))?;
     // Dedicated port + Lumio profile. Never attach to 9222 (that is often the user's own Chrome).
     let port = 9333u16;
-    if wait_debug(&http, port).await.is_ok() {
+    let http = http_client(Duration::from_secs(3))?;
+    if port_open(&probe, port).await {
+        // A window may already exist with no page showing. Open this address so the user sees it.
+        let _ = http.get(format!("http://127.0.0.1:{port}/json/new?{start_url}")).send().await;
         return Ok(Chrome { _child: None, port, http });
     }
     let bin = chrome_candidates()
@@ -90,8 +101,11 @@ pub async fn launch(start_url: &str) -> Result<Chrome, String> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .kill_on_drop(false);
-    let child = cmd.spawn().map_err(|e| format!("could not start Chrome: {e}"))?;
-    wait_debug(&http, port).await?;
+    let mut child = cmd.spawn().map_err(|e| format!("could not start Chrome: {e}"))?;
+    if let Err(err) = wait_debug(&probe, port).await {
+        child.kill().await.ok();
+        return Err(err);
+    }
     Ok(Chrome { _child: Some(child), port, http })
 }
 
@@ -126,7 +140,7 @@ impl Chrome {
         let (mut ws, _) = connect_async(&ws_url).await.map_err(|e| e.to_string())?;
         let payload = json!({ "id": 1, "method": method, "params": params });
         ws.send(Message::Text(payload.to_string().into())).await.map_err(|e| e.to_string())?;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
         loop {
             let left = deadline.saturating_duration_since(tokio::time::Instant::now());
             if left.is_zero() {
@@ -171,7 +185,7 @@ impl Chrome {
     }
 
     async fn wait_for_page(&self, wait_ms: u64) {
-        let budget = wait_ms.max(8000).min(20000);
+        let budget = wait_ms.max(1500).min(6000);
         let deadline = tokio::time::Instant::now() + Duration::from_millis(budget);
         loop {
             tokio::time::sleep(Duration::from_millis(500)).await;

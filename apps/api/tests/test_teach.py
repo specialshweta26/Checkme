@@ -181,6 +181,20 @@ def test_segments_and_alignment():
     assert "[00:15] typed “BLR”" in text
 
 
+def test_unavailable_input_is_a_note_and_the_app_switch_is_kept():
+    raw = "\n".join(
+        [
+            json.dumps({"kind": "capture_unavailable", "t": 0.2, "reason": "accessibility"}),
+            json.dumps({"kind": "window", "t": 1.0, "window": "Myntra"}),
+            json.dumps({"kind": "click", "t": 2.0, "x": 10, "y": 20, "button": 1, "window": "Myntra"}),
+        ]
+    )
+    events, notes = recorder.parse_capture(raw, 0.0)
+    assert notes and "accessibility" in notes[0]
+    assert [ev["kind"] for ev in events] == ["window", "click"]
+    assert events[0]["window"] == "Myntra"
+
+
 def test_teach_limit_is_configurable(monkeypatch):
     monkeypatch.setattr(service, "get_settings", lambda: SimpleNamespace(teach_max_seconds=120, openai_api_key=""))
     assert service.teach_limit() == 120
