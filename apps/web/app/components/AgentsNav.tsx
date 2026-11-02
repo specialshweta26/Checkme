@@ -941,7 +941,7 @@ function SkillEditor({
   return (
     <fieldset>
       <legend>Skills</legend>
-      <p className="muted">Save a workflow, or teach one by demonstration while the bot watches the screen. Teaching records up to ten minutes of your clicks, typing, and screen; you can also narrate with the microphone from the screen panel.</p>
+      <p className="muted">Save a workflow, or click Teach a task and do the work on this computer. Lumio records it and writes a skill. Optional: narrate with the microphone.</p>
       {skills.length ? (
         <ul className="skill-list clickable">
           {skills.map((skill) => (
@@ -1021,11 +1021,11 @@ function SkillEditor({
               }
             }}
           >
-            Teach from screen
+            Teach a task
           </button>
         )}
       </div>
-      {teaching ? <p className="muted">Recording the computer screen (max 10 minutes). Open the screen panel to use it and to turn on the microphone for narration.</p> : null}
+      {teaching ? <p className="muted">Recording. Do the task on this computer, then tap Stop teaching. Lumio turns it into a skill.</p> : null}
       {openSkill ? <SkillDetail skillId={openSkill} onClose={() => setOpenSkill(null)} onChanged={() => void refresh()} /> : null}
     </fieldset>
   );

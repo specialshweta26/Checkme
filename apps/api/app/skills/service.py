@@ -450,8 +450,9 @@ async def start_teaching(user: User, agent_id: uuid.UUID | None = None, name: st
         try:
             from app.desktop.agent import call_local
 
-            await call_local(user.id, "boot", {})
-        except Exception as exc:  # noqa: BLE001 - teaching still records rail input if Chrome is slow
+            # Do not wait — a screenshot/boot round-trip freezes Teach on the desktop app.
+            asyncio.create_task(call_local(user.id, "boot", {}))
+        except Exception as exc:  # noqa: BLE001 - teaching still records OS input if the sidecar is slow
             log.info("teach: local computer boot skipped user=%s: %s", key, type(exc).__name__)
     try:
         loop = asyncio.get_running_loop()
@@ -606,10 +607,10 @@ def _cancel_session_tasks(row: dict) -> None:
             task.cancel()
 
 
-SKILL_WRITER = """You turn a recorded demonstration on a computer into a reusable skill for an AI agent that controls the same kind of desktop (a Linux desktop with a Chromium browser).
-You get a timeline of what the user did (clicks with screen coordinates and window titles, typing, keys, scrolls, window changes) and what they said out loud while doing it, plus a few screenshots.
-Spoken instructions explain intent: prefer them over raw coordinates. Generalize: name the goal, the inputs that will change between runs (as {placeholders}), the steps in order (which site or app, what to look for on screen, what to click or type), and how to tell it worked.
-Describe targets by their visible label or purpose, not by pixel coordinates. Never include passwords, one-time codes, card numbers or other secrets that appear in the typing; write {password} etc. instead.
+SKILL_WRITER = """You turn a recorded demonstration on a computer into a reusable skill for an AI agent that will run on the same kind of computer (the user's Mac or Windows desktop in the Lumio app, or a Linux cloud desktop with a browser).
+You get a timeline of what the user did (clicks with window titles, typing, keys, scrolls, window changes) and what they said out loud, plus a few screenshots.
+Spoken instructions explain intent: prefer them over raw coordinates. Generalize: name the goal, the inputs that will change between runs (as {placeholders}), the steps in order (which app or site, what to open, what to look for, what to click or type), and how to tell it worked.
+On the user's own computer prefer open_path, launch_app, list_dir, and computer_act; use browser tools only for websites. Describe targets by visible label or purpose, not pixel coordinates. Never include passwords, one-time codes, card numbers or other secrets; write {password} etc. instead.
 Reply with JSON: {"name": "<short skill name, max 60 chars>", "instruction": "<the skill, plain text with numbered steps, max 2500 chars>"}"""
 
 # The Responses API only allows json_object output when the *input* mentions JSON (instructions don't count).

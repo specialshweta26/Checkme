@@ -2,6 +2,7 @@ export const GITHUB_REPO = "specialshweta26/Checkme";
 export const RELEASES_PAGE = `https://github.com/${GITHUB_REPO}/releases/latest`;
 
 export type Platform = "mac" | "windows" | "other";
+export type MacArch = "arm" | "intel";
 
 export function detectPlatform(): Platform {
   if (typeof navigator === "undefined") return "other";
@@ -12,7 +13,21 @@ export function detectPlatform(): Platform {
   return "other";
 }
 
-export type Installers = { mac?: string; windows?: string; page: string };
+export async function detectMacArch(): Promise<MacArch> {
+  const nav = navigator as Navigator & {
+    userAgentData?: { getHighEntropyValues?: (hints: string[]) => Promise<{ architecture?: string }> };
+  };
+  try {
+    const data = await nav.userAgentData?.getHighEntropyValues?.(["architecture"]);
+    if (data?.architecture === "x86") return "intel";
+    if (data?.architecture === "arm") return "arm";
+  } catch {
+    /* ignore */
+  }
+  return "arm";
+}
+
+export type Installers = { macArm?: string; macIntel?: string; mac?: string; windows?: string; page: string };
 
 export async function latestInstallers(): Promise<Installers> {
   try {
@@ -23,8 +38,12 @@ export async function latestInstallers(): Promise<Installers> {
     const data = await res.json();
     const assets: { name?: string; browser_download_url?: string }[] = data.assets || [];
     const pick = (test: RegExp) => assets.find((a) => test.test(a.name || ""))?.browser_download_url;
+    const macArm = pick(/aarch64|arm64/i);
+    const macIntel = pick(/x64\.dmg|_x64\.dmg|x86_64/i);
     return {
-      mac: pick(/\.dmg$/i),
+      macArm,
+      macIntel,
+      mac: macArm || macIntel || pick(/\.dmg$/i),
       windows: pick(/\.(exe|msi)$/i),
       page: data.html_url || RELEASES_PAGE,
     };

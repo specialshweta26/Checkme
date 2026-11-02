@@ -3,19 +3,35 @@
 import { useEffect, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { SiteFooter, SiteNav } from "../components/SiteChrome";
-import { detectPlatform, latestInstallers, type Installers, type Platform } from "../downloads";
+import { detectMacArch, detectPlatform, latestInstallers, type Installers, type MacArch, type Platform } from "../downloads";
 import { getMe } from "../lib";
+
+const FIX = "xattr -cr /Applications/Lumio.app && open /Applications/Lumio.app";
 
 export default function Download() {
   const [signedIn, setSignedIn] = useState(false);
   const [os, setOs] = useState<Platform>("other");
+  const [macArch, setMacArch] = useState<MacArch>("arm");
   const [installers, setInstallers] = useState<Installers>({ page: "https://github.com/specialshweta26/Checkme/releases/latest" });
+  const [origin, setOrigin] = useState("");
+  const [copied, setCopied] = useState<"install" | "fix" | "">("");
 
   useEffect(() => {
     setOs(detectPlatform());
+    setOrigin(window.location.origin);
+    void detectMacArch().then(setMacArch);
     void latestInstallers().then(setInstallers);
     getMe().then((me) => setSignedIn(Boolean(me)));
   }, []);
+
+  const installCmd = origin ? `curl -fsSL ${origin}/install-mac.sh | bash` : "curl -fsSL <site>/install-mac.sh | bash";
+
+  function copy(kind: "install" | "fix", text: string) {
+    void navigator.clipboard.writeText(text).then(() => {
+      setCopied(kind);
+      window.setTimeout(() => setCopied(""), 2000);
+    });
+  }
 
   return (
     <div className="site">
@@ -24,15 +40,32 @@ export default function Download() {
         <p className="site-kicker">Desktop</p>
         <h1>Lumio for Mac and Windows</h1>
         <p className="site-lead">
-          The web app runs on a cloud computer. The desktop app uses Chrome, files, and teaching on this machine — so bookings,
-          logins, and skills stay on your computer.
+          The web app runs on a cloud computer. The desktop app uses this machine — files, apps, Chrome, and teaching — so
+          bookings, logins, and skills stay on your computer.
         </p>
+        <div className="site-install-box" id="mac-install">
+            <strong>Install on this Mac</strong>
+            <p>
+              Do not open a browser-downloaded disk image first. macOS will say Lumio is damaged and offer Move to Bin —
+              that is Gatekeeper, not a broken file. Paste this in Terminal instead:
+            </p>
+            <pre className="site-install-cmd">{installCmd}</pre>
+            <button type="button" className="btn" disabled={!origin} onClick={() => copy("install", installCmd)}>
+              {copied === "install" ? "Copied" : "Copy command"}
+            </button>
+            <p className="site-download-note">
+              Already copied Lumio to Applications? Run{" "}
+              <button type="button" className="site-inline-cmd" onClick={() => copy("fix", FIX)}>
+                {copied === "fix" ? "Copied" : FIX}
+              </button>
+            </p>
+          </div>
         <div className="site-os-grid">
           <OsCard
             title="macOS"
-            hint="Apple silicon and Intel. macOS 12+"
-            href={installers.mac || installers.page}
-            cta={installers.mac ? "Download for Mac" : "Get the Mac build"}
+            hint={macArch === "intel" ? "Intel Mac, macOS 12+" : "Apple silicon, macOS 12+"}
+            href="#mac-install"
+            cta="Install from Terminal"
             highlight={os === "mac"}
             icon={<AppleIcon />}
           />

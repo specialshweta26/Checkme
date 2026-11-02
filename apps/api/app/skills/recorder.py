@@ -1,9 +1,10 @@
 """What the user does on the computer while teaching a skill.
 
 On the website the live desktop is an E2B noVNC stream: clicks go to the sandbox X server, so capture
-runs inside the sandbox (``xinput test-xi2 --root``). On the Lumio desktop app, Chrome on this computer
-is the live screen: the sidecar injects listeners and posts click/key/scroll events to
-``POST /api/desktop/teach-events``, and screenshots come from the local PNG cache.
+runs inside the sandbox (``xinput test-xi2 --root``). On the Lumio desktop app the live screen is the
+user's real desktop (Finder, files, apps, browser): the sidecar captures the OS display, listens for
+mouse/keys, and posts click/key/scroll events to ``POST /api/desktop/teach-events``. Screenshots come
+from the local PNG cache. Chrome listeners are an extra source when a website is open.
 
 The API also keeps key frames (changed screenshots) and records rail typing / agent tools via
 ``service.record_computer_step``. Every event carries ``t``: seconds since the teaching session started.
@@ -294,7 +295,7 @@ async def _snapshot_cached(rec: Recorder) -> None:
 
 
 def add_local_events(user_key: str, events: list) -> int:
-    """Clicks/keys from the desktop sidecar's Chrome listeners. No-op if teaching is not running."""
+    """Clicks/keys from the desktop sidecar (OS input, plus Chrome if a website is open). No-op if teaching is not running."""
     rec = _RECORDERS.get(user_key)
     if rec is None:
         return 0

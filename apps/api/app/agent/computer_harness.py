@@ -1,8 +1,8 @@
 """First-class computer/browser/file verbs. They wrap this user's computer.
 
-The website always uses the cloud computer (E2B Desktop, or Daytona). The Lumio desktop app runs shell, files,
-the browser, and teaching on this machine. Shell/files fall back to E2B if the sidecar is offline; browser,
-boot, live screen, and teaching never open E2B from the desktop app.
+The website always uses the cloud computer (E2B Desktop, or Daytona). The Lumio desktop app runs files,
+the browser, and teaching on this machine inside user-granted folders. Shell/files fall back to E2B if the sidecar
+is offline; browser, boot, live screen, and teaching never open E2B from the desktop app.
 Toolchain installs stay on the cloud computer. See docs/COMPUTER.md."""
 
 from __future__ import annotations
@@ -131,6 +131,16 @@ def _stay_on_this_computer(tool_name: str) -> bool:
         "status",
         "touch",
         "screen_png",
+        "open_path",
+        "launch_app",
+        "grant_folder",
+        "list_grants",
+        "list_folder_grants",
+        "search_files",
+        "copy_file",
+        "move_file",
+        "rename_file",
+        "delete_file",
     }
 
 
@@ -446,6 +456,9 @@ async def open_path(ctx, path: str) -> Any:
     target = (path or "").strip()
     if not target:
         return {"error": "path is required"}
+    local = await _try_local(ctx, "open_path", {"path": target})
+    if local is not None:
+        return local
     looks_dir = target.endswith("/") or "." not in target.rsplit("/", 1)[-1]
     if looks_dir:
         listed = await run_computer(ctx, "list_dir", {"path": target})
@@ -461,6 +474,9 @@ async def launch_app(ctx, name: str) -> Any:
     key = (name or "").strip().lower()
     if not key:
         return {"error": "app name is required"}
+    local = await _try_local(ctx, "launch_app", {"name": name.strip()})
+    if local is not None:
+        return local
     if key in _BROWSER_APPS:
         return {
             "ok": True,

@@ -320,6 +320,10 @@ export function skillFrameUrl(id: string, index: number) {
   return `/api/skills/${encodeURIComponent(id)}/frames/${index}`;
 }
 
+export function isLumioDesktop() {
+  return typeof window !== "undefined" && Boolean((window as { __lumioDesktop?: boolean }).__lumioDesktop);
+}
+
 export type TeachStart = { ok?: boolean; teaching?: boolean; max_seconds?: number; elapsed?: number; audio_optional?: boolean; skill_id?: string | null };
 
 export async function startTeaching(agentId?: string) {

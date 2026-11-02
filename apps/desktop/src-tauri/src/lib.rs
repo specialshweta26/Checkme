@@ -14,6 +14,8 @@ use tokio::process::Command;
 use tokio::sync::Mutex;
 
 mod browser;
+mod grants;
+mod os;
 
 const STDOUT_LIMIT: usize = 200_000;
 const FILE_TEXT_LIMIT: usize = 80_000;
@@ -39,45 +41,6 @@ fn lumio_url() -> String {
     }
 }
 
-fn jail_dir() -> PathBuf {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    let jail = home.join("Lumio");
-    let _ = fs::create_dir_all(&jail);
-    jail
-}
-
-fn strip_unc(path: &Path) -> PathBuf {
-    let text = path.to_string_lossy();
-    PathBuf::from(text.strip_prefix(r"\\?\").unwrap_or(&text))
-}
-
-fn resolve_in_jail(raw: &str) -> Result<PathBuf, String> {
-    let jail = strip_unc(&jail_dir().canonicalize().unwrap_or_else(|_| jail_dir()));
-    let given = raw.trim();
-    let path = if given.is_empty() || given == "." {
-        jail.clone()
-    } else {
-        let candidate = PathBuf::from(given);
-        if candidate.is_absolute() {
-            candidate
-        } else {
-            jail.join(candidate)
-        }
-    };
-    let resolved = if path.exists() {
-        strip_unc(&path.canonicalize().map_err(|err| err.to_string())?)
-    } else {
-        let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(&jail);
-        let _ = fs::create_dir_all(parent);
-        let parent_c = strip_unc(&parent.canonicalize().map_err(|err| err.to_string())?);
-        parent_c.join(path.file_name().unwrap_or_default())
-    };
-    if !resolved.starts_with(&jail) {
-        return Err("path is outside ~/Lumio".into());
-    }
-    Ok(resolved)
-}
-
 fn clip(text: String, limit: usize) -> String {
     if text.len() <= limit {
         text
@@ -89,83 +52,111 @@ fn clip(text: String, limit: usize) -> String {
     }
 }
 
+fn listed(dir: &Path) -> Value {
+    match fs::read_dir(dir) {
+        Ok(entries) => {
+            let mut names: Vec<String> = entries
+                .filter_map(|entry| entry.ok())
+                .map(|entry| {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if entry.path().is_dir() {
+                        format!("{name}/")
+                    } else {
+                        name
+                    }
+                })
+                .collect();
+            names.sort();
+            json!({ "ok": true, "path": dir.to_string_lossy(), "entries": names, "ran_on": "local_computer" })
+        }
+        Err(err) => json!({ "ok": false, "error": err.to_string(), "ran_on": "local_computer" }),
+    }
+}
+
 fn run_list_dir(args: &Value) -> Value {
     let path = args.get("path").and_then(Value::as_str).unwrap_or("");
-    match resolve_in_jail(path) {
-        Ok(dir) => match fs::read_dir(&dir) {
-            Ok(entries) => {
-                let mut names: Vec<String> = entries
-                    .filter_map(|entry| entry.ok())
-                    .map(|entry| {
-                        let name = entry.file_name().to_string_lossy().into_owned();
-                        if entry.path().is_dir() {
-                            format!("{name}/")
-                        } else {
-                            name
-                        }
-                    })
-                    .collect();
-                names.sort();
-                json!({ "ok": true, "path": dir.to_string_lossy(), "entries": names, "ran_on": "local_computer" })
-            }
-            Err(err) => json!({ "ok": false, "error": err.to_string() }),
-        },
-        Err(err) => json!({ "ok": false, "error": err }),
+    if path.trim().is_empty() {
+        return grants::list_roots();
+    }
+    match grants::resolve_existing(path) {
+        Ok(dir) => listed(&dir),
+        Err(err) => err.to_json(),
     }
 }
 
 fn run_read_file(args: &Value) -> Value {
     let Some(path) = args.get("path").and_then(Value::as_str) else {
-        return json!({ "ok": false, "error": "path is required" });
+        return json!({ "ok": false, "error": "path is required", "ran_on": "local_computer" });
     };
-    match resolve_in_jail(path) {
-        Ok(file) => match fs::read(&file) {
-            Ok(bytes) => json!({
-                "ok": true,
-                "path": file.to_string_lossy(),
-                "content": clip(String::from_utf8_lossy(&bytes).into_owned(), FILE_TEXT_LIMIT),
+    match grants::resolve_existing(path) {
+        Ok(file) => match fs::metadata(&file) {
+            Ok(meta) if meta.len() > grants::max_read_bytes() => json!({
+                "ok": false,
+                "error": format!("{} is larger than {} bytes", file.display(), grants::max_read_bytes()),
                 "ran_on": "local_computer"
             }),
-            Err(err) => json!({ "ok": false, "error": err.to_string() }),
+            Ok(_) => match fs::read(&file) {
+                Ok(bytes) => json!({
+                    "ok": true,
+                    "path": file.to_string_lossy(),
+                    "bytes": bytes.len(),
+                    "content": clip(String::from_utf8_lossy(&bytes).into_owned(), FILE_TEXT_LIMIT),
+                    "ran_on": "local_computer"
+                }),
+                Err(err) => json!({ "ok": false, "error": err.to_string(), "ran_on": "local_computer" }),
+            },
+            Err(err) => json!({ "ok": false, "error": err.to_string(), "ran_on": "local_computer" }),
         },
-        Err(err) => json!({ "ok": false, "error": err }),
+        Err(err) => err.to_json(),
     }
 }
 
 fn run_write_file(args: &Value) -> Value {
     let Some(path) = args.get("path").and_then(Value::as_str) else {
-        return json!({ "ok": false, "error": "path is required" });
+        return json!({ "ok": false, "error": "path is required", "ran_on": "local_computer" });
     };
     let content = args.get("content").and_then(Value::as_str).unwrap_or("");
-    match resolve_in_jail(path) {
+    let overwrite = args.get("overwrite").and_then(Value::as_bool).unwrap_or(false);
+    match grants::resolve_writable(path) {
         Ok(file) => {
+            if file.exists() && !overwrite {
+                return json!({
+                    "ok": false,
+                    "need": "overwrite_confirm",
+                    "path": file.to_string_lossy(),
+                    "error": "File exists. Call write_file again with overwrite=true after the user confirms.",
+                    "ran_on": "local_computer",
+                });
+            }
             if let Some(parent) = file.parent() {
                 let _ = fs::create_dir_all(parent);
             }
             match fs::write(&file, content.as_bytes()) {
-                Ok(()) => json!({
+                Ok(()) if file.exists() => json!({
                     "ok": true,
                     "path": file.to_string_lossy(),
                     "bytes": content.len(),
+                    "verified": true,
                     "ran_on": "local_computer"
                 }),
-                Err(err) => json!({ "ok": false, "error": err.to_string() }),
+                Ok(()) => json!({ "ok": false, "error": "write reported success but the file is missing", "ran_on": "local_computer" }),
+                Err(err) => json!({ "ok": false, "error": err.to_string(), "ran_on": "local_computer" }),
             }
         }
-        Err(err) => json!({ "ok": false, "error": err }),
+        Err(err) => err.to_json(),
     }
 }
 
 fn run_publish_file(args: &Value) -> Value {
     let Some(path) = args.get("path").and_then(Value::as_str) else {
-        return json!({ "ok": false, "error": "path is required" });
+        return json!({ "ok": false, "error": "path is required", "ran_on": "local_computer" });
     };
-    match resolve_in_jail(path) {
+    match grants::resolve_existing(path) {
         Ok(file) => match fs::read(&file) {
             Ok(bytes) if bytes.len() > PUBLISH_LIMIT => {
-                json!({ "ok": false, "error": format!("{} is larger than {PUBLISH_LIMIT} bytes", file.display()) })
+                json!({ "ok": false, "error": format!("{} is larger than {PUBLISH_LIMIT} bytes", file.display()), "ran_on": "local_computer" })
             }
-            Ok(bytes) if bytes.is_empty() => json!({ "ok": false, "error": "file is empty" }),
+            Ok(bytes) if bytes.is_empty() => json!({ "ok": false, "error": "file is empty", "ran_on": "local_computer" }),
             Ok(bytes) => {
                 let filename = args
                     .get("filename")
@@ -176,12 +167,121 @@ fn run_publish_file(args: &Value) -> Value {
                     "ok": true,
                     "filename": filename,
                     "content_b64": base64::engine::general_purpose::STANDARD.encode(bytes),
+                    "consent": "attach_to_chat",
+                    "note": "This copies local file bytes into chat storage. Ask the user before calling publish_file.",
                     "ran_on": "local_computer"
                 })
             }
-            Err(err) => json!({ "ok": false, "error": err.to_string() }),
+            Err(err) => json!({ "ok": false, "error": err.to_string(), "ran_on": "local_computer" }),
         },
-        Err(err) => json!({ "ok": false, "error": err }),
+        Err(err) => err.to_json(),
+    }
+}
+
+fn run_open_path(args: &Value) -> Value {
+    let path = args.get("path").and_then(Value::as_str).unwrap_or("");
+    match grants::resolve_existing(path) {
+        Ok(file) => match os::open_path(&file) {
+            Ok(()) => json!({ "ok": true, "path": file.to_string_lossy(), "ran_on": "local_computer" }),
+            Err(err) => json!({ "ok": false, "error": err, "ran_on": "local_computer" }),
+        },
+        Err(err) => err.to_json(),
+    }
+}
+
+fn run_search_files(args: &Value) -> Value {
+    let q = args.get("query").and_then(Value::as_str).unwrap_or("");
+    let under = args.get("path").and_then(Value::as_str);
+    match grants::search(q, under) {
+        Ok(v) => v,
+        Err(err) => err.to_json(),
+    }
+}
+
+fn run_copy_move(args: &Value, moving: bool) -> Value {
+    let Some(src) = args.get("src").and_then(Value::as_str).or_else(|| args.get("from").and_then(Value::as_str)) else {
+        return json!({ "ok": false, "error": "src is required", "ran_on": "local_computer" });
+    };
+    let Some(dest) = args.get("dest").and_then(Value::as_str).or_else(|| args.get("to").and_then(Value::as_str)) else {
+        return json!({ "ok": false, "error": "dest is required", "ran_on": "local_computer" });
+    };
+    let overwrite = args.get("overwrite").and_then(Value::as_bool).unwrap_or(false);
+    let from = match grants::resolve_existing(src) {
+        Ok(p) => p,
+        Err(err) => return err.to_json(),
+    };
+    let to = match grants::resolve_writable(dest) {
+        Ok(p) => p,
+        Err(err) => return err.to_json(),
+    };
+    if to.exists() && !overwrite {
+        return json!({
+            "ok": false,
+            "need": "overwrite_confirm",
+            "path": to.to_string_lossy(),
+            "error": "Destination exists. Confirm overwrite with the user, then retry with overwrite=true.",
+            "ran_on": "local_computer",
+        });
+    }
+    let result = if moving { fs::rename(&from, &to) } else { fs::copy(&from, &to).map(|_| ()) };
+    match result {
+        Ok(()) if to.exists() => json!({
+            "ok": true,
+            "src": from.to_string_lossy(),
+            "dest": to.to_string_lossy(),
+            "moved": moving,
+            "verified": true,
+            "ran_on": "local_computer"
+        }),
+        Ok(()) => json!({ "ok": false, "error": "operation reported success but the destination is missing", "ran_on": "local_computer" }),
+        Err(err) => json!({ "ok": false, "error": err.to_string(), "ran_on": "local_computer" }),
+    }
+}
+
+fn run_delete_file(args: &Value) -> Value {
+    let Some(path) = args.get("path").and_then(Value::as_str) else {
+        return json!({ "ok": false, "error": "path is required", "ran_on": "local_computer" });
+    };
+    if !args.get("confirm").and_then(Value::as_bool).unwrap_or(false) {
+        return json!({
+            "ok": false,
+            "need": "delete_confirm",
+            "path": path,
+            "error": "Deleting requires the user to confirm. Ask, then retry with confirm=true.",
+            "ran_on": "local_computer",
+        });
+    }
+    match grants::resolve_existing(path) {
+        Ok(file) => {
+            let result = if file.is_dir() { fs::remove_dir_all(&file) } else { fs::remove_file(&file) };
+            match result {
+                Ok(()) if !file.exists() => json!({ "ok": true, "path": file.to_string_lossy(), "verified": true, "ran_on": "local_computer" }),
+                Ok(()) => json!({ "ok": false, "error": "delete reported success but the path still exists", "ran_on": "local_computer" }),
+                Err(err) => json!({ "ok": false, "error": err.to_string(), "ran_on": "local_computer" }),
+            }
+        }
+        Err(err) => err.to_json(),
+    }
+}
+
+fn run_grant_folder(args: &Value) -> Value {
+    let start = args.get("path").and_then(Value::as_str).map(PathBuf::from);
+    match grants::pick_folder(start.as_deref()) {
+        Ok(grant) => json!({
+            "ok": true,
+            "grant": grant,
+            "folders": grants::snapshot().folders,
+            "ran_on": "local_computer",
+        }),
+        Err(err) => json!({ "ok": false, "error": err, "need": "folder_grant", "ran_on": "local_computer" }),
+    }
+}
+
+fn run_launch_app(args: &Value) -> Value {
+    let name = args.get("name").and_then(Value::as_str).unwrap_or("");
+    match os::launch_app(name) {
+        Ok(app) => json!({ "ok": true, "app": app, "ran_on": "local_computer" }),
+        Err(err) => json!({ "ok": false, "error": err, "ran_on": "local_computer" }),
     }
 }
 
@@ -201,11 +301,31 @@ fn python_bin() -> &'static str {
 
 async fn run_exec(command: &str, cwd: Option<&str>, timeout_s: u64) -> Value {
     if command.trim().is_empty() {
-        return json!({ "ok": false, "error": "command is required" });
+        return json!({ "ok": false, "error": "command is required", "ran_on": "local_computer" });
+    }
+    if !grants::terminal_allowed() {
+        return json!({
+            "ok": false,
+            "need": "terminal_grant",
+            "error": "Terminal access is off. File work uses list_dir, search_files, read_file, and write_file inside granted folders — not shell. The user can enable Terminal in This computer settings.",
+            "ran_on": "local_computer",
+        });
     }
     let dir = match cwd {
-        Some(raw) => resolve_in_jail(raw).unwrap_or_else(|_| jail_dir()),
-        None => jail_dir(),
+        Some(raw) => match grants::resolve_existing(raw) {
+            Ok(p) if p.is_dir() => p,
+            Ok(p) => p.parent().map(Path::to_path_buf).unwrap_or(p),
+            Err(err) => return err.to_json(),
+        },
+        None => {
+            let g = grants::snapshot();
+            match g.folders.first() {
+                Some(folder) => PathBuf::from(&folder.path),
+                None => {
+                    return grants::AccessError::NeedGrant { path: String::new() }.to_json();
+                }
+            }
+        }
     };
     let timeout_s = timeout_s.clamp(10, 300);
     let mut cmd = if cfg!(windows) {
@@ -277,7 +397,15 @@ async fn run_code(code: &str, timeout_s: u64) -> Value {
     if code.trim().is_empty() {
         return json!({ "ok": false, "error": "code is required" });
     }
-    let file = jail_dir().join(".lumio_run.py");
+    if !grants::terminal_allowed() {
+        return json!({
+            "ok": false,
+            "need": "terminal_grant",
+            "error": "Python execution is off until the user enables Terminal in This computer settings.",
+            "ran_on": "local_computer",
+        });
+    }
+    let file = grants::data_dir().join(".lumio_run.py");
     if fs::write(&file, code.as_bytes()).is_err() {
         return json!({ "ok": false, "error": "could not write temp script" });
     }
@@ -306,13 +434,12 @@ async fn run_browser(slot: &Mutex<Option<browser::Chrome>>, tool: &str, args: &V
         return json!({ "ok": false, "error": "Chrome is not open" });
     };
     let out = match tool {
-        "boot" | "touch" | "status" => chrome.snapshot().await,
         "browser_navigate" | "browse_open" => {
             let url = args.get("url").and_then(Value::as_str).unwrap_or("");
             let wait_ms = args.get("wait_ms").and_then(Value::as_u64).unwrap_or(1200);
             chrome.navigate(url, wait_ms).await
         }
-        "browser_snapshot" | "computer_observe" | "browse_screenshot" | "screen_png" => chrome.snapshot().await,
+        "browser_snapshot" | "browse_screenshot" => chrome.snapshot().await,
         "browser_act" | "browse_act" => {
             let actions = args.get("actions").and_then(Value::as_array).cloned().unwrap_or_default();
             let one = args.get("action").cloned();
@@ -324,10 +451,6 @@ async fn run_browser(slot: &Mutex<Option<browser::Chrome>>, tool: &str, args: &V
                 vec![args.clone()]
             };
             chrome.act(&steps).await
-        }
-        "computer_act" | "computer_control" => {
-            let actions = args.get("actions").and_then(Value::as_array).cloned().unwrap_or_else(|| vec![args.clone()]);
-            chrome.computer_act(&actions).await
         }
         "browser_search" => {
             let q = args.get("query").and_then(Value::as_str).unwrap_or("");
@@ -361,16 +484,33 @@ async fn run_job(tool: &str, args: &Value, chrome: &Mutex<Option<browser::Chrome
             run_code(code, timeout).await
         }
         "list_dir" => run_list_dir(args),
+        "list_grants" | "list_folder_grants" => grants::list_roots(),
+        "grant_folder" => run_grant_folder(args),
+        "search_files" => run_search_files(args),
         "read_file" => run_read_file(args),
         "write_file" => run_write_file(args),
+        "copy_file" => run_copy_move(args, false),
+        "move_file" | "rename_file" => run_copy_move(args, true),
+        "delete_file" => run_delete_file(args),
         "publish_file" => run_publish_file(args),
-        other if other.starts_with("browser")
-            || other.starts_with("browse_")
-            || other.starts_with("computer_")
-            || matches!(other, "boot" | "status" | "touch" | "screen_png") =>
-        {
-            run_browser(chrome, other, args).await
+        "open_path" => run_open_path(args),
+        "launch_app" => run_launch_app(args),
+        "boot" => match os::boot().await {
+            Ok(v) => v,
+            Err(err) => json!({ "ok": false, "error": err, "ran_on": "local_computer" }),
+        },
+        "status" | "touch" | "screen_png" | "computer_observe" => match os::snapshot().await {
+            Ok(v) => v,
+            Err(err) => json!({ "ok": false, "error": err, "ran_on": "local_computer" }),
+        },
+        "computer_act" | "computer_control" => {
+            let actions = args.get("actions").and_then(Value::as_array).cloned().unwrap_or_else(|| vec![args.clone()]);
+            match os::act(&actions).await {
+                Ok(v) => v,
+                Err(err) => json!({ "ok": false, "error": err, "ran_on": "local_computer" }),
+            }
         }
+        other if other.starts_with("browser") || other.starts_with("browse_") => run_browser(chrome, other, args).await,
         _ => json!({ "ok": false, "fallback_cloud": true, "error": format!("{tool} runs on the cloud computer") }),
     }
 }
@@ -440,7 +580,38 @@ fn machine_info() -> Value {
         .ok()
         .and_then(|h| h.into_string().ok())
         .unwrap_or_else(|| "Lumio desktop".into());
-    json!({ "hostname": host, "os": std::env::consts::OS })
+    json!({ "hostname": host, "os": std::env::consts::OS, "folders": grants::snapshot().folders, "terminal": grants::terminal_allowed() })
+}
+
+#[tauri::command]
+fn list_folder_grants() -> Value {
+    grants::list_roots()
+}
+
+#[tauri::command]
+fn grant_folder_ui() -> Result<Value, String> {
+    let grant = grants::pick_folder(None)?;
+    Ok(json!({ "ok": true, "grant": grant, "folders": grants::snapshot().folders, "terminal": grants::terminal_allowed() }))
+}
+
+#[tauri::command]
+fn revoke_folder_grant(id: String) -> Result<Value, String> {
+    let g = grants::revoke(&id)?;
+    Ok(json!({ "ok": true, "folders": g.folders, "terminal": g.terminal }))
+}
+
+#[tauri::command]
+fn set_terminal_grant(enabled: bool) -> Result<Value, String> {
+    let g = grants::set_terminal(enabled)?;
+    Ok(json!({ "ok": true, "terminal": g.terminal, "folders": g.folders }))
+}
+
+#[tauri::command]
+fn reset_browser_profile() -> Result<Value, String> {
+    let dir = grants::browser_profile_dir();
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(json!({ "ok": true, "cleared": true, "path": dir.to_string_lossy() }))
 }
 
 #[tauri::command]
@@ -451,6 +622,7 @@ async fn start_sidecar(app: tauri::AppHandle, token: String, api_base: String) -
     if state.started.swap(true, Ordering::SeqCst) {
         return Ok(());
     }
+    os::start_input_listen();
     let clone = state.inner().clone();
     let shots = state.inner().clone();
     tauri::async_runtime::spawn(async move {
@@ -468,50 +640,37 @@ async fn screenshot_loop(state: Arc<Sidecar>) {
         Err(_) => return,
     };
     loop {
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(Duration::from_millis(400)).await;
         let (token, api_base) = {
             let token = state.token.lock().await.clone();
             let api_base = state.api_base.lock().await.clone();
             (token, api_base)
         };
         let (Some(token), Some(api_base)) = (token, api_base) else { continue };
-        let info = {
+        let mut events = os::drain_teach();
+        {
             let chrome = state.chrome.lock().await;
-            match chrome.as_ref() {
-                Some(c) => c.page_info().await.ok(),
-                None => None,
+            if let Some(c) = chrome.as_ref() {
+                events.extend(c.drain_teach().await);
             }
-        };
-        let Some((shot, url, title)) = info else { continue };
-        if !shot.is_empty() {
-            let _ = client
-                .post(format!("{api_base}/api/desktop/screen"))
-                .header("X-Lumio-Agent", &token)
-                .json(&json!({ "png_b64": shot, "url": url, "title": title }))
-                .send()
-                .await;
         }
-        let events = {
-            let chrome = state.chrome.lock().await;
-            match chrome.as_ref() {
-                Some(c) => c.drain_teach().await,
-                None => vec![],
-            }
-        };
-        if !events.is_empty() {
-            let _ = client
-                .post(format!("{api_base}/api/desktop/teach-events"))
-                .header("X-Lumio-Agent", &token)
-                .json(&json!({ "events": events, "url": url, "title": title }))
-                .send()
-                .await;
+        if events.is_empty() {
+            continue;
         }
+        let title = tokio::task::spawn_blocking(os::front_title)
+            .await
+            .unwrap_or_else(|_| "This computer".into());
+        let _ = client
+            .post(format!("{api_base}/api/desktop/teach-events"))
+            .header("X-Lumio-Agent", &token)
+            .json(&json!({ "events": events, "url": "", "title": title }))
+            .send()
+            .await;
     }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let _ = jail_dir();
     tauri::Builder::default()
         .manage(Arc::new(Sidecar {
             token: Mutex::new(None),
@@ -519,8 +678,17 @@ pub fn run() {
             chrome: Mutex::new(None),
             started: AtomicBool::new(false),
         }))
-        .invoke_handler(tauri::generate_handler![start_sidecar, machine_info])
+        .invoke_handler(tauri::generate_handler![
+            start_sidecar,
+            machine_info,
+            list_folder_grants,
+            grant_folder_ui,
+            revoke_folder_grant,
+            set_terminal_grant,
+            reset_browser_profile
+        ])
         .setup(|app| {
+            let _ = grants::data_dir();
             let url = lumio_url();
             WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url.parse()?))
                 .title("Lumio")

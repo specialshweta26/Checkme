@@ -49,6 +49,16 @@ LOCAL_TOOLS = {
     "computer_observe",
     "computer_act",
     "computer_control",
+    "open_path",
+    "launch_app",
+    "list_grants",
+    "list_folder_grants",
+    "grant_folder",
+    "search_files",
+    "copy_file",
+    "move_file",
+    "rename_file",
+    "delete_file",
 }
 
 
@@ -107,7 +117,7 @@ async def pair(db: AsyncSession, user: User, *, hostname: str = "", os_name: str
             name="This computer",
             slug=LOCAL_SLUG,
             alias=host,
-            description="The Lumio desktop app on this machine: shell, files, Chrome, and teaching.",
+            description="The Lumio desktop app on this machine: granted folders, apps, and the Lumio browser.",
             auth_type="platform",
             credentials_enc=encrypt(creds),
             server_key=server_key_for("builtin", LOCAL_PROVIDER, None),
@@ -138,7 +148,7 @@ async def pair(db: AsyncSession, user: User, *, hostname: str = "", os_name: str
         "agent_token": token,
         "slug": LOCAL_SLUG,
         "prefer": creds["prefer"],
-        "jail": "Lumio",
+        "jail": "grants",
     }
 
 

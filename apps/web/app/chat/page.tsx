@@ -11,7 +11,7 @@ import { dismissFocusCard, focusCardDismissed, FocusOnboarding } from "../compon
 import { AgentAvatar } from "../components/AgentAvatar";
 import { JobTimeline } from "../components/JobTimeline";
 import { Thinking } from "../components/Thinking";
-import { announceWorkspaceChanged, chatHref, deleteSession, getMe, listSessions, loadSession, rememberScope, uploadFiles, startTeaching, stopTeaching, type ChatSessionRow, type Me, type UploadedFile, type WorkspaceRoster } from "../lib";
+import { announceWorkspaceChanged, chatHref, deleteSession, getMe, isLumioDesktop, listSessions, loadSession, rememberScope, uploadFiles, startTeaching, stopTeaching, type ChatSessionRow, type Me, type UploadedFile, type WorkspaceRoster } from "../lib";
 
 const STORE = "assistant.session";
 
@@ -1110,7 +1110,9 @@ export default function ChatPage() {
       </div>
       {screenOpen ? (
         <>
+          {!(teaching && isLumioDesktop()) ? (
           <button type="button" className="screen-scrim" aria-label="Close computer" onClick={() => setScreenOpen(false)} />
+          ) : null}
           <ScreenRail
             session={computer}
             // Only a running turn counts as "operating": an old message that once used the browser must not
@@ -1128,7 +1130,7 @@ export default function ChatPage() {
               const skillAgentId = agentId || group?.owner_id || group?.members[0]?.id;
               const started = await startTeaching(skillAgentId || undefined);
               setTeaching(true);
-              setControlling(true);
+              if (!isLumioDesktop()) setControlling(true);
               return started;
             }}
             onTeachStop={async (name) => {
