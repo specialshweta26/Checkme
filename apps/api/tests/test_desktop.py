@@ -132,7 +132,7 @@ async def test_desktop_shell_uses_laptop_when_online(monkeypatch, as_desktop):
     assert out["ran_on"] == "local_computer" and out["stdout"] == "local"
 
 
-async def test_desktop_shell_falls_back_when_sidecar_offline(monkeypatch, as_desktop):
+async def test_desktop_shell_does_not_use_the_cloud_when_offline(monkeypatch, as_desktop):
     calls = []
 
     async def fake(slug, tool, args):
@@ -144,9 +144,35 @@ async def test_desktop_shell_falls_back_when_sidecar_offline(monkeypatch, as_des
 
     monkeypatch.setattr("app.desktop.agent.is_online", online)
     ctx = _ctx([_computer(), _local()], fake)
-    out = await computer_harness.shell(ctx, "ls")
-    assert calls == [("computer", "exec")]
-    assert out["ran_on"] == "cloud_computer"
+    out = await computer_harness.shell(ctx, "ls ~/Desktop")
+    assert calls == []
+    assert out["ran_on"] == "local_computer"
+    assert out.get("computer_unavailable") is True
+
+
+async def test_desktop_file_tools_are_not_sent_to_the_cloud(as_desktop):
+    ctx = _ctx([_computer(), _local()])
+    assert computer_harness.desktop_tool_slug(ctx, "computer", "list_dir") == "laptop"
+    assert computer_harness.desktop_tool_slug(ctx, "computer", "search_files") == "laptop"
+    assert computer_harness.desktop_tool_slug(ctx, "computer", "read_file") == "laptop"
+
+
+async def test_desktop_search_stays_on_this_computer(monkeypatch, as_desktop):
+    calls = []
+
+    async def fake(slug, tool, args):
+        calls.append((slug, tool, args.get("query")))
+        return {"ok": True, "hits": [{"name": "OMS report.xlsx", "path": "/Users/me/Desktop/OMS report.xlsx"}]}
+
+    async def online(_uid):
+        return True
+
+    monkeypatch.setattr("app.desktop.agent.is_online", online)
+    ctx = _ctx([_computer(), _local()], fake)
+    out = await computer_harness.search_files(ctx, "OMS report")
+    assert calls == [("laptop", "search_files", "OMS report")]
+    assert out["ran_on"] == "local_computer"
+    assert out["hits"][0]["name"] == "OMS report.xlsx"
 
 
 async def test_desktop_browser_offline_does_not_open_e2b(monkeypatch, as_desktop):

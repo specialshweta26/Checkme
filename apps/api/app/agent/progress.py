@@ -287,8 +287,10 @@ def describe_tool(name: str, args: dict | None, connector_names: dict[str, str] 
     if n == "web_read":
         hosts = [_host(u) for u in (a.get("urls") or [])[:5] if u]
         return f"Reading {', '.join(h for h in hosts if h)}" if hosts else "Reading pages"
+    if n == "search_files":
+        return f"Searching this computer for {_clip(a.get('query'), 40)}"
     if n == "list_files":
-        return f"Listing files in {_clip(a.get('path') or '/', 40)}"
+        return f"Listing files in {_clip(a.get('path') or 'granted folders', 40)}"
     if n == "attach_file":
         return f"Attaching {_clip(a.get('filename') or a.get('path'), 50)}"
     if n == "open_path":

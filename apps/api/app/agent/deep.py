@@ -1315,6 +1315,9 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
     args = as_dict(args)
     orig_tool = tool_name
     orig_args = dict(args)
+    from app.agent.computer_harness import desktop_tool_slug
+
+    connector_slug = desktop_tool_slug(ctx, connector_slug, tool_name)
     conn = ctx.connectors.get(connector_slug)
     if conn is None:
         return {"error": f"connector '{connector_slug}' is not connected for this user"}
@@ -2556,7 +2559,9 @@ def shell_routing_hint(connectors: list | None, agent=None) -> str:
             "directly, including CSV and other files inside them. read_file on a CSV or TSV summarizes the whole table on this computer (row counts, status breakdowns, numeric totals), even when the file is many megabytes. Use that summary. Never ask the user to enable Terminal to analyze a granted spreadsheet. Never say files are limited to ~/Lumio. "
             "Never open a folder picker. For any other folder, ask in one sentence and wait for the answer. "
             "Never use shell to bypass folder grants. "
+            "search_files finds a file by the words the user used, across every granted folder. list_files with no path lists those folders. "
             "list_dir, read_file, write_file, and search_files stay on this computer. If the desktop app is offline, say so and stop. Do not read those files on the cloud computer. "
+            "A missing path on the cloud machine does not mean the file is missing on this Mac. "
             "Terminal/run_code stay off unless they enabled Terminal in This computer settings. "
             "Ask before overwrite, delete, bulk changes, sending forms, purchasing, or publishing. "
             "To operate an installed app, call computer_use: discover, then inspect, then launch. Trust its status and evidence. "
@@ -3157,6 +3162,55 @@ def _task_state_out(ctx: RunContext) -> dict | None:
 
 
 async def run_deep_agent(
+    db: AsyncSession,
+    user,
+    session_id: uuid.UUID,
+    request_id: str,
+    history: list[dict],
+    query: str,
+    confirmations: list[dict] | None = None,
+    auto_confirm: bool = False,
+    workspace_agent=None,
+    group=None,
+    teammates: list | None = None,
+    teammate_depth: int = 0,
+    mentions: dict | None = None,
+    progress: Any = None,
+    job: Any = None,
+    task_key: str | None = None,
+    client_kind: str | None = None,
+) -> dict[str, Any]:
+    from app.desktop.client import client_kind as current_client
+    from app.desktop.client import reset_client_kind, set_client_kind
+
+    kind = (client_kind or current_client() or "web").strip().lower()
+    if kind not in {"desktop", "web"}:
+        kind = "web"
+    token = set_client_kind(kind)
+    try:
+        return await _run_deep_agent(
+            db,
+            user,
+            session_id,
+            request_id,
+            history,
+            query,
+            confirmations,
+            auto_confirm,
+            workspace_agent,
+            group,
+            teammates,
+            teammate_depth,
+            mentions,
+            progress,
+            job,
+            task_key,
+        )
+    finally:
+        reset_client_kind(token)
+
+
+async def _run_deep_agent(
     db: AsyncSession,
     user,
     session_id: uuid.UUID,
