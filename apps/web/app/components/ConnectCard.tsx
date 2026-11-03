@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { connectMarketplace, grantToolkitAgent } from "../lib";
+import { connectMarketplace, grantToolkitAgent, isLumioDesktop } from "../lib";
 
 export type ConnectCardView = {
   toolkit?: string;
@@ -63,7 +63,7 @@ function ConnectPanel({
   agentId?: string | null;
   agentName?: string | null;
 }) {
-  const href = card.redirect_url || "";
+  const stored = card.redirect_url || "";
   const title = card.name || card.toolkit || "Connect app";
   const forId = card.agent_id || agentId || "";
   const forName = card.agent_name || agentName || "";
@@ -71,7 +71,21 @@ function ConnectPanel({
   const [enabled, setEnabled] = useState(false);
   const [error, setError] = useState("");
   const [apiKey, setApiKey] = useState("");
-  const needsKey = Boolean(card.needs_credentials) && !href;
+  const [sessionUrl, setSessionUrl] = useState("");
+  const needsKey = Boolean(card.needs_credentials) && !stored;
+  const desktop = isLumioDesktop();
+
+  async function freshSession() {
+    if (!card.toolkit || needsKey) return stored;
+    const data = await connectMarketplace(card.toolkit, forId || undefined);
+    if (data.connected) {
+      setEnabled(true);
+      return "";
+    }
+    const fresh = String(data.redirect_url || "").trim();
+    if (!fresh) throw new Error("Composio did not start a new sign-in session.");
+    return fresh;
+  }
 
   async function enable() {
     setBusy(true);
@@ -89,10 +103,12 @@ function ConnectPanel({
         await grantToolkitAgent(card.toolkit, forId);
         setEnabled(true);
       }
-      if (href) window.open(href, "_blank", "noreferrer");
+      const next = await freshSession();
+      if (!next) return;
+      setSessionUrl(next);
+      window.open(next, "_blank", "noreferrer");
     } catch (err: any) {
       setError(err.message || "Could not enable this connector");
-      if (href) window.open(href, "_blank", "noreferrer");
     } finally {
       setBusy(false);
     }
@@ -125,14 +141,14 @@ function ConnectPanel({
           {enabled ? <p className="ok">Enabled{forName ? ` for ${forName}` : ""}.</p> : null}
           {error ? <p className="err">{error}</p> : null}
         </div>
-        {href || needsKey ? (
+        {stored || needsKey || card.toolkit ? (
           <button className="btn" type="button" disabled={busy || (needsKey && !apiKey.trim())} onClick={() => void enable()}>
             {busy ? "Enabling…" : enabled ? "Reconnect" : needsKey ? "Save key" : forName ? `Enable for ${forName}` : "Connect"}
           </button>
         ) : null}
       </header>
-      {href ? (
-        <details className="connect-card-embed">
+      {sessionUrl && !desktop ? (
+        <details className="connect-card-embed" open>
           <summary>Composio authorization</summary>
           <div className="browser-frame connect-card-browser">
             <div className="browser-chrome">
@@ -141,8 +157,8 @@ function ConnectPanel({
                 <i />
                 <i />
               </span>
-              <div className="browser-url">{href}</div>
-              <a className="browser-open" href={href} target="_blank" rel="noreferrer">
+              <div className="browser-url">{sessionUrl}</div>
+              <a className="browser-open" href={sessionUrl} target="_blank" rel="noreferrer">
                 Open tab
               </a>
             </div>
@@ -150,11 +166,11 @@ function ConnectPanel({
               <iframe
                 className="browser-iframe"
                 title={title}
-                src={href}
+                src={sessionUrl}
                 allow="clipboard-write"
                 sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox"
               />
-              <a className="connect-card-fallback" href={href} target="_blank" rel="noreferrer">
+              <a className="connect-card-fallback" href={sessionUrl} target="_blank" rel="noreferrer">
                 If this page is blank, continue in Composio
               </a>
             </div>

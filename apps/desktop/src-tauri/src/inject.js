@@ -2,6 +2,29 @@
   if (window.__lumioDesktop) return;
   window.__lumioDesktop = true;
 
+  // Saved Composio links expire. Chat cards used to embed them, and this webview
+  // then handed that navigation to the system browser on launch.
+  function expiredComposioLink(value) {
+    return /^https?:\/\/([^/]+\.)?composio\.dev\/link\//i.test(String(value || ""));
+  }
+  var iframeSrc = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, "src");
+  if (iframeSrc && iframeSrc.set && iframeSrc.get) {
+    Object.defineProperty(HTMLIFrameElement.prototype, "src", {
+      configurable: true,
+      enumerable: iframeSrc.enumerable,
+      get: iframeSrc.get,
+      set: function (value) {
+        if (expiredComposioLink(value)) return;
+        return iframeSrc.set.call(this, value);
+      },
+    });
+  }
+  var origSetAttribute = Element.prototype.setAttribute;
+  Element.prototype.setAttribute = function (name, value) {
+    if (this.tagName === "IFRAME" && String(name).toLowerCase() === "src" && expiredComposioLink(value)) return;
+    return origSetAttribute.call(this, name, value);
+  };
+
   // Do not mirror the Mac/Windows desktop inside Lumio — that capture loop freezes the machine.
   // Teaching records OS clicks in the background; the user works in real apps.
   var css = document.createElement("style");
