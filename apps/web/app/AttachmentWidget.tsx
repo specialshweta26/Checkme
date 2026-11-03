@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { saveDownload } from "./lib";
 
 export type Attachment = {
   filename: string;
@@ -154,7 +155,16 @@ function AttachmentRow({ item }: { item: Attachment }) {
         <button type="button" className={`att-btn${open ? " on" : ""}`} onClick={() => setOpen((v) => !v)} disabled={!preview}>
           <IconEye /> {open ? "Hide preview" : "Preview"}
         </button>
-        <a className="att-btn" href={download || undefined} download={item.filename} target="_blank" rel="noreferrer">
+        <a
+          className="att-btn"
+          href={download || undefined}
+          download={item.filename}
+          onClick={(event) => {
+            if (!download) return;
+            event.preventDefault();
+            void saveDownload(download, item.filename || "").catch(() => window.open(download, "_blank", "noopener,noreferrer"));
+          }}
+        >
           <IconDownload /> Download file
         </a>
         <button type="button" className="att-btn" onClick={summarize} disabled={busy}>

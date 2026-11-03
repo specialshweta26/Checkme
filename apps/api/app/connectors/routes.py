@@ -186,7 +186,12 @@ async def computer_screen(user: User = Depends(current_user), db: AsyncSession =
     from app.desktop.agent import wants_local_computer
 
     if await wants_local_computer(db, user):
-        cached = live_screen_png(str(user.id))
+        from app.desktop.agent import local_browser_frame
+
+        try:
+            cached = await local_browser_frame(user.id)
+        except Exception as vis_exc:  # noqa: BLE001
+            raise HTTPException(404, str(vis_exc)[:200] or "Waiting for this computer's screen") from vis_exc
         if cached:
             return Response(content=cached, media_type="image/png", headers={"Cache-Control": "no-store"})
         raise HTTPException(404, "Waiting for this computer's screen")

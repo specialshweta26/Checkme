@@ -1,10 +1,16 @@
 "use client";
 
 import { Fragment, useState, type ReactNode } from "react";
+import { saveDownload } from "../lib";
 import { DataTable, textNodes } from "./DataTable";
 
-function openLink(event: { preventDefault: () => void }, href: string) {
+function openLink(event: { preventDefault: () => void }, href: string, filename = "") {
   event.preventDefault();
+  const file = /\/api\/files(?:\?|$)/i.test(href) || /\.(xlsx|xls|csv|pdf|docx?|pptx?|zip|png|jpe?g|webp|gif)(?:$|\?)/i.test(href);
+  if (file) {
+    void saveDownload(href, filename).catch(() => window.open(href, "_blank", "noopener,noreferrer"));
+    return;
+  }
   window.open(href, "_blank", "noopener,noreferrer");
 }
 
@@ -18,11 +24,11 @@ function inline(text: string): ReactNode[] {
     if (image) {
       return <img key={i} src={image[2]} alt={image[1]} />;
     }
-    const link = part.match(/^\[([^\]]+)\]\((https?:\/\/.+)\)$/);
+    const link = part.match(/^\[([^\]]+)\]\(((?:https?:\/\/|\/api\/files)[^)]+)\)$/);
     if (link) {
       const href = link[2].replace(/[.,;:!?]+$/, "");
       return (
-        <a key={i} href={href} target="_blank" rel="noreferrer" onClick={(event) => openLink(event, href)}>
+        <a key={i} href={href} target="_blank" rel="noreferrer" onClick={(event) => openLink(event, href, link[1])}>
           {link[1]}
         </a>
       );

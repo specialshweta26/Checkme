@@ -25,15 +25,11 @@
     return origSetAttribute.call(this, name, value);
   };
 
-  // Do not mirror the Mac/Windows desktop inside Lumio — that capture loop freezes the machine.
-  // Teaching records OS clicks in the background; the user works in real apps.
-  var css = document.createElement("style");
-  css.textContent = [
-    ".screen-preview,.screen-stream,.screen-placeholder,.screen-input-bar{display:none!important}",
-    ".screen-scrim{display:none!important}",
-    ".screen-rail.overlay.fullscreen{inset:auto!important;top:12px!important;left:50%!important;transform:translateX(-50%)!important;width:min(640px,calc(100vw - 24px))!important;height:auto!important;max-height:none!important;border-radius:16px!important;padding:12px 16px!important}",
-  ].join("");
-  document.documentElement.appendChild(css);
+  document.documentElement.classList.add("lumio-desktop");
+  if (document.body) document.body.classList.add("lumio-desktop");
+  document.addEventListener("DOMContentLoaded", function () {
+    document.body.classList.add("lumio-desktop");
+  });
 
   function withClient(headers) {
     var h = new Headers(headers || {});
@@ -72,7 +68,8 @@
       if (!/^https?:\/\//i.test(href)) return;
       var here = location.host;
       try {
-        if (new URL(href).host === here) return;
+        var target = new URL(href);
+        if (target.host === here && !/\/api\/files(?:\?|$)/i.test(target.pathname + target.search)) return;
       } catch (e) {
         return;
       }
