@@ -285,6 +285,40 @@ def _ingest_screen(user_id, result: dict) -> dict:
     return result
 
 
+_SCREEN_TRY: dict[str, float] = {}
+
+
+async def local_browser_frame(user_id) -> bytes:
+    """The Chrome window Lumio is driving on this computer. Not a full-desktop capture.
+
+    A full-screen capture loop inside the app freezes the machine. This asks for one browser
+    picture, and reuses it for a couple of seconds while the screen panel is open.
+    """
+    from app.connectors.daytona_box import live_screen_age, live_screen_png
+
+    key = str(user_id)
+    png = live_screen_png(key)
+    if png and live_screen_age(key) < 2:
+        return png
+    now = time.monotonic()
+    if now - _SCREEN_TRY.get(key, 0) < 2:
+        if png:
+            return png
+        raise LocalOffline("The computer browser is not open yet. Ask Lumio to open the page, then open the screen again.")
+    _SCREEN_TRY[key] = now
+    try:
+        await asyncio.wait_for(call_local(user_id, "browse_screenshot", {}), timeout=8)
+    except Exception as vis_exc:  # noqa: BLE001
+        png = live_screen_png(key)
+        if png:
+            return png
+        raise LocalOffline(str(vis_exc)[:200] or "The computer browser is not open yet.") from vis_exc
+    png = live_screen_png(key)
+    if not png:
+        raise LocalOffline("The computer browser is not open yet. Ask Lumio to open the page, then open the screen again.")
+    return png
+
+
 async def wants_local_computer(db: AsyncSession, user: User) -> bool:
     """Desktop app: use this machine even before the sidecar is marked online. Never E2B."""
     from app.desktop.client import prefer_local

@@ -324,6 +324,41 @@ export function isLumioDesktop() {
   return typeof window !== "undefined" && Boolean((window as { __lumioDesktop?: boolean }).__lumioDesktop);
 }
 
+function downloadName(href: string, header: string | null, fallback: string) {
+  const match = /filename\*=UTF-8''([^;]+)|filename="([^"]+)"/i.exec(header || "");
+  const named = decodeURIComponent(match?.[1] || match?.[2] || "");
+  if (named) return named;
+  if (fallback) return fallback;
+  try {
+    const last = new URL(href, window.location.origin).pathname.split("/").pop() || "";
+    return decodeURIComponent(last) || "download";
+  } catch {
+    return "download";
+  }
+}
+
+/** Save a chat file. The desktop webview swallows same-site window.open, so that app hands the link to the system browser. */
+export async function saveDownload(href: string, filename = "") {
+  const url = (href || "").trim();
+  if (!url || typeof window === "undefined") return;
+  const tauri = (window as { __TAURI__?: { core?: { invoke?: (name: string, args: { url: string }) => Promise<unknown> } } }).__TAURI__?.core;
+  if (isLumioDesktop() && tauri?.invoke && /^https?:\/\//i.test(url)) {
+    await tauri.invoke("open_external", { url });
+    return;
+  }
+  const res = await fetch(url, { credentials: "include" });
+  if (!res.ok) throw new Error("Could not download this file");
+  const blob = await res.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = objectUrl;
+  link.download = downloadName(url, res.headers.get("content-disposition"), filename);
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1500);
+}
+
 export type TeachStart = { ok?: boolean; teaching?: boolean; max_seconds?: number; elapsed?: number; audio_optional?: boolean; skill_id?: string | null };
 
 export async function startTeaching(agentId?: string, page?: { url?: string; title?: string }) {

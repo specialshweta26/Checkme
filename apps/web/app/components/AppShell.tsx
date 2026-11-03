@@ -5,6 +5,7 @@ import {
   chatHref,
   deleteSession,
   initials,
+  isLumioDesktop,
   listSessions,
   markInboxSeen,
   rememberScope,
@@ -174,6 +175,10 @@ export function AppShell({
   children: ReactNode;
 }) {
   const [open, setOpen] = useState(false);
+  useEffect(() => {
+    if (!isLumioDesktop()) return;
+    document.body.classList.add("lumio-desktop");
+  }, []);
   const [scope, setScope] = useState({ agent: "", group: "" });
   const [own, setOwn] = useState<ChatSessionRow[]>([]);
   const [badge, setBadge] = useState(0);

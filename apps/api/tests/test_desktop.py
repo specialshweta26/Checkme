@@ -329,3 +329,24 @@ async def test_desktop_launch_app_uses_laptop(monkeypatch, as_desktop):
     out = await computer_harness.launch_app(ctx, "Finder")
     assert calls == [("laptop", "launch_app", "Finder")]
     assert out["ran_on"] == "local_computer"
+
+
+async def test_desktop_screen_uses_the_browser_picture_not_a_desktop_capture(monkeypatch):
+    from app.connectors.daytona_box import forget_screen, remember_screen
+    from app.desktop import agent
+
+    png = b"\x89PNG" + b"\x00" * 40
+    calls = []
+
+    async def fake(user_id, tool, args=None):
+        calls.append(tool)
+        remember_screen(png, str(user_id))
+        return {"ok": True}
+
+    monkeypatch.setattr(agent, "call_local", fake)
+    forget_screen("u-screen")
+    agent._SCREEN_TRY.pop("u-screen", None)
+    assert (await agent.local_browser_frame("u-screen")).startswith(b"\x89PNG")
+    assert calls == ["browse_screenshot"]
+    await agent.local_browser_frame("u-screen")
+    assert calls == ["browse_screenshot"]

@@ -1396,6 +1396,29 @@ input.tasks-search { width: min(260px, 100%); }
   outline: 2px solid var(--accent);
   cursor: crosshair;
 }
+/* The installed desktop app hides this panel in its startup script. These rules are more specific, so the screen still shows. */
+body.lumio-desktop .screen-preview,
+body.lumio-desktop .screen-placeholder,
+body.lumio-desktop .screen-input-bar,
+body.lumio-desktop .screen-scrim {
+  display: grid !important;
+}
+body.lumio-desktop .screen-stream {
+  display: block !important;
+}
+body.lumio-desktop .screen-rail.overlay.fullscreen {
+  inset: 0 !important;
+  top: 0 !important;
+  right: 0 !important;
+  bottom: 0 !important;
+  left: 0 !important;
+  transform: none !important;
+  width: 100vw !important;
+  height: 100dvh !important;
+  max-height: none !important;
+  border-radius: 0 !important;
+  padding: clamp(12px, 2vw, 28px) !important;
+}
 .screen-preview img {
   display: block;
   width: 100%;

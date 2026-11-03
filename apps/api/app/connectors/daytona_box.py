@@ -62,6 +62,14 @@ def live_screen_png(user_id: str | None = None) -> bytes:
     return _LIVE_PNG.get(str(user_id or _SCREEN_USER.get() or "default"), b"")
 
 
+def live_screen_age(user_id: str | None = None) -> float:
+    """Seconds since the last frame. A missing frame is old."""
+    key = str(user_id or _SCREEN_USER.get() or "default")
+    if key not in _LIVE_AT:
+        return 1e9
+    return max(0.0, time.monotonic() - _LIVE_AT[key])
+
+
 def remember_page(user_id: str | None, url: str = "", title: str = "") -> None:
     """The page the desktop computer is actually on, so teaching can save it."""
     page = (url or "").strip()
