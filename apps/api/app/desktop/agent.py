@@ -38,6 +38,7 @@ LOCAL_TOOLS = {
     "browse_open",
     "browser_snapshot",
     "browser_act",
+    "browser_collect",
     "browse_act",
     "browser_tabs",
     "browser_new_tab",

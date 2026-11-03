@@ -15,7 +15,7 @@ from pathlib import Path
 
 HOST = "127.0.0.1"
 PORT = 18765
-VERSION = "22"
+VERSION = "23"
 _HOME = Path(os.environ.get("CHECKME_BROWSER_HOME") or "/tmp")
 SHOT = "/tmp/checkme-browser.png"
 PROFILE = str(_HOME / "profile")
@@ -171,9 +171,11 @@ _tab_refs: dict = {}
 try:  # the API imports the package module; on the computer the same file sits next to this one
     from app.connectors.block_detect import detect_block
     from app.connectors.block_detect import page_is_thin as _thin
+    from app.connectors.listing_collect import collect_page as _collect_page
 except ImportError:  # pragma: no cover - exercised on the cloud computer
     from checkme_block_detect import detect_block  # type: ignore
     from checkme_block_detect import page_is_thin as _thin  # type: ignore
+    from checkme_listing_collect import collect_page as _collect_page  # type: ignore
 
 
 def _load_config() -> dict:
@@ -440,9 +442,9 @@ def _dump(page):
         text = page.inner_text("body")
     except Exception:
         text = ""
-    raw = text or ""
-    if len(raw) > 12000:
-        raw = raw[:6000] + "\n…\n" + raw[-6000:]
+    full = text or ""
+    omitted = len(full) > 12000
+    raw = full[:6000] + "\n…\n" + full[-6000:] if omitted else full
     try:
         composer = page.evaluate(
             """() => {
@@ -464,6 +466,7 @@ def _dump(page):
             "url": page.url,
             "title": page.title(),
             "text": raw,
+            "text_omitted": omitted,
             "composer": composer or "",
             "viewport": {"width": VIEW_W, "height": VIEW_H},
             "screenshot_path": SHOT,
@@ -2030,13 +2033,42 @@ def handle(cmd: dict) -> dict:
             return _rec_start()
         if command in {"rec_drain", "rec_stop"}:
             return _rec_drain(stop=command == "rec_stop")
-        if command in {"navigate", "goto", "snapshot", "act", "replay", "observe", "screenshot", "load_html"}:
+        if command in {"navigate", "goto", "snapshot", "act", "replay", "observe", "screenshot", "load_html", "collect"}:
             tid, page = _page_for(cmd)
             data = _handle_page(command, cmd, page)
             return _with_tab(data, tid) if isinstance(data, dict) else data
         return _handle_page(command, cmd, _ensure_page())
     finally:
         drain_browser_events()
+
+
+def _settle_collect(page) -> None:
+    try:
+        if smart_waits():
+            wait_ready(page, "scroll")
+        else:
+            page.wait_for_timeout(450)
+    except Exception:
+        try:
+            page.wait_for_timeout(450)
+        except Exception:
+            pass
+
+
+def _collect_listing(page, cmd: dict) -> dict:
+    try:
+        offset = int(cmd.get("offset") or 0)
+    except (TypeError, ValueError):
+        offset = 0
+    return _collect_page(
+        page,
+        min_price=cmd.get("min_price"),
+        max_price=cmd.get("max_price"),
+        words=str(cmd.get("words") or ""),
+        with_reviews=bool(cmd.get("with_reviews")),
+        offset=offset,
+        settle=_settle_collect,
+    )
 
 
 def _handle_page(command: str, cmd: dict, page) -> dict:
@@ -2098,6 +2130,8 @@ def _handle_page(command: str, cmd: dict, page) -> dict:
         return data
     if command == "snapshot":
         return _snapshot(page)
+    if command == "collect":
+        return _collect_listing(page, cmd)
     if command == "act":
         return _act_page(page, cmd.get("actions") or [])
     if command == "replay":

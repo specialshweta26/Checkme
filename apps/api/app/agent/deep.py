@@ -1060,6 +1060,7 @@ async def search_user_tools(ctx: RunContext, query: str, connector_slug: str | N
                     "browser_navigate",
                     "browser_snapshot",
                     "browser_act",
+                    "browser_collect",
                     "browser_tabs",
                     "browser_new_tab",
                     "browser_switch_tab",
@@ -2705,7 +2706,7 @@ def system_prompt(
         "To connect an app the user named, call connect_app with that toolkit slug (gmail, github, figma, slack) — never a different vendor. "
         "connect_app returns redirect_url; the chat always shows the Composio connect card. Do not only paste the URL, and do not refuse to connect when composio is listed.\n"
         "Computer, browser, files, web search, memory, skills, and scratchpad are first-class tools. Call them directly. "
-        "Do not search_tools or call_tool for browser_navigate, browser_snapshot, browser_act, computer_observe, computer_act, "
+        "Do not search_tools or call_tool for browser_navigate, browser_snapshot, browser_act, browser_collect, computer_observe, computer_act, "
         "shell, run_code, list_files, read_file, write_file, save_mail_attachments, attach_file, open_path, launch_app, request_takeover, web_search, web_read, web_fetch, "
         "remember, recall_memory, or scratchpad_add.\n"
         "When the user asks for a chart, plot, HTML report, or downloadable file: fetch the data first, then "
@@ -2742,6 +2743,11 @@ def system_prompt(
         "web_search already falls back to searching in the computer browser; browser_search does that directly. web_search tries Tavily (and any other configured search API) first, then the computer browser, then free server-side search engines; Tavily often returns each result's page text, so web_fetch or web_read on a result is instant. If it returns `setup`, tell the user in one line which search key to configure (it names the env vars) and why, then keep going with browser_navigate on known sites. "
         "Never stop after one failed page. Never say you cannot verify live updates until you have searched and opened at least one article.\n"
         "Browser operator: execute the user's website task on the live computer yourself. Do not tell them how to click. "
+        "When the user wants the items, prices, or reviews from a listing, apply the site's own filter if it is on the snapshot, "
+        "then call browser_collect with the numeric range and the words they used. Do not answer from a clipped snapshot, and do not say the full listing is unavailable. "
+        "If text_omitted is true, the snapshot dropped the middle of the page. If next_offset is set, call browser_collect again with that offset until every match is in hand. "
+        "If the result is too_large, inspect_result and page until every requested row is in hand. Quote only prices and review text the tool returned, and say when a price can still vary by size. "
+        "Reviews are the ones shown on the page, not a full export. "
         "Loop until done: inspect the snapshot (tree, verified, alerts, tables) → browser_act one logical step → read the new snapshot → continue. "
         f"{_fast_browser_hint()}"
         "Identify controls by role and name first, then label, then visible text; computer_act x,y last. "

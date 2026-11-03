@@ -9,6 +9,7 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
 const SNAPSHOT_JS: &str = include_str!("snapshot.js");
+const COLLECT_JS: &str = include_str!("collect.js");
 const ACT_JS: &str = include_str!("act.js");
 const TEACH_JS: &str = include_str!("teach.js");
 const DRAIN_TEACH_JS: &str = r#"(() => { const b = window.__lumioTeachBuf || []; window.__lumioTeachBuf = []; return b.slice(0, 200); })()"#;
@@ -152,11 +153,15 @@ impl Chrome {
     }
 
     async fn cdp(&self, method: &str, params: Value) -> Result<Value, String> {
+        self.cdp_wait(method, params, Duration::from_secs(8)).await
+    }
+
+    async fn cdp_wait(&self, method: &str, params: Value, wait: Duration) -> Result<Value, String> {
         let ws_url = self.page_ws().await?;
         let (mut ws, _) = connect_async(&ws_url).await.map_err(|e| e.to_string())?;
         let payload = json!({ "id": 1, "method": method, "params": params });
         ws.send(Message::Text(payload.to_string().into())).await.map_err(|e| e.to_string())?;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+        let deadline = tokio::time::Instant::now() + wait;
         loop {
             let left = deadline.saturating_duration_since(tokio::time::Instant::now());
             if left.is_zero() {
@@ -180,10 +185,15 @@ impl Chrome {
     }
 
     async fn eval(&self, expression: &str) -> Result<Value, String> {
+        self.eval_wait(expression, Duration::from_secs(8)).await
+    }
+
+    async fn eval_wait(&self, expression: &str, wait: Duration) -> Result<Value, String> {
         let result = self
-            .cdp(
+            .cdp_wait(
                 "Runtime.evaluate",
                 json!({ "expression": expression, "returnByValue": true, "awaitPromise": false }),
+                wait,
             )
             .await?;
         Ok(result.pointer("/result/value").cloned().unwrap_or(Value::Null))
@@ -381,12 +391,338 @@ impl Chrome {
         self.navigate(&format!("https://www.google.com/search?q={q}"), 1500).await
     }
 
+    pub async fn collect(&self, args: &Value) -> Result<Value, String> {
+        collect_listing(self, args).await
+    }
+
     pub async fn page_info(&self) -> Result<(String, String, String), String> {
         let shot = self.screenshot_b64().await.unwrap_or_default();
         let url = self.eval("location.href").await.ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
         let title = self.eval("document.title").await.ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
         Ok((shot, url, title))
     }
+}
+
+const COLLECT_PASSES: usize = 80;
+const COLLECT_CAP: usize = 400;
+const REVIEW_BATCH: usize = 80;
+
+struct SavedCollect {
+    key: String,
+    scanned: usize,
+    unpriced: usize,
+    stopped: String,
+    matched: Vec<Value>,
+}
+
+fn collect_cache() -> &'static std::sync::Mutex<Option<SavedCollect>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<SavedCollect>>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+fn collect_part(marker: &str) -> Result<&'static str, String> {
+    let key = format!("/* {marker} */");
+    let Some(at) = COLLECT_JS.find(&key) else {
+        return Err(format!("collector script missing {marker}"));
+    };
+    let rest = &COLLECT_JS[at + key.len()..];
+    let Some(end) = rest.find("/* lumio-collect-end */") else {
+        return Err(format!("collector script missing end after {marker}"));
+    };
+    Ok(rest[..end].trim())
+}
+
+fn json_f64(value: &Value) -> Option<f64> {
+    value
+        .as_f64()
+        .or_else(|| value.as_i64().map(|n| n as f64))
+        .or_else(|| value.as_u64().map(|n| n as f64))
+        .or_else(|| value.as_str().and_then(|s| s.parse().ok()))
+}
+
+fn opt_price(args: &Value, key: &str) -> Option<f64> {
+    args.get(key).and_then(json_f64)
+}
+
+fn split_amounts(amounts: &Value) -> (Option<f64>, Option<f64>, Vec<f64>) {
+    let mut struck = Vec::new();
+    let mut plain = Vec::new();
+    for item in amounts.as_array().into_iter().flatten() {
+        let Some(value) = item.get("value").and_then(json_f64) else { continue };
+        if value <= 0.0 {
+            continue;
+        }
+        if item.get("struck").and_then(Value::as_bool).unwrap_or(false) {
+            struck.push(value);
+        } else {
+            plain.push(value);
+        }
+    }
+    let mut other = Vec::new();
+    if !plain.is_empty() {
+        let selling = plain[0];
+        other.extend(plain.iter().skip(1).copied());
+        if !struck.is_empty() {
+            let mrp = struck.iter().copied().fold(f64::MIN, f64::max);
+            other.extend(struck.iter().copied().filter(|v| (*v - mrp).abs() > 0.001));
+            return (Some(selling), Some(mrp), other);
+        }
+        return (Some(selling), None, other);
+    }
+    if !struck.is_empty() {
+        let selling = struck[0];
+        other.extend(struck.iter().skip(1).copied());
+        return (Some(selling), None, other);
+    }
+    (None, None, other)
+}
+
+fn canon_url(raw: &str) -> String {
+    let text = raw.trim();
+    if !(text.starts_with("https://") || text.starts_with("http://")) {
+        return String::new();
+    }
+    text.split('#').next().unwrap_or("").to_string()
+}
+
+fn title_ok(title: &str, words: &str) -> bool {
+    let low = title.to_lowercase();
+    words.split_whitespace().all(|word| low.contains(&word.to_lowercase()))
+}
+
+fn in_price(price: f64, low: Option<f64>, high: Option<f64>) -> bool {
+    if let Some(min) = low {
+        if price < min {
+            return false;
+        }
+    }
+    if let Some(max) = high {
+        if price > max {
+            return false;
+        }
+    }
+    true
+}
+
+enum CardFate {
+    Skip,
+    Unpriced,
+    Drop,
+    Keep(Value),
+}
+
+fn card_fate(card: &Value, low: Option<f64>, high: Option<f64>, words: &str) -> CardFate {
+    let url = canon_url(card.get("url").and_then(Value::as_str).unwrap_or(""));
+    if url.is_empty() {
+        return CardFate::Skip;
+    }
+    let title = card.get("title").and_then(Value::as_str).unwrap_or("").split_whitespace().collect::<Vec<_>>().join(" ");
+    let (selling, mrp, other) = split_amounts(card.get("amounts").unwrap_or(&Value::Null));
+    let Some(selling) = selling else { return CardFate::Unpriced };
+    if title.len() < 2 {
+        return CardFate::Unpriced;
+    }
+    if !title_ok(&title, words) || !in_price(selling, low, high) {
+        return CardFate::Drop;
+    }
+    CardFate::Keep(json!({
+        "title": title.chars().take(180).collect::<String>(),
+        "url": url,
+        "selling_price": selling,
+        "mrp": mrp,
+        "other_prices": other,
+        "rating": card.get("rating").cloned().unwrap_or(Value::Null),
+        "rating_count": card.get("rating_count").cloned().unwrap_or(Value::Null),
+        "review_count": card.get("review_count").cloned().unwrap_or(Value::Null),
+    }))
+}
+
+fn apply_review(row: &mut Value, info: &Value) {
+    let (selling, mrp, other) = split_amounts(info.get("amounts").unwrap_or(&Value::Null));
+    if let Some(selling) = selling {
+        let current = row.get("selling_price").and_then(json_f64);
+        if current != Some(selling) {
+            let mut extra = row.get("other_prices").and_then(Value::as_array).cloned().unwrap_or_default();
+            if let Some(prev) = current {
+                extra.push(json!(prev));
+            }
+            for price in other {
+                extra.push(json!(price));
+            }
+            row["other_prices"] = Value::Array(extra);
+            row["selling_price"] = json!(selling);
+        }
+    }
+    if let Some(mrp) = mrp {
+        row["mrp"] = json!(mrp);
+    }
+    if let Some(rating) = info.get("rating").and_then(json_f64) {
+        row["rating"] = json!(rating);
+    }
+    if info.get("rating_count").map(|v| !v.is_null()).unwrap_or(false) {
+        row["rating_count"] = info["rating_count"].clone();
+    }
+    if info.get("review_count").map(|v| !v.is_null()).unwrap_or(false) {
+        row["review_count"] = info["review_count"].clone();
+    }
+    let mut reviews = Vec::new();
+    for text in info.get("reviews").and_then(Value::as_array).into_iter().flatten() {
+        let snippet = text.as_str().unwrap_or("").split_whitespace().collect::<Vec<_>>().join(" ");
+        if snippet.is_empty() {
+            continue;
+        }
+        reviews.push(Value::String(snippet.chars().take(400).collect()));
+        if reviews.len() >= 8 {
+            break;
+        }
+    }
+    row["reviews"] = Value::Array(reviews.clone());
+    row["reviews_shown"] = json!(reviews.len());
+    row["reviews_complete"] = json!(false);
+}
+
+async fn read_review(chrome: &Chrome, row: &mut Value, review_js: &str, read_js: &str) {
+    let url = row.get("url").and_then(Value::as_str).unwrap_or("").to_string();
+    if chrome.cdp_wait("Page.navigate", json!({ "url": url }), Duration::from_secs(20)).await.is_err() {
+        row["reviews"] = json!([]);
+        row["reviews_shown"] = json!(0);
+        row["reviews_complete"] = json!(false);
+        row["review_error"] = json!("could not open the product page");
+        return;
+    }
+    chrome.wait_for_page(1500).await;
+    let info = chrome.eval_wait(review_js, Duration::from_secs(20)).await.unwrap_or(Value::Null);
+    let mut info = if info.is_object() { info } else { json!({}) };
+    if info.get("clicked").and_then(Value::as_bool).unwrap_or(false) {
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        if let Ok(next) = chrome.eval_wait(read_js, Duration::from_secs(20)).await {
+            if next.is_object() {
+                info = next;
+            }
+        }
+    }
+    apply_review(row, &info);
+}
+
+async fn scroll_collect(chrome: &Chrome, extract_js: &str, scroll_js: &str) -> Result<(Vec<Value>, String), String> {
+    let mut seen: Vec<String> = Vec::new();
+    let mut cards: Vec<Value> = Vec::new();
+    let mut stall = 0usize;
+    let mut stopped = "end".to_string();
+    let mut finished = false;
+    for _ in 0..COLLECT_PASSES {
+        let found = chrome.eval_wait(extract_js, Duration::from_secs(20)).await.unwrap_or(Value::Null);
+        let mut added = 0usize;
+        for card in found.as_array().into_iter().flatten() {
+            let url = canon_url(card.get("url").and_then(Value::as_str).unwrap_or(""));
+            if url.is_empty() || seen.iter().any(|have| have == &url) {
+                continue;
+            }
+            seen.push(url);
+            cards.push(card.clone());
+            added += 1;
+        }
+        if cards.len() >= COLLECT_CAP {
+            stopped = "cap".to_string();
+            finished = true;
+            break;
+        }
+        let state = chrome.eval_wait(scroll_js, Duration::from_secs(15)).await.unwrap_or(json!({}));
+        tokio::time::sleep(Duration::from_millis(450)).await;
+        let moved = state.get("moved").and_then(Value::as_bool).unwrap_or(false);
+        if added == 0 {
+            stall += 1;
+        } else {
+            stall = 0;
+        }
+        if stall >= 2 && !moved {
+            stopped = "end".to_string();
+            finished = true;
+            break;
+        }
+        if stall >= 2 && moved {
+            stopped = "stalled".to_string();
+            finished = true;
+            break;
+        }
+    }
+    if !finished {
+        stopped = if cards.len() >= COLLECT_CAP { "cap" } else { "stalled" }.to_string();
+    }
+    Ok((cards, stopped))
+}
+
+async fn collect_listing(chrome: &Chrome, args: &Value) -> Result<Value, String> {
+    let extract_js = collect_part("lumio-collect-cards")?;
+    let scroll_js = collect_part("lumio-collect-scroll")?;
+    let review_fn = collect_part("lumio-collect-review-fn")?;
+    let review_js = format!("({review_fn})(true)");
+    let read_js = format!("({review_fn})(false)");
+    let low = opt_price(args, "min_price");
+    let high = opt_price(args, "max_price");
+    let words = args.get("words").and_then(Value::as_str).unwrap_or("");
+    let with_reviews = args.get("with_reviews").and_then(Value::as_bool).unwrap_or(false);
+    let offset = args.get("offset").and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n.max(0) as u64))).unwrap_or(0) as usize;
+    let key = format!("{:?}|{:?}|{}|{}", low, high, words.to_lowercase(), with_reviews);
+    let cached = if offset > 0 {
+        collect_cache().lock().ok().and_then(|guard| {
+            guard.as_ref().filter(|saved| saved.key == key).map(|saved| {
+                (saved.matched.clone(), saved.scanned, saved.unpriced, saved.stopped.clone())
+            })
+        })
+    } else {
+        None
+    };
+    let (matched, scanned, unpriced, stopped) = if let Some(saved) = cached {
+        saved
+    } else {
+        let (cards, stopped) = scroll_collect(chrome, extract_js, scroll_js).await?;
+        let mut matched = Vec::new();
+        let mut seen_urls = Vec::new();
+        let mut unpriced = 0usize;
+        for card in &cards {
+            let url = canon_url(card.get("url").and_then(Value::as_str).unwrap_or(""));
+            if url.is_empty() || seen_urls.iter().any(|have| have == &url) {
+                continue;
+            }
+            seen_urls.push(url);
+            match card_fate(card, low, high, words) {
+                CardFate::Keep(row) => matched.push(row),
+                CardFate::Unpriced => unpriced += 1,
+                CardFate::Skip | CardFate::Drop => {}
+            }
+        }
+        let scanned = seen_urls.len();
+        if let Ok(mut guard) = collect_cache().lock() {
+            *guard = Some(SavedCollect { key, scanned, unpriced, stopped: stopped.clone(), matched: matched.clone() });
+        }
+        (matched, scanned, unpriced, stopped)
+    };
+    let mut rows = matched.clone();
+    let mut next_offset = Value::Null;
+    if with_reviews {
+        let end = (offset + REVIEW_BATCH).min(matched.len());
+        let start = offset.min(matched.len());
+        let mut batch = Vec::new();
+        for row in matched.iter().skip(start).take(end.saturating_sub(start)) {
+            let mut copy = row.clone();
+            read_review(chrome, &mut copy, &review_js, &read_js).await;
+            batch.push(copy);
+        }
+        next_offset = if end < matched.len() { json!(end) } else { Value::Null };
+        rows = batch;
+    }
+    Ok(json!({
+        "ok": true,
+        "scanned": scanned,
+        "matched": matched.len(),
+        "unpriced": unpriced,
+        "stopped": stopped,
+        "rows": rows,
+        "next_offset": next_offset,
+        "ran_on": "local_computer",
+        "note": "Selling price is the non-struck amount, or the only amount on the card. It can still vary by size. Reviews are the ones shown on the page, not a full export.",
+    }))
 }
 
 fn key_event(phase: &str, key: &str) -> Value {
