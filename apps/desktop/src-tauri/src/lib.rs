@@ -349,6 +349,20 @@ fn run_write_file(args: &Value) -> Value {
     };
     let content = args.get("content").and_then(Value::as_str).unwrap_or("");
     let overwrite = args.get("overwrite").and_then(Value::as_bool).unwrap_or(false);
+    let bytes = if let Some(encoded) = args.get("content_base64").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+        match base64::engine::general_purpose::STANDARD.decode(encoded) {
+            Ok(decoded) => decoded,
+            Err(_) => {
+                return json!({
+                    "ok": false,
+                    "error": "content_base64 is not valid base64",
+                    "ran_on": "local_computer",
+                })
+            }
+        }
+    } else {
+        content.as_bytes().to_vec()
+    };
     match grants::resolve_writable(path) {
         Ok(file) => {
             if file.exists() && !overwrite {
@@ -363,11 +377,11 @@ fn run_write_file(args: &Value) -> Value {
             if let Some(parent) = file.parent() {
                 let _ = fs::create_dir_all(parent);
             }
-            match fs::write(&file, content.as_bytes()) {
+            match fs::write(&file, &bytes) {
                 Ok(()) if file.exists() => json!({
                     "ok": true,
                     "path": file.to_string_lossy(),
-                    "bytes": content.len(),
+                    "bytes": bytes.len(),
                     "verified": true,
                     "ran_on": "local_computer"
                 }),

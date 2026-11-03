@@ -473,6 +473,19 @@ async def read_file(ctx, path: str) -> Any:
     return await run_computer(ctx, "read_file", {"path": path})
 
 
+async def write_bytes(ctx, path: str, data: bytes) -> Any:
+    """Write file bytes. Used when mail attachments must land in a folder, not a chat link."""
+    import base64
+
+    if not (path or "").strip():
+        return {"error": "path is required"}
+    return await run_computer(
+        ctx,
+        "write_file",
+        {"path": path, "content_base64": base64.b64encode(data or b"").decode("ascii"), "overwrite": False},
+    )
+
+
 async def write_file(ctx, path: str, content: str) -> Any:
     if not (path or "").strip():
         return {"error": "path is required"}

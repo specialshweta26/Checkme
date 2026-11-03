@@ -262,7 +262,7 @@ MAIL_CALENDAR_TOOLS: list[ToolSpec] = [
     ),
     ToolSpec(
         "download_attachment",
-        "Download an attachment. The user receives a secure download link; file bytes never go to the model.",
+        "Download one attachment into the chat. To save mail attachments into a folder on the computer, use save_mail_attachments. Gmail and Outlook both download the file bytes.",
         _obj({"message_id": _STR, "attachment_id": _STR}, ["message_id", "attachment_id"]),
         group="attachments",
         requires=("message_id", "attachment_id"),
