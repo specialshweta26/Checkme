@@ -27,5 +27,19 @@
     return { ref, role, name, tag: el.tagName.toLowerCase(), href: el.href || '', in_view: inView(el), x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
   });
     const tree = elements.map((n) => ('- ' + n.ref + ' ' + n.role + ' ' + (n.name || '') + (n.href ? ' ' + n.href : '')).trim()).join('\n');
-  return { url: location.href, title: document.title || '', text: (document.body && document.body.innerText || '').slice(0, 12000), tree, elements };
+  const full = (document.body && document.body.innerText || '').replace(/\n{3,}/g, '\n\n');
+  const head = full.slice(0, 5000);
+  const tail = full.length > 5000 ? full.slice(-5000) : '';
+  const active = document.activeElement;
+  let composer = '';
+  if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) composer = String(active.value || '');
+  else if (active && active.isContentEditable) composer = String(active.innerText || '').replace(/\s+/g, ' ').trim();
+  return {
+    url: location.href,
+    title: document.title || '',
+    text: tail ? head + '\n…\n' + tail : head,
+    composer: composer.slice(0, 500),
+    tree,
+    elements
+  };
 })()

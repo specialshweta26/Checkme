@@ -12,6 +12,22 @@ const SNAPSHOT_JS: &str = include_str!("snapshot.js");
 const ACT_JS: &str = include_str!("act.js");
 const TEACH_JS: &str = include_str!("teach.js");
 const DRAIN_TEACH_JS: &str = r#"(() => { const b = window.__lumioTeachBuf || []; window.__lumioTeachBuf = []; return b.slice(0, 200); })()"#;
+const SUBMIT_IF_DRAFT_JS: &str = r#"(() => {
+  const el = document.activeElement;
+  const draft = !el ? '' : (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') ? String(el.value || '') : (el.isContentEditable ? String(el.innerText || '').trim() : '');
+  if (!draft) return { draft_cleared: true };
+  const hit = Array.from(document.querySelectorAll('button, [role="button"]')).find((node) => {
+    const r = node.getBoundingClientRect();
+    if (r.width < 2 || r.height < 2) return false;
+    const st = getComputedStyle(node);
+    if (st.visibility === 'hidden' || st.display === 'none') return false;
+    const name = (node.getAttribute('aria-label') || node.getAttribute('title') || node.innerText || '').replace(/\s+/g, ' ').trim();
+    return /^(send|submit)\b/i.test(name);
+  });
+  if (!hit) return { draft_cleared: false };
+  hit.click();
+  return { clicked_send: true };
+})()"#;
 
 pub struct Chrome {
     _child: Option<Child>,
@@ -287,12 +303,24 @@ impl Chrome {
             }
             let ref_id = step.get("ref").and_then(Value::as_str).unwrap_or("");
             let text = step.get("text").and_then(Value::as_str).unwrap_or("");
-            let js = format!(
-                "({ACT_JS})({ref_id:?}, {kind:?}, {text:?})"
-            );
-            self.eval(&js).await?;
+            let js = format!("({ACT_JS})({ref_id:?}, {kind:?}, {text:?})");
+            let result = self.eval(&js).await?;
+            if result.get("ok").and_then(Value::as_bool) == Some(false) {
+                return Err(result.get("error").and_then(Value::as_str).unwrap_or("browser action failed").to_string());
+            }
+            if result.get("insert").and_then(Value::as_bool) == Some(true) && !text.is_empty() {
+                self.type_text(text).await?;
+            }
+            if result.get("submit").and_then(Value::as_bool) == Some(true) {
+                let key = result.get("key").and_then(Value::as_str).unwrap_or("Enter");
+                self.key(key).await?;
+                tokio::time::sleep(Duration::from_millis(450)).await;
+                if key.eq_ignore_ascii_case("enter") || key.eq_ignore_ascii_case("return") {
+                    self.eval(SUBMIT_IF_DRAFT_JS).await.ok();
+                }
+            }
         }
-        tokio::time::sleep(Duration::from_millis(400)).await;
+        tokio::time::sleep(Duration::from_millis(700)).await;
         self.snapshot().await
     }
 
@@ -302,8 +330,8 @@ impl Chrome {
     }
 
     pub async fn key(&self, key: &str) -> Result<(), String> {
-        self.cdp("Input.dispatchKeyEvent", json!({ "type": "keyDown", "key": key })).await?;
-        self.cdp("Input.dispatchKeyEvent", json!({ "type": "keyUp", "key": key })).await?;
+        self.cdp("Input.dispatchKeyEvent", key_event("keyDown", key)).await?;
+        self.cdp("Input.dispatchKeyEvent", key_event("keyUp", key)).await?;
         Ok(())
     }
 
@@ -359,6 +387,33 @@ impl Chrome {
         let title = self.eval("document.title").await.ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
         Ok((shot, url, title))
     }
+}
+
+fn key_event(phase: &str, key: &str) -> Value {
+    let name = if key.eq_ignore_ascii_case("return") { "Enter" } else { key };
+    let (code, vk) = match name {
+        "Enter" => ("Enter", 13),
+        "Backspace" => ("Backspace", 8),
+        "Tab" => ("Tab", 9),
+        "Escape" => ("Escape", 27),
+        "ArrowDown" => ("ArrowDown", 40),
+        "ArrowUp" => ("ArrowUp", 38),
+        "ArrowLeft" => ("ArrowLeft", 37),
+        "ArrowRight" => ("ArrowRight", 39),
+        "Delete" => ("Delete", 46),
+        " " | "Space" => ("Space", 32),
+        _ => ("", 0),
+    };
+    let mut event = json!({
+        "type": phase,
+        "key": name,
+        "windowsVirtualKeyCode": vk,
+        "nativeVirtualKeyCode": vk,
+    });
+    if !code.is_empty() {
+        event["code"] = json!(code);
+    }
+    event
 }
 
 fn urlencoding_lite(raw: &str) -> String {
