@@ -47,6 +47,22 @@ def test_classify_turn(text, kind):
     assert classify_turn(text).kind == kind
 
 
+def test_file_and_folder_requests_are_computer_work():
+    from app.agent.fast_path import is_computer_file_query
+
+    for text in (
+        "where is the OMS report on my desktop",
+        "list the files in Downloads",
+        "find the folder I saved yesterday",
+        "open Documents",
+    ):
+        assert is_computer_file_query(text)
+        assert classify_turn(text).kind == COMPUTER
+    assert not is_computer_file_query("where is Paris")
+    assert not is_computer_file_query("check my gmail")
+    assert classify_turn("latest news on the national cricket team captain").kind == QUICK_WEB
+
+
 def test_classify_overrides():
     assert classify_turn("latest news", confirmations=True).kind == COMPUTER
     assert classify_turn("latest news", coding_agent=True).kind == DEEP

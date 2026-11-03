@@ -74,7 +74,8 @@ def test_stale_daytona_wording_is_gone_from_shell_docs():
     ctx = _ctx([_computer()], _agent("coding"))
     docs = {t.name: t.description for t in harness_tools(ctx)}
     assert "Daytona sandbox)" not in docs["sandbox_shell"]
-    assert "E2B" in docs["sandbox_shell"] and "E2B" in docs["shell"]
+    assert "E2B" in docs["sandbox_shell"]
+    assert "desktop app" in docs["shell"] and "cloud computer" in docs["shell"]
 
 
 # --- not-connected fallback ----------------------------------------------------------------------------------

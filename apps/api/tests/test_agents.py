@@ -132,6 +132,10 @@ def test_connector_assignments_restrict_specific_agents():
     mapping["c-comp"] = ["jj"]
     kept_market = filter_connectors([gmail, computer, market], agent_id="cc", assignments=mapping)
     assert {c.slug for c in kept_market} == {"computer", "composio"}
+    laptop = SimpleNamespace(id="c-mac", slug="laptop", provider="trusted_local")
+    mapping["c-mac"] = ["jj"]
+    kept_laptop = filter_connectors([gmail, computer, laptop], agent_id="cc", assignments=mapping)
+    assert {c.slug for c in kept_laptop} == {"computer", "laptop"}
     assert agent_may_use_toolkit("cc", "figma", {})
     assert agent_may_use_toolkit("cc", "figma", {"figma": ["cc", "jj"]})
     assert not agent_may_use_toolkit("cc", "figma", {"figma": ["jj"]})
