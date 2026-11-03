@@ -2575,6 +2575,9 @@ def shell_routing_hint(connectors: list | None, agent=None) -> str:
             "If the desktop agent is offline, say the desktop app needs to be open. Browser, files, boot, and teaching never move to the cloud computer. "
             "Toolchain installs (ensure_toolchain) stay on the cloud computer. "
             "Never tell the user to install something unless they asked. "
+            "A file or folder request uses search_files, list_files, list_dir, read_file, or write_file. "
+            "Every agent has those. Do not list_connectors, search_tools, list_my_skills, or get_skill for it, "
+            "and do not follow a saved skill unless the user named that skill. "
         )
     else:
         text = (
@@ -2594,6 +2597,13 @@ def shell_routing_hint(connectors: list | None, agent=None) -> str:
                 "No local computer is connected, so everything runs on the cloud computer; if the user explicitly wants "
                 "their own laptop, say they can use the Lumio desktop app (Mac/Windows) and offer to do it in the cloud now. "
             )
+        text += (
+            "A file or folder request uses search_files, list_files, list_dir, read_file, or write_file on the computer. "
+            "Every agent has those, on the website and in the desktop app. "
+            "Do not list_connectors, search_tools, list_my_skills, or get_skill for it, "
+            "and do not follow a saved skill unless the user named that skill. "
+            "Use a connector only when the user is asking for a connected app, such as mail, calendar, or a marketplace app. "
+        )
     if not is_coding_agent(agent):
         text += (
             "Repo changes, pull requests, merges and deploys belong to a coding agent: hand them over (ask_teammate a "
@@ -2681,7 +2691,8 @@ def system_prompt(
         + workspace_bit
         + f"Current date and time: {now.strftime('%Y-%m-%d %H:%M')} ({tz}). Interpret and display times in that timezone.\n"
         "Only use connectors listed below. Other users have different connectors.\n"
-        "Discover first: list_connectors, then search_tools with a short capability phrase (what the tool must return), not the full user sentence. "
+        "Discover first when the user wants a connected app (mail, calendar, a marketplace app): list_connectors, then search_tools with a short capability phrase (what the tool must return), not the full user sentence. "
+        "A file, folder, or this-computer request is not a connector or skill lookup. Use search_files, list_files, list_dir, read_file, or write_file. Every agent has them. "
         "Omit brand names, people, and dates from the search query; pass those as tool arguments after get_tool_schema. "
         "First search_tools without connector_slug so mail, MCP, and marketplace catalogs all expand. "
         "Only pass connector_slug after a data tool from that connector already appeared. "
@@ -3308,8 +3319,10 @@ async def _run_deep_agent(
         callbacks.append(run_cancel.callback())
     all_skills: list = []
     skills_task = None
+    file_turn = fast_path.is_computer_file_query(query)
     if db is not None:
         # Skill routing (embeddings + a confirm call) needs no DB once the index is loaded: run it while memory loads.
+        # File and folder requests stay on the computer: keep the skill index for "what can you do", but do not match or run a skill.
         from app.skills.service import list_skills
 
         _t = _time.monotonic()
@@ -3318,7 +3331,8 @@ async def _run_deep_agent(
         except Exception:  # noqa: BLE001
             log.info("skills: loading the skill index failed", exc_info=True)
             await db.rollback()
-        skills_task = asyncio.create_task(_route_and_confirm(all_skills, query))
+        if not file_turn:
+            skills_task = asyncio.create_task(_route_and_confirm(all_skills, query))
         timer.mark("skills_index", _t)
     if progress is not None and plan.kind != fast_path.QUICK_WEB:
         await progress.emit("Recalling what I know about this" if not teammate_depth else "Picking up the task", kind="memory")

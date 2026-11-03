@@ -716,10 +716,14 @@ async def grant_toolkit_agent(db: AsyncSession, user: User, toolkit: str, agent_
 
 
 def is_shared_computer(conn) -> bool:
-    """The built-in computer (E2B Desktop or Daytona): slug ``computer``, provider ``daytona``."""
-    return getattr(conn, "kind", "builtin") == "builtin" and (
-        getattr(conn, "slug", "") == "computer" or getattr(conn, "provider", "") == "daytona"
-    )
+    """The user's computer, on the website and in the desktop app. Every agent can use it.
+
+    Cloud computer: slug ``computer`` / provider ``daytona``. This Mac or PC: slug ``laptop`` /
+    provider ``trusted_local``. Assigning either to one agent must not hide it from the others.
+    """
+    slug = getattr(conn, "slug", "") or ""
+    provider = getattr(conn, "provider", "") or ""
+    return slug in {"computer", "laptop"} or provider in {"daytona", "trusted_local"}
 
 
 def filter_connectors(connectors: list, agent_id=None, teammate_ids: list | None = None, assignments: dict | None = None):

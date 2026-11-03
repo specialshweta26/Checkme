@@ -34,6 +34,157 @@ fn push_event(row: Value) {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn install_input_tap() -> Result<(), String> {
+    use std::ffi::c_void;
+    use std::sync::atomic::AtomicPtr;
+
+    #[repr(C)]
+    struct CgPoint {
+        x: f64,
+        y: f64,
+    }
+
+    static TAP: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGEventTapCreate(
+            tap: u32,
+            place: u32,
+            options: u32,
+            events: u64,
+            callback: unsafe extern "C" fn(*mut c_void, u32, *mut c_void, *mut c_void) -> *mut c_void,
+            user_info: *mut c_void,
+        ) -> *mut c_void;
+        fn CGEventGetLocation(event: *mut c_void) -> CgPoint;
+        fn CGEventGetIntegerValueField(event: *mut c_void, field: u32) -> i64;
+        fn CGEventTapEnable(tap: *mut c_void, enable: bool);
+    }
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        static kCFRunLoopCommonModes: *const c_void;
+        fn CFMachPortCreateRunLoopSource(allocator: *mut c_void, port: *mut c_void, order: i64) -> *mut c_void;
+        fn CFRunLoopAddSource(rl: *mut c_void, source: *mut c_void, mode: *const c_void);
+        fn CFRunLoopGetMain() -> *mut c_void;
+    }
+
+    fn note_key(code: i64) {
+        let window = cached_title();
+        let row = match code {
+            36 => json!({ "kind": "key", "key": "Enter", "window": window }),
+            48 => json!({ "kind": "key", "key": "Tab", "window": window }),
+            53 => json!({ "kind": "key", "key": "Escape", "window": window }),
+            51 => json!({ "kind": "key", "key": "Backspace", "window": window }),
+            49 => json!({ "kind": "char", "char": " ", "window": window }),
+            12 => json!({ "kind": "char", "char": "q", "window": window }),
+            13 => json!({ "kind": "char", "char": "w", "window": window }),
+            14 => json!({ "kind": "char", "char": "e", "window": window }),
+            15 => json!({ "kind": "char", "char": "r", "window": window }),
+            17 => json!({ "kind": "char", "char": "t", "window": window }),
+            16 => json!({ "kind": "char", "char": "y", "window": window }),
+            32 => json!({ "kind": "char", "char": "u", "window": window }),
+            34 => json!({ "kind": "char", "char": "i", "window": window }),
+            31 => json!({ "kind": "char", "char": "o", "window": window }),
+            35 => json!({ "kind": "char", "char": "p", "window": window }),
+            0 => json!({ "kind": "char", "char": "a", "window": window }),
+            1 => json!({ "kind": "char", "char": "s", "window": window }),
+            2 => json!({ "kind": "char", "char": "d", "window": window }),
+            3 => json!({ "kind": "char", "char": "f", "window": window }),
+            5 => json!({ "kind": "char", "char": "g", "window": window }),
+            4 => json!({ "kind": "char", "char": "h", "window": window }),
+            38 => json!({ "kind": "char", "char": "j", "window": window }),
+            40 => json!({ "kind": "char", "char": "k", "window": window }),
+            37 => json!({ "kind": "char", "char": "l", "window": window }),
+            6 => json!({ "kind": "char", "char": "z", "window": window }),
+            7 => json!({ "kind": "char", "char": "x", "window": window }),
+            8 => json!({ "kind": "char", "char": "c", "window": window }),
+            9 => json!({ "kind": "char", "char": "v", "window": window }),
+            11 => json!({ "kind": "char", "char": "b", "window": window }),
+            45 => json!({ "kind": "char", "char": "n", "window": window }),
+            46 => json!({ "kind": "char", "char": "m", "window": window }),
+            18 => json!({ "kind": "char", "char": "1", "window": window }),
+            19 => json!({ "kind": "char", "char": "2", "window": window }),
+            20 => json!({ "kind": "char", "char": "3", "window": window }),
+            21 => json!({ "kind": "char", "char": "4", "window": window }),
+            23 => json!({ "kind": "char", "char": "5", "window": window }),
+            22 => json!({ "kind": "char", "char": "6", "window": window }),
+            26 => json!({ "kind": "char", "char": "7", "window": window }),
+            28 => json!({ "kind": "char", "char": "8", "window": window }),
+            25 => json!({ "kind": "char", "char": "9", "window": window }),
+            29 => json!({ "kind": "char", "char": "0", "window": window }),
+            _ => return,
+        };
+        push_event(row);
+    }
+
+    unsafe extern "C" fn on_event(
+        _proxy: *mut c_void,
+        kind: u32,
+        event: *mut c_void,
+        _user: *mut c_void,
+    ) -> *mut c_void {
+        if event.is_null() {
+            return event;
+        }
+        if kind == 0xFFFF_FFFE || kind == 0xFFFF_FFFF {
+            let tap = TAP.load(Ordering::SeqCst);
+            if !tap.is_null() {
+                CGEventTapEnable(tap, true);
+            }
+            return event;
+        }
+        match kind {
+            5 | 6 | 7 | 27 => {
+                let point = CGEventGetLocation(event);
+                if let Ok(mut pos) = mouse_pos().lock() {
+                    *pos = (point.x as i32, point.y as i32);
+                }
+            }
+            1 | 3 | 25 => {
+                let point = CGEventGetLocation(event);
+                let (x, y) = (point.x as i32, point.y as i32);
+                if let Ok(mut pos) = mouse_pos().lock() {
+                    *pos = (x, y);
+                }
+                let button = if kind == 1 { 1 } else if kind == 3 { 3 } else { 2 };
+                push_event(json!({
+                    "kind": "click",
+                    "x": x,
+                    "y": y,
+                    "button": button,
+                    "window": cached_title(),
+                }));
+            }
+            22 => {
+                let delta = CGEventGetIntegerValueField(event, 11);
+                let direction = if delta < 0 { "down" } else { "up" };
+                push_event(json!({ "kind": "scroll", "direction": direction, "window": cached_title() }));
+            }
+            10 => note_key(CGEventGetIntegerValueField(event, 9)),
+            _ => {}
+        }
+        event
+    }
+
+    // Left/right/other mouse down, move, drag, key down, scroll.
+    let mask = (1u64 << 1) | (1u64 << 3) | (1u64 << 5) | (1u64 << 6) | (1u64 << 7) | (1u64 << 10) | (1u64 << 22) | (1u64 << 25) | (1u64 << 27);
+    let tap = unsafe { CGEventTapCreate(0, 0, 1, mask, on_event, std::ptr::null_mut()) };
+    if tap.is_null() {
+        return Err("event tap was not created".into());
+    }
+    TAP.store(tap, Ordering::SeqCst);
+    let source = unsafe { CFMachPortCreateRunLoopSource(std::ptr::null_mut(), tap, 0) };
+    if source.is_null() {
+        return Err("run loop source was not created".into());
+    }
+    unsafe {
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, kCFRunLoopCommonModes);
+        CGEventTapEnable(tap, true);
+    }
+    Ok(())
+}
+
 pub fn start_input_listen() {
     if LISTENING.swap(true, Ordering::SeqCst) {
         return;
@@ -48,6 +199,19 @@ pub fn start_input_listen() {
             std::thread::sleep(Duration::from_millis(pause));
         }
     });
+    #[cfg(target_os = "macos")]
+    {
+        // rdev's listener asks macOS for the keyboard layout off the main thread and the
+        // process is killed (SIGTRAP in TSMGetInputSourceProperty). This tap only reads
+        // positions and key codes, which is safe on a background run loop.
+        if let Err(err) = install_input_tap() {
+            push_event(json!({
+                "kind": "capture_unavailable",
+                "reason": format!("input capture needs Accessibility for Lumio ({err})"),
+            }));
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
     std::thread::spawn(|| {
         if let Err(err) = rdev::listen(move |event| {
             match event.event_type {
@@ -111,6 +275,7 @@ pub fn cached_title() -> String {
         .unwrap_or_default()
 }
 
+#[cfg(not(target_os = "macos"))]
 fn map_key(key: rdev::Key) -> Option<Value> {
     let window = cached_title();
     match key {

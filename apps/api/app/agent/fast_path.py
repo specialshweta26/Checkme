@@ -41,6 +41,19 @@ _COMPUTER = re.compile(
     r"compare (?:quotes|plans|policies)|get (?:a )?quote)\b",
     re.I,
 )
+# Files and folders live on the computer (this Mac in the desktop app, the cloud computer on the website).
+# Not a connector catalog search and not a saved skill.
+_FILES = re.compile(
+    r"\b("
+    r"(?:my |the |a |this )?(?:files?|folders?|director(?:y|ies))|"
+    r"(?:on |in |from )?(?:my |the )?(?:desktop|documents|downloads)|"
+    r"finder|file explorer|"
+    r"search (?:my |the )?(?:computer|mac|pc|laptop|files|folders)|"
+    r"(?:find|locate|list|open|read|show|save|move|rename) (?:me )?(?:the |my |a )?(?:file|folder|desktop|documents|downloads)|"
+    r"where (?:is|are) (?:the |my )?(?:file|folder|desktop|documents|downloads)"
+    r")\b",
+    re.I,
+)
 # Commands and installs run on the cloud computer's shell (never a quick text answer telling the user to do it).
 _SHELL = re.compile(
     r"\b(install(?:ing|ed)?|uninstall|npm|npx|pnpm|yarn|pip3?|brew|apt(?:-get)?|terminal|command line|bash|"
@@ -92,6 +105,11 @@ class TurnPlan:
         return self.kind in {DIRECT, QUICK_WEB}
 
 
+def is_computer_file_query(query: str) -> bool:
+    """True when the user is asking about files or folders, not a connector or a skill."""
+    return bool(_FILES.search(query or ""))
+
+
 def recency_for(query: str) -> tuple[str, bool]:
     """(Tavily time_range or "", news topic?) from generic recency words in the query."""
     q = query or ""
@@ -119,6 +137,8 @@ def classify_turn(query: str, *, has_uploads: bool = False, confirmations: bool 
     if not q:
         return TurnPlan(DIRECT, "empty")
     first = q.split("\n\n", 1)[0]
+    if is_computer_file_query(first):
+        return TurnPlan(COMPUTER, "files or folders on the computer")
     if _COMPUTER.search(first):
         return TurnPlan(COMPUTER, "needs a real browser session")
     if _SHELL.search(first):
