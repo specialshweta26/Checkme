@@ -1698,15 +1698,28 @@ async def _invoke_daytona(row, name: str, args: dict[str, Any]) -> Any:
             response = await proc.exec(f"cat {path!s}", timeout=30)
             return {"path": path, "content": _clip(getattr(response, "result", "") or "")}
         if name == "write_file":
-            content = args.get("content") or ""
+            import base64 as _b64
+            from pathlib import Path as FilePath
+
+            encoded = args.get("content_base64")
+            if encoded:
+                raw = _b64.b64decode(str(encoded))
+            else:
+                raw = (args.get("content") or "").encode("utf-8")
+            parent = str(FilePath(path).parent)
+            if parent not in {"", ".", "/"}:
+                await proc.exec(f"mkdir -p {shlex.quote(parent)}", timeout=15)
             if fs is not None and hasattr(fs, "upload_file"):
-                await fs.upload_file(content.encode("utf-8"), path)
-                return {"ok": True, "path": path, "bytes": len(content.encode("utf-8"))}
-            response = await proc.exec(
-                f"mkdir -p \"$(dirname {path})\" && cat > {path} <<'CHECKME_EOF'\n{content}\nCHECKME_EOF",
-                timeout=30,
+                await fs.upload_file(raw, path)
+                return {"ok": True, "path": path, "bytes": len(raw)}
+            script = (
+                "import base64, pathlib\n"
+                f"p = pathlib.Path({path!r})\n"
+                "p.parent.mkdir(parents=True, exist_ok=True)\n"
+                f"p.write_bytes(base64.b64decode({_b64.b64encode(raw).decode()!r}))\n"
             )
-            return {"ok": getattr(response, "exit_code", 1) == 0, "path": path}
+            response = await proc.exec(f"python3 - <<'PY'\n{script}\nPY", timeout=60)
+            return {"ok": getattr(response, "exit_code", 1) == 0, "path": path, "bytes": len(raw)}
         if name == "list_dir":
             if fs is not None and hasattr(fs, "list_files"):
                 entries = await fs.list_files(path)

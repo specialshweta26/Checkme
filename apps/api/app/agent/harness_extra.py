@@ -106,6 +106,13 @@ class WriteFileInput(BaseModel):
     content: str
 
 
+class SaveMailInput(BaseModel):
+    query: str = Field(description="The user's search words for the mail, such as sender and subject. Do not add a provider name unless they named one.")
+    path: str = Field(description="Folder to write the files into, such as ~/Desktop/the folder they named.")
+    account: str = Field(default="", description="gmail or outlook only when the user named that account. Empty searches every connected mailbox.")
+    page_token: str = Field(default="", description="From a previous save's more map, with account set to that mailbox.")
+
+
 class AttachFileInput(BaseModel):
     path: str = Field(description="Sandbox path to attach.")
     filename: str = Field(default="", description="Download name shown to the user.")
@@ -377,6 +384,13 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         """Write a UTF-8 file on the computer, creating parent directories."""
         ctx.used_tools.append("write_file")
         return _dumps(await computer.write_file(ctx, path, content))
+
+    async def save_mail_attachments(query: str, path: str, account: str = "", page_token: str = "") -> str:
+        """Save attachments from the user's mail into a folder on this computer. Searches every connected Gmail and Outlook account unless account is set. Pages past the first 50 messages, downloads the files, and writes them into path. Do not stop at a chat download link."""
+        from app.agent.mail_files import save_mail_attachments as _save
+
+        ctx.used_tools.append("save_mail_attachments")
+        return _dumps(await _save(ctx, query, path, account, page_token))
 
     async def attach_file(path: str, filename: str = "") -> str:
         """Copy a computer file into a download link in this chat. Use after write_file or run_code. Cite download_url, never a sandbox path."""
@@ -659,6 +673,12 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         StructuredTool.from_function(coroutine=list_files, name="list_files", description=list_files.__doc__, args_schema=PathInput),
         StructuredTool.from_function(coroutine=read_file, name="read_file", description=read_file.__doc__, args_schema=PathInput),
         StructuredTool.from_function(coroutine=write_file, name="write_file", description=write_file.__doc__, args_schema=WriteFileInput),
+        StructuredTool.from_function(
+            coroutine=save_mail_attachments,
+            name="save_mail_attachments",
+            description=save_mail_attachments.__doc__,
+            args_schema=SaveMailInput,
+        ),
         StructuredTool.from_function(coroutine=attach_file, name="attach_file", description=attach_file.__doc__, args_schema=AttachFileInput),
         StructuredTool.from_function(coroutine=open_path, name="open_path", description=open_path.__doc__, args_schema=PathInput),
         StructuredTool.from_function(coroutine=launch_app, name="launch_app", description=launch_app.__doc__, args_schema=LaunchAppInput),
