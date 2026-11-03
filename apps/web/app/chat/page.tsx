@@ -11,7 +11,7 @@ import { dismissFocusCard, focusCardDismissed, FocusOnboarding } from "../compon
 import { AgentAvatar } from "../components/AgentAvatar";
 import { JobTimeline } from "../components/JobTimeline";
 import { Thinking } from "../components/Thinking";
-import { announceWorkspaceChanged, chatHref, deleteSession, getMe, isLumioDesktop, listSessions, loadSession, rememberScope, uploadFiles, startTeaching, stopTeaching, type ChatSessionRow, type Me, type UploadedFile, type WorkspaceRoster } from "../lib";
+import { announceWorkspaceChanged, chatHref, deleteSession, getMe, isLumioDesktop, listSessions, loadSession, rememberScope, saveDownload, uploadFiles, startTeaching, stopTeaching, type ChatSessionRow, type Me, type UploadedFile, type WorkspaceRoster } from "../lib";
 
 const STORE = "assistant.session";
 
@@ -912,8 +912,22 @@ export default function ChatPage() {
             {messages.map((m, i) =>
               m.role === "user" ? (
                 <div key={i} className="turn user">
-                  <div className="bubble">{m.content}</div>
-                  {m.meta?.uploads?.length ? <AttachmentWidget items={m.meta.uploads} /> : null}
+                  {m.meta?.uploads?.length ? (
+                    <div className="user-files">
+                      {m.meta.uploads.map((file: UploadedFile) => (
+                        <button
+                          key={file.key || file.filename}
+                          type="button"
+                          className="user-file"
+                          onClick={() => file.download_url && void saveDownload(file.download_url, file.filename)}
+                        >
+                          <span className="user-file-mark" aria-hidden />
+                          <span className="user-file-name">{file.filename}</span>
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                  {m.content && m.content !== "Attached files" ? <div className="bubble">{m.content}</div> : null}
                 </div>
               ) : (
                 <div key={i} className={`turn assistant${m.meta?.agent_name ? " speaker" : ""}`}>
@@ -992,7 +1006,6 @@ export default function ChatPage() {
                 steps={progress[currentKey]?.steps}
                 hint={progress[currentKey]?.hint}
                 draft={progress[currentKey]?.draft}
-                onStop={() => void stopTurn(currentKey)}
                 stopping={stopping.includes(currentKey)}
                 stalled={Boolean(stalled[currentKey])}
               /> : null}
@@ -1022,19 +1035,21 @@ export default function ChatPage() {
               ))}
             </div>
           ) : null}
-          {uploads.length ? (
-            <div className="attach-chips composer-chips">
-              {uploads.map((file) => (
-                <span key={file.key} className="attach-chip">
-                  {file.filename}
-                  <button type="button" aria-label="Remove file" onClick={() => setUploads((rows) => rows.filter((f) => f.key !== file.key))}>
-                    ×
-                  </button>
-                </span>
-              ))}
-            </div>
-          ) : null}
           <form className="composer" onSubmit={onSubmit}>
+            {uploads.length ? (
+              <div className="attach-chips">
+                {uploads.map((file) => (
+                  <span key={file.key} className="attach-chip">
+                    <span className="user-file-mark" aria-hidden />
+                    <span className="attach-chip-name">{file.filename}</span>
+                    <button type="button" aria-label={`Remove ${file.filename}`} onClick={() => setUploads((rows) => rows.filter((f) => f.key !== file.key))}>
+                      ×
+                    </button>
+                  </span>
+                ))}
+              </div>
+            ) : null}
+            <div className="composer-row">
             <input
               ref={fileRef}
               type="file"
@@ -1048,6 +1063,7 @@ export default function ChatPage() {
                   setUploadError("");
                   const uploaded = await uploadFiles(picked);
                   setUploads((rows) => [...rows, ...uploaded]);
+                  box.current?.focus();
                 } catch (err: any) {
                   setUploadError(err.message || "Upload failed");
                 }
@@ -1066,9 +1082,11 @@ export default function ChatPage() {
                 activeGroup
                   ? "Write normally, @ a bot, or @everyone…"
                   : busyHere
-                    ? "Send a message to redirect, or tap Stop…"
+                    ? "Type to redirect…"
                     : pending.length
                     ? "Reply to your agent…"
+                    : uploads.length
+                    ? "Ask about this file…"
                     : "Ask about sales, mail, or schedule work…"
               }
               rows={1}
@@ -1079,7 +1097,7 @@ export default function ChatPage() {
                 }
               }}
             />
-            {busyHere && !text.trim() && !uploads.length ? (
+            {busyHere && !text.trim() ? (
               <button
                 className="send stop"
                 type="button"
@@ -1104,6 +1122,7 @@ export default function ChatPage() {
                 </svg>
               </button>
             )}
+            </div>
           </form>
         </div>
         </div>
