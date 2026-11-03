@@ -35,6 +35,15 @@ class BrowserActInput(BaseModel):
     tab: str = Field(default="", description="Optional tab id (t1, t2 from browser_tabs); works on that tab without switching the screen. Default: active tab.")
 
 
+class BrowserCollectInput(BaseModel):
+    min_price: float | None = Field(default=None, description="Lowest selling price to keep, inclusive. Omit if the user set no minimum.")
+    max_price: float | None = Field(default=None, description="Highest selling price to keep, inclusive. Omit if the user set no maximum.")
+    words: str = Field(default="", description="Words from the user that must appear in the product title. Empty keeps every title.")
+    with_reviews: bool = Field(default=False, description="Open each matching product and read the rating and the reviews shown on the page.")
+    offset: int = Field(default=0, description="Review batch to continue. 0 starts a new collect. Pass next_offset from the previous result.")
+    tab: str = Field(default="", description="Optional tab id (t1, t2 from browser_tabs). Default: active tab.")
+
+
 class BrowserTaskInput(BaseModel):
     goal: str = Field(description="What to get done on the site, e.g. 'log in and open the latest statement'. Mention the final action only if the user asked to finish it.")
     url: str = Field(default="", description="Start page (http/https). Empty = continue on the current page.")
@@ -309,6 +318,28 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         if tab:
             args["tab"] = tab
         return _dumps(fast.for_model(await computer.run_computer(ctx, "browser_act", args)))
+
+    async def browser_collect(
+        min_price: float | None = None,
+        max_price: float | None = None,
+        words: str = "",
+        with_reviews: bool = False,
+        offset: int = 0,
+        tab: str = "",
+    ) -> str:
+        """Read a long listing on the current page. Scrolls until the cards stop and returns title, url, selling price, MRP, and rating for each card in range. words must appear in the title. with_reviews opens each match and reads the reviews shown on that page. If next_offset is set, call again with that offset until every match is in hand. Do not answer a multi-product listing from a clipped snapshot."""
+        ctx.used_tools.append("browser_collect")
+        args: dict[str, Any] = {
+            "min_price": min_price,
+            "max_price": max_price,
+            "words": words or "",
+            "with_reviews": bool(with_reviews),
+            "offset": int(offset or 0),
+            "timeout": 300,
+        }
+        if tab:
+            args["tab"] = tab
+        return _dumps(await computer.run_computer(ctx, "browser_collect", args))
 
     async def browser_task(goal: str, url: str = "", values: dict[str, str] | None = None, max_steps: int = 0, allow_final_action: bool = False) -> str:
         """Fast path for routine multi-step browser work (log in, fill a form, search a site, open a statement, download a file). A small fast model reads the page's numbered elements and runs several actions per call (stops at the first failure), escalates to the main model on repeated failures, and replays a saved run of the same task with no model calls. Pass the values the steps need in values ({email: ..., password: ...}); they are typed as {{name}} and never shown to the planning model or logged. Returns done + result, need_user (CAPTCHA, missing code), stopped_before (a Pay/Book/Send/Delete control it will not click unless allow_final_action), or fallback: then continue yourself with browser_act from the returned page."""
@@ -647,6 +678,7 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         StructuredTool.from_function(coroutine=browser_navigate, name="browser_navigate", description=browser_navigate.__doc__, args_schema=UrlInput),
         StructuredTool.from_function(coroutine=browser_snapshot, name="browser_snapshot", description=browser_snapshot.__doc__, args_schema=TabInput),
         StructuredTool.from_function(coroutine=browser_act, name="browser_act", description=browser_act.__doc__, args_schema=BrowserActInput),
+        StructuredTool.from_function(coroutine=browser_collect, name="browser_collect", description=browser_collect.__doc__, args_schema=BrowserCollectInput),
         StructuredTool.from_function(coroutine=browser_tabs, name="browser_tabs", description=browser_tabs.__doc__),
         *(
             [StructuredTool.from_function(coroutine=browser_task, name="browser_task", description=browser_task.__doc__, args_schema=BrowserTaskInput)]

@@ -33,6 +33,7 @@ _COMPUTER_USE = {
     "browser_search",
     "browser_snapshot",
     "browser_act",
+    "browser_collect",
     "browser_tabs",
     "browser_new_tab",
     "browser_switch_tab",
@@ -231,6 +232,30 @@ DAYTONA_TOOLS = [
                 "tab": {"type": "string", "description": "Optional tab id (t1, t2 from browser_tabs). Works on that tab without switching the screen; default is the active tab."},
             },
             "required": ["actions"],
+        },
+        group="computer",
+        read_only=False,
+        tags=("computer", "browser"),
+    ),
+    ToolSpec(
+        name="browser_collect",
+        description=(
+            "Read a long listing on the current page: scroll until the cards stop, and return each card's title, "
+            "url, selling price, MRP, and rating. Pass min_price and max_price when the user gave a range (inclusive). "
+            "words are the user's product words that must appear in the title. with_reviews opens each match and reads "
+            "the rating plus the reviews shown on that page (not a full export). If next_offset is set, call again "
+            "with that offset until every match is in hand. Use this instead of answering from a clipped snapshot."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "min_price": {"type": "number", "description": "Lowest selling price to keep, inclusive. Omit if the user set no minimum."},
+                "max_price": {"type": "number", "description": "Highest selling price to keep, inclusive. Omit if the user set no maximum."},
+                "words": {"type": "string", "description": "Words from the user that must appear in the title. Empty keeps every title."},
+                "with_reviews": {"type": "boolean", "description": "Open each match and read the reviews shown on the product page."},
+                "offset": {"type": "integer", "description": "Review batch to continue. 0 starts a new collect. Pass next_offset from the previous result."},
+                "tab": {"type": "string", "description": "Optional tab id (t1, t2 from browser_tabs)."},
+            },
         },
         group="computer",
         read_only=False,
@@ -537,6 +562,7 @@ def _out(response) -> str:
 BROWSER_HOME = "/home/daytona/.checkme/browser"
 DAEMON_PY = f"{BROWSER_HOME}/checkme_browser_daemon.py"
 DETECT_PY = f"{BROWSER_HOME}/checkme_block_detect.py"
+LISTING_PY = f"{BROWSER_HOME}/checkme_listing_collect.py"
 PW_READY = f"{BROWSER_HOME}/pw-ready"
 DAEMON_LOG = f"{BROWSER_HOME}/daemon.log"
 _MODULE_FAIL = re.compile(r"ModuleNotFoundError|No module named|ImportError", re.I)
@@ -625,10 +651,11 @@ async def _put_sandbox_file(proc, fs, dest: str, data: bytes) -> None:
 async def _install_daemon(proc, fs=None, config: dict | None = None) -> None:
     from pathlib import Path as FilePath
 
-    from app.connectors import block_detect, computer_daemon
+    from app.connectors import block_detect, computer_daemon, listing_collect
 
     await _exec(proc, f"mkdir -p {BROWSER_HOME}", 8)
     await _put_sandbox_file(proc, fs, DETECT_PY, FilePath(block_detect.__file__).read_bytes())
+    await _put_sandbox_file(proc, fs, LISTING_PY, FilePath(listing_collect.__file__).read_bytes())
     await _put_sandbox_file(proc, fs, DAEMON_PY, FilePath(computer_daemon.__file__).read_bytes())
     if config is not None:
         # Read once by the daemon at start, then deleted (it may hold proxy credentials).
@@ -1593,6 +1620,21 @@ async def _invoke_daytona(row, name: str, args: dict[str, Any]) -> Any:
             out = await _browser_rpc(proc, {"command": "act", "actions": actions, "tab": tab}, 90, fs)
             _save_after_sign_in(proc, fs, out)
             return out
+        if name == "browser_collect":
+            try:
+                offset = int(args.get("offset") or 0)
+            except (TypeError, ValueError):
+                offset = 0
+            payload = {
+                "command": "collect",
+                "tab": tab,
+                "min_price": args.get("min_price"),
+                "max_price": args.get("max_price"),
+                "words": str(args.get("words") or ""),
+                "with_reviews": bool(args.get("with_reviews")),
+                "offset": offset,
+            }
+            return await _browser_rpc(proc, payload, 300, fs)
         if name == "browser_replay":
             # Internal: verified selector replay of a saved trace (app/agent/fast_browser.py).
             steps = args.get("steps")

@@ -721,6 +721,7 @@ async fn run_browser(slot: &Mutex<Option<browser::Chrome>>, tool: &str, args: &V
             chrome.navigate(url, wait_ms).await
         }
         "browser_snapshot" | "browse_screenshot" => chrome.snapshot().await,
+        "browser_collect" => chrome.collect(args).await,
         "browser_act" | "browse_act" => {
             let actions = args.get("actions").and_then(Value::as_array).cloned().unwrap_or_default();
             let one = args.get("action").cloned();

@@ -28,8 +28,9 @@
   });
     const tree = elements.map((n) => ('- ' + n.ref + ' ' + n.role + ' ' + (n.name || '') + (n.href ? ' ' + n.href : '')).trim()).join('\n');
   const full = (document.body && document.body.innerText || '').replace(/\n{3,}/g, '\n\n');
-  const head = full.slice(0, 5000);
-  const tail = full.length > 5000 ? full.slice(-5000) : '';
+  const omitted = full.length > 10000;
+  const head = omitted ? full.slice(0, 5000) : full;
+  const tail = omitted ? full.slice(-5000) : '';
   const active = document.activeElement;
   let composer = '';
   if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) composer = String(active.value || '');
@@ -38,6 +39,7 @@
     url: location.href,
     title: document.title || '',
     text: tail ? head + '\n…\n' + tail : head,
+    text_omitted: omitted,
     composer: composer.slice(0, 500),
     tree,
     elements
