@@ -58,8 +58,11 @@ jobs:
           TAG: ${{ github.ref_type == 'tag' && github.ref_name || format('desktop-v{0}', github.run_number) }}
         run: |
           set -euo pipefail
-          APP="$(find apps/desktop/src-tauri/target -path '*/release/bundle/macos/Lumio.app' -type d | head -1)"
-          test -n "$APP" && test -d "$APP"
+          APP="$(find apps/desktop/src-tauri/target -path '*/release/bundle/macos/Lumio.app' -type d | head -1 || true)"
+          if [ -z "${APP}" ] || [ ! -d "${APP}" ]; then
+            echo "Disk image is already uploaded. The app bundle was removed after packaging."
+            exit 0
+          fi
           xattr -cr "$APP" || true
           codesign --force --deep --sign - "$APP"
           VERSION="$(python3 -c "import json; print(json.load(open('apps/desktop/src-tauri/tauri.conf.json'))['version'])")"
