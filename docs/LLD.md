@@ -636,7 +636,7 @@ SSE payload: `{ count, pending, items, inbox, connected }`. Web `readBadge` must
 
 ## 9. Files and previews
 
-`storage.py`: S3/MinIO or disk (`FILE_STORAGE=disk`, Render). Keys `{user_id}/{uuid}/{filename}`.
+`storage.py`: S3-compatible storage (R2 on Render, MinIO locally), or disk with `FILE_STORAGE=disk`, which only a rollback needs. Keys `{user_id}/{uuid}/{filename}`.
 
 Upload returns `{ key, filename, download_url, preview_url, previewable, extracted_text? }`. Chat user bubble and inbox chips show these. Send paths pass keys; `invoke_named` reads bytes only at send time.
 
@@ -765,7 +765,7 @@ See `.env.example`. Important knobs in `app/config.py`:
 | `OPENAI_REASONING_EFFORT` | Responses `reasoning.effort` (`none`). Tool search uses a capability query (not the raw user sentence); catalog tools like `gateway__tool_search` are not data answers. |
 | `GOOGLE_*` / `MICROSOFT_*` | Must be on **checkme-api** in Render |
 | `SESSION_SECRET` / `TOKEN_ENCRYPTION_KEY` | Cookies + Fernet |
-| `FILE_STORAGE` | `s3` local, `disk` Render |
+| `FILE_STORAGE` | `s3` local (MinIO) and Render (R2) |
 | `ALLOW_PRIVATE_MCP_URLS` | true only on Compose |
 | `chat_rate_limit_per_minute` | 30 |
 | `history_messages` | 8 prior turns into the agent |

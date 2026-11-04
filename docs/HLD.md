@@ -65,7 +65,7 @@ flowchart TB
   subgraph Data
     PG[(Postgres + pgvector)]
     Redis[(Redis)]
-    Files[(Disk or MinIO)]
+    Files[(R2 or MinIO)]
   end
   Web -->|"/api/* cookie"| HTTP
   HTTP --> Agent
@@ -89,7 +89,7 @@ flowchart TB
 | `apps/api` | Session auth, agent loop, inbox ingest/classify, scheduler, file I/O, OAuth |
 | Postgres | Users, accounts, connectors, chats, inbox cards, tools index, tasks |
 | Redis | Session presence, revocation, rate limits |
-| Object storage | Uploaded and mail attachments. Local: MinIO. Render: disk on `checkme-api` |
+| Object storage | Uploaded and mail attachments. Local: MinIO. Render: Cloudflare R2 |
 | Packages | `connector_core` catalog; `gmail_mcp` / `outlook_mcp` implementations |
 
 ## 5. Web application surfaces
@@ -222,7 +222,7 @@ Docker Compose: Next (3000), API (8001→8000), Postgres+pgvector, Redis, MinIO.
 | Service | Type | Notes |
 | --- | --- | --- |
 | `checkme-web` | web | Next production image; `API_HOSTPORT` from API; health `/up` |
-| `checkme-api` | private web | FastAPI; disk `/var/data` for attachments; OAuth + OpenAI env |
+| `checkme-api` | private web | FastAPI; attachments in R2, no disk; OAuth + OpenAI env. Old and new instances overlap on each deploy, so migrations must not drop or rename anything the previous version uses |
 | `checkme-postgres` | private | pgvector image, 10 GB disk |
 | `checkme-redis` | keyvalue | sessions / rate limit |
 

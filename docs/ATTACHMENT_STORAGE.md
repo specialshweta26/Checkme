@@ -1,7 +1,11 @@
 # Moving attachments off the Render disk
 
-`checkme-api` keeps attachments on a persistent disk. Render's docs say a disk "disables zero-downtime deploys": the old
-instance stops before the new one starts, so the API is down during every deploy, and the web proxy logs
+**Status:** finished once the disk-removal PR is merged and step 10 passes. Attachments are in Cloudflare R2. After the
+disk is gone, `copy` and `verify` exit 2 with "No files found", which is expected. `check` and the rollback below still
+work.
+
+`checkme-api` kept attachments on a persistent disk. Render's docs say a disk "disables zero-downtime deploys": the old
+instance stops before the new one starts, so the API was down during every deploy, and the web proxy logged
 `getaddrinfo ENOTFOUND checkme-api-kw68`. This runbook moves the files to object storage so the disk can go.
 
 The app code does not change. `app/storage.py` already supports S3 through `FILE_STORAGE`. Download links keep working
