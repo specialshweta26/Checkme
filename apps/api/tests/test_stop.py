@@ -382,6 +382,105 @@ def test_kill_script_kills_only_the_tagged_tree():
                 p.kill()
 
 
+def _wait_for_files(paths, timeout=10.0):
+    import time
+
+    deadline = time.monotonic() + timeout
+    while not all(p.exists() for p in paths):
+        assert time.monotonic() < deadline, "the tagged commands never started"
+        time.sleep(0.01)
+
+
+def test_kill_script_stops_the_following_command_from_running(tmp_path):
+    """`sleep 30; deploy` must not reach `deploy`, however the signals interleave with the shell's own wait."""
+    import subprocess
+    import time
+
+    from app.agent import toolchain
+
+    # One kill run across many shells: each one is a fresh chance to lose the race, so a bad order cannot slip through.
+    # The next command is external on purpose: a forked child outlives its shell's TERM, while a builtin writing to a
+    # file nearly always dies first and would hide the bug.
+    late = tmp_path / "late"
+    ready = [tmp_path / f"ready{i}" for i in range(20)]
+    runs = [
+        subprocess.Popen(
+            ["bash", "-c", toolchain.wrap(f"touch {r}; sleep 30; /bin/sh -c 'echo late >> {late}'", "seq1")],
+            stderr=subprocess.DEVNULL,
+        )
+        for r in ready
+    ]
+    try:
+        _wait_for_files(ready)
+        time.sleep(0.2)  # let every shell settle into waiting on its sleep
+        subprocess.run(["bash", "-c", toolchain.kill_script("seq1")], timeout=10)
+        for p in runs:
+            p.wait(timeout=5)
+        time.sleep(0.2)
+        assert not late.exists()
+        assert all(p.returncode != 0 for p in runs)
+    finally:
+        for p in runs:
+            if p.poll() is None:
+                p.kill()
+
+
+@pytest.mark.parametrize("shell", ["bash", "sh", "dash", "zsh"])
+def test_kill_script_ends_a_nested_tree_and_leaves_nothing_frozen(tmp_path, shell):
+    """Every process in the tree really exits, under any shell the provider runs it with (Daytona defaults to zsh)."""
+    import os
+    import shutil
+    import subprocess
+    import time
+
+    from app.agent import toolchain
+
+    if not shutil.which(shell):
+        pytest.skip(f"{shell} missing")
+    late, ready, pids = tmp_path / "late", tmp_path / "ready", tmp_path / "pids"
+    inner = f"echo $$ >> {pids}; sleep 30 & echo $! >> {pids}; touch {ready}; wait; echo late >> {late}"
+    outer = f"bash -c '{inner}'; echo late >> {late}"
+    tagged = subprocess.Popen(["bash", "-c", toolchain.wrap(outer, "nest1")])
+    other = subprocess.Popen(["bash", "-c", "sleep 30", "other-run"])
+    try:
+        _wait_for_files([ready])
+        subprocess.run([shell, "-c", toolchain.kill_script("nest1")], timeout=10)
+        tagged.wait(timeout=5)
+        deadline = time.monotonic() + 5
+        for pid in [int(line) for line in pids.read_text().split()]:
+            while True:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+                assert time.monotonic() < deadline, f"process {pid} survived the kill"
+                time.sleep(0.01)
+        assert not late.exists()
+        assert other.poll() is None
+    finally:
+        for p in (tagged, other):
+            if p.poll() is None:
+                p.kill()
+
+
+def test_kill_script_still_lets_a_term_trap_clean_up(tmp_path):
+    import subprocess
+
+    from app.agent import toolchain
+
+    log, ready = tmp_path / "log", tmp_path / "ready"
+    script = f"trap 'echo cleaned >> {log}; exit 143' TERM; touch {ready}; sleep 30; echo late >> {log}"
+    tagged = subprocess.Popen(["bash", "-c", toolchain.wrap(script, "trap1")])
+    try:
+        _wait_for_files([ready])
+        subprocess.run(["bash", "-c", toolchain.kill_script("trap1")], timeout=10)
+        tagged.wait(timeout=5)
+        assert log.read_text().split() == ["cleaned"]
+    finally:
+        if tagged.poll() is None:
+            tagged.kill()
+
+
 # ---- background jobs: cooperative stop in the job loop ----
 
 
