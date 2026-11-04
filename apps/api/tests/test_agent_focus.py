@@ -313,7 +313,7 @@ async def test_coding_agent_gets_a_bigger_step_budget(monkeypatch):
         return ""
 
     class Graph:
-        async def ainvoke(self, payload, config=None):
+        async def ainvoke(self, payload, config=None, **kw):
             seen["limit"] = config["recursion_limit"]
             return {"messages": []}
 

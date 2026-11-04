@@ -200,7 +200,7 @@ System prompt rules that matter in production:
 - Destructive tools still `call_tool`; the app confirms.
 - Checkme's own agents/groups use the workspace tools above, never `search_tools`/`call_tool` or a third-party "group" (LiveChat, Slack…). After a change the reply says it is in the left sidebar under **Personal**. There is no group lead setting (the first member answers).
 
-Recursion: `max_agent_steps * 8` (floor 80), retry twice up to 200 if LangGraph hits the limit.
+Recursion: `max_agent_steps * 8` (floor 80). If LangGraph hits the limit, the run continues from its in-memory checkpoint, up to twice with a limit of up to 200, so finished tool calls don't repeat. The checkpoint lasts only for the turn, so an API restart still loses the run.
 
 ### 6.2 `call_tool` internals
 
@@ -721,7 +721,7 @@ Staff `learn_voice` updates the speaking agent’s voice block from sent mail.
 | Chat agent exception | HTTP 502, message stored only on success path |
 | SSE drop | client badge poll |
 | File token expired | 404, “ask again in chat” |
-| Recursion limit | retry with higher limit, then user-visible failure string |
+| Recursion limit | continue from the checkpoint with a higher limit, then user-visible failure string |
 
 ## 14. Tests (representative)
 

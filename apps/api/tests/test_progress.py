@@ -250,7 +250,7 @@ async def test_run_deep_agent_streams_live_steps(monkeypatch):
         return ""
 
     class Graph:
-        async def ainvoke(self, payload, config=None):
+        async def ainvoke(self, payload, config=None, **kw):
             cbs = (config or {}).get("callbacks") or []
             assert cbs and isinstance(cbs[0], P.ProgressCallback)
             tool = StructuredTool.from_function(
