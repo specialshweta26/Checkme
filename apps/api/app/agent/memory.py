@@ -22,7 +22,6 @@ _LABEL = re.compile(r"^[A-Za-z0-9_-]{1,50}$")
 CORE_LABELS = ("prefs", "people", "voice", "work", "coding")
 PERSONA_LABELS = ("voice", "prefs")
 STANDING_LABELS = ("people", "work", "learned")
-MEMORY_BUDGET = 2400
 SCOPE_AGENT = "agent"
 SCOPE_SHARED = "user_shared"
 STATUS_ACTIVE = "active"
@@ -270,7 +269,7 @@ async def _write_letta_passage(agent, text: str) -> None:
     try:
         resp = await shared_client().post(
             f"{s.letta_base_url}/v1/agents/{letta_id}/archival-memory",
-            json={"text": text[:800]},
+            json={"text": text},
             headers=_headers(),
             timeout=_LETTA_TIMEOUT,
         )
@@ -288,14 +287,14 @@ async def _write_letta_block(agent, label: str, value: str) -> None:
     try:
         resp = await shared_client().patch(
             f"{s.letta_base_url}/v1/agents/{letta_id}/core-memory/blocks/{label}",
-            json={"value": (value or "")[:800]},
+            json={"value": value or ""},
             headers=_headers(),
             timeout=_LETTA_TIMEOUT,
         )
         if resp.status_code == 404:
             resp = await shared_client().post(
                 f"{s.letta_base_url}/v1/agents/{letta_id}/core-memory/blocks",
-                json={"label": label, "value": (value or "")[:800]},
+                json={"label": label, "value": value or ""},
                 headers=_headers(),
                 timeout=_LETTA_TIMEOUT,
             )
@@ -460,10 +459,10 @@ def _assemble_memory(blocks: list, facts: list, history: list[str] | None = None
     if history:
         parts.append("From earlier chats")
         parts.extend(f"- {line}" for line in history)
-    return "\n".join(parts).strip()[:MEMORY_BUDGET]
+    return "\n".join(parts).strip()
 
 
-async def load_memory(db: AsyncSession, user: User, query: str, agent=None) -> str:
+async def load_memory(db: AsyncSession, user: User, query: str, agent=None, task_key: str = "") -> str:
     """Labeled persona + facts for one workspace agent. Fail-open: empty string on error."""
     try:
         owner = await _memory_agent(db, user, agent=agent)
@@ -525,9 +524,17 @@ async def load_memory(db: AsyncSession, user: User, query: str, agent=None) -> s
                     continue
                 extra.append(stripped)
             if extra:
-                assembled = (assembled + ("\n" if assembled else "") + "\n".join(extra)).strip()[:MEMORY_BUDGET]
+                assembled = (assembled + ("\n" if assembled else "") + "\n".join(extra)).strip()
             elif not assembled:
-                assembled = letta_text[:MEMORY_BUDGET]
+                assembled = letta_text
+    try:
+        from app.memory_engine.recall import recall_block
+
+        extra_memory = await recall_block(db, user.id, owner.id, query, task_key=task_key)
+        if extra_memory:
+            assembled = (assembled + "\n\n" + extra_memory).strip()
+    except Exception:  # noqa: BLE001 - the new stores must not blank the memory already loaded
+        log.info("memory engine recall failed", exc_info=True)
     return assembled
 
 
@@ -582,7 +589,7 @@ async def remember(
         user_id=user_id,
         agent_id=owner.id,
         kind=kind,
-        text=text[:800],
+        text=text,
         embedding=vec,
         scope=scope,
         status=STATUS_ACTIVE,
@@ -592,7 +599,13 @@ async def remember(
     )
     db.add(row)
     await db.commit()
-    await _write_letta_passage(owner, text[:800])
+    await _write_letta_passage(owner, text)
+    try:
+        from app.memory_engine.semantic import remember_fact_text
+
+        await remember_fact_text(db, user_id, text, agent_id=owner.id, scope=scope)
+    except Exception:  # noqa: BLE001
+        log.info("semantic memory skipped", exc_info=True)
     return row
 
 
@@ -611,12 +624,12 @@ async def upsert_core(db: AsyncSession, user_id: uuid.UUID, label: str, value: s
         )
     ).scalar_one_or_none()
     if row is None:
-        db.add(MemoryBlock(user_id=user_id, agent_id=owner.id, label=label, value=value[:800]))
+        db.add(MemoryBlock(user_id=user_id, agent_id=owner.id, label=label, value=value))
     else:
-        row.value = value[:800]
+        row.value = value
     await _ensure_saved_letta(db, user, owner)
     await db.commit()
-    await _write_letta_block(owner, label, value[:800])
+    await _write_letta_block(owner, label, value)
 
 
 def _need_db(ctx) -> dict | None:
@@ -643,17 +656,17 @@ async def remember_fact(ctx, text: str, label: str = "", shared: bool = False) -
     if tag in CORE_LABELS:
         existing = await read_core(ctx.db, ctx.user, tag, agent=owner)
         merged = (existing.rstrip() + "\n" + body).strip() if existing else body
-        await upsert_core(ctx.db, ctx.user.id, tag, merged[:800], getattr(owner, "id", None))
-        return {"ok": True, "kind": "block", "label": tag, "shared": bool(shared), "value": merged[:800]}
+        await upsert_core(ctx.db, ctx.user.id, tag, merged, getattr(owner, "id", None))
+        return {"ok": True, "kind": "block", "label": tag, "shared": bool(shared), "value": merged}
     await remember(
         ctx.db,
         ctx.user.id,
         "archival",
-        body[:800],
+        body,
         getattr(owner, "id", None),
         scope=SCOPE_SHARED if shared else SCOPE_AGENT,
     )
-    return {"ok": True, "kind": "passage", "shared": bool(shared), "text": body[:800]}
+    return {"ok": True, "kind": "passage", "shared": bool(shared), "text": body}
 
 
 async def recall_memory(ctx, query: str = "", label: str = "") -> dict:
@@ -716,7 +729,7 @@ async def forget_memory(ctx, memory_id: str = "", label: str = "", text: str = "
             needle = (text or "").strip()
             if needle and needle.lower() in (row.value or "").lower():
                 kept = "\n".join(line for line in row.value.splitlines() if needle.lower() not in line.lower())
-                row.value = kept[:800]
+                row.value = kept
                 removed.append(f"block:{tag}")
             else:
                 await ctx.db.delete(row)

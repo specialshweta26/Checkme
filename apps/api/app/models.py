@@ -557,6 +557,7 @@ class AgentSkill(Base):
     frames: Mapped[list] = mapped_column(JSONB, default=list)  # key screenshots {t, jpeg (base64)}
     notes: Mapped[list] = mapped_column(JSONB, default=list)
     auto_named: Mapped[bool] = mapped_column(Boolean, default=False)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
@@ -649,6 +650,91 @@ class ResearchSummary(Base):
     sources: Mapped[list] = mapped_column(JSONB, default=list)
     embedding = mapped_column(Vector(DIMS), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
+
+
+class WorkflowCheckpoint(Base):
+    """Durable copy of one task's working memory. Redis holds the hot copy; this row survives a restart."""
+
+    __tablename__ = "workflow_checkpoints"
+    __table_args__ = (UniqueConstraint("user_id", "task_key", name="uq_workflow_checkpoints_task"),)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    task_key: Mapped[str] = mapped_column(String(200))
+    session_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    context: Mapped[dict] = mapped_column(JSONB, default=dict)
+    browser: Mapped[dict] = mapped_column(JSONB, default=dict)
+    variables: Mapped[dict] = mapped_column(JSONB, default=dict)
+    progress: Mapped[dict] = mapped_column(JSONB, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class MemoryEpisode(Base):
+    """One past experience: what happened, what was done, and how it turned out. Postgres is canonical."""
+
+    __tablename__ = "memory_episodes"
+    __table_args__ = (Index("ix_memory_episodes_user_agent", "user_id", "agent_id", "status"),)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    group_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    scope: Mapped[str] = mapped_column(String(20), default="agent")  # agent | group | user_shared
+    status: Mapped[str] = mapped_column(String(20), default="active")
+    observation: Mapped[str] = mapped_column(Text, default="")
+    thoughts: Mapped[str] = mapped_column(Text, default="")
+    action: Mapped[str] = mapped_column(Text, default="")
+    result: Mapped[str] = mapped_column(Text, default="")
+    feedback: Mapped[str] = mapped_column(Text, default="")
+    outcome: Mapped[str] = mapped_column(String(20), default="")  # completed | failed | corrected
+    embedding = mapped_column(Vector(DIMS), nullable=True)
+    source_session_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class SemanticDocument(Base):
+    """Full source text for a business fact, policy, email, or other document. Chunks are only the search index."""
+
+    __tablename__ = "semantic_documents"
+    __table_args__ = (Index("ix_semantic_documents_user", "user_id", "status"),)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    group_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    scope: Mapped[str] = mapped_column(String(20), default="agent")
+    source: Mapped[str] = mapped_column(String(40), default="fact")  # fact | email | document | policy
+    title: Mapped[str] = mapped_column(Text, default="")
+    body: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(20), default="active")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class SemanticChunk(Base):
+    """Search index over a semantic document. The document row keeps the full text."""
+
+    __tablename__ = "semantic_chunks"
+    __table_args__ = (Index("ix_semantic_chunks_document", "document_id"),)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    document_id: Mapped[int] = mapped_column(ForeignKey("semantic_documents.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    text: Mapped[str] = mapped_column(Text, default="")
+    embedding = mapped_column(Vector(DIMS), nullable=True)
+
+
+class AgentSkillVersion(Base):
+    """Immutable copy of a skill. A task pins the revision it started with."""
+
+    __tablename__ = "agent_skill_versions"
+    __table_args__ = (UniqueConstraint("skill_id", "revision", name="uq_agent_skill_versions"),)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    skill_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    name: Mapped[str] = mapped_column(String(160), default="")
+    kind: Mapped[str] = mapped_column(String(20), default="saved")
+    steps: Mapped[list] = mapped_column(JSONB, default=list)
+    instruction: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
 class ChannelLink(Base):

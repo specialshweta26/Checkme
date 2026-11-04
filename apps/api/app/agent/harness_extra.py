@@ -304,7 +304,11 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
             args["wait_ms"] = wait_ms
         if tab:
             args["tab"] = tab
-        return _dumps(fast.for_model(await computer.run_computer(ctx, "browser_navigate", args)))
+        raw = await computer.run_computer(ctx, "browser_navigate", args)
+        from app.memory_engine.working import note_browser
+
+        await note_browser(ctx, url, raw if isinstance(raw, dict) else None)
+        return _dumps(fast.for_model(raw))
 
     async def browser_snapshot(tab: str = "") -> str:
         """Re-read the live computer browser: URL, title, page text, and interactive refs (e0, e1). browser_navigate and browser_act already return one."""
@@ -317,7 +321,11 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         args: dict[str, Any] = {"actions": actions}
         if tab:
             args["tab"] = tab
-        return _dumps(fast.for_model(await computer.run_computer(ctx, "browser_act", args)))
+        raw = await computer.run_computer(ctx, "browser_act", args)
+        from app.memory_engine.working import note_browser
+
+        await note_browser(ctx, "", raw if isinstance(raw, dict) else None)
+        return _dumps(fast.for_model(raw))
 
     async def browser_collect(
         min_price: float | None = None,
@@ -339,7 +347,11 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         }
         if tab:
             args["tab"] = tab
-        return _dumps(await computer.run_computer(ctx, "browser_collect", args))
+        raw = await computer.run_computer(ctx, "browser_collect", args)
+        from app.memory_engine.working import note_browser
+
+        await note_browser(ctx, "", raw if isinstance(raw, dict) else None)
+        return _dumps(raw)
 
     async def browser_task(goal: str, url: str = "", values: dict[str, str] | None = None, max_steps: int = 0, allow_final_action: bool = False) -> str:
         """Fast path for routine multi-step browser work (log in, fill a form, search a site, open a statement, download a file). A small fast model reads the page's numbered elements and runs several actions per call (stops at the first failure), escalates to the main model on repeated failures, and replays a saved run of the same task with no model calls. Pass the values the steps need in values ({email: ..., password: ...}); they are typed as {{name}} and never shown to the planning model or logged. Returns done + result, need_user (CAPTCHA, missing code), stopped_before (a Pay/Book/Send/Delete control it will not click unless allow_final_action), or fallback: then continue yourself with browser_act from the returned page."""
