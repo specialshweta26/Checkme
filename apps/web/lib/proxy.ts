@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { apiBase } from "./backend";
+import { apiBase, apiUnavailable, fetchApi, neverReachedApi } from "./backend";
 
 const HOP = new Set([
   "connection",
@@ -25,7 +25,14 @@ export async function proxyApi(req: NextRequest, path: string) {
   if (req.method !== "GET" && req.method !== "HEAD") {
     init.body = await req.arrayBuffer();
   }
-  const upstream = await fetch(`${apiBase()}${path}${search}`, init);
+  let upstream: Response;
+  try {
+    upstream = await fetchApi(`${apiBase()}${path}${search}`, init, req.signal);
+  } catch (err) {
+    // A request that may have reached the API still fails as before, so the chat can recover by progress id.
+    if (!neverReachedApi(err)) throw err;
+    return apiUnavailable(path, err);
+  }
   const out = new Headers();
   upstream.headers.forEach((value, key) => {
     if (!HOP.has(key.toLowerCase())) out.append(key, value);
