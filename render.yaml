@@ -30,19 +30,12 @@ services:
     branch: main
     dockerfilePath: ./apps/api/Dockerfile
     dockerContext: .
-    # Moving attachments to object storage: docs/ATTACHMENT_STORAGE.md. Attachments now live in R2. Keep this disk until
-    # that runbook says to remove it: it holds the older files and is the fast way back.
+    # Attachments live in R2 (docs/ATTACHMENT_STORAGE.md). No disk here: a disk would turn zero-downtime deploys off.
     # healthCheckPath is web-only on Render. Private services get a TCP check, and uvicorn opens its port only after
     # startup finishes, so traffic already waits for startup.
-    disk:
-      name: checkme-files
-      mountPath: /var/data
-      sizeGB: 10
     envVars:
       - key: FILE_STORAGE
         value: s3
-      - key: STORAGE_DISK_PATH
-        value: /var/data/attachments
       # Render ignores sync: false on an existing Blueprint, so add these three by hand in the dashboard.
       - key: S3_ENDPOINT_URL
         sync: false

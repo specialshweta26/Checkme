@@ -37,7 +37,7 @@ flowchart TB
   subgraph Data
     PG[(Postgres + pgvector)]
     Redis[(Redis)]
-    Files[(Disk or MinIO)]
+    Files[(R2 or MinIO)]
   end
 
   PWA -->|"cookie proxy"| HTTP
@@ -72,7 +72,7 @@ flowchart TB
     RWeb["checkme-web"] -->|"API_HOSTPORT"| RApi["checkme-api"]
     RApi --> RPg["checkme-postgres"]
     RApi --> RRedis["checkme-redis"]
-    RApi --> RDisk["disk /var/data/attachments"]
+    RApi --> RFiles["Cloudflare R2"]
   end
 ```
 
@@ -215,7 +215,7 @@ sequenceDiagram
   participant U as User
   participant UI as Chat or Inbox
   participant A as FastAPI
-  participant S as Disk or MinIO
+  participant S as R2 or MinIO
   participant P as Gmail/Graph
   U->>UI: attach files
   UI->>A: POST /api/files/upload
