@@ -57,6 +57,11 @@ class Settings(BaseSettings):
     postgres_password: str = ""
     postgres_db: str = "assistant"
     redis_url: str = "redis://localhost:6379/0"
+    # Graphiti's graph database. Empty means semantic facts stay in Postgres and the graph client stays off.
+    neo4j_uri: str = ""
+    neo4j_user: str = "neo4j"
+    neo4j_password: str = ""
+    graphiti_telemetry_enabled: bool = False
 
     letta_base_url: str = ""
     letta_api_key: str = ""

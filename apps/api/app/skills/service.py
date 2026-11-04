@@ -104,6 +104,7 @@ def serialize_skill(row: AgentSkill, full: bool = False) -> dict:
         "duration_ms": row.duration_ms or 0,
         "created_at": _iso(row.created_at),
         "updated_at": _iso(getattr(row, "updated_at", None)),
+        "revision": int(getattr(row, "revision", None) or 1),
         "step_count": len(row.steps or []),
         "frame_count": len(frames),
         "has_transcript": bool(getattr(row, "transcript", None)),
@@ -169,7 +170,13 @@ async def update_skill(
             raise SkillError("Skill name is required.")
         row.name = title[:160]
     if instruction is not None:
-        row.instruction = instruction[:8000]
+        row.instruction = instruction
+    try:
+        from app.memory_engine.procedures import add_version
+
+        add_version(db, row, bump=True)
+    except Exception:  # noqa: BLE001 - the skill update still saves when versioning is unavailable
+        log.info("skill version skipped", exc_info=True)
     await db.commit()
     await db.refresh(row)
     return row
@@ -240,10 +247,18 @@ async def save_skill(
         name=title[:160],
         kind="taught" if kind == "taught" else "saved",
         steps=list(steps or []),
-        instruction=(instruction or "")[:8000],
+        instruction=instruction or "",
         duration_ms=max(0, int(duration_ms or 0)),
+        revision=1,
     )
     db.add(row)
+    await db.flush()
+    try:
+        from app.memory_engine.procedures import add_version
+
+        add_version(db, row, bump=False)
+    except Exception:  # noqa: BLE001
+        log.info("skill version skipped", exc_info=True)
     await db.commit()
     await db.refresh(row)
     return row
@@ -319,6 +334,14 @@ async def _store_update(skill_id: str, **fields: Any) -> bool:
         for key, value in fields.items():
             setattr(row, key, value)
         row.updated_at = _now()
+        ready = (fields.get("status") or row.status) == "ready"
+        if ready and any(key in fields for key in ("instruction", "steps", "name")):
+            try:
+                from app.memory_engine.procedures import add_version
+
+                add_version(session, row, bump=True)
+            except Exception:  # noqa: BLE001
+                log.info("skill version skipped", exc_info=True)
         await session.commit()
         return True
 

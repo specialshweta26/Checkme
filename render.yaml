@@ -58,6 +58,15 @@ services:
           name: checkme-redis
           type: keyvalue
           property: connectionString
+      # Optional Graphiti graph. Leave NEO4J_URI empty until that private service exists.
+      - key: NEO4J_URI
+        sync: false
+      - key: NEO4J_USER
+        value: neo4j
+      - key: NEO4J_PASSWORD
+        sync: false
+      - key: GRAPHITI_TELEMETRY_ENABLED
+        value: "false"
       - key: PUBLIC_WEB_URL
         fromService:
           name: checkme-web

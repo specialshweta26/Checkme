@@ -99,6 +99,7 @@ async def _migrate() -> None:
         await _migrate_jobs(conn)
         await _migrate_agent_scope(conn)
         await _migrate_memory(conn)
+        await conn.execute(text("ALTER TABLE agent_skills ADD COLUMN IF NOT EXISTS revision INTEGER DEFAULT 1"))
 
 
 async def _migrate_jobs(conn) -> None:

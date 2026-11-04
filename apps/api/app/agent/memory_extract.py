@@ -63,8 +63,8 @@ async def enqueue_extract(
         request_id=str(request_id)[:64],
         status="queued",
         payload={
-            "user_text": (user_text or "")[:4000],
-            "assistant_text": (assistant_text or "")[:4000],
+            "user_text": user_text or "",
+            "assistant_text": assistant_text or "",
             "peer": bool(peer),
         },
     )
@@ -112,7 +112,7 @@ async def enqueue_turn(
             session_id,
             request_id,
             user_text=user_text,
-            assistant_text=(item.get("text") or "")[:4000],
+            assistant_text=item.get("text") or "",
             peer=True,
         )
     wake()
@@ -169,9 +169,9 @@ async def _extract_json(user_text: str, assistant_text: str) -> dict:
         "prefs (string, standing preference for this agent; empty if none), "
         "facts (array of {text, scope, supersede}). scope is agent or user_shared. "
         "user_shared only for identity facts every agent should know (name, city, timezone). "
-        "Max 3 facts. Ignore acknowledgements, tool dumps, secrets, one-off tasks. "
+        "Ignore acknowledgements, tool dumps, secrets, one-off tasks. "
         "supersede is optional existing fact text being replaced.\n"
-        f"User: {user_text[:1500]}\nAssistant: {assistant_text[:1500]}"
+        f"User: {user_text}\nAssistant: {assistant_text}"
     )
     try:
         resp = await chat_complete(
@@ -194,7 +194,7 @@ def _clean_fact(text: str) -> str:
         return ""
     if _ACK.match(body):
         return ""
-    return body[:800]
+    return body
 
 
 async def apply_extract(db: AsyncSession, user: User, agent, payload: dict, session_id=None) -> dict:
@@ -207,15 +207,15 @@ async def apply_extract(db: AsyncSession, user: User, agent, payload: dict, sess
         prior = await read_core(db, user, "voice", agent)
         if voice.lower() not in (prior or "").lower():
             merged = (prior.rstrip() + "\n" + voice).strip() if prior else voice
-            await upsert_core(db, user.id, "voice", merged[:800], agent.id)
+            await upsert_core(db, user.id, "voice", merged, agent.id)
             applied["voice"] = True
     if prefs:
         prior = await read_core(db, user, "prefs", agent)
         if prefs.lower() not in (prior or "").lower():
             merged = (prior.rstrip() + "\n" + prefs).strip() if prior else prefs
-            await upsert_core(db, user.id, "prefs", merged[:800], agent.id)
+            await upsert_core(db, user.id, "prefs", merged, agent.id)
             applied["prefs"] = True
-    for item in (payload.get("facts") or [])[:3]:
+    for item in payload.get("facts") or []:
         if not isinstance(item, dict):
             continue
         body = _clean_fact(str(item.get("text") or ""))
@@ -248,10 +248,14 @@ async def process_job(db: AsyncSession, job: MemoryExtractJob) -> str:
         job.last_error = ""
         return job.status
     payload = await _extract_json(user_text, assistant_text)
-    if payload.get("discard") is True or not payload:
-        job.status = "done"
-        return job.status
-    await apply_extract(db, user, agent, payload, job.session_id)
+    if payload and payload.get("discard") is not True:
+        await apply_extract(db, user, agent, payload, job.session_id)
+    try:
+        from app.memory_engine.episodes import record_turn
+
+        await record_turn(db, user, agent, user_text, assistant_text, session_id=job.session_id)
+    except Exception:  # noqa: BLE001 - a failed episode write must not fail the extract job
+        log.info("episode memory skipped", exc_info=True)
     job.status = "done"
     job.last_error = ""
     return job.status

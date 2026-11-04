@@ -244,7 +244,7 @@ async def begin(
             "job_id": str(job_id) if job_id else None,
             "skill_id": str(skill.get("id")) if skill.get("id") else None,
             "skill_name": str(skill.get("name") or "")[:160],
-            "skill_version": str(skill.get("updated_at") or skill.get("created_at") or "")[:40],
+            "skill_version": str(skill.get("revision") or skill.get("updated_at") or skill.get("created_at") or "")[:40],
             "status": "active",
             "step_index": 0,
             "step_count": count_steps(skill),
@@ -287,7 +287,9 @@ async def checkpoint(
         fields["status"] = status
     if not fields:
         return state
-    return await STORE.update(state_id, **fields)
+    updated = await STORE.update(state_id, **fields)
+    await _mirror_working(updated)
+    return updated
 
 
 # ---------------------------------------------------------------- handover
@@ -323,7 +325,7 @@ async def finish(state_id, result: str = "", ok: bool = True, by: str = "") -> d
     state = await STORE.get(state_id)
     if state is None or state.get("status") not in OPEN:
         return state
-    done = await STORE.update(state_id, status="done" if ok else "failed", result=(result or "")[:4000])
+    done = await STORE.update(state_id, status="done" if ok else "failed", result=result or "")
     parent_id = state.get("parent_id")
     if parent_id:
         parent = await STORE.get(parent_id)
@@ -336,7 +338,31 @@ async def finish(state_id, result: str = "", ok: bool = True, by: str = "") -> d
             if parent.get("status") == "handed_off":
                 fields["status"] = "active"
             await STORE.update(parent_id, **fields)
+    await _mirror_working(done)
+    await _remember_outcome(done or state, ok=ok)
     return done
+
+
+async def _mirror_working(state: dict | None) -> None:
+    if state is None or not isinstance(STORE, DbStore):
+        return
+    try:
+        from app.memory_engine.working import save_from_task
+
+        await save_from_task(state)
+    except Exception:  # noqa: BLE001
+        log.info("working memory mirror skipped", exc_info=True)
+
+
+async def _remember_outcome(state: dict | None, *, ok: bool) -> None:
+    if state is None or not isinstance(STORE, DbStore):
+        return
+    try:
+        from app.memory_engine.episodes import save_outcome
+
+        await save_outcome(state, ok=ok)
+    except Exception:  # noqa: BLE001
+        log.info("task episode skipped", exc_info=True)
 
 
 def _merge_artifacts(mine, theirs) -> list:
