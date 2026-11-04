@@ -58,13 +58,16 @@ services:
           name: checkme-redis
           type: keyvalue
           property: connectionString
-      # Optional Graphiti graph. Leave NEO4J_URI empty until that private service exists.
+      # Optional Graphiti graph. Leave NEO4J_URI empty until that database exists.
+      # Aura uses the instance id as both the username and the database name.
       - key: NEO4J_URI
         sync: false
       - key: NEO4J_USER
-        value: neo4j
+        value: 52cb8113
       - key: NEO4J_PASSWORD
         sync: false
+      - key: NEO4J_DATABASE
+        value: 52cb8113
       - key: GRAPHITI_TELEMETRY_ENABLED
         value: "false"
       - key: PUBLIC_WEB_URL

@@ -18,6 +18,13 @@ _graph = None
 _graph_failed = False
 
 
+def graph_database_name() -> str:
+    """Aura's database is the instance id. A local server uses the default name neo4j."""
+    from app.config import get_settings
+
+    return (get_settings().neo4j_database or "").strip() or "neo4j"
+
+
 def graph_configured() -> bool:
     from app.config import get_settings
 
@@ -129,7 +136,12 @@ async def _client():
         log.info("graphiti is not available: %s", type(exc).__name__)
         return None
     try:
-        client = Graphiti(settings.neo4j_uri, settings.neo4j_user or "neo4j", settings.neo4j_password)
+        from graphiti_core.driver.neo4j_driver import Neo4jDriver
+
+        user = settings.neo4j_user or "neo4j"
+        database = graph_database_name()
+        driver = Neo4jDriver(settings.neo4j_uri, user, settings.neo4j_password, database=database)
+        client = Graphiti(settings.neo4j_uri, user, settings.neo4j_password, graph_driver=driver)
         await client.build_indices_and_constraints()
     except Exception as exc:  # noqa: BLE001
         _graph_failed = True
