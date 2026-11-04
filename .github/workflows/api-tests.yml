@@ -1,0 +1,29 @@
+name: API tests
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: apps/api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: apps/api/uv.lock
+      # Same Python as apps/api/Dockerfile, so tests match production.
+      - name: Install dependencies
+        run: uv sync --frozen --python 3.12
+      - name: Run tests
+        run: uv run --frozen python -m pytest -q
