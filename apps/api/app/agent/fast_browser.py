@@ -30,6 +30,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from app.config import get_settings
+from app.connectors.computer_daemon import looks_secret, secret_text
 
 log = logging.getLogger(__name__)
 
@@ -43,10 +44,21 @@ _PLACEHOLDER = re.compile(r"\{\{\s*([A-Za-z0-9_.-]{1,40})\s*\}\}")
 # Final or irreversible controls the fast loop never clicks unless the caller allowed the final action.
 _FINAL = re.compile(
     r"\b(pay|pay now|buy|buy now|place (?:your )?order|purchase|complete (?:purchase|order|booking)|confirm (?:and )?pay|"
-    r"book now|confirm booking|reserve now|delete|remove account|close account|send money|transfer|cancel (?:my )?subscription)\b",
+    r"book now|book (?:flights?|tickets?|hotel|room|appointment|table|seats?)|confirm booking|reserve now|delete|remove account|"
+    r"close account|send(?! (?:(?:a|an|the|me|my) )*(?:code|otp|link|verification|again|reset))|transfer|make payment|"
+    r"proceed to pay(?:ment)?|submit (?:order|payment)|confirm (?:order|payment|purchase)|confirm & pay|"
+    r"cancel (?:my )?(?:subscription|order|booking))\b",
     re.I,
 )
-_SECRET_NAME = re.compile(r"pass|pwd|otp|code|pin|cvv|cvc|secret|token", re.I)
+# Devanagari vowel signs are not word characters, so these labels are matched without word edges.
+_FINAL_HI = re.compile("भुगतान|खरीद|ऑर्डर कर|बुक कर|भेजें|भेजिए|हटाएं|हटाएँ|मिटाएं|रद्द कर")
+# Words that only mean "final" on a payment step: "Proceed" there can charge the user, on a sign-in page it cannot.
+_GENERIC_ADVANCE = re.compile(r"\s*(?:proceed\b.*|continue|next|submit|confirm|ok|okay|yes|done|agree|i agree|finish)\W*", re.I)
+_PAYMENT_PAGE = re.compile(
+    r"\b(?:cvv|cvc|card number|upi id|net ?banking|amount payable|total payable|amount to pay|payment (?:method|details|summary))\b|भुगतान",
+    re.I,
+)
+_PAYMENT_URL = re.compile(r"/(?:pay|payments?)(?:[/?#]|$)", re.I)
 
 
 def setting(name: str, default: Any = True) -> Any:
@@ -156,6 +168,11 @@ def param_name(target: dict | None, taken: set[str]) -> str:
     return name
 
 
+def secret_param(name: str) -> bool:
+    """A {{placeholder}} holding a secret. A bare `code` is a sign-in code; `promo_code` and `zip_code` are not."""
+    return looks_secret(name) or secret_text(name) == "code"
+
+
 def trace_steps(planned: list[dict], daemon_trace: list[dict], values: dict[str, str]) -> list[dict]:
     """Saved-trace steps for the completed part of a batch: stable target descriptors instead of refs, and
     parameters instead of anything typed into a secret field (or anything that came from a caller value)."""
@@ -175,7 +192,7 @@ def trace_steps(planned: list[dict], daemon_trace: list[dict], values: dict[str,
         if kind in {"fill", "type", "select", "pick"}:
             raw = str(raw or "")
             m = _PLACEHOLDER.fullmatch(raw.strip())
-            secret = bool(done.get("secret")) or (m is not None and bool(_SECRET_NAME.search(m.group(1))))
+            secret = bool(done.get("secret")) or (m is not None and secret_param(m.group(1)))
             if m:
                 row["param"] = m.group(1)
                 taken.add(m.group(1))
@@ -513,13 +530,49 @@ async def plan_step(model: str, goal: str, state: dict, values: dict[str, str], 
     return parse_plan(resp.choices[0].message.content or "")
 
 
+def _is_final_label(label: str) -> bool:
+    return bool(_FINAL.search(label) or _FINAL_HI.search(label))
+
+
+def _on_payment_page(state: dict) -> bool:
+    return bool(_PAYMENT_PAGE.search(str(state.get("text") or "")) or _PAYMENT_URL.search(str(state.get("url") or "")))
+
+
 def final_click(actions: list[dict], state: dict) -> str:
-    """Name of a final/irreversible control the batch would click, else ""."""
-    names = {str(e.get("ref")): str(e.get("name") or "") for e in state.get("elements") or [] if isinstance(e, dict)}
+    """Name of a final/irreversible control the batch would click, else "". On a payment step this also covers
+    generic labels ("Proceed"), buttons with no label (icons), and pressing Enter."""
+    elements = {str(e.get("ref")): e for e in state.get("elements") or [] if isinstance(e, dict)}
+    paying = _on_payment_page(state)
     for step in actions:
-        if str(step.get("kind") or "").lower() in {"click", "dblclick", "press"}:
-            label = names.get(str(step.get("ref") or ""), "")
-            if label and _FINAL.search(label):
+        kind = str(step.get("kind") or "").lower()
+        if kind not in {"click", "dblclick", "press"}:
+            continue
+        el = elements.get(str(step.get("ref") or ""))
+        label = str((el or {}).get("name") or "").strip()
+        if label and _is_final_label(label):
+            return label
+        if not paying:
+            continue
+        if kind == "press":
+            if str(step.get("text") or step.get("key") or "Enter").strip().lower() in {"enter", "return"}:
+                return "the Enter key on a payment page"
+        elif label and _GENERIC_ADVANCE.fullmatch(label):
+            return label
+        elif el is not None and not label and str(el.get("role") or "") in {"button", "link"}:
+            return "an unlabeled button on a payment page"
+    return ""
+
+
+def trace_final_step(steps: list[dict]) -> str:
+    """Name of a final/irreversible control a saved run clicks, else "". A run saved when the final action was
+    allowed must not repeat it later just because the goal matches."""
+    for step in steps or []:
+        if str(step.get("kind") or "").lower() not in {"click", "dblclick"}:
+            continue
+        target = step.get("target") if isinstance(step.get("target"), dict) else {}
+        for key in ("name", "aria_label", "label"):
+            label = str(target.get(key) or "")
+            if label and _is_final_label(label):
                 return label
     return ""
 
@@ -553,6 +606,8 @@ async def browser_task(ctx, goal: str, url: str = "", values: dict | None = None
                 target_host = host_of(str(state.get("url") or ""))
             rows = await STORE.candidates(user_id, host=target_host) if target_host else []
             trace = pick_trace(rows, goal=goal)
+            if trace is not None and not allow_final_action and trace_final_step(trace.get("steps") or []):
+                trace = None  # the model loop below stops at that control and asks
             if trace is not None:
                 t0 = time.monotonic()
                 rep = await replay(ctx, trace, vals)
@@ -604,7 +659,7 @@ async def browser_task(ctx, goal: str, url: str = "", values: dict | None = None
                 blocked = "" if allow_final_action else final_click(actions, state)
                 if blocked:
                     return _result(state, vals, ok=True, done=False, stopped_before=blocked,
-                                   result=f"Stopped before '{blocked}' (a final action). Ask the user, then finish with browser_act.",
+                                   result=f"Stopped before '{blocked}' (a final action). If the user asked for it in chat, call again with allow_final_action; otherwise ask them first.",
                                    log=log_steps, took_ms=int((time.monotonic() - started) * 1000))  # fmt: skip
                 t1 = time.monotonic()
                 state, ok, err, kept = await _run_batch(ctx, actions, vals)
@@ -799,7 +854,8 @@ def dom_events_to_steps(events: list[dict]) -> tuple[str, list[dict]]:
     return start_url, steps[:200]
 
 
-async def replay_named(ctx, name: str = "", url: str = "", skill_id: str = "", values: dict | None = None) -> dict:
+async def replay_named(ctx, name: str = "", url: str = "", skill_id: str = "", values: dict | None = None,
+                       allow_final_action: bool = False) -> dict:  # fmt: skip
     """browser_replay: run a saved flow (a finished browser_task, or a taught skill's DOM recording) by name, site
     or skill id, without model calls. On a mismatch it stops and returns the page so the caller continues."""
     vals = {str(k): str(v) for k, v in (values or {}).items() if v is not None}
@@ -816,6 +872,10 @@ async def replay_named(ctx, name: str = "", url: str = "", skill_id: str = "", v
             "saved": [{"name": r.get("name"), "host": r.get("host"), "params": r.get("params")} for r in rows[:10]],
             "hint": "Use browser_task (it saves the run when it finishes) or browser_act.",
         }
+    blocked = "" if allow_final_action else trace_final_step(trace.get("steps") or [])
+    if blocked:
+        return {"ok": False, "trace": trace.get("name"), "stopped_before": blocked,
+                "hint": f"This saved run clicks '{blocked}' (a final action), so it was not run. If the user asked for it in chat, call again with allow_final_action; otherwise ask them first."}  # fmt: skip
     started = time.monotonic()
     rep = await replay(ctx, trace, vals)
     if rep.get("missing"):
