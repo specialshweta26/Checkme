@@ -299,6 +299,12 @@ async def test_progress_is_rate_limited(fake):
     assert not await service.progress(other, "plan", "x")  # window closed
 
 
+async def test_first_progress_is_sent_soon_after_boot(fake, monkeypatch):
+    monkeypatch.setattr(service.time, "monotonic", lambda: 40.0)  # time.monotonic counts from boot on Linux
+    job = _job("running", channel={"type": "whatsapp", "address": "+919876543210", "inbound_at": datetime.now(timezone.utc).isoformat()})
+    assert await service.progress(job, "plan", "1. Read mail 2. Draft reply")
+
+
 # ---- webhook routes ----
 
 

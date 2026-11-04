@@ -960,7 +960,7 @@ async def progress(job: AgentJob, kind: str, text: str) -> bool:
         return False
     if since > WINDOW - WINDOW_MARGIN or not enabled():
         return False
-    st = _progress_state.setdefault(str(job.id), {"n": 0, "at": 0.0})
+    st = _progress_state.setdefault(str(job.id), {"n": 0, "at": float("-inf")})
     now = time.monotonic()
     if st["n"] >= PROGRESS_MAX or now - st["at"] < PROGRESS_GAP_S:
         return False
