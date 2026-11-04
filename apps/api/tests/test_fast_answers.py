@@ -330,7 +330,7 @@ async def test_quick_web_turn_end_to_end(monkeypatch):
     seen = {}
 
     class Graph:
-        async def ainvoke(self, payload, config=None):
+        async def ainvoke(self, payload, config=None, **kw):
             return {"messages": [AIMessage(content="Here is the news.")]}
 
     def build(ctx, prompt):

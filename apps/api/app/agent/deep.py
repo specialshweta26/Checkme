@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 from langchain_core.tools import StructuredTool
 from langchain_openai import ChatOpenAI
+from langgraph.checkpoint.memory import InMemorySaver
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -2723,6 +2724,8 @@ def build_agent(ctx: RunContext, prompt: str):
         "model": _chat_model(),
         "tools": harness_tools(ctx),
         "system_prompt": prompt,
+        # Lives for this turn only, so a run that hits the step limit continues instead of starting over.
+        "checkpointer": InMemorySaver(),
     }
     middleware = _todo_middleware()
     if middleware:
@@ -2752,6 +2755,16 @@ def _is_recursion_limit(exc: BaseException) -> bool:
         return True
     msg = str(exc).lower()
     return "recursion limit" in msg or "recursed" in msg
+
+
+async def _can_resume(graph: Any, config: dict) -> bool:
+    """Whether the turn's checkpoint holds progress to continue from."""
+    try:
+        state = await graph.aget_state(config)
+    except Exception:  # noqa: BLE001 - starting over is the fallback
+        log.warning("could not read the run checkpoint", exc_info=True)
+        return False
+    return bool((state.values or {}).get("messages"))
 
 
 def last_text(messages: list) -> str:
@@ -3270,15 +3283,18 @@ async def _run_deep_agent(
         limit = min(max(24, get_settings().max_agent_steps * 3), 120 if coding else 48)
     text = ""
     peer = f":peer:{getattr(workspace_agent, 'id', 'x')}" if teammate_depth else ""
+    thread = {"configurable": {"thread_id": f"{session_id}{peer}"}}
+    next_input: dict | None = payload
     for attempt in range(3):
         try:
             result = await graph.ainvoke(
-                payload,
+                next_input,
                 config={
                     "recursion_limit": limit,
-                    "configurable": {"thread_id": f"{session_id}{peer}:r{attempt}"},
+                    **thread,
                     **({"callbacks": callbacks} if callbacks else {}),
                 },
+                durability="exit",  # only a stopped run needs the checkpoint, so skip writing one per step
             )
             text = last_text(result.get("messages") if isinstance(result, dict) else [])
             break
@@ -3287,9 +3303,11 @@ async def _run_deep_agent(
                 raise run_cancel.TurnCancelled("stopped") from exc
             if _is_recursion_limit(exc) and attempt < 2:
                 limit = min(limit + 40, 280 if coding else 200)
+                resumed = await _can_resume(graph, thread)
+                next_input = None if resumed else payload  # None continues from the checkpoint
                 if progress is not None:
-                    await progress.emit("That took many steps; giving it one more pass", kind="retry")
-                log.warning("recursion limit reached; retry %s/2 with limit=%s", attempt + 1, limit)
+                    await progress.emit("That took many steps; continuing where it stopped", kind="retry")
+                log.warning("recursion limit reached; retry %s/2 with limit=%s resumed=%s", attempt + 1, limit, resumed)
                 continue
             log.exception("deep agent failed")
             text = f"I could not finish that request: {str(exc)[:240]}"

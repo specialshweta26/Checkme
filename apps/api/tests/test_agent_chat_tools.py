@@ -297,7 +297,7 @@ async def test_run_deep_agent_executes_confirmed_workspace_delete(ws, monkeypatc
         return ""
 
     class Graph:
-        async def ainvoke(self, payload, config=None):
+        async def ainvoke(self, payload, config=None, **kw):
             called["messages"] = [m.content for m in payload["messages"]]
             return {"messages": []}
 
