@@ -190,6 +190,10 @@ services:
     branch: main
     dockerfilePath: ./deploy/postgres/Dockerfile
     dockerContext: ./deploy/postgres
+    # Redeploy only when the database image changes, not on every merge to main.
+    buildFilter:
+      paths:
+        - deploy/postgres/**
     envVars:
       - key: POSTGRES_USER
         value: assistant
