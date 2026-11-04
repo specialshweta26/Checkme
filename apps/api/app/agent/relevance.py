@@ -162,10 +162,10 @@ def default_scorer(mode: str = "auto") -> Scorer:
         mode = "auto"
     if mode == "keywords" or not get_settings().openai_api_key:
         return Scorer(mode="keywords")
-    from app.llm import chat_complete, embed_texts
+    from app.llm import chat_complete, embed_texts, small_model
 
     async def llm(prompt: str) -> str:
-        resp = await chat_complete([{"role": "user", "content": prompt}], response_format={"type": "json_object"}, max_tokens=400)
+        resp = await chat_complete([{"role": "user", "content": prompt}], response_format={"type": "json_object"}, max_tokens=400, model=small_model())
         return resp.choices[0].message.content or ""
 
     return Scorer(embed=embed_texts, llm=llm, mode=mode)

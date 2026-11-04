@@ -25,6 +25,12 @@ def openai_client() -> AsyncOpenAI:
     return _client
 
 
+def small_model() -> str:
+    """Model for background and routing calls: OPENAI_SMALL_MODEL, else OPENAI_MODEL."""
+    s = get_settings()
+    return (s.openai_small_model or "").strip() or s.openai_model
+
+
 def reasoning_payload() -> dict[str, str]:
     effort = (get_settings().openai_reasoning_effort or "").strip() or "none"
     if effort == "none":

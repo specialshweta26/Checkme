@@ -18,7 +18,7 @@ from app.agent.memory import (
     upsert_core,
     read_core,
 )
-from app.llm import chat_complete
+from app.llm import chat_complete, small_model
 from app.models import ChatMessage, MemoryExtractJob, User, WorkspaceAgent
 
 log = logging.getLogger(__name__)
@@ -179,6 +179,7 @@ async def _extract_json(user_text: str, assistant_text: str) -> dict:
             response_format={"type": "json_object"},
             max_tokens=500,
             temperature=0,
+            model=small_model(),
         )
         raw = (resp.choices[0].message.content or "").strip()
         data = json.loads(raw)

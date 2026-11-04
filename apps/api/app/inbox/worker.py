@@ -34,9 +34,6 @@ async def _mail_user_ids() -> list:
 
 async def ingest_all_inboxes() -> int:
     """Store new mail for every connected account. Does not need a browser session."""
-    import time
-
-    t0 = time.time()
     arrived = 0
     for user_id in await _mail_user_ids():
         try:
@@ -51,11 +48,6 @@ async def ingest_all_inboxes() -> int:
             await asyncio.sleep(0)
         except Exception:  # noqa: BLE001
             log.exception("inbox ingest failed for user %s", user_id)
-    # #region agent log
-    from app.debug_ndjson import dbg
-
-    dbg("B", "inbox/worker.py:ingest", "ingest end", {"ms": int((time.time() - t0) * 1000), "arrived": arrived})
-    # #endregion
     return arrived
 
 

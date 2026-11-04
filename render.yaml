@@ -89,6 +89,8 @@ services:
         value: gpt-6-luna
       - key: OPENAI_REASONING_EFFORT
         value: none
+      - key: OPENAI_SMALL_MODEL
+        sync: false
       - key: DAYTONA_API_KEY
         sync: false
       - key: DAYTONA_API_URL

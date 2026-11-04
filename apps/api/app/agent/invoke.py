@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import timedelta
 from typing import Any
@@ -89,7 +90,7 @@ def _load_mail_files(args: dict) -> dict:
 async def invoke_named(db, user, conn, tool_name: str, args: dict, attachments: list) -> Any:
     runtime = RuntimeConnector(conn)
     if tool_name in {"send_message", "reply", "forward", "create_draft"}:
-        args = _load_mail_files(args)
+        args = await asyncio.to_thread(_load_mail_files, args)
     if tool_name in STAFF_TOOLS:
         return await staff_dispatch(db, user, runtime, tool_name, args)
     if tool_name in {"create_event", "create_google_meet", "create_teams_meeting"}:

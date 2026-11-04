@@ -297,52 +297,6 @@ def as_dict(value: Any) -> dict:
     return value if isinstance(value, dict) else {}
 
 
-def _dbg_arg_peek(args: dict | None) -> dict:
-    raw = args or {}
-    inner = raw.get("arguments") if isinstance(raw.get("arguments"), dict) else raw
-    if not isinstance(inner, dict):
-        inner = {}
-    keep = ("brand", "brand_id", "entity", "preset", "since", "until", "start", "end", "query", "q", "trend")
-    peek = {k: str(inner.get(k))[:80] for k in keep if inner.get(k) not in (None, "")}
-    peek["arg_keys"] = list(inner.keys())[:16]
-    if raw.get("tool_name"):
-        peek["inner_tool"] = str(raw.get("tool_name"))[:120]
-    return peek
-
-
-def _dbg_result_peek(result: Any) -> dict:
-    if not isinstance(result, dict):
-        return {"type": type(result).__name__}
-    daily = result.get("daily") or result.get("days") or result.get("series")
-    rows = daily if isinstance(daily, list) else []
-
-    def _num(row: Any) -> float:
-        if not isinstance(row, dict):
-            return 0.0
-        for key in ("net_sales", "net", "sales", "revenue", "value"):
-            val = row.get(key)
-            if isinstance(val, dict):
-                val = val.get("value") or val.get("amount")
-            try:
-                return float(val or 0)
-            except (TypeError, ValueError):
-                continue
-        return 0.0
-
-    msgs = result.get("messages") or result.get("items") or []
-    return {
-        "keys": list(result.keys())[:16],
-        "brand": str(result.get("brand") or result.get("brand_id") or "")[:40],
-        "window": str(result.get("window") or "")[:80],
-        "daily_n": len(rows) if isinstance(daily, list) else (None if daily is None else type(daily).__name__),
-        "daily_nonzero": sum(1 for row in rows if _num(row) != 0),
-        "cat_empty": not bool(result.get("by_category")),
-        "msg_n": len(msgs) if isinstance(msgs, list) else None,
-        "too_large": bool(result.get("too_large")),
-        "has_error": bool(result.get("error")),
-    }
-
-
 def _now(tz: str) -> datetime:
     try:
         return datetime.now(ZoneInfo(tz or "Asia/Kolkata"))
@@ -486,25 +440,6 @@ async def _expand_gateway_catalog(ctx: RunContext, conn, query: str) -> list[dic
         execute_name,
         capability_terms(query),
     )
-    # #region agent log
-    from app.debug_ndjson import dbg
-
-    dbg(
-        "D",
-        "deep.py:_expand_gateway_catalog",
-        "gateway expand",
-        {
-            "slug": conn.slug,
-            "provider": getattr(conn, "provider", "") or "",
-            "search": search_name or "",
-            "execute": execute_name or "",
-            "query": (query or "")[:80],
-            "toolkit": toolkit or "",
-            "parsed_n": len(parsed),
-            "names": [str(r.get("tool_name") or "")[:80] for r in rows[:10]],
-        },
-    )
-    # #endregion
     return rows
 
 
@@ -881,20 +816,6 @@ async def list_user_connectors(ctx: RunContext) -> list[dict]:
             }
         )
     out.extend(await _connected_marketplace_apps(ctx))
-    # #region agent log
-    from app.debug_ndjson import dbg
-
-    dbg(
-        "A",
-        "deep.py:list_user_connectors",
-        "listed connectors",
-        {
-            "slugs": [item["slug"] for item in out],
-            "kinds": [item["kind"] for item in out],
-            "has_composio": any(item["slug"] == "composio" or item["kind"] == "marketplace" for item in out),
-        },
-    )
-    # #endregion
     return out
 
 
@@ -945,14 +866,12 @@ async def _connected_marketplace_apps(ctx: RunContext) -> list[dict]:
 
 async def search_user_tools(ctx: RunContext, query: str, connector_slug: str | None = None) -> list[dict]:
     conns = list(ctx.connectors.values())
-    scoped = False
     if connector_slug:
         conn = ctx.connectors.get(connector_slug)
         if conn is None:
             return [{"error": f"connector '{connector_slug}' is not connected for this user"}]
         if keep_connector_scope(getattr(conn, "provider", None), query):
             conns = [conn]
-            scoped = True
     hits = await search_tools(ctx.db, conns, query, 40) if ctx.db is not None else []
     q = (query or "").lower()
     wanted: set[tuple[str, str]] = set()
@@ -1127,38 +1046,6 @@ async def search_user_tools(ctx: RunContext, query: str, connector_slug: str | N
         if is_catalog_tool(row["tool_name"]) or row["tool_name"] in GATEWAY_EXECUTE_NAMES
     ]
     merged = nested + data_local + (catalog_local if not nested else [])
-    # #region agent log
-    from app.debug_ndjson import dbg
-
-    dbg(
-        "B",
-        "deep.py:search_user_tools",
-        "catalog search results",
-        {
-            "query": (query or "")[:80],
-            "slug": connector_slug or "",
-            "scoped": scoped,
-            "extras": extra_capability_terms(query)[:8],
-            "conn_slugs": [c.slug for c in conns],
-            "calendary": calendary,
-            "has_composio_conn": any(getattr(c, "provider", None) == "composio" for c in conns),
-            "tools": [f"{row['connector_slug']}.{row['tool_name']}" for row in merged][:24],
-            "nested": len(nested),
-            "teams_hits": [
-                f"{row['connector_slug']}.{row['tool_name']}"
-                for row in merged
-                if "team" in (row.get("tool_name") or "").lower()
-                or "chat" in (row.get("tool_name") or "").lower()
-            ][:12],
-            "composio_hits": [row["tool_name"] for row in merged if row.get("connector_slug") == "composio"][:12],
-            "has_get_thread": any(row["tool_name"] == "get_thread" for row in merged),
-            "has_get_message": any(row["tool_name"] == "get_message" for row in merged),
-            "has_send_message": any(row["tool_name"] == "send_message" for row in merged),
-            "has_summarize_attachments": any(row["tool_name"] == "summarize_attachments" for row in merged),
-            "has_list_attachments": any(row["tool_name"] == "list_attachments" for row in merged),
-        },
-    )
-    # #endregion
     return [{k: v for k, v in row.items() if k != "score"} for row in merged]
 
 
@@ -1185,22 +1072,6 @@ async def get_user_tool_schema(ctx: RunContext, connector_slug: str, tool_name: 
     hits = await load_named(ctx.db, [conn], {(connector_slug, tool_name)}) if ctx.db is not None else []
     if not hits:
         fallback = _builtin_mail_spec(conn, tool_name)
-        # #region agent log
-        from app.debug_ndjson import dbg
-
-        dbg(
-            "F",
-            "deep.py:get_user_tool_schema",
-            "tool missing from index",
-            {
-                "slug": connector_slug,
-                "tool": tool_name,
-                "server_key": bool(conn.server_key),
-                "fallback": bool(fallback),
-                "provider": getattr(conn, "provider", "") or "",
-            },
-        )
-        # #endregion
         if fallback:
             return fallback
         surface = await _load_gateway_surface(ctx, conn)
@@ -1384,7 +1255,6 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
     if tool_name == "get_thread":
         args = _complete_thread_args(ctx, args)
     try:
-        t_invoke = __import__("time").time()
         if connector_slug == "computer":
             from app.connectors.daytona_box import set_computer_agent
 
@@ -1393,58 +1263,8 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
             result = await ctx.call_impl(connector_slug, tool_name, args)
         else:
             result = await invoke_named(ctx.db, ctx.user, conn, tool_name, args, ctx.attachments)
-        # #region agent log
-        from app.debug_ndjson import dbg
-
-        dbg(
-            "C",
-            "deep.py:call_user_tool",
-            "tool elapsed",
-            {
-                "slug": connector_slug,
-                "orig_tool": orig_tool,
-                "tool": tool_name,
-                "ms": int((__import__("time").time() - t_invoke) * 1000),
-            },
-        )
-
-        peek = _dbg_result_peek(result)
-        dbg(
-            "C",
-            "deep.py:call_user_tool",
-            "tool invoked",
-            {
-                "slug": connector_slug,
-                "orig_tool": orig_tool,
-                "tool": tool_name,
-                "args": _dbg_arg_peek(orig_args),
-                "wrapped": _dbg_arg_peek(args),
-                "has_error": bool(isinstance(result, dict) and result.get("error")),
-                "error": (result.get("error")[:160] if isinstance(result, dict) and result.get("error") else ""),
-                "has_message_id": bool(isinstance(result, dict) and (result.get("message_id") or (result.get("messages") or [{}])[0].get("message_id"))),
-                "attachment_count": len(result.get("attachments") or []) if isinstance(result, dict) else 0,
-                **peek,
-            },
-        )
-        # #endregion
         result = await _hydrate_opened_mail(ctx, connector_slug, tool_name, result)
         await _track_github_writes(ctx, conn, tool_name, args, result)
-        # #region agent log
-        if tool_name in {"search_messages", "list_messages"}:
-            from app.debug_ndjson import dbg
-
-            dbg(
-                "B",
-                "deep.py:_hydrate_opened_mail",
-                "mail follow-up",
-                {
-                    "slug": connector_slug,
-                    "wants_open": _wants_mail_open(ctx.query),
-                    "did_open": bool(isinstance(result, dict) and result.get("opened_message")),
-                    "did_summarize": bool(isinstance(result, dict) and result.get("attachment_open")),
-                },
-            )
-        # #endregion
         if ctx.db is not None:
             await bump_usage(ctx.db, ctx.user.id, conn.id, tool_name, True)
         source_name = _source_tool(connector_slug, tool_name, args)
@@ -3252,11 +3072,7 @@ async def _run_deep_agent(
     task_key: str | None = None,
 ) -> dict[str, Any]:
     from app.connectors.platform import ensure_platform_connectors
-    from app.debug_ndjson import dbg as _dbg_start
 
-    # #region agent log
-    _dbg_start("C", "deep.py:run_deep_agent", "agent start", {"query": (query or "")[:80], "n_history": len(history or [])})
-    # #endregion
     import time as _time
 
     from app.agent import fast_path
@@ -3481,23 +3297,6 @@ async def _run_deep_agent(
     timer.mark("agent", _t)
     timer.log()
     source = ctx.sources[-1] if ctx.sources else None
-    # #region agent log
-    from app.debug_ndjson import dbg
-
-    dbg(
-        "B",
-        "deep.py:run_deep_agent",
-        "agent finished",
-        {
-            "query": (query or "")[:80],
-            "used_tools": ctx.used_tools,
-            "skills_used": ctx.active_skills,
-            "attachment_cards": len(ctx.attachments),
-            "claimed_search_only": "only provides" in (text or "").lower() or "searching" in (text or "").lower(),
-            "text_head": (text or "")[:160],
-        },
-    )
-    # #endregion
     had_card = bool(_connect_cards(ctx))
     await _maybe_start_connect(ctx, query)
     cards = _connect_cards(ctx)

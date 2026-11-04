@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 import uuid
 from urllib.parse import quote
@@ -24,14 +25,14 @@ async def get_file(t: str = Query(..., min_length=8), render: bool = False):
     if not data or not data.get("key"):
         raise HTTPException(404, "File not found.")
     try:
-        body, stored_type = get_bytes(data["key"])
+        body, stored_type = await asyncio.to_thread(get_bytes, data["key"])
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(404, "File not found") from exc
     filename = data.get("filename") or "file"
     content_type = guess_media_type(filename, data.get("content_type") or stored_type)
     if render and content_type == "application/pdf":
         try:
-            png = render_pdf_preview(body, max_pages=12)
+            png = await asyncio.to_thread(render_pdf_preview, body, max_pages=12)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(422, "Could not render this PDF") from exc
         return Response(
@@ -65,7 +66,7 @@ async def upload_files(files: list[UploadFile] = File(...), user: User = Depends
         filename = re.sub(r"[^A-Za-z0-9._-]+", "_", upload.filename or "file")[:180] or "file"
         content_type = guess_media_type(filename, upload.content_type)
         key = f"{user.id}/{uuid.uuid4().hex}/{filename}"
-        put_bytes(key, data, content_type)
+        await asyncio.to_thread(put_bytes, key, data, content_type)
         preview = is_previewable(filename, content_type)
         kind = "pdf" if "pdf" in content_type or filename.lower().endswith(".pdf") else "image" if content_type.startswith("image/") else "file"
         out.append(
@@ -78,7 +79,7 @@ async def upload_files(files: list[UploadFile] = File(...), user: User = Depends
                 "download_url": signed_url(key, upload.filename or filename, inline=False, content_type=content_type),
                 "preview_url": signed_url(key, upload.filename or filename, inline=True, content_type=content_type) if preview else None,
                 "previewable": preview,
-                "extracted_text": clip(extract_text(filename, content_type, data, limit=8000) or "", 4000),
+                "extracted_text": clip(await asyncio.to_thread(extract_text, filename, content_type, data, limit=8000) or "", 4000),
             }
         )
     return {"files": out}

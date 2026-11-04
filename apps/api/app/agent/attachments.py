@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -88,14 +89,14 @@ async def store_blob(user_id, blob, message_id: str = "", attachment_id: str = "
 
     safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", blob.filename or "file")[:180] or "file"
     key = f"{user_id}/{uuid.uuid4().hex}/{safe_name}"
-    put_bytes(key, blob.data, blob.content_type)
+    await asyncio.to_thread(put_bytes, key, blob.data, blob.content_type)
     download = signed_url(key, blob.filename, inline=False, content_type=blob.content_type)
     preview = (
         signed_url(key, blob.filename, inline=True, content_type=blob.content_type)
         if is_previewable(blob.filename, blob.content_type)
         else None
     )
-    text = extract_text(blob.filename, blob.content_type, blob.data, limit=8000)
+    text = await asyncio.to_thread(extract_text, blob.filename, blob.content_type, blob.data, limit=8000)
     card = {
         "filename": blob.filename,
         "content_type": blob.content_type,

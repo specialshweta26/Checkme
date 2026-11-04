@@ -197,7 +197,11 @@ async def confirm_skills(query: str, candidates: list[dict], llm=None) -> list[d
 
             if not get_settings().openai_api_key:
                 return [{**c, "match": {**(c.get("match") or {}), "confirmed": None}} for c in candidates]
-            from app.llm import chat_complete as llm
+            from functools import partial
+
+            from app.llm import chat_complete, small_model
+
+            llm = partial(chat_complete, model=small_model())
         resp = await asyncio.wait_for(llm(messages, response_format={"type": "json_object"}, max_tokens=200), CONFIRM_TIMEOUT)
         text = resp.choices[0].message.content if hasattr(resp, "choices") else str(resp)
         data = json.loads(text or "{}")

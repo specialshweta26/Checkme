@@ -31,6 +31,8 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-6-luna"
     openai_embedding_model: str = "text-embedding-3-small"
     openai_reasoning_effort: str = "none"
+    # Model for background and routing calls (memory, skill matching, browser planning). Empty = OPENAI_MODEL.
+    openai_small_model: str = ""
     embedding_dims: int = 1536
 
     google_client_id: str = Field(default="", validation_alias=AliasChoices("GOOGLE_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_ID"))
@@ -195,7 +197,7 @@ class Settings(BaseSettings):
     browser_smart_waits: bool = True  # DOM-quiet / load-state waits instead of fixed sleeps in the daemon
     browser_compact_snapshot: bool = True  # model sees the numbered tree, not the 150-element JSON list
     browser_fast_loop: bool = True  # browser_task: a small model plans batches of actions, escalates on failure
-    browser_fast_model: str = ""  # model for routine browser steps; empty = OPENAI_MODEL
+    browser_fast_model: str = ""  # model for routine browser steps; empty = OPENAI_SMALL_MODEL, then OPENAI_MODEL
     browser_escalate_model: str = ""  # model after repeated failures; empty = OPENAI_MODEL
     browser_fast_max_steps: int = 12  # model rounds per browser_task
     browser_replay: bool = True  # save successful browser_task runs and replay them without model calls

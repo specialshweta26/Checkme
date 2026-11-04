@@ -355,7 +355,8 @@ async def send_reply(
     item.draft = body
     from app.agent.invoke import _load_mail_files
 
-    args = _load_mail_files(
+    args = await asyncio.to_thread(
+        _load_mail_files,
         {
             "message_id": item.message_id,
             "body": body,
@@ -363,7 +364,7 @@ async def send_reply(
             "reply_all": bool(reply_all),
             "cc": _address_list(cc),
             "bcc": _address_list(bcc),
-        }
+        },
     )
     result = await runtime.call("reply", args)
     if isinstance(result, dict) and result.get("error"):
