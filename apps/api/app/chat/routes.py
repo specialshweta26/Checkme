@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import time
 import uuid
 from datetime import datetime, timezone
 
@@ -248,12 +247,6 @@ async def chat(
             workspace_agent = owner
             working["owner_id"] = str(owner.id)
 
-    # #region agent log
-    from app.debug_ndjson import dbg
-
-    dbg("B", "chat/routes.py:chat", "chat request", {"query": text[:80], "has_session": bool(body.session_id)})
-    # #endregion
-    t0 = time.time()
     routed = await _maybe_start_job(db, user, sess, workspace_agent, group, confirms, text, agent_text, history, request_id)
     if routed is not None:
         return routed
@@ -320,25 +313,10 @@ async def chat(
                 progress=progress,
                 client_kind=(request.headers.get("x-lumio-client") or "web"),
             )
-            # #region agent log
-            dbg(
-                "C",
-                "chat/routes.py:chat",
-                "agent returned",
-                {
-                    "ms": int((time.time() - t0) * 1000),
-                    "n_tools": len(result.get("used_tools") or []),
-                    "used_tools": (result.get("used_tools") or [])[:16],
-                },
-            )
-            # #endregion
         except Exception as exc:  # noqa: BLE001
             if run.cancelled or isinstance(exc, run_cancel.TurnCancelled):
                 raise run_cancel.TurnCancelled("stopped") from exc
             log.exception("chat agent failed")
-            # #region agent log
-            dbg("C", "chat/routes.py:chat", "agent exception", {"error": str(exc)[:200], "ms": int((time.time() - t0) * 1000)})
-            # #endregion
             working_message.content = "I couldn't finish that request. You can retry or continue in this chat."
             working_message.meta = {**(working_message.meta or {}), "in_progress": False, "failed": True}
             try:

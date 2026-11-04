@@ -1,6 +1,9 @@
 from types import SimpleNamespace
 
+from app.agent import fast_browser
+from app.config import get_settings
 from app.llm import (
+    small_model,
     _EMB_LOCAL,
     _as_chat_completion,
     _responses_tools,
@@ -80,3 +83,19 @@ async def test_embed_texts_uses_process_cache_not_redis(monkeypatch):
     assert first == [[0.1, 0.2]]
     assert second == [[0.1, 0.2], [0.1, 0.2]]
     assert calls == [["hello"]]
+
+
+def test_small_model_falls_back_to_the_main_model(monkeypatch):
+    monkeypatch.setattr(get_settings(), "openai_model", "main-model")
+    monkeypatch.setattr(get_settings(), "openai_small_model", "")
+    assert small_model() == "main-model"
+    monkeypatch.setattr(get_settings(), "openai_small_model", "tiny-model")
+    assert small_model() == "tiny-model"
+
+
+def test_browser_fast_model_prefers_its_own_setting_then_small_model(monkeypatch):
+    monkeypatch.setattr(get_settings(), "openai_small_model", "tiny-model")
+    monkeypatch.setattr(get_settings(), "browser_fast_model", "")
+    assert fast_browser.fast_model() == "tiny-model"
+    monkeypatch.setattr(get_settings(), "browser_fast_model", "browser-model")
+    assert fast_browser.fast_model() == "browser-model"

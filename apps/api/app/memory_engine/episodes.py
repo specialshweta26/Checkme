@@ -91,7 +91,7 @@ def _manager():
 
 
 async def _extract_local(user_text: str, assistant_text: str) -> list[dict]:
-    from app.llm import chat_complete
+    from app.llm import chat_complete, small_model
 
     prompt = (
         _INSTRUCTIONS
@@ -103,6 +103,7 @@ async def _extract_local(user_text: str, assistant_text: str) -> list[dict]:
         response_format={"type": "json_object"},
         max_tokens=1200,
         temperature=0,
+        model=small_model(),
     )
     raw = (resp.choices[0].message.content or "").strip()
     return normalize_episodes(json.loads(raw) if raw else {})

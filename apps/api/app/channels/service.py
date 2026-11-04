@@ -9,6 +9,7 @@ everything is scoped by the link's user_id; approvals are only accepted from a n
 
 from __future__ import annotations
 
+import asyncio
 import difflib
 import logging
 import re
@@ -544,7 +545,7 @@ async def _content(user: User, msg: Inbound, cmd: Command) -> tuple[str, list[di
         if not said:
             return text, [], "I couldn't make out that voice note. Could you type it?"
         return (f"{text}\n\n" if text else "") + f"(voice note) {said}", [], ""
-    card = _store_upload(user, data, mime, msg.filename or _default_name(msg.kind, mime))
+    card = await asyncio.to_thread(_store_upload, user, data, mime, msg.filename or _default_name(msg.kind, mime))
     extracted = (card.get("extracted_text") or "").strip()
     bits = f"- {card['filename']} (attachment_key={card['key']})" + (f"\n{extracted[:3000]}" if extracted else "")
     body = (text or ("Please look at this photo." if msg.kind == "image" else "Please review the attached file."))

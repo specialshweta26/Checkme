@@ -5,7 +5,7 @@ to the normal screenshot / browser_act loop on any error:
 
 - ``for_model``: the model reads the numbered element tree (``- e3 textbox Email [email]``), not the 150-element
   JSON list and screenshot paths (BROWSER_COMPACT_SNAPSHOT).
-- ``browser_task``: a small fast model (BROWSER_FAST_MODEL, default OPENAI_MODEL) plans a batch of actions per
+- ``browser_task``: a small fast model (BROWSER_FAST_MODEL, default OPENAI_SMALL_MODEL, then OPENAI_MODEL) plans a batch of actions per
   call; the daemon runs them and stops at the first failure. After repeated failures it escalates to
   BROWSER_ESCALATE_MODEL, then returns ``fallback`` so the main agent continues itself (BROWSER_FAST_LOOP).
 - Traces: a finished browser_task is saved as selector steps (``browser_traces``) and replayed next time with
@@ -54,8 +54,9 @@ def setting(name: str, default: Any = True) -> Any:
 
 
 def fast_model() -> str:
-    s = get_settings()
-    return (str(getattr(s, "browser_fast_model", "") or "").strip()) or s.openai_model
+    from app.llm import small_model
+
+    return (str(getattr(get_settings(), "browser_fast_model", "") or "").strip()) or small_model()
 
 
 def escalate_model() -> str:
