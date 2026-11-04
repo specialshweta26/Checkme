@@ -130,7 +130,7 @@ def test_catalog_lines_label_computer_and_marketplace():
 
 
 def test_daemon_version_is_current():
-    assert DAEMON_VERSION == "23"
+    assert DAEMON_VERSION == "24"
 
 
 def test_bot_wall_detects_sorry_and_skips_cookie_consent():

@@ -15,7 +15,7 @@ from pathlib import Path
 
 HOST = "127.0.0.1"
 PORT = 18765
-VERSION = "23"
+VERSION = "24"
 _HOME = Path(os.environ.get("CHECKME_BROWSER_HOME") or "/tmp")
 SHOT = "/tmp/checkme-browser.png"
 PROFILE = str(_HOME / "profile")
@@ -835,7 +835,25 @@ def looks_like_file_url(url: str) -> bool:
     return bool(_FILE_EXT.search("/" + path)) or bool(re.search(r"[?&](download|export|attachment)=", text, re.I))
 
 
-_SECRET_HINT = re.compile(r"pass|pwd|otp|one.?time|cvv|cvc|pin\b|secret|security.?code|card.?number|cc-number|cc-csc", re.I)
+# Matched against secret_text(), so word edges work for snake_case and camelCase names. _REC_JS holds a copy.
+_SECRET_PATTERN = (
+    r"password|passwd|passcode|passphrase|passkey|pwd|cvv|cvc|secret|token|one ?time|\bpass(?:port)?\d*\b|\bpword\b|"
+    r"(?:\b|sms|email|mobile|phone|login|user)otp|\btotp\b|\bmfa\b|\b2fa\b|\bcsc\b|\bssn\b|\b[mtu]?pin\d*\b|"
+    r"(?:security|verification|verify|auth|authentication|access|login|sms|email) ?code|"
+    r"card ?(?:number|num|no)\b|\bcc ?(?:number|num|csc)\b"
+)
+_SECRET_HINT = re.compile(_SECRET_PATTERN)
+
+
+def secret_text(text: str) -> str:
+    """Lower-case words with camelCase and punctuation split, so `passenger_name` is not read as `pass`."""
+    spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", str(text or ""))
+    return re.sub(r"[^A-Za-z0-9]+", " ", spaced).lower().strip()
+
+
+def looks_secret(text: str) -> bool:
+    """Whether a field name or label reads like a password, one-time code, card number or similar."""
+    return bool(_SECRET_HINT.search(secret_text(text)))
 
 
 def is_secret_target(target: dict | None) -> bool:
@@ -844,7 +862,7 @@ def is_secret_target(target: dict | None) -> bool:
     if str(t.get("input_type") or "").lower() == "password":
         return True
     blob = " ".join(str(t.get(k) or "") for k in ("name_attr", "id", "autocomplete", "label", "placeholder", "aria_label"))
-    return bool(_SECRET_HINT.search(blob))
+    return looks_secret(blob)
 
 
 _DESCRIPTOR_KEYS = ("role", "name", "tag", "id", "name_attr", "placeholder", "aria_label", "testid", "label", "input_type", "autocomplete", "href")
@@ -976,7 +994,8 @@ _REC_JS = r"""() => {
   const BASE = 'a, button, input, textarea, select, option, label, summary, [role="button"], [role="link"], [role="textbox"], [role="searchbox"], [role="checkbox"], [role="radio"], [role="combobox"], [role="option"], [role="tab"], [role="menuitem"], [contenteditable="true"]';
   const tags = {A: 'link', BUTTON: 'button', INPUT: 'textbox', TEXTAREA: 'textbox', SELECT: 'combobox', OPTION: 'option', LABEL: 'label', SUMMARY: 'button'};
   const inputRole = {submit: 'button', button: 'button', reset: 'button', image: 'button', checkbox: 'checkbox', radio: 'radio', search: 'searchbox', file: 'file'};
-  const secretRe = /pass|pwd|otp|one.?time|cvv|cvc|pin\b|secret|security.?code|card.?number|cc-number|cc-csc/i;
+  const secretRe = /password|passwd|passcode|passphrase|passkey|pwd|cvv|cvc|secret|token|one ?time|\bpass(?:port)?\d*\b|\bpword\b|(?:\b|sms|email|mobile|phone|login|user)otp|\btotp\b|\bmfa\b|\b2fa\b|\bcsc\b|\bssn\b|\b[mtu]?pin\d*\b|(?:security|verification|verify|auth|authentication|access|login|sms|email) ?code|card ?(?:number|num|no)\b|\bcc ?(?:number|num|csc)\b/;
+  const secretText = (s) => s.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[^A-Za-z0-9]+/g, ' ').toLowerCase();
   const desc = (el) => {
     const a = (k) => (el.getAttribute && el.getAttribute(k) || '').slice(0, 120);
     const type = (a('type') || '').toLowerCase();
@@ -1006,7 +1025,7 @@ _REC_JS = r"""() => {
     const t = desc(el);
     const type = t.input_type;
     if (type === 'file') return;
-    const secret = type === 'password' || secretRe.test([t.name_attr, t.id, t.autocomplete, t.label, t.placeholder, t.aria_label].join(' '));
+    const secret = type === 'password' || secretRe.test(secretText([t.name_attr, t.id, t.autocomplete, t.label, t.placeholder, t.aria_label].join(' ')));
     if (el.tagName === 'SELECT') { send({kind: 'select', target: t, text: String(el.value || '').slice(0, 200)}); return; }
     if (type === 'checkbox' || type === 'radio') { send({kind: el.checked ? 'check' : 'uncheck', target: t}); return; }
     const value = el.isContentEditable ? el.innerText : el.value;

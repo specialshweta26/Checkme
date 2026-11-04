@@ -559,3 +559,129 @@ def test_page_brief_keeps_the_end_of_a_long_page_and_a_draft():
     text = brief.split("Text:\n", 1)[1].split("\nElements:", 1)[0]
     assert "Composer still holds: Hello" in brief
     assert "\n…\n" in text and text.rstrip().endswith("Hello")
+
+
+@pytest.mark.parametrize("name", ["shipping_address", "passenger_name", "promo_code", "zip_code", "country_code", "pincode", "compassion", "spin", "laptop", "hotpot", "shippingAddress", "passengerName"])
+def test_ordinary_fields_are_not_secret(name):
+    assert not d.looks_secret(name) and not fb.secret_param(name)
+    assert not d.is_secret_target({"name_attr": name})
+
+
+@pytest.mark.parametrize("name", ["password", "userPassword", "userpassword", "user_pass", "pass", "passwd", "pwd", "otp", "smsOtp", "emailotp", "enterOTP", "cvv", "cc-csc", "cc-number", "cardNumber", "card_number", "one-time-code", "security code", "verification_code", "pin", "mpin", "api_token", "client_secret", "passport_number"])
+def test_secret_fields_are_detected(name):
+    assert d.looks_secret(name) and fb.secret_param(name)
+
+
+def test_a_bare_code_placeholder_is_secret_but_only_as_a_placeholder():
+    assert fb.secret_param("code") and not d.looks_secret("code")
+
+
+def test_recorder_script_uses_the_same_secret_pattern():
+    assert "const secretRe = /" + d._SECRET_PATTERN + "/;" in d._REC_JS
+
+
+@pytest.mark.parametrize("label", ["Send", "Send message", "Confirm order", "Proceed to payment", "Submit payment", "Book flight", "Cancel my order", "भुगतान करें", "अभी खरीदें", "भेजें"])
+def test_final_click_catches_more_final_labels(label):
+    state = {"elements": [{"ref": "e1", "name": label, "role": "button"}]}
+    assert fb.final_click([{"kind": "click", "ref": "e1"}], state) == label
+
+
+@pytest.mark.parametrize("label", ["Send code", "Send OTP", "Send me a link", "Resend", "Continue", "Proceed", "Next", "Checkout"])
+def test_final_click_leaves_ordinary_steps_alone(label):
+    state = {"url": "https://acme.test/login", "text": "Sign in", "elements": [{"ref": "e1", "name": label, "role": "button"}]}
+    assert fb.final_click([{"kind": "click", "ref": "e1"}], state) == ""
+
+
+@pytest.mark.parametrize("page", [{"text": "Amount payable: Rs 500. Enter CVV"}, {"url": "https://acme.test/payment/step2"}])
+def test_final_click_is_stricter_on_a_payment_page(page):
+    state = {"url": "https://acme.test/x", "text": "", **page, "elements": [
+        {"ref": "e1", "name": "Proceed", "role": "button"},
+        {"ref": "e2", "name": "", "role": "button"},
+        {"ref": "e3", "name": "", "role": "textbox"},
+        {"ref": "e4", "name": "Help", "role": "link"},
+    ]}  # fmt: skip
+    assert fb.final_click([{"kind": "click", "ref": "e1"}], state) == "Proceed"
+    assert "unlabeled" in fb.final_click([{"kind": "click", "ref": "e2"}], state)
+    assert "Enter" in fb.final_click([{"kind": "press", "text": "Enter"}], state)
+    assert fb.final_click([{"kind": "press", "text": "Tab"}], state) == ""
+    assert fb.final_click([{"kind": "click", "ref": "e3"}], state) == ""
+    assert fb.final_click([{"kind": "click", "ref": "e4"}], state) == ""
+
+
+def test_trace_final_step_reads_saved_targets():
+    assert fb.trace_final_step([{"kind": "click", "target": {"role": "button", "name": "Pay now"}}]) == "Pay now"
+    assert fb.trace_final_step([{"kind": "click", "target": {"aria_label": "Place order"}}]) == "Place order"
+    assert fb.trace_final_step([{"kind": "click", "target": {"name": "Sign in"}}, {"kind": "fill", "target": {"name": "Pay"}}]) == ""
+
+
+FINAL_TRACE = {"id": "t9", "host": "acme.test", "name": "pay the bill", "goal": "Pay the bill", "start_url": "https://acme.test/bill",
+               "steps": [{"kind": "click", "target": {"role": "button", "name": "Pay now"}}]}  # fmt: skip
+
+
+async def test_browser_task_does_not_replay_a_saved_final_action(monkeypatch, ctx):
+    ctx.store.rows = [dict(FINAL_TRACE)]
+    state = {**LOGIN, "elements": [{"ref": "e9", "name": "Pay now"}]}
+
+    async def snap(c):
+        return state
+
+    async def replay(*a, **k):
+        raise AssertionError("must not replay a saved final action")
+
+    monkeypatch.setattr(fb, "_snapshot", snap)
+    monkeypatch.setattr(fb, "replay", replay)
+    _plans(monkeypatch, ctx, [{"actions": [{"kind": "click", "ref": "e9"}], "done": False, "result": "", "need_user": ""}])
+    out = await fb.browser_task(ctx, "Pay the bill", "", {})
+    assert out["stopped_before"] == "Pay now"
+
+
+async def test_replay_named_refuses_a_saved_final_action(monkeypatch, ctx):
+    ctx.store.rows = [dict(FINAL_TRACE)]
+
+    async def replay(*a, **k):
+        raise AssertionError("must not replay a saved final action")
+
+    monkeypatch.setattr(fb, "replay", replay)
+    out = await fb.replay_named(ctx, "pay the bill", "https://acme.test/bill")
+    assert out["ok"] is False and out["stopped_before"] == "Pay now"
+
+
+async def test_replay_named_runs_a_final_action_the_user_asked_for(monkeypatch, ctx):
+    ctx.store.rows = [dict(FINAL_TRACE)]
+    ran = []
+
+    async def replay(c, trace, values):
+        ran.append(trace["id"])
+        return {"ok": True, "completed": 1, "state": {}}
+
+    monkeypatch.setattr(fb, "replay", replay)
+    out = await fb.replay_named(ctx, "pay the bill", "https://acme.test/bill", allow_final_action=True)
+    assert out["ok"] is True and ran == ["t9"]
+
+
+async def test_browser_task_replays_a_final_action_the_user_asked_for(monkeypatch, ctx):
+    ctx.store.rows = [dict(FINAL_TRACE)]
+    ran = []
+
+    async def replay(c, trace, values):
+        ran.append(trace["id"])
+        return {"ok": True, "completed": 1, "state": {}}
+
+    monkeypatch.setattr(fb, "replay", replay)
+    _plans(monkeypatch, ctx, [])
+    out = await fb.browser_task(ctx, "Pay the bill", "https://acme.test/bill", {}, allow_final_action=True)
+    assert out["via"] == "replay" and ran == ["t9"]
+
+
+@pytest.mark.parametrize("label", ["Download", "Download statement", "Export PDF"])
+def test_downloads_are_never_treated_as_final(label):
+    state = {"url": "https://acme.test/payment/x", "text": "Amount payable", "elements": [{"ref": "e1", "name": label, "role": "button"}]}
+    assert fb.final_click([{"kind": "click", "ref": "e1"}], state) == ""
+    assert fb.trace_final_step([{"kind": "click", "target": {"role": "button", "name": label}}]) == ""
+
+
+def test_browser_replay_tool_accepts_the_permission():
+    from app.agent.harness_extra import BrowserReplayInput
+
+    assert BrowserReplayInput(allow_final_action=True).allow_final_action is True
+    assert BrowserReplayInput().allow_final_action is False
