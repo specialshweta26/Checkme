@@ -144,7 +144,7 @@ def env(monkeypatch):
 
 async def _start(env, message, **kw):
     body = chat_routes.ChatIn(message=message, progress_id=kw.pop("progress_id", "turn_abcdef123456"), **kw)
-    return asyncio.create_task(chat_routes.chat(body, SimpleNamespace(add_task=lambda *a, **k: None), env.user, env.db))
+    return asyncio.create_task(chat_routes.chat(body, SimpleNamespace(add_task=lambda *a, **k: None), SimpleNamespace(headers={}), env.user, env.db))
 
 
 async def _wait_run(env, n=1):
@@ -336,7 +336,7 @@ async def test_stopped_cloud_command_is_killed_on_the_computer_not_the_sandbox(m
     )
     monkeypatch.setattr(computer_harness, "computer_slug", lambda c: "computer")
 
-    async def run_computer(c, tool, args):
+    async def run_computer(c, tool, args, **_kw):
         return await call_impl("computer", tool, args)
 
     monkeypatch.setattr(computer_harness, "run_computer", run_computer)
