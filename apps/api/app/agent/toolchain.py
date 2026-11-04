@@ -259,12 +259,22 @@ def run_name(tag: str) -> str:
 
 
 def kill_script(tag: str) -> str:
-    """Kill the process tree of a command started with ``wrap(..., tag)``. Never touches the sandbox itself."""
+    """Kill the process tree of a command started with ``wrap(..., tag)``. Never touches the sandbox itself.
+
+    A shell whose child dies moves straight on to its next command, so in ``sleep 30; deploy`` no signal order is safe
+    while the shell is running: child first starts ``deploy``, and parent first can still miss a child forked just
+    before the TERM. So the tree is frozen from the top down (a stopped parent cannot fork, so its child list is final),
+    every process gets its TERM while frozen, and only then do they resume, with the TERM already pending.
+
+    The kill may run under any shell (Daytona defaults to zsh, which does not word-split ``$var``), so the pid lists
+    stay in unquoted command substitutions and ``$@``.
+    """
     name = run_name(tag)
     pattern = "[" + name[0] + "]" + name[1:]  # so pgrep does not match this script's own command line
     return (
-        "kt(){ for c in $(pgrep -P \"$1\" 2>/dev/null); do kt \"$c\"; done; kill -TERM \"$1\" 2>/dev/null; }; "
-        f"for p in $(pgrep -f '{pattern}' 2>/dev/null); do kt \"$p\"; done; true"
+        'fz(){ kill -STOP "$1" 2>/dev/null; echo "$1"; for c in $(pgrep -P "$1" 2>/dev/null); do fz "$c"; done; }; '
+        f"set -- $(for p in $(pgrep -f '{pattern}' 2>/dev/null); do fz \"$p\"; done); "
+        'kill -TERM "$@" 2>/dev/null; kill -CONT "$@" 2>/dev/null; true'
     )
 
 
