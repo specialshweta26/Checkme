@@ -67,6 +67,17 @@ def test_episode_normalizer_drops_secrets_and_keeps_failures():
     assert rows[0]["observation"] == "login failed"
 
 
+def test_aura_database_name_replaces_the_default(monkeypatch):
+    from app.config import get_settings
+    from app.memory_engine.semantic import graph_database_name
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "neo4j_database", "", raising=False)
+    assert graph_database_name() == "neo4j"
+    monkeypatch.setattr(settings, "neo4j_database", "52cb8113", raising=False)
+    assert graph_database_name() == "52cb8113"
+
+
 def test_graph_stays_off_without_a_database(monkeypatch):
     from app.config import get_settings
 
