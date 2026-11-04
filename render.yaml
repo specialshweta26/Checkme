@@ -30,6 +30,10 @@ services:
     branch: main
     dockerfilePath: ./apps/api/Dockerfile
     dockerContext: .
+    # Moving attachments to object storage: docs/ATTACHMENT_STORAGE.md. Keep this disk and FILE_STORAGE=disk until
+    # that runbook says to change them. Switching before the files are copied makes existing attachments unreadable.
+    # healthCheckPath is web-only on Render. Private services get a TCP check, and uvicorn opens its port only after
+    # startup finishes, so traffic already waits for startup.
     disk:
       name: checkme-files
       mountPath: /var/data
@@ -39,6 +43,15 @@ services:
         value: disk
       - key: STORAGE_DISK_PATH
         value: /var/data/attachments
+      # Render ignores sync: false on an existing Blueprint, so add these three by hand in the dashboard.
+      - key: S3_ENDPOINT_URL
+        sync: false
+      - key: S3_ACCESS_KEY
+        sync: false
+      - key: S3_SECRET_KEY
+        sync: false
+      - key: S3_BUCKET
+        value: checkme-attachments
       - key: DATABASE_HOSTPORT
         fromService:
           name: checkme-postgres
