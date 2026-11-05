@@ -244,6 +244,7 @@ class Settings(BaseSettings):
     chat_rate_limit_per_minute: int = 30
     history_messages: int = 8
     max_agent_steps: int = 20
+    agent_finish_check: bool = True  # compare a finished turn with the request (one small-model call, two if work is left)
 
     @model_validator(mode="after")
     def fill_oauth_from_environ(self):

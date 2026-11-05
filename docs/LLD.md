@@ -202,6 +202,8 @@ System prompt rules that matter in production:
 
 Recursion: `max_agent_steps * 8` (floor 80). If LangGraph hits the limit, the run continues from its in-memory checkpoint, up to twice with a limit of up to 200, so finished tool calls don't repeat. The checkpoint lasts only for the turn, so an API restart still loses the run.
 
+Finish check (`agent/finish_check.py`, `AGENT_FINISH_CHECK`, default on): a finished top-level turn with at least 2 tool calls that isn't waiting on the user goes to the small model, which lists asked-for work the reply doesn't show as done. If it lists anything, the same run continues once with that list; whatever is still open after that is added to the reply as "Not finished yet". A failed check changes nothing.
+
 ### 6.2 `call_tool` internals
 
 ```mermaid
