@@ -2717,6 +2717,14 @@ def _exclude_shell():
         log.debug("could not exclude shell execute tool")
 
 
+def _durable_saver(ctx: RunContext | None):
+    if getattr(ctx, "job", None) is None or getattr(ctx, "teammate_depth", 0):
+        return None
+    from app.agent.run_store import DurableSaver
+
+    return DurableSaver()
+
+
 def build_agent(ctx: RunContext, prompt: str):
     from deepagents import create_deep_agent
 
@@ -2725,8 +2733,9 @@ def build_agent(ctx: RunContext, prompt: str):
         "model": _chat_model(),
         "tools": harness_tools(ctx),
         "system_prompt": prompt,
-        # Lives for this turn only, so a run that hits the step limit continues instead of starting over.
-        "checkpointer": InMemorySaver(),
+        # A chat turn's checkpoint lives for that turn, so hitting the step limit continues instead of starting over.
+        # A job's lives in Postgres, so a restart continues it too.
+        "checkpointer": _durable_saver(ctx) or InMemorySaver(),
     }
     middleware = _todo_middleware()
     if middleware:
@@ -3316,8 +3325,18 @@ async def _run_deep_agent(
     text = ""
     finished = False
     peer = f":peer:{getattr(workspace_agent, 'id', 'x')}" if teammate_depth else ""
-    thread = {"configurable": {"thread_id": f"{session_id}{peer}"}}
+    durable = _durable_saver(ctx) is not None
+    from app.agent import run_store
+
+    thread_id = run_store.job_thread(ctx.job, query, confirmations, history) if durable else f"{session_id}{peer}"
+    thread = {"configurable": {"thread_id": thread_id}}
     next_input: dict | None = payload
+    if durable and await _can_resume(graph, thread):
+        cut_off = await run_store.settle_interrupted_calls(graph, thread)
+        next_input = None
+        log.info("job continues from its checkpoint; %s call(s) were cut off", cut_off)
+        if progress is not None:
+            await progress.emit("Continuing where it stopped before the restart", kind="retry")
     for attempt in range(3):
         try:
             result = await graph.ainvoke(
@@ -3327,7 +3346,7 @@ async def _run_deep_agent(
                     **thread,
                     **({"callbacks": callbacks} if callbacks else {}),
                 },
-                durability="exit",  # only a stopped run needs the checkpoint, so skip writing one per step
+                durability="sync" if durable else "exit",  # a chat turn needs it only when stopped by the limit
             )
             text = last_text(result.get("messages") if isinstance(result, dict) else [])
             finished = True
@@ -3348,6 +3367,9 @@ async def _run_deep_agent(
             break
     if finished and get_settings().agent_finish_check and finish_check.should_check(ctx, text):
         text = await _finish_what_is_left(ctx, graph, query, text, result, progress, callbacks, limit, thread)
+    saver = getattr(graph, "checkpointer", None)
+    if durable and saver is not None:
+        await saver.adelete_thread(thread_id)  # the turn is over, so nothing is left to resume
     timer.mark("agent", _t)
     timer.log()
     source = ctx.sources[-1] if ctx.sources else None

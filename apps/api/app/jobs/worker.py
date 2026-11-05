@@ -216,6 +216,10 @@ async def worker_loop(session_factory: Callable | None = None) -> None:
         try:
             if tick % 20 == 0:
                 await recover_stale(session_factory)
+            if tick % 1200 == 0:  # about hourly
+                from app.agent.run_store import prune_old
+
+                await prune_old(session_factory)
             if tick % LOGIN_POLL_TICKS == 0 and (login_poll is None or login_poll.done()):
                 login_poll = asyncio.create_task(_poll_logins(session_factory), name="login-poll")
             tick += 1

@@ -13,6 +13,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -650,6 +651,21 @@ class ResearchSummary(Base):
     sources: Mapped[list] = mapped_column(JSONB, default=list)
     embedding = mapped_column(Vector(DIMS), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
+
+
+class RunCheckpoint(Base):
+    """LangGraph checkpoints of a running background job, so a restart can continue it. See agent/run_store."""
+
+    __tablename__ = "run_checkpoints"
+    thread_id: Mapped[str] = mapped_column(String(120), primary_key=True)
+    ns: Mapped[str] = mapped_column(String(300), primary_key=True, default="")
+    checkpoint_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    parent_id: Mapped[str | None] = mapped_column(String(64))
+    checkpoint_type: Mapped[str] = mapped_column(String(32))
+    checkpoint: Mapped[bytes] = mapped_column(LargeBinary)
+    meta: Mapped[bytes] = mapped_column(LargeBinary)
+    writes: Mapped[list] = mapped_column(JSONB, default=list)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
 
 
 class WorkflowCheckpoint(Base):
