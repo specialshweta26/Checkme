@@ -42,6 +42,20 @@ async def test_a_failed_check_changes_nothing(monkeypatch):
     assert await finish_check.unfinished_items("goal", "reply", []) == []
 
 
+async def test_the_request_meets_the_json_mode_rule(monkeypatch):
+    seen = {}
+
+    async def fake(messages, **kw):
+        seen.update(messages=messages, **kw)
+        content = '{"complete": false, "unfinished": ["email Ben"]}'
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
+
+    monkeypatch.setattr("app.llm.chat_complete", fake)
+    assert await finish_check.unfinished_items("email both", "emailed Asha", ["send_email"]) == ["email Ben"]
+    assert seen["response_format"] == {"type": "json_object"}
+    assert any("json" in m["content"].lower() for m in seen["messages"] if m["role"] != "system")
+
+
 class _Graph:
     def __init__(self, replies):
         self.replies = list(replies)

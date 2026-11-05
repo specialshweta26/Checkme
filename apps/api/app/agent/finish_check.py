@@ -54,7 +54,8 @@ async def unfinished_items(goal: str, reply: str, used_tools: list[str], todos: 
     )
     try:
         resp = await chat_complete(
-            [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": body}],
+            # JSON mode needs the word "json" in the input messages; the system prompt doesn't count.
+            [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": "Check this and answer in JSON:\n" + body}],
             response_format={"type": "json_object"},
             max_tokens=300,
             model=small_model(),
