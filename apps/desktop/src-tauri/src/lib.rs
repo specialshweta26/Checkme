@@ -15,6 +15,7 @@ use tokio::process::Command;
 use tokio::sync::Mutex;
 
 mod browser;
+mod updates;
 mod grants;
 mod os;
 
@@ -1010,6 +1011,7 @@ async fn screenshot_loop(state: Arc<Sidecar>) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(Arc::new(Sidecar {
             token: Mutex::new(None),
             api_base: Mutex::new(None),
@@ -1027,6 +1029,7 @@ pub fn run() {
             reset_browser_profile
         ])
         .setup(|app| {
+            updates::start(app.handle().clone());
             let _ = grants::data_dir();
             let url = lumio_url();
             WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url.parse()?))
