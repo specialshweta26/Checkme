@@ -398,6 +398,19 @@ class Automation(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
+class MailSubscription(Base):
+    """A Microsoft Graph subscription that tells us when a mailbox gets new mail. See inbox/push.py."""
+
+    __tablename__ = "mail_subscriptions"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    connector_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("connectors.id", ondelete="CASCADE"), unique=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    subscription_id: Mapped[str] = mapped_column(String(200), unique=True)
+    client_state_hash: Mapped[str] = mapped_column(String(64))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
 class WebhookDelivery(Base):
     """Idempotency record connecting an inbound webhook delivery to its agent job."""
 

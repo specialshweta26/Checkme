@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 import uuid
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
+from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -85,6 +85,27 @@ async def delete_automation(
     except LookupError as exc:
         raise HTTPException(404, str(exc)) from exc
     return {"ok": True}
+
+
+@webhook_router.post("/microsoft-mail", include_in_schema=False)
+async def microsoft_mail_notification(request: Request, db: AsyncSession = Depends(get_db)):
+    """Graph's subscription check sends validationToken and expects it back as plain text within seconds."""
+    from app.inbox import push
+    from app.inbox.worker import wake_inbox
+
+    token = request.query_params.get("validationToken")
+    if token is not None:
+        return PlainTextResponse(token[:1024])
+    raw = await request.body()
+    if len(raw) > push.MAX_BODY_BYTES:
+        raise HTTPException(413, "Notification too large.")
+    try:
+        payload = json.loads(raw or b"{}")
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        payload = None
+    if await push.accept_notifications(db, payload):
+        wake_inbox()
+    return Response(status_code=202)  # the same for a bad secret, so a caller learns nothing
 
 
 @webhook_router.post("/{automation_id}")
