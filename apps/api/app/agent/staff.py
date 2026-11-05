@@ -330,8 +330,25 @@ async def create_automation(db, user, args: dict, agent=None) -> dict:
             "secret": hook["secret"],
             "note": "Copy the secret now; it is shown only once. Send it in the X-Checkme-Secret header. The event name must match X-Event-Type. Include a stable Idempotency-Key to avoid duplicate runs.",
         }
+    if trigger_type in {"mail", "meeting"}:
+        from app.automations.triggers import create_trigger
+
+        try:
+            made = await create_trigger(
+                db,
+                user,
+                trigger_type=trigger_type,
+                name=args.get("name") or f"{trigger_type.title()} automation",
+                trigger=args.get("trigger"),
+                condition=args.get("condition") or "",
+                action=args.get("action") or "",
+                agent=agent,
+            )
+        except ValueError as exc:
+            return {"error": str(exc)}
+        return {"created": True, "trigger_type": trigger_type, "automation": made, "note": "It asks the user before any sensitive action."}
     if trigger_type != "schedule":
-        return {"error": "trigger_type must be 'schedule' or 'webhook'."}
+        return {"error": "trigger_type must be 'schedule', 'webhook', 'mail' or 'meeting'."}
     owner = await _routine_owner(db, user, agent)
     row = Automation(
         user_id=user.id,

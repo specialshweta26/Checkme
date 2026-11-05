@@ -1387,7 +1387,7 @@ class StaffInput(BaseModel):
     )
     args: dict[str, Any] = Field(
         default_factory=dict,
-        description="For create_automation: name, trigger, condition, action, requires_approval, and optional trigger_type='webhook' plus agent_name. Webhook trigger must be an exact event type such as issues or push.",
+        description="For create_automation: name, trigger, condition, action, requires_approval, and optional trigger_type='webhook' plus agent_name, 'mail' (trigger is the sender: an address, @domain or name) or 'meeting' (trigger is the minutes before each meeting). Webhook trigger must be an exact event type such as issues or push.",
     )
 
 
@@ -2653,7 +2653,8 @@ def system_prompt(
         "If you cannot tell which connector fits, ask the user.\n"
         "Destructive connector actions still need call_tool; the app asks the user to confirm.\n"
         "If the user wants work done later (email a report in N minutes, tonight, every day), schedule_task and do not fetch now. "
-        "For event-driven work, create a webhook automation with run_staff_tool(name='create_automation', args={trigger_type:'webhook', name, trigger:<exact event name>, condition, action, requires_approval:true}). "
+        "For 'when mail from X arrives' or 'before each meeting', use run_staff_tool(name='create_automation', args={trigger_type:'mail' or 'meeting', name, trigger, condition, action}). "
+        "For other event-driven work, create a webhook automation with run_staff_tool(name='create_automation', args={trigger_type:'webhook', name, trigger:<exact event name>, condition, action, requires_approval:true}). "
         "Keep external actions gated on a clear user reply. When a tool says a confirmation is needed, tell the user in one natural sentence exactly what you prepared and ask whether they want you to go ahead; do not mention approval, approve, cards, or buttons, and wait for a clear reply. Return the generated webhook URL, one-time secret, exact headers, and a ready-to-copy curl example; the secret is only returned at creation. List or disable automations with the automation endpoints when asked. "
         "If they want a calendar invite or meeting at a clock time, that time is the event start: call create_event now. "
         "If repeated requests reveal a useful routine, point that out and offer to schedule it; create it when the user asks. Use an existing schedule or webhook "
