@@ -91,16 +91,15 @@ async def test_unfinished_work_continues_the_same_run_once(monkeypatch):
     assert len(graph.inputs) == 1 and "send the second" in graph.inputs[0]["messages"][0]["content"]
 
 
-async def test_work_still_open_is_reported_not_retried_forever(monkeypatch):
+async def test_the_run_continues_only_once_and_the_verdict_is_never_shown(monkeypatch):
     graph = _Graph(["tried"])
     out = await _run(monkeypatch, [["send the second"], ["send the second"]], graph)
-    assert out.startswith("tried") and "Not finished yet" in out and "send the second" in out
-    assert len(graph.inputs) == 1
+    assert out == "tried" and len(graph.inputs) == 1
 
 
-async def test_a_failed_continuation_keeps_the_reply_and_reports(monkeypatch):
+async def test_a_failed_continuation_keeps_the_reply_as_it_was(monkeypatch):
     out = await _run(monkeypatch, [["send the second"]], _Graph([RuntimeError("model down")]))
-    assert out.startswith("sent one") and "send the second" in out
+    assert out == "sent one"
 
 
 async def test_stopping_to_ask_the_user_ends_the_check(monkeypatch):

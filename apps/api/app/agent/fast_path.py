@@ -172,6 +172,9 @@ def prompt_hint(plan: TurnPlan) -> str:
     return ""
 
 
+SLOW_STAGE_MS = 5000
+
+
 @dataclass
 class TurnTimer:
     """Per-stage wall-clock timings for one turn, logged as one line at the end."""
@@ -190,7 +193,10 @@ class TurnTimer:
         return int((time.monotonic() - self.started) * 1000)
 
     def mark(self, stage: str, since: float) -> None:
-        self.stages[stage] = self.stages.get(stage, 0) + int((time.monotonic() - since) * 1000)
+        took = int((time.monotonic() - since) * 1000)
+        self.stages[stage] = self.stages.get(stage, 0) + took
+        if took >= SLOW_STAGE_MS:  # the summary line only comes at the end, which a stuck turn never reaches
+            log.warning("slow turn stage: %s took %dms", stage, took)
 
     def status(self) -> None:
         if self.first_status_ms is None:

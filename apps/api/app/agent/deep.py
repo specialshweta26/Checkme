@@ -2695,7 +2695,7 @@ def _chat_model():
     s = get_settings()
     effort = (s.openai_reasoning_effort or "").strip() or "none"
     reasoning = reasoning_payload()
-    base = {"model": s.openai_model, "api_key": s.openai_api_key}
+    base = {"model": s.openai_model, "api_key": s.openai_api_key, "timeout": 120, "max_retries": 1}
     if bool(getattr(s, "stream_tokens", True)):
         # Tokens reach the callbacks as they are generated (the chat shows the reply as it streams).
         base["streaming"] = True
@@ -2906,7 +2906,8 @@ async def _ask_teammate(ctx: RunContext, agent_id: str, prompt: str) -> dict:
 
 
 async def _finish_what_is_left(ctx, graph, query, text, result, progress, callbacks, limit, thread) -> str:
-    """Check the finished turn against the request. Continue the same run once, then list what's still open."""
+    """Check the finished turn against the request, and continue the same run once if work is left. The check can be
+    wrong, so its verdict is never shown to the user as fact: the agent's own reply says what it did and didn't do."""
     from app.agent import cancel as run_cancel
 
     def todos_of(state: Any) -> Any:
@@ -2928,12 +2929,11 @@ async def _finish_what_is_left(ctx, graph, query, text, result, progress, callba
         if isinstance(exc, run_cancel.TurnCancelled) or run_cancel.is_cancelled():
             raise run_cancel.TurnCancelled("stopped") from exc
         log.warning("finish check continuation failed: %s", type(exc).__name__)
-        return text + finish_check.unfinished_note(items)
+        return text
     text = last_text(result.get("messages") if isinstance(result, dict) else []) or text
     if ctx.pending or ctx.question:
         return text  # it stopped to ask the user, so the turn isn't over
-    left = await finish_check.unfinished_items(query, text, ctx.used_tools, todos_of(result))
-    return text + finish_check.unfinished_note(left) if left else text
+    return text
 
 
 async def _work_together(ctx: RunContext, task: str) -> dict:
@@ -3043,6 +3043,32 @@ async def with_computer(db: AsyncSession, user, conns: list) -> list:
     if laptop is not None and laptop.enabled and LOCAL_SLUG not in have:
         extra.append(laptop)
     return [*conns, *extra] if extra else conns
+
+
+MEMORY_TIMEOUT_S = 8
+
+
+async def _load_memory_bounded(db, user, query: str, agent, task_key: str) -> str:
+    """Memory for this turn, or nothing if it can't be had quickly: answering without memory beats hanging on a slow
+    store. It gets its own database session, so being cut off can't leave the turn's session unusable."""
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    async def load() -> str:
+        bind = getattr(db, "bind", None)
+        if bind is None:
+            return await load_memory(db, user, query, agent, task_key=task_key)
+        async with AsyncSession(bind, expire_on_commit=False) as own:
+            found = await load_memory(own, user, query, agent, task_key=task_key)
+            await own.commit()
+            return found
+
+    try:
+        return await asyncio.wait_for(load(), MEMORY_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        log.warning("memory recall timed out after %ss; answering without it", MEMORY_TIMEOUT_S)
+    except Exception as exc:  # noqa: BLE001 - same reason
+        log.warning("memory recall failed (%s); answering without it", type(exc).__name__)
+    return ""
 
 
 async def _begin_task_state(
@@ -3296,7 +3322,7 @@ async def _run_deep_agent(
     if progress is not None and plan.kind != fast_path.QUICK_WEB:
         await progress.emit("Recalling what I know about this" if not teammate_depth else "Picking up the task", kind="memory")
     _t = _time.monotonic()
-    memory = await load_memory(db, user, query, workspace_agent, task_key=getattr(ctx, "task_key", "") or "")
+    memory = await _load_memory_bounded(db, user, query, workspace_agent, getattr(ctx, "task_key", "") or "")
     timer.mark("memory", _t)
     pad_bit = pad.as_prompt(ctx.scratchpad)
     if pad_bit:

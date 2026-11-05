@@ -21,7 +21,8 @@ def openai_client() -> AsyncOpenAI:
     global _client
     if _client is None:
         s = get_settings()
-        _client = AsyncOpenAI(api_key=s.openai_api_key)
+        # The default waits 10 minutes per try and retries twice, so one stuck call could hang a turn for half an hour.
+        _client = AsyncOpenAI(api_key=s.openai_api_key, timeout=60, max_retries=1)
     return _client
 
 
