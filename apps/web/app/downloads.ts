@@ -38,8 +38,9 @@ export async function latestInstallers(): Promise<Installers> {
     const data = await res.json();
     const assets: { name?: string; browser_download_url?: string }[] = data.assets || [];
     const pick = (test: RegExp) => assets.find((a) => test.test(a.name || ""))?.browser_download_url;
-    const macArm = pick(/aarch64|arm64/i);
-    const macIntel = pick(/x64\.dmg|_x64\.dmg|x86_64/i);
+    // Only installers: releases also hold update files like Lumio_aarch64.app.tar.gz.
+    const macArm = pick(/(aarch64|arm64).*\.dmg$/i);
+    const macIntel = pick(/(x64|x86_64).*\.dmg$/i);
     return {
       macArm,
       macIntel,

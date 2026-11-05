@@ -36,9 +36,26 @@ jobs:
       - name: Install frontend deps
         working-directory: apps/desktop
         run: npm ci
+      # In-app updates compare version numbers, so each release's version has to come from its tag.
+      - name: Set the app version from the tag
+        working-directory: apps/desktop/src-tauri
+        shell: bash
+        env:
+          VERSION: ${{ github.ref_type == 'tag' && github.ref_name || format('0.0.{0}', github.run_number) }}
+        run: |
+          node -e '
+            const fs = require("fs");
+            const version = process.env.VERSION.replace(/^desktop-v/, "");
+            if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error("Bad version: " + version);
+            const conf = JSON.parse(fs.readFileSync("tauri.conf.json", "utf8"));
+            conf.version = version;
+            fs.writeFileSync("tauri.conf.json", JSON.stringify(conf, null, 2) + "\n");
+          '
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: apps/desktop
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || format('desktop-v{0}', github.run_number) }}

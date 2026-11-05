@@ -14,9 +14,21 @@
       "csp": null
     }
   },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEFGRjE1QjgxQ0FBRTc2MzcKUldRM2RxN0tnVnZ4cndTcmR4NVdFa2U0cERhNzdIZEZ1QndJM3lKeFlUTVo0cVEwZHdFV0Nnb24K",
+      "endpoints": [
+        "https://github.com/specialshweta26/Checkme/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  },
   "bundle": {
     "active": true,
-    "targets": ["dmg", "nsis"],
+    "targets": ["app", "dmg", "nsis"],
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

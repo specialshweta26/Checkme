@@ -38,6 +38,14 @@ Artifacts land in `src-tauri/target/release/bundle/`. File tools stay inside gra
 
 macOS Gatekeeper treats a browser-downloaded unsigned app as damaged. Install with `curl -fsSL <site>/install-mac.sh | bash`, or after copying to Applications run `xattr -cr /Applications/Lumio.app`.
 
+## Updates
+
+Release builds check GitHub's latest release at startup and every 6 hours, and offer **Update now**. The app verifies each
+update against the public key in `tauri.conf.json` before installing it, and the release workflow signs with the
+`TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` secrets. If the private key is lost, installed apps
+can't accept new updates and everyone has to reinstall by hand. To release, push a tag like `desktop-v0.1.12`: the app's
+version comes from the tag.
+
 ## Folder grants
 
 There is no automatic home-folder or `~/Lumio` jail. The user grants folders with the native picker (**This computer** in the app, or the agent calls `grant_folder`). List, search, read, write, copy, move, and delete run only inside those folders. Terminal and Python stay off until enabled in settings. The Lumio browser uses a separate profile under the app data directory; it does not read Chrome/Edge/Safari profiles.
