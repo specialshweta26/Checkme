@@ -57,7 +57,7 @@ async def test_job_runs_waits_for_approval_and_posts_to_chat(factory):
         await db.commit()
         job_id = job.id
 
-    picked = await worker.claim(factory, 4, set())
+    picked = await worker.claim(factory, 4)
     assert [p[0] for p in picked if p[1] == user.id] == [job_id]
     calls = []
     token = sign_confirm("tool", {"slug": "coding", "tool": "push_branch", "args": {"repo": "a/b", "branch": "agent/x"}}, ttl=3600)
@@ -83,7 +83,7 @@ async def test_job_runs_waits_for_approval_and_posts_to_chat(factory):
             db.add(ev)
         await db.commit()
 
-    assert await worker.claim(factory, 4, set())
+    assert await worker.claim(factory, 4)
     assert await run_job(job_id, factory, agent_impl) == "done"
     assert calls[1]["confirmations"][0]["tool"] == "push_branch"
     assert "approved" in calls[1]["query"]
@@ -98,7 +98,7 @@ async def test_job_runs_waits_for_approval_and_posts_to_chat(factory):
         assert "pr" in kinds and kinds[-1] == "result"
 
 
-async def test_one_running_job_per_user_and_stale_recovery(factory):
+async def test_per_user_limit_and_stale_recovery(factory, monkeypatch):
     from datetime import datetime, timedelta, timezone
 
     from app.jobs import service, worker
@@ -111,9 +111,10 @@ async def test_one_running_job_per_user_and_stale_recovery(factory):
         b = await service.create_job(db, user, agent=agent, prompt="two")
         c = await service.create_job(db, other, agent=other_agent, prompt="three")
         await db.commit()
-    picked = {p[0] for p in await worker.claim(factory, 4, set())}
+    monkeypatch.setattr(worker, "MAX_PER_USER", 1)
+    picked = {p[0] for p in await worker.claim(factory, 4)}
     assert a.id in picked and c.id in picked and b.id not in picked
-    assert b.id not in {p[0] for p in await worker.claim(factory, 4, set())}  # user still has a running job
+    assert b.id not in {p[0] for p in await worker.claim(factory, 4)}  # user is at the limit
 
     async with factory() as db:
         row = await db.get(AgentJob, a.id)
@@ -137,7 +138,7 @@ async def test_failure_marks_failed_and_tells_chat(factory):
     async with factory() as db:
         job = await service.create_job(db, user, agent=agent, prompt="explode")
         await db.commit()
-    await worker.claim(factory, 4, set())
+    await worker.claim(factory, 4)
 
     async def boom(*a, **kw):
         raise RuntimeError("sandbox unavailable")
@@ -207,7 +208,7 @@ async def _drain(factory, agent_impl, user_id, limit=20):
 
     seen = []
     for _ in range(limit):
-        picked = [p for p in await worker.claim(factory, 4, set()) if p[1] == user_id]
+        picked = [p for p in await worker.claim(factory, 4) if p[1] == user_id]
         if not picked:
             break
         for job_id, _ in picked:
