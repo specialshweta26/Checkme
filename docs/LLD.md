@@ -723,6 +723,7 @@ Staff `learn_voice` updates the speaking agent’s voice block from sent mail.
 | Chat agent exception | HTTP 502, message stored only on success path |
 | SSE drop | client badge poll |
 | File token expired | 404, “ask again in chat” |
+| Microsoft mail notification missed, or subscription lapsed | the 90-second inbox check still finds the mail; `inbox/push.py` renews or replaces the subscription on its next sync |
 | Mail / meeting trigger fails | logged; the other triggers still run, and it retries on the next check |
 | Recursion limit | continue from the checkpoint with a higher limit, then user-visible failure string |
 

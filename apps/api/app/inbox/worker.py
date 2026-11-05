@@ -11,7 +11,23 @@ from app.models import Connector, User
 
 log = logging.getLogger(__name__)
 INTERVAL_SEC = 90
+WAKE_GAP_SEC = 5  # new mail often comes in bursts, so let them collect into one check
 _classify_task: asyncio.Task | None = None
+_wake = asyncio.Event()
+
+
+def wake_inbox() -> None:
+    """A mailbox reported new mail: run the check now rather than at the next tick."""
+    _wake.set()
+
+
+async def _wait_for_next_check() -> None:
+    try:
+        await asyncio.wait_for(_wake.wait(), timeout=INTERVAL_SEC)
+        await asyncio.sleep(WAKE_GAP_SEC)
+    except asyncio.TimeoutError:
+        pass
+    _wake.clear()
 
 
 async def _mail_user_ids() -> list:
@@ -91,7 +107,7 @@ async def inbox_loop() -> None:
             log.exception("inbox worker tick failed")
         if _classify_task is None or _classify_task.done():
             _classify_task = asyncio.create_task(classify_all_inboxes(), name="inbox-classify")
-        await asyncio.sleep(INTERVAL_SEC)
+        await _wait_for_next_check()
 
 
 async def start_inbox_worker() -> asyncio.Task:

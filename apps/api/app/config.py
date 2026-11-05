@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     )
 
     public_web_url: str = "http://localhost:3000"
+    microsoft_mail_push: bool = True  # new Outlook mail wakes the inbox check; needs an https public_web_url
 
     openai_api_key: str = ""
     openai_model: str = "gpt-6-luna"
