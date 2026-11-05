@@ -223,6 +223,7 @@ async def run_job(job_id, session_factory: Callable | None = None, agent_impl: C
             db.add(service.fail(job, str(exc)[:500]))
             await service.after_terminal(db, job)
             await db.commit()
+            await _forget_run(job)
             await _notify_channel(db, job)
             return job.status
         await db.refresh(job)  # picks up a cancel (and heartbeats) written by other sessions
@@ -233,6 +234,7 @@ async def run_job(job_id, session_factory: Callable | None = None, agent_impl: C
             db.add(ev)
         if job.status in service.TERMINAL:
             await service.after_terminal(db, job)
+            await _forget_run(job)
         elif job.status in {"waiting_input", "waiting_approval"} and job.parent_id is None:
             if job.kind == "event":
                 await service.post_to_chat(db, job)
@@ -272,7 +274,18 @@ async def _stopped(db, job: AgentJob) -> str:
         for ev in service.cancel(job):
             db.add(ev)
     await db.commit()
+    await _forget_run(job)
     return job.status
+
+
+async def _forget_run(job: AgentJob) -> None:
+    """Never raises: rows left behind are cleared by age."""
+    from app.agent.run_store import forget_job
+
+    try:
+        await forget_job(job)
+    except Exception as exc:  # noqa: BLE001
+        log.info("job %s checkpoints not cleared: %s", job.id, type(exc).__name__)
 
 
 async def _notify_channel(db, job: AgentJob, attachments: list | None = None) -> None:

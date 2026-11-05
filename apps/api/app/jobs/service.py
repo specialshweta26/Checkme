@@ -247,6 +247,8 @@ def apply_outcome(job: AgentJob, query: str, result: dict) -> list[JobEvent]:
     meta["confirmations"] = []
     meta.pop("next_query", None)
     meta.pop("question", None)
+    meta.pop("restarted", None)
+    meta.pop("confirmed_started", None)
     _merge_prs(meta, result)
     pending = [p for p in (result.get("pending_confirms") or []) if isinstance(p, dict) and p.get("token")]
     children = [str(c.get("id") if isinstance(c, dict) else c) for c in (result.get("jobs_started") or [])]

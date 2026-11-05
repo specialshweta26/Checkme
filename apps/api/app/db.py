@@ -110,6 +110,7 @@ async def _migrate_jobs(conn) -> None:
         "ALTER TABLE agent_jobs ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMPTZ",
         "CREATE INDEX IF NOT EXISTS ix_job_events_root_id_id ON job_events (root_id, id)",
         "CREATE INDEX IF NOT EXISTS ix_agent_jobs_user_status ON agent_jobs (user_id, status)",
+        "ALTER TABLE IF EXISTS run_checkpoints DROP COLUMN IF EXISTS writes",  # now run_checkpoint_writes
     ):
         await conn.execute(text(stmt))
 
