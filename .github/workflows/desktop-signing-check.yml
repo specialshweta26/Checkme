@@ -1,0 +1,45 @@
+name: Desktop signing check
+
+# Proves that two different builds signed with one certificate keep the same identity, which is what makes macOS keep
+# their permissions. Uses a throwaway certificate and no secrets.
+on:
+  pull_request:
+    paths:
+      - apps/desktop/scripts/**
+      - .github/workflows/desktop-signing-check.yml
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create a throwaway certificate
+        run: |
+          NO_UPLOAD=1 apps/desktop/scripts/create-signing-cert.sh "$RUNNER_TEMP/cert"
+          echo "MAC_SIGNING_P12=$(base64 < "$RUNNER_TEMP/cert/lumio-mac-signing.p12" | tr -d '\n')" >> "$GITHUB_ENV"
+          echo "MAC_SIGNING_PASSWORD=$(cat "$RUNNER_TEMP/cert/lumio-mac-signing.password")" >> "$GITHUB_ENV"
+      - name: Refuses to replace an existing certificate
+        run: |
+          if NO_UPLOAD=1 apps/desktop/scripts/create-signing-cert.sh "$RUNNER_TEMP/cert"; then exit 1; fi
+      - name: Import it
+        run: apps/desktop/scripts/import-signing-cert.sh
+      - name: Two different builds keep one identity
+        run: |
+          cd "$RUNNER_TEMP"
+          echo 'int main(void){return 0;}' > one.c
+          echo 'int main(void){return 1;}' > two.c
+          clang one.c -o one
+          clang two.c -o two
+          for build in one two; do
+            codesign --force --sign "$LUMIO_MAC_IDENTITY" -i app.lumio.desktop "$build"
+            codesign --verify "$build"
+          done
+          first="$(codesign -d -r- one 2>&1 | tail -1)"
+          second="$(codesign -d -r- two 2>&1 | tail -1)"
+          echo "$first"
+          [[ "$first" == "$second" ]]
+          [[ "$first" == *"certificate leaf"* ]]
+          [[ "$first" != *"cdhash"* ]]

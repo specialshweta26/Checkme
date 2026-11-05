@@ -341,7 +341,7 @@ async def test_desktop_screen_uses_the_browser_picture_not_a_desktop_capture(mon
     async def fake(user_id, tool, args=None):
         calls.append(tool)
         remember_screen(png, str(user_id))
-        return {"ok": True}
+        return {"ok": True, "screenshot": True}
 
     monkeypatch.setattr(agent, "call_local", fake)
     forget_screen("u-screen")
@@ -350,3 +350,78 @@ async def test_desktop_screen_uses_the_browser_picture_not_a_desktop_capture(mon
     assert calls == ["browse_screenshot"]
     await agent.local_browser_frame("u-screen")
     assert calls == ["browse_screenshot"]
+
+
+def _frame(label: str) -> bytes:
+    return b"\x89PNG" + label.encode().ljust(40, b"\x00")
+
+
+def _screen_setup(monkeypatch, replies):
+    """replies: tool -> dict to return (a "screenshot" reply stores a picture), or an Exception to raise."""
+    from app.connectors.daytona_box import forget_screen, remember_screen
+    from app.desktop import agent
+
+    key = f"u-{uuid.uuid4().hex[:8]}"
+    calls = []
+
+    async def fake(user_id, tool, args=None):
+        calls.append(tool)
+        reply = replies[tool]
+        if isinstance(reply, Exception):
+            raise reply
+        if reply.get("screenshot"):
+            remember_screen(_frame(tool), str(user_id))
+        return reply
+
+    monkeypatch.setattr(agent, "call_local", fake)
+    forget_screen(key)
+    return agent, key, calls
+
+
+async def test_with_no_browser_open_the_panel_shows_the_desktop(monkeypatch):
+    agent, key, calls = _screen_setup(
+        monkeypatch, {"browse_screenshot": {"ok": False, "error": "Chrome is not open"}, "screen_png": {"ok": True, "screenshot": True}}
+    )
+    assert await agent.local_browser_frame(key) == _frame("screen_png")
+    assert calls == ["browse_screenshot", "screen_png"]
+
+
+async def test_an_open_browser_never_captures_the_whole_screen(monkeypatch):
+    agent, key, calls = _screen_setup(monkeypatch, {"browse_screenshot": {"ok": True, "screenshot": True}, "screen_png": {"ok": True, "screenshot": True}})
+    await agent.local_browser_frame(key)
+    assert calls == ["browse_screenshot"]
+
+
+async def test_desktop_capture_is_not_a_fast_loop(monkeypatch):
+    from app.connectors import daytona_box
+
+    agent, key, calls = _screen_setup(
+        monkeypatch, {"browse_screenshot": {"ok": False, "error": "closed"}, "screen_png": {"ok": True, "screenshot": True}}
+    )
+    await agent.local_browser_frame(key)
+    # Past the 2-second freshness of the picture, but well inside the desktop capture gap.
+    monkeypatch.setattr(agent, "live_screen_age", lambda k: 5, raising=False)
+    monkeypatch.setattr(daytona_box, "live_screen_age", lambda k: 5)
+    for _ in range(4):
+        assert await agent.local_browser_frame(key) == _frame("screen_png")
+    assert calls.count("screen_png") == 1
+
+
+async def test_the_panel_says_what_is_wrong(monkeypatch):
+    needs = "Allow Screen Recording for Lumio in System Settings"
+    agent, key, _ = _screen_setup(monkeypatch, {"browse_screenshot": {"ok": False, "error": "closed"}, "screen_png": {"ok": False, "error": needs}})
+    with pytest.raises(LocalOffline, match="Screen Recording"):
+        await agent.local_browser_frame(key)
+    with pytest.raises(LocalOffline, match="Screen Recording"):
+        await agent.local_browser_frame(key)  # and again while throttled
+
+
+async def test_an_old_picture_is_not_shown_forever(monkeypatch):
+    from app.connectors import daytona_box
+
+    agent, key, _ = _screen_setup(monkeypatch, {"browse_screenshot": {"ok": False, "error": "closed"}, "screen_png": LocalOffline("offline")})
+    daytona_box.remember_screen(_frame("old"), key)
+    monkeypatch.setattr(daytona_box, "live_screen_age", lambda k: agent._SCREEN_STALE_S + 1)
+    with pytest.raises(LocalOffline, match="offline"):
+        await agent.local_browser_frame(key)
+
