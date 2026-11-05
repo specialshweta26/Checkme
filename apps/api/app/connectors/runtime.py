@@ -27,11 +27,15 @@ class RuntimeConnector:
         if self.kind == "builtin":
             if self.provider == "daytona":
                 from app.connectors.daytona_box import call_daytona
+                from app.jobs import computer_lock
 
+                await computer_lock.ensure()
                 return await call_daytona(self.row, name, args)
             if self.provider in ("trusted_local", "local", "computer_local"):
                 from app.desktop.agent import LocalOffline, call_local
+                from app.jobs import computer_lock
 
+                await computer_lock.ensure()
                 try:
                     result = await call_local(self.row.user_id, name, args)
                 except LocalOffline as vis_exc:

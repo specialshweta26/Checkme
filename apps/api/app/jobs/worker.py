@@ -1,7 +1,8 @@
 """In-process job worker, started next to the task scheduler in the API lifespan.
 
 - Polls every POLL_S for queued jobs and claims them with FOR UPDATE SKIP LOCKED.
-- One running job per user (they share one computer/sandbox), at most MAX_CONCURRENT overall.
+- Up to MAX_PER_USER running jobs per user, at most MAX_CONCURRENT overall. Jobs that use the computer take turns on
+  it (see computer_lock), so a long coding job doesn't delay a job that only needs connectors.
 - A heartbeat is written every HEARTBEAT_S while a job runs; jobs whose heartbeat is older than
   STALE_S (the process died or was redeployed) are requeued, and failed after MAX_ATTEMPTS.
 """
@@ -10,12 +11,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import Counter
 from datetime import datetime, timedelta, timezone
-from typing import Callable
+from typing import Callable, Iterable
 
 from sqlalchemy import and_, or_, select
 
-from app.jobs import service
+from app.jobs import computer_lock, service
 from app.jobs.runner import run_job
 from app.models import AgentJob
 
@@ -26,6 +28,7 @@ LOGIN_POLL_TICKS = 5  # jobs waiting on a CLI sign-in are checked about every 15
 HEARTBEAT_S = 60
 STALE_S = 300
 MAX_CONCURRENT = 4
+MAX_PER_USER = 3  # leaves a slot for other users, since all jobs share MAX_CONCURRENT
 MAX_ATTEMPTS = 3
 
 _wake = asyncio.Event()
@@ -73,27 +76,37 @@ async def recover_stale(session_factory: Callable) -> int:
     return moved
 
 
-async def claim(session_factory: Callable, limit: int, busy_users: set) -> list:
-    """Mark up to `limit` queued jobs as running (oldest first, one per user)."""
+def pick_jobs(queued: Iterable, running_users: Iterable, limit: int) -> list:
+    """The queued jobs to start, oldest first, without passing MAX_PER_USER for any user."""
+    counts = Counter(running_users)
+    picked = []
+    for job in queued:
+        if len(picked) >= limit:
+            break
+        if counts[job.user_id] >= MAX_PER_USER:
+            continue
+        counts[job.user_id] += 1
+        picked.append(job)
+    return picked
+
+
+async def claim(session_factory: Callable, limit: int) -> list:
+    """Mark up to `limit` queued jobs as running (oldest first, up to MAX_PER_USER per user)."""
     if limit <= 0:
         return []
-    running = select(AgentJob.user_id).where(AgentJob.status == "running")
     async with session_factory() as db:
+        running = (await db.execute(select(AgentJob.user_id).where(AgentJob.status == "running"))).scalars().all()
         rows = (
             await db.execute(
                 select(AgentJob)
-                .where(AgentJob.status == "queued", AgentJob.user_id.not_in(running))
+                .where(AgentJob.status == "queued")
                 .order_by(AgentJob.created_at)
                 .with_for_update(skip_locked=True)
                 .limit(limit * 4)
             )
         ).scalars().all()
         picked = []
-        users = set(busy_users)
-        for job in rows:
-            if job.user_id in users or len(picked) >= limit:
-                continue
-            users.add(job.user_id)
+        for job in pick_jobs(rows, running, limit):
             job.status = "running"
             job.attempts = (job.attempts or 0) + 1
             job.started_at = job.started_at or _now()
@@ -143,12 +156,22 @@ async def _watch_cancel(session_factory: Callable, job_id, run) -> None:
 async def _run_one(session_factory: Callable, job_id, user_id=None) -> None:
     from app.agent import cancel as run_cancel
 
+    async def report_wait() -> None:
+        async with session_factory() as db:
+            job = await db.get(AgentJob, job_id)
+            if job is not None:
+                db.add(service.event(job, "status", "Waiting for the computer; another job is using it"))
+                await db.commit()
+
     beat = asyncio.create_task(_heartbeat(session_factory, job_id))
     run = run_cancel.register(run_cancel.job_key(job_id), user_id=user_id, kind="job", job_id=job_id)
+    computer = computer_lock.JobComputer(user_id, report_wait)
     token = run_cancel.current.set(run)
+    computer_token = computer_lock.current.set(computer)
     try:
         inner = asyncio.create_task(run_job(job_id, session_factory), name=f"job-run-{job_id}")
     finally:
+        computer_lock.current.reset(computer_token)
         run_cancel.current.reset(token)
     run.task = inner
     watch = asyncio.create_task(_watch_cancel(session_factory, job_id, run))
@@ -173,6 +196,7 @@ async def _run_one(session_factory: Callable, job_id, user_id=None) -> None:
         except Exception:  # noqa: BLE001
             log.exception("could not mark job %s failed", job_id)
     finally:
+        computer.release()
         beat.cancel()
         watch.cancel()
         run_cancel.unregister(run.key, run)
@@ -197,7 +221,7 @@ async def worker_loop(session_factory: Callable | None = None) -> None:
             tick += 1
             for task in [t for t in active if t.done()]:
                 active.pop(task, None)
-            picked = await claim(session_factory, MAX_CONCURRENT - len(active), set(active.values()))
+            picked = await claim(session_factory, MAX_CONCURRENT - len(active))
             for job_id, user_id in picked:
                 task = asyncio.create_task(_run_one(session_factory, job_id, user_id), name=f"job-{job_id}")
                 active[task] = user_id
