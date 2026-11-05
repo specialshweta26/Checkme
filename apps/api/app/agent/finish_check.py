@@ -76,8 +76,3 @@ def continue_message(items: list[str]) -> str:
         "Finish these now if you can. Don't repeat anything already done. If you can't finish one, say why. "
         "End with your complete final reply to the user."
     )
-
-
-def unfinished_note(items: list[str]) -> str:
-    listed = "\n".join(f"- {item}" for item in items)
-    return f"\n\nNot finished yet:\n{listed}"
