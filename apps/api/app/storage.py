@@ -161,4 +161,26 @@ def extract_text(filename: str, content_type: str, data: bytes, limit: int = 400
 
         doc = Document(io.BytesIO(data))
         return "\n".join(p.text for p in doc.paragraphs)[:limit]
+    if name.endswith(".pptx"):
+        return _pptx_text(data)[:limit]
     return ""
+
+
+def _pptx_text(data: bytes) -> str:
+    """Slide text, in slide order, from the XML inside the file."""
+    import re
+    import zipfile
+    from xml.etree import ElementTree
+
+    def number(name: str) -> int:
+        found = re.search(r"(\d+)\.xml$", name)
+        return int(found.group(1)) if found else 0
+
+    out = []
+    with zipfile.ZipFile(io.BytesIO(data)) as pptx:
+        slides = [n for n in pptx.namelist() if re.fullmatch(r"ppt/slides/slide\d+\.xml", n)]
+        for name in sorted(slides, key=number):
+            root = ElementTree.fromstring(pptx.read(name))
+            lines = [node.text for node in root.iter("{http://schemas.openxmlformats.org/drawingml/2006/main}t") if node.text]
+            out.append(f"Slide {number(name)}: " + " ".join(lines))
+    return "\n".join(out)
