@@ -96,7 +96,7 @@ services:
       - key: OPENAI_REASONING_EFFORT
         value: none
       - key: OPENAI_SMALL_MODEL
-        sync: false
+        value: gpt-5.4-nano
       - key: DAYTONA_API_KEY
         sync: false
       - key: DAYTONA_API_URL
