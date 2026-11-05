@@ -177,6 +177,8 @@ def describe_tool(name: str, args: dict | None, connector_names: dict[str, str] 
         }.get(staff, f"Running {humanize_tool(staff)}")
     if n == "ask_teammate":
         return f"Handing work to a teammate: {_clip(a.get('prompt'), 60)}"
+    if n == "work_together":
+        return f"Working the shared task: {_clip(a.get('task'), 60)}"
     if n == "list_agents_and_groups":
         return "Looking up your agents and groups"
     if n == "create_agent":
@@ -371,6 +373,8 @@ def _tool_short(name: str, args: dict | None, connector_names: dict[str, str] | 
         return "the tool search"
     if name == "ask_teammate":
         return "your teammate"
+    if name == "work_together":
+        return "the group"
     return humanize_tool(name)
 
 

@@ -117,6 +117,7 @@ class RunContext:
     task_key: str = ""  # isolates this task's skill state (app/skills/task_state.py)
     task_state: dict | None = None  # the skill this task follows and how far it got (checkpointed)
     task_resumed: bool = False
+    shared_task_used: bool = False
 
 
 def _json_size(value: Any) -> int:
@@ -1450,6 +1451,13 @@ class AskTeammateInput(BaseModel):
     )
 
 
+class WorkTogetherInput(BaseModel):
+    task: str = Field(
+        default="",
+        description="The shared task. Leave empty to use the user's message. The group proposes, responds, may challenge, then converges. It stops on its own.",
+    )
+
+
 class SaveSkillInput(BaseModel):
     name: str = Field(description="Short name for this workflow.")
     instruction: str = Field(default="", description="What to do when this skill runs.")
@@ -1829,6 +1837,10 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
     async def ask_teammate(agent_id: str, prompt: str) -> str:
         """Post a message to a teammate in this group thread. They reply as themselves in their own bubble. Their memory stays separate. Do not ask yourself or paste their reply into yours."""
         return dumps(await _ask_teammate(ctx, agent_id, prompt), 12000)
+
+    async def work_together(task: str = "") -> str:
+        """Talk through a plan or disagreement with this group; nobody can use tools or see data in it, so hand real work over with ask_teammate. Each bot proposes, may respond or challenge, then the group converges. Stops on agreement or a hard cap. Do not call this more than once."""
+        return dumps(await _work_together(ctx, task), 12000)
 
     async def save_skill(name: str, instruction: str = "") -> str:
         """Save a workflow this bot should reuse later."""
@@ -2315,6 +2327,14 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
                 name="ask_teammate",
                 description=ask_teammate.__doc__,
                 args_schema=AskTeammateInput,
+            )
+        )
+        tools.append(
+            StructuredTool.from_function(
+                coroutine=work_together,
+                name="work_together",
+                description=work_together.__doc__,
+                args_schema=WorkTogetherInput,
             )
         )
     tools.extend(
@@ -2913,6 +2933,54 @@ async def _finish_what_is_left(ctx, graph, query, text, result, progress, callba
         return text  # it stopped to ask the user, so the turn isn't over
     left = await finish_check.unfinished_items(query, text, ctx.used_tools, todos_of(result))
     return text + finish_check.unfinished_note(left) if left else text
+
+
+async def _work_together(ctx: RunContext, task: str) -> dict:
+    """Shared task: each member gets short model turns, posted as their own bubbles, until they converge or it stops."""
+    from app.agents.collab import run_shared_task
+
+    if ctx.group is None or not ctx.teammates or ctx.teammate_depth >= 1:
+        return {"error": "work_together is only for the group owner."}
+    if getattr(ctx, "shared_task_used", False):
+        return {"error": "A shared task already ran this turn."}
+    ctx.shared_task_used = True
+    members = []
+    if ctx.agent is not None:
+        members.append(ctx.agent)
+    for peer in ctx.teammates:
+        if ctx.agent is None or str(peer.id) != str(ctx.agent.id):
+            members.append(peer)
+    by_id = {str(m.id): m for m in members}
+
+    async def show_post(post: dict) -> None:
+        if ctx.progress is not None:
+            await ctx.progress.child(post["name"]).emit(clip(post["text"], 120), kind="peer")
+
+    board = await run_shared_task(members, (task or "").strip() or ctx.query, on_post=show_post)
+    ctx.used_tools.append("work_together")
+    for post in board.get("posts") or []:
+        member = by_id.get(post["agent_id"])
+        ctx.thread.append(
+            {
+                "text": post["text"],
+                "agent_id": post["agent_id"],
+                "agent_name": post["name"],
+                "agent_color": getattr(member, "color", "") or "",
+                "agent_avatar": getattr(member, "avatar", "") or "",
+                "peer": True,
+                "used_tools": [],
+                "computer": {},
+                "attachments": [],
+            }
+        )
+    out = {
+        "reason": board.get("reason") or "",
+        "outcome": board.get("outcome") or "",
+        "posts": [{"name": p["name"], "kind": p["kind"], "text": p["text"]} for p in board.get("posts") or []],
+    }
+    if out["reason"] != "converged":
+        out["note"] = "The group did not reach agreement. Do not say it did: tell the user how far it got."
+    return out
 
 
 async def _route_and_confirm(all_skills: list, query: str) -> list:
