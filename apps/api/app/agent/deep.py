@@ -3261,6 +3261,11 @@ async def _run_deep_agent(
         slug, tool = payload.get("slug"), payload.get("tool")
         if not slug or not tool:
             continue
+        from app.agent import run_store
+
+        if not await run_store.claim_confirmed(ctx, payload):
+            extra.append(HumanMessage(content=f"A restart interrupted the approved {tool}, so it may or may not have taken effect. Check before doing anything else, and don't run it again."))
+            continue
         if progress is not None:
             await progress.emit(f"Running what you confirmed: {tool.replace('_', ' ')}", kind="confirm", tool=tool)
         if slug == workspace_tools.WORKSPACE_SLUG:
@@ -3328,14 +3333,14 @@ async def _run_deep_agent(
     durable = _durable_saver(ctx) is not None
     from app.agent import run_store
 
-    thread_id = run_store.job_thread(ctx.job, query, confirmations, history) if durable else f"{session_id}{peer}"
+    thread_id = run_store.job_thread(ctx.job) if durable else f"{session_id}{peer}"
     thread = {"configurable": {"thread_id": thread_id}}
     next_input: dict | None = payload
-    if durable and await _can_resume(graph, thread):
-        cut_off = await run_store.settle_interrupted_calls(graph, thread)
-        next_input = None
-        log.info("job continues from its checkpoint; %s call(s) were cut off", cut_off)
-        if progress is not None:
+    if durable:
+        new_messages = [*extra, HumanMessage(content=query)]
+        next_input, how = await run_store.job_turn_input(graph, thread, ctx.job, payload, new_messages)
+        log.info("job turn starts as %s", how)
+        if how == "restart" and progress is not None:
             await progress.emit("Continuing where it stopped before the restart", kind="retry")
     for attempt in range(3):
         try:
@@ -3367,9 +3372,6 @@ async def _run_deep_agent(
             break
     if finished and get_settings().agent_finish_check and finish_check.should_check(ctx, text):
         text = await _finish_what_is_left(ctx, graph, query, text, result, progress, callbacks, limit, thread)
-    saver = getattr(graph, "checkpointer", None)
-    if durable and saver is not None:
-        await saver.adelete_thread(thread_id)  # the turn is over, so nothing is left to resume
     timer.mark("agent", _t)
     timer.log()
     source = ctx.sources[-1] if ctx.sources else None

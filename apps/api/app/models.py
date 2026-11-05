@@ -664,8 +664,25 @@ class RunCheckpoint(Base):
     checkpoint_type: Mapped[str] = mapped_column(String(32))
     checkpoint: Mapped[bytes] = mapped_column(LargeBinary)
     meta: Mapped[bytes] = mapped_column(LargeBinary)
-    writes: Mapped[list] = mapped_column(JSONB, default=list)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
+
+
+class RunCheckpointWrite(Base):
+    """A write made during a checkpoint's step. Its own table because it can arrive before the checkpoint's row."""
+
+    __tablename__ = "run_checkpoint_writes"
+    __table_args__ = (
+        UniqueConstraint("thread_id", "ns", "checkpoint_id", "task", "idx", name="uq_run_checkpoint_writes"),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    thread_id: Mapped[str] = mapped_column(String(120), index=True)
+    ns: Mapped[str] = mapped_column(String(300), default="")
+    checkpoint_id: Mapped[str] = mapped_column(String(64))
+    task: Mapped[str] = mapped_column(String(64))
+    idx: Mapped[int] = mapped_column(Integer)
+    channel: Mapped[str] = mapped_column(String(300))
+    value_type: Mapped[str] = mapped_column(String(32))
+    value: Mapped[bytes] = mapped_column(LargeBinary)
 
 
 class WorkflowCheckpoint(Base):

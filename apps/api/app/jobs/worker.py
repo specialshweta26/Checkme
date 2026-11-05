@@ -71,6 +71,7 @@ async def recover_stale(session_factory: Callable) -> int:
                 await service.after_terminal(db, job)
             else:
                 job.status = "queued"
+                job.meta = {**(job.meta or {}), "restarted": True}
                 db.add(service.event(job, "status", "Restarting after an interruption", {"status": "queued"}))
         await db.commit()
     return moved
