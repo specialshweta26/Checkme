@@ -25,6 +25,7 @@ from app.agents.service import (
     filter_connectors,
     toolkit_assignment_map,
 )
+from app.agent import finish_check
 from app.agent.confirm import sign_confirm
 from app.agent.invoke import bump_usage, confirmed, invoke_named, preview
 from app.agent.memory import load_memory
@@ -2873,6 +2874,37 @@ async def _ask_teammate(ctx: RunContext, agent_id: str, prompt: str) -> dict:
     return {"from": member.name, "agent_id": str(member.id), "reply": item["text"]}
 
 
+async def _finish_what_is_left(ctx, graph, query, text, result, progress, callbacks, limit, thread) -> str:
+    """Check the finished turn against the request. Continue the same run once, then list what's still open."""
+    from app.agent import cancel as run_cancel
+
+    def todos_of(state: Any) -> Any:
+        return state.get("todos") if isinstance(state, dict) else None
+
+    items = await finish_check.unfinished_items(query, text, ctx.used_tools, todos_of(result))
+    if not items:
+        return text
+    log.info("finish check: %s item(s) unfinished", len(items))
+    if progress is not None:
+        await progress.emit("Finishing what's left", kind="retry")
+    try:
+        result = await graph.ainvoke(
+            {"messages": [{"role": "user", "content": finish_check.continue_message(items)}]},
+            config={"recursion_limit": limit, **thread, **({"callbacks": callbacks} if callbacks else {})},
+            durability="exit",
+        )
+    except Exception as exc:  # noqa: BLE001
+        if isinstance(exc, run_cancel.TurnCancelled) or run_cancel.is_cancelled():
+            raise run_cancel.TurnCancelled("stopped") from exc
+        log.warning("finish check continuation failed: %s", type(exc).__name__)
+        return text + finish_check.unfinished_note(items)
+    text = last_text(result.get("messages") if isinstance(result, dict) else []) or text
+    if ctx.pending or ctx.question:
+        return text  # it stopped to ask the user, so the turn isn't over
+    left = await finish_check.unfinished_items(query, text, ctx.used_tools, todos_of(result))
+    return text + finish_check.unfinished_note(left) if left else text
+
+
 async def _route_and_confirm(all_skills: list, query: str) -> list:
     """Skills that fit this request: routed (keywords + embeddings), then confirmed by a short LLM check."""
     from app.skills import task_state as ts
@@ -3282,6 +3314,7 @@ async def _run_deep_agent(
     if teammate_depth:
         limit = min(max(24, get_settings().max_agent_steps * 3), 120 if coding else 48)
     text = ""
+    finished = False
     peer = f":peer:{getattr(workspace_agent, 'id', 'x')}" if teammate_depth else ""
     thread = {"configurable": {"thread_id": f"{session_id}{peer}"}}
     next_input: dict | None = payload
@@ -3297,6 +3330,7 @@ async def _run_deep_agent(
                 durability="exit",  # only a stopped run needs the checkpoint, so skip writing one per step
             )
             text = last_text(result.get("messages") if isinstance(result, dict) else [])
+            finished = True
             break
         except Exception as exc:  # noqa: BLE001
             if isinstance(exc, run_cancel.TurnCancelled) or run_cancel.is_cancelled():
@@ -3312,6 +3346,8 @@ async def _run_deep_agent(
             log.exception("deep agent failed")
             text = f"I could not finish that request: {str(exc)[:240]}"
             break
+    if finished and get_settings().agent_finish_check and finish_check.should_check(ctx, text):
+        text = await _finish_what_is_left(ctx, graph, query, text, result, progress, callbacks, limit, thread)
     timer.mark("agent", _t)
     timer.log()
     source = ctx.sources[-1] if ctx.sources else None
