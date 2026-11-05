@@ -83,6 +83,7 @@ async def lifespan(_app: FastAPI):
     from app.agent.memory_worker import start_memory_worker
     from app.inbox.worker import start_inbox_worker
     from app.inbox.push import start_mail_push
+    from app.automations.triggers import start_meeting_triggers
     from app.jobs.worker import start_job_worker
     from app.tasks.scheduler import start_scheduler
 
@@ -93,6 +94,7 @@ async def lifespan(_app: FastAPI):
         await start_job_worker(),
         await start_inbox_worker(),
         await start_mail_push(),
+        await start_meeting_triggers(),
         await start_memory_worker(),
     ]
     cfg = get_settings()

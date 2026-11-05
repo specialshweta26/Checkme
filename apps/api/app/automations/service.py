@@ -160,19 +160,29 @@ async def accept_webhook(
         "If the condition does not match, explain briefly that the event was skipped and take no action.\n"
         f"<webhook_payload>{event_text}</webhook_payload>"
     )
+    return await queue_event(db, row, event_id, event_name or row.trigger, prompt, agent=agent)
+
+
+async def queue_event(db: AsyncSession, row: Automation, event_id: str, event_name: str, prompt: str, *, agent=None) -> dict:
+    """Queue one job for an event. Each event runs once per automation, however many times it's delivered."""
+    automation_id = row.id  # a rollback below expires the row
+    if agent is None:
+        agent = await db.get(WorkspaceAgent, row.agent_id) if row.agent_id else None
+    if agent is None or agent.user_id != row.user_id:
+        raise LookupError("Automation agent not found.")
     session = ChatSession(
-        user_id=user.id,
-        title=f"Webhook · {row.name}"[:200],
-        state={"automation_id": row.id, "webhook_event_id": event_id},
+        user_id=row.user_id,
+        title=f"Automation · {row.name}"[:200],
+        state={"automation_id": row.id, "event_id": event_id},
         agent_id=agent.id,
     )
     db.add(session)
     await db.flush()
     job = jobs.new_job(
-        user.id,
+        row.user_id,
         agent=agent,
         prompt=prompt,
-        title=f"{row.name} · {event_name or row.trigger}"[:200],
+        title=f"{row.name} · {event_name}"[:200],
         role="planner",
         kind="event",
         session_id=session.id,
@@ -182,7 +192,7 @@ async def accept_webhook(
     job.meta["event_id"] = event_id
     job.meta["requires_approval"] = bool(row.requires_approval)
     db.add(job)
-    db.add(jobs.event(job, "status", f"Queued webhook event: {row.name}", {"status": "queued", "kind": "event"}))
+    db.add(jobs.event(job, "status", f"Queued event: {row.name}", {"status": "queued", "kind": "event"}))
     db.add(WebhookDelivery(automation_id=row.id, event_id=event_id, job_id=job.id))
     try:
         await db.commit()
