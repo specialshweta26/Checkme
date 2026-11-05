@@ -3048,7 +3048,7 @@ async def with_computer(db: AsyncSession, user, conns: list) -> list:
 MEMORY_TIMEOUT_S = 8
 
 
-async def _load_memory_bounded(db, user, query: str, agent, task_key: str) -> str:
+async def _load_memory_bounded(db, user, query: str, agent, task_key: str, light: bool = False) -> str:
     """Memory for this turn, or nothing if it can't be had quickly: answering without memory beats hanging on a slow
     store. It gets its own database session, so being cut off can't leave the turn's session unusable."""
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -3056,9 +3056,9 @@ async def _load_memory_bounded(db, user, query: str, agent, task_key: str) -> st
     async def load() -> str:
         bind = getattr(db, "bind", None)
         if bind is None:
-            return await load_memory(db, user, query, agent, task_key=task_key)
+            return await load_memory(db, user, query, agent, task_key=task_key, light=light)
         async with AsyncSession(bind, expire_on_commit=False) as own:
-            found = await load_memory(own, user, query, agent, task_key=task_key)
+            found = await load_memory(own, user, query, agent, task_key=task_key, light=light)
             await own.commit()
             return found
 
@@ -3284,8 +3284,14 @@ async def _run_deep_agent(
         job=job,
         toolkit_assignments=toolkits,
     )
-    if plan.kind == fast_path.COMPUTER:
-        # Start the browser (and restore saved sign-ins) while the model plans its first step.
+    uploaded = "attachment_key=" in (query or "")
+    simple_turn = (
+        fast_path.is_simple_turn(query, has_uploads=uploaded or bool(images), confirmations=bool(confirmations))
+        and not teammate_depth
+        and job is None
+    )
+    if plan.kind == fast_path.COMPUTER and not fast_path.is_computer_file_query(query.split("\n\n", 1)[0]):
+        # Start the browser (and restore saved sign-ins) while the model plans its first step. Files don't need it.
         try:
             from app.agent import fast_browser
 
@@ -3316,13 +3322,13 @@ async def _run_deep_agent(
         except Exception:  # noqa: BLE001
             log.info("skills: loading the skill index failed", exc_info=True)
             await db.rollback()
-        if not file_turn:
+        if not file_turn and not simple_turn:
             skills_task = asyncio.create_task(_route_and_confirm(all_skills, query))
         timer.mark("skills_index", _t)
     if progress is not None and plan.kind != fast_path.QUICK_WEB:
         await progress.emit("Recalling what I know about this" if not teammate_depth else "Picking up the task", kind="memory")
     _t = _time.monotonic()
-    memory = await _load_memory_bounded(db, user, query, workspace_agent, getattr(ctx, "task_key", "") or "")
+    memory = await _load_memory_bounded(db, user, query, workspace_agent, getattr(ctx, "task_key", "") or "", light=simple_turn)
     timer.mark("memory", _t)
     pad_bit = pad.as_prompt(ctx.scratchpad)
     if pad_bit:
@@ -3360,7 +3366,11 @@ async def _run_deep_agent(
         )
         last_reply = next((str(h.get("content") or "") for h in reversed(history or []) if h.get("role") == "assistant"), "")
         await _begin_task_state(
-            ctx, matched_skills[0] if matched_skills else None, meta_question=is_meta_question(query), query=query, last_reply=last_reply
+            ctx,
+            matched_skills[0] if matched_skills else None,
+            meta_question=simple_turn or is_meta_question(query),
+            query=query,
+            last_reply=last_reply,
         )
         if matched_skills and progress is not None and not ctx.task_state:
             names = ", ".join(str(s.get("name")) for s in matched_skills)

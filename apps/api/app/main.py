@@ -81,6 +81,7 @@ async def lifespan(_app: FastAPI):
     except Exception as vis_exc:  # noqa: BLE001
         log.warning("object storage not ready: %s", vis_exc)
     from app.agent.memory_worker import start_memory_worker
+    from app.loop_watch import watch_loop
     from app.inbox.worker import start_inbox_worker
     from app.inbox.push import start_mail_push
     from app.automations.triggers import start_meeting_triggers
@@ -90,6 +91,7 @@ async def lifespan(_app: FastAPI):
     workers = [
         asyncio.create_task(_reclaim_redis_later(), name="redis-reclaim"),
         asyncio.create_task(_sync_builtins_later(), name="startup-sync"),
+        asyncio.create_task(watch_loop(), name="loop-watch"),
         await start_scheduler(),
         await start_job_worker(),
         await start_inbox_worker(),

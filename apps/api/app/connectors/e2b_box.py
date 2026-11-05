@@ -180,7 +180,7 @@ class E2BFiles:
         else:
             from pathlib import Path
 
-            data = Path(str(src)).read_bytes()
+            data = await asyncio.to_thread(Path(str(src)).read_bytes)
         await asyncio.wait_for(
             asyncio.to_thread(self._sbx.files.write, dest, data, request_timeout=FILE_TIMEOUT),
             timeout=FILE_TIMEOUT + 5,

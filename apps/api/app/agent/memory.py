@@ -462,8 +462,9 @@ def _assemble_memory(blocks: list, facts: list, history: list[str] | None = None
     return "\n".join(parts).strip()
 
 
-async def load_memory(db: AsyncSession, user: User, query: str, agent=None, task_key: str = "") -> str:
-    """Labeled persona + facts for one workspace agent. Fail-open: empty string on error."""
+async def load_memory(db: AsyncSession, user: User, query: str, agent=None, task_key: str = "", light: bool = False) -> str:
+    """Labeled persona + facts for one workspace agent. Fail-open: empty string on error. ``light`` keeps only the
+    persona blocks, skipping every search, for turns that don't need them."""
     try:
         owner = await _memory_agent(db, user, agent=agent)
     except Exception as exc:  # noqa: BLE001
@@ -478,6 +479,8 @@ async def load_memory(db: AsyncSession, user: User, query: str, agent=None, task
     except Exception as exc:  # noqa: BLE001
         log.warning("memory block load failed: %s", exc)
         blocks = []
+    if light:
+        return _assemble_memory(list(blocks), [], [])
     try:
         passages = await _agent_passages(db, user.id, owner.id)
         ranked = _rank_passages(passages, query)
