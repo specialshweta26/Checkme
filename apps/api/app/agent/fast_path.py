@@ -125,6 +125,26 @@ def recency_for(query: str) -> tuple[str, bool]:
     return "", news
 
 
+_SMALL_TALK = re.compile(
+    r"\s*(hi|hey|hello|yo|hii+|namaste|thanks|thank you|thx|ok(?:ay)?|cool|great|nice|bye|good (?:morning|afternoon|evening|night)|"
+    r"how are you|how's it going|what's up|sup)(?:\s+(?:there|team|everyone|all))?[\s!.?]*",
+    re.I,
+)
+
+
+def is_small_talk(query: str) -> bool:
+    return bool(_SMALL_TALK.fullmatch(query or ""))
+
+
+def is_simple_turn(query: str, *, has_uploads: bool = False, confirmations: bool = False) -> bool:
+    """Greetings and file or folder requests don't need memory search or skills: the model and its tools handle them
+    with what's in the conversation, so they skip that work. Uploads and approvals always get the full path."""
+    if has_uploads or confirmations:
+        return False
+    first = (query or "").split("\n\n", 1)[0]
+    return is_small_talk(first) or is_computer_file_query(first)
+
+
 def classify_turn(query: str, *, has_uploads: bool = False, confirmations: bool = False, coding_agent: bool = False) -> TurnPlan:
     """Heuristic class of one chat turn. No I/O, microseconds."""
     q = (query or "").strip()
