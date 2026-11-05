@@ -46,6 +46,13 @@ update against the public key in `tauri.conf.json` before installing it, and the
 can't accept new updates and everyone has to reinstall by hand. To release, push a tag like `desktop-v0.1.12`: the app's
 version comes from the tag.
 
+## Mac signing
+
+macOS keeps permissions such as Screen Recording by an app's signature. Mac releases are signed with one self-signed
+certificate from the `MAC_SIGNING_P12` and `MAC_SIGNING_PASSWORD` secrets, so updates keep those permissions. Without
+those secrets, builds are ad-hoc signed and every update loses them. `scripts/create-signing-cert.sh` creates the
+certificate once. Keep the `.p12` backed up: replacing it costs users their permissions one more time.
+
 ## Folder grants
 
 There is no automatic home-folder or `~/Lumio` jail. The user grants folders with the native picker (**This computer** in the app, or the agent calls `grant_folder`). List, search, read, write, copy, move, and delete run only inside those folders. Terminal and Python stay off until enabled in settings. The Lumio browser uses a separate profile under the app data directory; it does not read Chrome/Edge/Safari profiles.

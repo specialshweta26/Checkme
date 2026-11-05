@@ -37,6 +37,12 @@ jobs:
         working-directory: apps/desktop
         run: npm ci
       # In-app updates compare version numbers, so each release's version has to come from its tag.
+      - name: Load the Mac signing certificate
+        if: runner.os == 'macOS'
+        env:
+          MAC_SIGNING_P12: ${{ secrets.MAC_SIGNING_P12 }}
+          MAC_SIGNING_PASSWORD: ${{ secrets.MAC_SIGNING_PASSWORD }}
+        run: apps/desktop/scripts/import-signing-cert.sh
       - name: Set the app version from the tag
         working-directory: apps/desktop/src-tauri
         shell: bash
@@ -67,7 +73,7 @@ jobs:
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
-      - name: Ad-hoc sign Mac app and replace the DMG
+      - name: Sign Mac app and replace the DMG
         if: runner.os == 'macOS'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -81,7 +87,7 @@ jobs:
             exit 0
           fi
           xattr -cr "$APP" || true
-          codesign --force --deep --sign - "$APP"
+          codesign --force --deep --sign "${LUMIO_MAC_IDENTITY:--}" "$APP"
           VERSION="$(python3 -c "import json; print(json.load(open('apps/desktop/src-tauri/tauri.conf.json'))['version'])")"
           STAGE="$(mktemp -d)"
           ditto "$APP" "$STAGE/Lumio.app"

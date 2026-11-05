@@ -287,14 +287,15 @@ def _ingest_screen(user_id, result: dict) -> dict:
 
 
 _SCREEN_TRY: dict[str, float] = {}
+_SCREEN_ERROR: dict[str, str] = {}
+_SCREEN_STALE_S = 30
+DESKTOP_CAPTURE_EVERY_S = 10
+SCREEN_UNAVAILABLE = "Can't show this computer's screen yet. Check that Lumio has Screen Recording permission."
 
 
 async def local_browser_frame(user_id) -> bytes:
-    """The Chrome window Lumio is driving on this computer. Not a full-desktop capture.
-
-    A full-screen capture loop inside the app freezes the machine. This asks for one browser
-    picture, and reuses it for a couple of seconds while the screen panel is open.
-    """
+    """A picture for the live screen panel: Lumio's browser if it's open, otherwise this computer's desktop, since the
+    agent also works in other apps. Reuses a recent picture for a couple of seconds while the panel is open."""
     from app.connectors.daytona_box import live_screen_age, live_screen_png
 
     key = str(user_id)
@@ -303,21 +304,31 @@ async def local_browser_frame(user_id) -> bytes:
         return png
     now = time.monotonic()
     if now - _SCREEN_TRY.get(key, 0) < 2:
-        if png:
+        if png and live_screen_age(key) < _SCREEN_STALE_S:
             return png
-        raise LocalOffline("The computer browser is not open yet. Ask Lumio to open the page, then open the screen again.")
+        raise LocalOffline(_SCREEN_ERROR.get(key) or SCREEN_UNAVAILABLE)
     _SCREEN_TRY[key] = now
-    try:
-        await asyncio.wait_for(call_local(user_id, "browse_screenshot", {}), timeout=8)
-    except Exception as vis_exc:  # noqa: BLE001
-        png = live_screen_png(key)
-        if png:
-            return png
-        raise LocalOffline(str(vis_exc)[:200] or "The computer browser is not open yet.") from vis_exc
-    png = live_screen_png(key)
-    if not png:
-        raise LocalOffline("The computer browser is not open yet. Ask Lumio to open the page, then open the screen again.")
-    return png
+    problem = SCREEN_UNAVAILABLE
+    for tool in ("browse_screenshot", "screen_png"):
+        try:
+            result = await asyncio.wait_for(call_local(user_id, tool, {}), timeout=8)
+        except Exception as vis_exc:  # noqa: BLE001
+            problem = str(vis_exc)[:200] or SCREEN_UNAVAILABLE
+            continue
+        if isinstance(result, dict) and result.get("screenshot"):
+            _SCREEN_ERROR.pop(key, None)
+            if tool == "screen_png":
+                # Capturing the whole screen in a fast loop has frozen machines, so it runs far less often than the
+                # browser picture. The panel keeps showing the last one in between.
+                _SCREEN_TRY[key] = now + DESKTOP_CAPTURE_EVERY_S - 2
+            return live_screen_png(key)
+        if isinstance(result, dict) and result.get("error"):
+            problem = str(result["error"])[:200]
+    _SCREEN_ERROR[key] = problem
+    # A picture this old could show something that's no longer true, so say what's wrong instead.
+    if png and live_screen_age(key) < _SCREEN_STALE_S:
+        return png
+    raise LocalOffline(problem)
 
 
 async def wants_local_computer(db: AsyncSession, user: User) -> bool:
