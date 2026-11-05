@@ -30,6 +30,81 @@ const SUBMIT_IF_DRAFT_JS: &str = r#"(() => {
   return { clicked_send: true };
 })()"#;
 
+const MAX_ELEMENTS: usize = 150;
+const MAX_FRAMES: usize = 8;
+const MAX_FRAME_TEXT: usize = 3000;
+// Enough text, a visible field (sign-in and OTP pages are short), or a loaded frame that may hold the form.
+const PAGE_READY_JS: &str = r#"(() => {
+  const body = document.body;
+  if ((body && body.innerText || '').replace(/\s+/g, ' ').trim().length > 180) return true;
+  const shows = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  const hasField = (root) => {
+    for (const el of root.querySelectorAll('*')) {
+      if (el.matches('input:not([type=hidden]), textarea, select, [contenteditable="true"]') && shows(el)) return true;
+      if (el.shadowRoot && hasField(el.shadowRoot)) return true;
+    }
+    return false;
+  };
+  if (hasField(document)) return true;
+  if (document.readyState !== 'complete') return false;
+  return Array.from(document.querySelectorAll('iframe')).some((f) => { const r = f.getBoundingClientRect(); return r.width >= 200 && r.height >= 100; });
+})()"#;
+
+/// The other-site frames of the page at `page_ws`, from Chrome's target list.
+fn frames_of_page(targets: &[Value], page_ws: &str) -> Vec<String> {
+    let Some(page_id) = targets
+        .iter()
+        .find(|t| t.get("webSocketDebuggerUrl").and_then(Value::as_str) == Some(page_ws))
+        .and_then(|t| t.get("id").and_then(Value::as_str))
+    else {
+        return vec![];
+    };
+    targets
+        .iter()
+        .filter(|t| t.get("type").and_then(Value::as_str) == Some("iframe"))
+        .filter(|t| t.get("parentId").and_then(Value::as_str) == Some(page_id))
+        .filter_map(|t| t.get("webSocketDebuggerUrl").and_then(Value::as_str).map(str::to_string))
+        .take(MAX_FRAMES)
+        .collect()
+}
+
+/// Add one other-site frame's snapshot to the page's. Its x/y are relative to the frame, so they're dropped: its
+/// elements are acted on by ref. Frames with nothing to act on or read (trackers, empty ads) are left out.
+fn merge_frame(page: &mut Value, frame: &Value) {
+    let elements = frame.get("elements").and_then(Value::as_array).cloned().unwrap_or_default();
+    let text = frame.get("text").and_then(Value::as_str).unwrap_or("").trim();
+    if elements.is_empty() && text.len() < 20 {
+        return;
+    }
+    let url = frame.get("url").and_then(Value::as_str).unwrap_or("");
+    if let Some(list) = page.get_mut("elements").and_then(Value::as_array_mut) {
+        list.extend(elements.into_iter().map(|mut e| {
+            if let Some(row) = e.as_object_mut() {
+                row.remove("x");
+                row.remove("y");
+                row.insert("frame".into(), json!(url));
+            }
+            e
+        }));
+    }
+    let tree = frame.get("tree").and_then(Value::as_str).unwrap_or("");
+    if !tree.is_empty() {
+        let joined = format!("{}\n[frame {url}]\n{tree}", page["tree"].as_str().unwrap_or(""));
+        page["tree"] = json!(joined.trim_start());
+    }
+    if !text.is_empty() {
+        let clipped: String = text.chars().take(MAX_FRAME_TEXT).collect();
+        let joined = format!("{}\n[frame {url}]\n{clipped}", page["text"].as_str().unwrap_or(""));
+        page["text"] = json!(joined.trim_start());
+    }
+    // The focused field may be in the frame.
+    if page["composer"].as_str().unwrap_or("").is_empty() {
+        if let Some(composer) = frame.get("composer").filter(|c| c.as_str().is_some_and(|t| !t.is_empty())) {
+            page["composer"] = composer.clone();
+        }
+    }
+}
+
 pub struct Chrome {
     _child: Option<Child>,
     port: u16,
@@ -158,7 +233,31 @@ impl Chrome {
 
     async fn cdp_wait(&self, method: &str, params: Value, wait: Duration) -> Result<Value, String> {
         let ws_url = self.page_ws().await?;
-        let (mut ws, _) = connect_async(&ws_url).await.map_err(|e| e.to_string())?;
+        self.cdp_on(&ws_url, method, params, wait).await
+    }
+
+    /// Debug addresses of the open page's frames from other sites. Chrome runs these as separate targets, so script in
+    /// the page can't reach them.
+    async fn frame_targets(&self) -> Vec<String> {
+        let Ok(page_ws) = self.page_ws().await else { return vec![] };
+        let Ok(targets) = self.pages().await else { return vec![] };
+        frames_of_page(&targets, &page_ws)
+    }
+
+    async fn eval_on(&self, ws_url: &str, expression: &str) -> Result<Value, String> {
+        let result = self
+            .cdp_on(
+                ws_url,
+                "Runtime.evaluate",
+                json!({ "expression": expression, "returnByValue": true, "awaitPromise": false }),
+                Duration::from_secs(8),
+            )
+            .await?;
+        Ok(result.pointer("/result/value").cloned().unwrap_or(Value::Null))
+    }
+
+    async fn cdp_on(&self, ws_url: &str, method: &str, params: Value, wait: Duration) -> Result<Value, String> {
+        let (mut ws, _) = connect_async(ws_url).await.map_err(|e| e.to_string())?;
         let payload = json!({ "id": 1, "method": method, "params": params });
         ws.send(Message::Text(payload.to_string().into())).await.map_err(|e| e.to_string())?;
         let deadline = tokio::time::Instant::now() + wait;
@@ -216,7 +315,7 @@ impl Chrome {
         loop {
             tokio::time::sleep(Duration::from_millis(500)).await;
             let ready = self
-                .eval("(() => { const t = (document.body && document.body.innerText || '').replace(/\\s+/g, ' ').trim(); return t.length > 180 && document.readyState !== 'loading'; })()")
+                .eval(PAGE_READY_JS)
                 .await
                 .ok()
                 .and_then(|v| v.as_bool())
@@ -252,9 +351,20 @@ impl Chrome {
 
     pub async fn snapshot(&self) -> Result<Value, String> {
         self.arm_teach().await;
-        let mut data = self.eval(SNAPSHOT_JS).await?;
+        let mut data = self.eval(&format!("({SNAPSHOT_JS})(0, {MAX_ELEMENTS})")).await?;
         if !data.is_object() {
             data = json!({ "url": "", "title": "", "text": "", "tree": "", "elements": [] });
+        }
+        for ws_url in self.frame_targets().await {
+            let start = data["elements"].as_array().map_or(0, Vec::len);
+            if start >= MAX_ELEMENTS {
+                break;
+            }
+            let limit = MAX_ELEMENTS - start;
+            // A frame that can't be read (still loading, or just closed) shouldn't lose the rest of the page.
+            if let Ok(frame) = self.eval_on(&ws_url, &format!("({SNAPSHOT_JS})({start}, {limit})")).await {
+                merge_frame(&mut data, &frame);
+            }
         }
         if let Ok(shot) = self.screenshot_b64().await {
             data["screenshot_b64"] = json!(shot);
@@ -314,19 +424,38 @@ impl Chrome {
             let ref_id = step.get("ref").and_then(Value::as_str).unwrap_or("");
             let text = step.get("text").and_then(Value::as_str).unwrap_or("");
             let js = format!("({ACT_JS})({ref_id:?}, {kind:?}, {text:?})");
-            let result = self.eval(&js).await?;
+            // The ref is on the page or in one of its other-site frames. Keyboard input goes to whichever has it.
+            let mut target = self.page_ws().await?;
+            let mut result = self.eval_on(&target, &js).await?;
+            if result.get("not_found").and_then(Value::as_bool) == Some(true) {
+                for ws_url in self.frame_targets().await {
+                    if let Ok(found) = self.eval_on(&ws_url, &js).await {
+                        if found.get("not_found").and_then(Value::as_bool) != Some(true) {
+                            result = found;
+                            target = ws_url;
+                            break;
+                        }
+                    }
+                }
+            }
+            if kind == "press" && result.get("not_found").and_then(Value::as_bool) == Some(true) {
+                // A stale ref on a key press falls back to whatever has focus.
+                result = self.eval_on(&target, &format!("({ACT_JS})(\"\", {kind:?}, {text:?})")).await?;
+            }
             if result.get("ok").and_then(Value::as_bool) == Some(false) {
                 return Err(result.get("error").and_then(Value::as_str).unwrap_or("browser action failed").to_string());
             }
             if result.get("insert").and_then(Value::as_bool) == Some(true) && !text.is_empty() {
-                self.type_text(text).await?;
+                self.cdp_on(&target, "Input.insertText", json!({ "text": text }), Duration::from_secs(8)).await?;
             }
             if result.get("submit").and_then(Value::as_bool) == Some(true) {
                 let key = result.get("key").and_then(Value::as_str).unwrap_or("Enter");
-                self.key(key).await?;
+                for phase in ["keyDown", "keyUp"] {
+                    self.cdp_on(&target, "Input.dispatchKeyEvent", key_event(phase, key), Duration::from_secs(8)).await?;
+                }
                 tokio::time::sleep(Duration::from_millis(450)).await;
                 if key.eq_ignore_ascii_case("enter") || key.eq_ignore_ascii_case("return") {
-                    self.eval(SUBMIT_IF_DRAFT_JS).await.ok();
+                    self.eval_on(&target, SUBMIT_IF_DRAFT_JS).await.ok();
                 }
             }
         }
@@ -760,4 +889,196 @@ fn urlencoding_lite(raw: &str) -> String {
             _ => format!("%{b:02X}"),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod frame_tests {
+    use super::*;
+
+    fn snapshot() -> Value {
+        json!({ "url": "https://a.test/", "text": "page", "tree": "- e0 button Go", "composer": "", "elements": [{ "ref": "e0", "x": 5, "y": 5 }] })
+    }
+
+    #[test]
+    fn only_this_pages_frames_are_used() {
+        let targets = vec![
+            json!({ "id": "p1", "type": "page", "webSocketDebuggerUrl": "ws://p1" }),
+            json!({ "id": "p2", "type": "page", "webSocketDebuggerUrl": "ws://p2" }),
+            json!({ "id": "f1", "type": "iframe", "parentId": "p1", "webSocketDebuggerUrl": "ws://f1" }),
+            json!({ "id": "f2", "type": "iframe", "parentId": "p2", "webSocketDebuggerUrl": "ws://f2" }),
+            json!({ "id": "w1", "type": "worker", "parentId": "p1", "webSocketDebuggerUrl": "ws://w1" }),
+        ];
+        assert_eq!(frames_of_page(&targets, "ws://p1"), vec!["ws://f1"]);
+        assert!(frames_of_page(&targets, "ws://gone").is_empty());
+    }
+
+    #[test]
+    fn a_frame_is_merged_without_its_coordinates() {
+        let mut page = snapshot();
+        let frame = json!({ "url": "https://pay.test/", "text": "Card details", "tree": "- e1 textbox Card", "composer": "note", "elements": [{ "ref": "e1", "x": 9, "y": 9 }] });
+        merge_frame(&mut page, &frame);
+        let rows = page["elements"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows[1].get("x").is_none() && rows[1].get("y").is_none());
+        assert_eq!(rows[1]["frame"], "https://pay.test/");
+        assert!(page["tree"].as_str().unwrap().contains("[frame https://pay.test/]\n- e1 textbox Card"));
+        assert!(page["text"].as_str().unwrap().contains("Card details"));
+        assert_eq!(page["composer"], "note");
+    }
+
+    #[test]
+    fn an_empty_frame_is_left_out() {
+        let mut page = snapshot();
+        merge_frame(&mut page, &json!({ "url": "https://ads.test/", "text": " ", "tree": "", "elements": [] }));
+        assert_eq!(page["elements"].as_array().unwrap().len(), 1);
+        assert!(!page["text"].as_str().unwrap().contains("ads.test"));
+    }
+
+    #[test]
+    fn frame_text_is_capped() {
+        let mut page = snapshot();
+        let long = "x".repeat(MAX_FRAME_TEXT * 2);
+        merge_frame(&mut page, &json!({ "url": "https://b.test/", "text": long, "tree": "", "elements": [] }));
+        assert!(page["text"].as_str().unwrap().len() < MAX_FRAME_TEXT + 100);
+    }
+
+    const MAIN_PAGE: &str = r#"<!doctype html><title>Main</title><body>
+      <button id="plain">Plain button</button>
+      <input id="pw" type="password" autocomplete="current-password">
+      <input id="card" autocomplete="cc-number" value="4242424242424242">
+      <div id="host"></div>
+      <iframe id="same" src="/inner" width="400" height="200"></iframe>
+      <iframe id="other" src="OTHER/frame" width="400" height="200"></iframe>
+      <script>
+        document.getElementById('pw').value = 'hunter22-secret';
+        const root = document.getElementById('host').attachShadow({ mode: 'open' });
+        root.innerHTML = '<p>Shadow words</p><input id="in-shadow" placeholder="Shadow field">';
+      </script></body>"#;
+    const INNER_PAGE: &str = r#"<!doctype html><body><p>Same origin words</p><input id="in-same" placeholder="Same field"></body>"#;
+    const FRAME_PAGE: &str = r#"<!doctype html><body><p>Other site words</p>
+      <input id="in-other" placeholder="Other field" type="text">
+      <input id="pw-other" type="password" placeholder="Other password"></body>"#;
+    const SIGN_IN: &str = r#"<!doctype html><title>Sign in</title><body><input placeholder="Email"></body>"#;
+    const EMPTY: &str = r#"<!doctype html><title>Nothing</title><body></body>"#;
+
+    async fn serve(listener: tokio::net::TcpListener, other: String) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else { return };
+            let other = other.clone();
+            tokio::spawn(async move {
+                let mut buf = [0u8; 2048];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]);
+                let path = head.split_whitespace().nth(1).unwrap_or("/");
+                let body = match path {
+                    "/inner" => INNER_PAGE.to_string(),
+                    "/frame" => FRAME_PAGE.to_string(),
+                    "/signin" => SIGN_IN.to_string(),
+                    "/empty" => EMPTY.to_string(),
+                    _ => MAIN_PAGE.replace("OTHER", &other),
+                };
+                let reply = format!("HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len());
+                let _ = sock.write_all(reply.as_bytes()).await;
+            });
+        }
+    }
+
+    fn ref_of(snapshot: &Value, name: &str) -> String {
+        snapshot["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["name"].as_str().is_some_and(|n| n.contains(name)))
+            .unwrap_or_else(|| panic!("no element named {name}: {}", snapshot["tree"]))["ref"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    /// Drives a real headless Chrome. Run with: cargo test frame_tests -- --ignored
+    #[test]
+    #[ignore = "needs Google Chrome"]
+    fn real_chrome_reads_and_fills_frames_and_shadow_dom() {
+        let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let web = listener.local_addr().unwrap().port();
+            // 127.0.0.1 and localhost are different sites, so this frame gets its own Chrome target.
+            tokio::spawn(serve(listener, format!("http://localhost:{web}")));
+
+            let bin = chrome_candidates().into_iter().next().expect("Chrome is installed");
+            let port = 9444u16;
+            let profile = std::env::temp_dir().join(format!("lumio-frame-test-{web}"));
+            let mut child = Command::new(&bin)
+                .arg("--headless=new")
+                .arg(format!("--remote-debugging-port={port}"))
+                .arg(format!("--user-data-dir={}", profile.display()))
+                .arg("--no-first-run")
+                .arg("--site-per-process")
+                .arg("--window-size=1280,800")
+                .arg(format!("http://127.0.0.1:{web}/empty"))
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap();
+            let http = http_client(Duration::from_secs(3)).unwrap();
+            wait_debug(&http, port).await.unwrap();
+            let chrome = Chrome { _child: None, port, http };
+
+            let t0 = std::time::Instant::now();
+            let page = chrome.navigate(&format!("http://127.0.0.1:{web}/signin"), 6000).await.unwrap();
+            assert!(t0.elapsed() < Duration::from_millis(3000), "short sign-in page took {:?}", t0.elapsed());
+            assert!(page["tree"].as_str().unwrap().contains("Email"));
+
+            let page = chrome.navigate(&format!("http://127.0.0.1:{web}/"), 6000).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(800)).await;
+            let page = if page["tree"].as_str().unwrap().contains("Other field") { page } else { chrome.snapshot().await.unwrap() };
+            let mut without_shot = page.clone();
+            without_shot.as_object_mut().unwrap().remove("screenshot_b64");
+            let dump = without_shot.to_string();
+            assert!(dump.contains("Shadow words") && dump.contains("Same origin words") && dump.contains("Other site words"), "{dump}");
+            assert!(!dump.contains("hunter22-secret"), "password leaked: {dump}");
+            assert!(!dump.contains("4242424242424242"), "card number leaked: {dump}");
+
+            let refs: Vec<&str> = page["elements"].as_array().unwrap().iter().filter_map(|e| e["ref"].as_str()).collect();
+            let unique: std::collections::HashSet<_> = refs.iter().collect();
+            assert_eq!(refs.len(), unique.len(), "refs must not repeat: {refs:?}");
+
+            for (name, frame_id, script_target) in [
+                ("Shadow field", "in-shadow", "shadow"),
+                ("Same field", "in-same", "same"),
+                ("Other field", "in-other", "other"),
+            ] {
+                let target = ref_of(&page, name);
+                chrome.act(&[json!({ "kind": "fill", "ref": target, "text": format!("typed {name}") })]).await.unwrap_or_else(|e| panic!("{name}: {e}"));
+                let read = match script_target {
+                    "shadow" => chrome.eval(&format!("document.getElementById('host').shadowRoot.getElementById('{frame_id}').value")).await.unwrap(),
+                    "same" => chrome.eval(&format!("document.getElementById('same').contentDocument.getElementById('{frame_id}').value")).await.unwrap(),
+                    _ => {
+                        let frames = chrome.frame_targets().await;
+                        assert!(!frames.is_empty(), "the other-site frame should be its own target");
+                        chrome.eval_on(&frames[0], &format!("document.getElementById('{frame_id}').value")).await.unwrap()
+                    }
+                };
+                assert_eq!(read, json!(format!("typed {name}")), "{name}");
+            }
+
+            // A secret typed into the other-site frame stays out of what comes back.
+            let pw = ref_of(&page, "Other password");
+            let after = chrome.act(&[json!({ "kind": "fill", "ref": pw, "text": "frame-secret-77" })]).await.unwrap();
+            let mut after = after;
+            after.as_object_mut().unwrap().remove("screenshot_b64");
+            assert!(!after.to_string().contains("frame-secret-77"), "frame password leaked");
+
+            // Clicking in the page still works, and a ref that doesn't exist is an error.
+            assert!(chrome.act(&[json!({ "kind": "click", "ref": "e9999" })]).await.is_err());
+            chrome.act(&[json!({ "kind": "press", "ref": "e9999", "text": "Tab" })]).await.unwrap();
+            let plain = ref_of(&page, "Plain button");
+            chrome.act(&[json!({ "kind": "click", "ref": plain })]).await.unwrap();
+
+            child.kill().await.ok();
+        });
+    }
 }

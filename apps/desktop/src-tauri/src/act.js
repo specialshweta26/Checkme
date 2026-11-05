@@ -1,6 +1,20 @@
 (function (ref, kind, text) {
-  const el = document.querySelector('[data-checkme-ref="' + ref + '"]');
-  if (!el && kind !== 'press') return { ok: false, error: 'ref not found: ' + ref };
+  // Same walk as snapshot.js: the page, open shadow roots and same-origin iframes.
+  function find(root) {
+    const hit = root.querySelector('[data-checkme-ref="' + ref + '"]');
+    if (hit) return hit;
+    for (const node of root.querySelectorAll('*')) {
+      let inner = node.shadowRoot || null;
+      if (!inner && (node.tagName === 'IFRAME' || node.tagName === 'FRAME')) {
+        try { inner = node.contentDocument; } catch (e) {}
+      }
+      const found = inner && find(inner);
+      if (found) return found;
+    }
+    return null;
+  }
+  const el = ref ? find(document) : null;
+  if (!el && (kind !== 'press' || ref)) return { ok: false, not_found: true, error: 'ref not found: ' + ref };
   const target = el || document.activeElement;
   if (!target) return { ok: false, error: 'nothing to act on' };
 
@@ -18,9 +32,9 @@
       return;
     }
     if (!node.isContentEditable) return;
-    const sel = window.getSelection();
+    const sel = node.ownerDocument.getSelection();
     if (!sel) return;
-    const range = document.createRange();
+    const range = node.ownerDocument.createRange();
     range.selectNodeContents(node);
     sel.removeAllRanges();
     sel.addRange(range);
