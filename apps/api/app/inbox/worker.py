@@ -63,6 +63,16 @@ async def classify_all_inboxes() -> None:
             log.exception("inbox classify failed for user %s", user_id)
 
 
+async def _check_mail_triggers() -> int:
+    from app.automations.triggers import check_mail
+
+    try:
+        return await check_mail(SessionLocal)
+    except Exception:  # noqa: BLE001 - triggers must not stop inbox sync
+        log.exception("mail triggers failed")
+        return 0
+
+
 async def inbox_loop() -> None:
     global _classify_task
     await asyncio.sleep(30)
@@ -71,6 +81,10 @@ async def inbox_loop() -> None:
             count = await ingest_all_inboxes()
             if count:
                 log.info("inbox worker stored %s new messages", count)
+            if await _check_mail_triggers():
+                from app.jobs.worker import wake
+
+                wake()
         except asyncio.TimeoutError:
             log.warning("inbox ingest timed out; yielding to HTTP")
         except Exception:  # noqa: BLE001
