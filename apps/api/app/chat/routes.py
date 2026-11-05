@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent import cancel as run_cancel
 from app.agent.attachments import summarize_one
 from app.agent.confirm import read_confirm
+from app.agent.attachments import uploaded_images
 from app.agent.deep import run_deep_agent
 from app.agent.memory import seed_letta
 from app.agent.progress import ProgressReporter, read_progress, read_progress_draft, read_progress_session, valid_progress_id
@@ -151,11 +152,12 @@ async def chat(
             keys.append(item.get("key"))
             name = item.get("filename") or "file"
             extracted = (item.get("extracted_text") or "").strip()
-            bits.append(f"- {name} (attachment_key={item.get('key')})" + (f"\n{extracted[:3000]}" if extracted else ""))
+            bits.append(f"- {name} (attachment_key={item.get('key')})" + (f"\n{extracted[:12000]}" if extracted else ""))
         agent_text = (
             text
-            + "\n\nThe user uploaded these files. Use attachment_keys when sending or replying to mail. "
-            "Analyze them in detail; do not give a brief summary.\n"
+            + "\n\nThe user uploaded these files, and this request is about them. Their contents are in this message: "
+            "work from them directly and don't open or search for them on the computer. Use attachment_keys only when "
+            "sending or replying to mail. Analyze them in detail; do not give a brief summary.\n"
             + "\n".join(bits)
         )
 
@@ -312,6 +314,7 @@ async def chat(
                 mentions=mentions,
                 progress=progress,
                 client_kind=(request.headers.get("x-lumio-client") or "web"),
+                images=uploaded_images(user.id, uploads),
             )
         except Exception as exc:  # noqa: BLE001
             if run.cancelled or isinstance(exc, run_cancel.TurnCancelled):

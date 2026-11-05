@@ -213,13 +213,57 @@ async def confirm_skills(query: str, candidates: list[dict], llm=None) -> list[d
     return [{**by_id[i], "match": {**(by_id[i].get("match") or {}), "confirmed": True}} for i in keep if i in by_id]
 
 
+_CARRY_ON = re.compile(r"^\W*(continue|carry on|keep going|go on|go ahead|resume|next( step)?|proceed)\b", re.I)
+
+
+async def continues_task(query: str, state: dict, last_reply: str = "", llm=None) -> bool:
+    """Whether this message carries on the skill in progress. If that can't be decided, it's treated as a new request:
+    the skill stays open, whereas wrongly continuing it would derail what the user just asked."""
+    text = (query or "").strip()
+    if not text:
+        return False
+    if _CARRY_ON.search(text):
+        return True
+    messages = [
+        {"role": "system", "content": "You decide whether a user's latest message carries on a named task in progress. It does only if it is about that task's subject: it answers a question the assistant asked for the task, gives details the task needs, or asks for the task's next part. Answer false for a greeting, small talk, or a request about anything else, even if it follows on from the assistant's last message. Example: the task is a sales report and the assistant just listed some files; 'open that file' has nothing to do with the report, so it is false."},
+        {
+            "role": "user",
+            "content": json.dumps({"task": state.get("skill_name"), "assistant_said": (last_reply or "")[-800:], "user_said": text[:1500]}, ensure_ascii=False)
+            + '\n\nReply in JSON: {"continues": true or false}',
+        },
+    ]
+    try:
+        if llm is None:
+            from functools import partial
+
+            from app.llm import chat_complete, small_model
+
+            llm = partial(chat_complete, model=small_model())
+        resp = await asyncio.wait_for(llm(messages, response_format={"type": "json_object"}, max_tokens=60), CONFIRM_TIMEOUT)
+        raw = resp.choices[0].message.content if hasattr(resp, "choices") else str(resp)
+        return json.loads(raw).get("continues") is True
+    except Exception as exc:  # noqa: BLE001 - see the docstring
+        log.info("task state: continuation check failed (%s)", type(exc).__name__)
+        return False
+
+
 async def begin(
-    user, task_key: str, agent_id=None, skill: dict | None = None, session_id=None, job_id=None, meta_question: bool = False
+    user,
+    task_key: str,
+    agent_id=None,
+    skill: dict | None = None,
+    session_id=None,
+    job_id=None,
+    meta_question: bool = False,
+    query: str = "",
+    last_reply: str = "",
 ) -> tuple[dict | None, bool]:
     """The state this run follows, and whether it resumed an earlier one.
 
     Jobs keep their state for their whole life (retries and restarts resume). In chat a newly routed skill replaces
-    an older one; with nothing routed the active skill resumes if it is recent. Meta questions never resume a task.
+    an older one; with nothing routed the active skill resumes only if it is recent and this message carries it on, so a
+    greeting or a different request isn't pulled into it. That skill stays open in case the user comes back to it.
+    Meta questions never resume a task.
     """
     try:
         current = await STORE.find_open(user.id, task_key)
@@ -235,7 +279,9 @@ async def begin(
         if not is_job and same:
             return current, True
         if not is_job and skill is None:
-            return (current, True) if (fresh and not meta_question and current.get("status") == "active") else (None, False)
+            if fresh and not meta_question and current.get("status") == "active" and await continues_task(query, current, last_reply):
+                return current, True
+            return None, False
         await STORE.update(current["id"], status="dropped")
     if skill is None:
         return None, False

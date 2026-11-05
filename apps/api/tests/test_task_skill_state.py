@@ -67,7 +67,7 @@ async def test_concurrent_tasks_are_isolated(task_store):
 async def test_chat_task_switches_resumes_and_ignores_meta_questions(task_store):
     key = ts.task_key_for(session_id="s1", agent_id="a1")
     first, _ = await ts.begin(USER, key, skill=SKILL)
-    follow, resumed = await ts.begin(USER, key, skill=None)
+    follow, resumed = await ts.begin(USER, key, skill=None, query="continue")
     assert resumed and follow["id"] == first["id"]
     meta, resumed = await ts.begin(USER, key, skill=None, meta_question=True)
     assert meta is None and not resumed
@@ -76,7 +76,7 @@ async def test_chat_task_switches_resumes_and_ignores_meta_questions(task_store)
     assert (await task_store.get(first["id"]))["status"] == "dropped"
     # Old chat state does not come back after the resume window.
     task_store.rows[switched["id"]]["updated_at"] -= timedelta(hours=ts.CHAT_RESUME_HOURS + 1)
-    stale, _ = await ts.begin(USER, key, skill=None)
+    stale, _ = await ts.begin(USER, key, skill=None, query="continue")
     assert stale is None
 
 

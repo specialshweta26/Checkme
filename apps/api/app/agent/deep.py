@@ -2402,6 +2402,7 @@ def shell_routing_hint(connectors: list | None, agent=None) -> str:
             "directly, including CSV and other files inside them. read_file on a CSV or TSV summarizes the whole table on this computer (row counts, status breakdowns, numeric totals), even when the file is many megabytes. Use that summary. Never ask the user to enable Terminal to analyze a granted spreadsheet. Never say files are limited to ~/Lumio. "
             "Never open a folder picker. For any other folder, ask in one sentence and wait for the answer. "
             "Never use shell to bypass folder grants. "
+            "If an earlier message already named a file or its folder, go straight to it instead of searching again. "
             "search_files finds a file by the words the user used, across every granted folder. list_files with no path lists those folders. "
             "list_dir, read_file, write_file, and search_files stay on this computer. If the desktop app is offline, say so and stop. Do not read those files on the cloud computer. "
             "A missing path on the cloud machine does not mean the file is missing on this Mac. "
@@ -3044,7 +3045,9 @@ async def with_computer(db: AsyncSession, user, conns: list) -> list:
     return [*conns, *extra] if extra else conns
 
 
-async def _begin_task_state(ctx: RunContext, skill: dict | None, meta_question: bool = False, resumed_ok: bool = True) -> None:
+async def _begin_task_state(
+    ctx: RunContext, skill: dict | None, meta_question: bool = False, resumed_ok: bool = True, query: str = "", last_reply: str = ""
+) -> None:
     """Open or resume this task's skill state and narrate it (chat status line + job timeline)."""
     from app.skills import task_state as ts
 
@@ -3059,6 +3062,8 @@ async def _begin_task_state(ctx: RunContext, skill: dict | None, meta_question: 
             session_id=ctx.session_id,
             job_id=getattr(ctx.job, "id", None),
             meta_question=meta_question,
+            query=query,
+            last_reply=last_reply,
         )
     except Exception:  # noqa: BLE001 - never block a turn on task state
         log.info("task state: begin failed", exc_info=True)
@@ -3145,6 +3150,7 @@ async def run_deep_agent(
     job: Any = None,
     task_key: str | None = None,
     client_kind: str | None = None,
+    images: list[str] | None = None,
 ) -> dict[str, Any]:
     from app.desktop.client import client_kind as current_client
     from app.desktop.client import reset_client_kind, set_client_kind
@@ -3171,6 +3177,7 @@ async def run_deep_agent(
             progress,
             job,
             task_key,
+            images,
         )
     finally:
         reset_client_kind(token)
@@ -3193,6 +3200,7 @@ async def _run_deep_agent(
     progress: Any = None,
     job: Any = None,
     task_key: str | None = None,
+    images: list[str] | None = None,
 ) -> dict[str, Any]:
     from app.connectors.platform import ensure_platform_connectors
 
@@ -3302,6 +3310,12 @@ async def _run_deep_agent(
         if block and block not in (memory or ""):
             memory = ((memory or "").rstrip() + "\n\nYour coding memory (repos, conventions, past PRs):\n" + block).strip()
     extra = []
+    if images:
+        from app.agent.attachments import image_message
+
+        shown = await image_message(images)
+        if shown is not None:
+            extra.append(shown)
     matched_skills: list = []
     if db is not None:
         _t = _time.monotonic()
@@ -3318,8 +3332,9 @@ async def _run_deep_agent(
         ctx.task_key = task_key or ts.task_key_for(
             session_id=session_id, agent_id=getattr(workspace_agent, "id", None), job_id=getattr(job, "id", None)
         )
+        last_reply = next((str(h.get("content") or "") for h in reversed(history or []) if h.get("role") == "assistant"), "")
         await _begin_task_state(
-            ctx, matched_skills[0] if matched_skills else None, meta_question=is_meta_question(query)
+            ctx, matched_skills[0] if matched_skills else None, meta_question=is_meta_question(query), query=query, last_reply=last_reply
         )
         if matched_skills and progress is not None and not ctx.task_state:
             names = ", ".join(str(s.get("name")) for s in matched_skills)

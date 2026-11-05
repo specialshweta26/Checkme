@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import io
 import json
 import logging
+import re
 import uuid
 from typing import Any
 
@@ -11,7 +14,7 @@ from app.config import get_settings
 from app.connectors.runtime import RuntimeConnector, is_binary
 from app.llm import chat_complete
 from app.security import file_link_ttl_s
-from app.storage import extract_text, put_bytes, signed_url
+from app.storage import extract_text, get_bytes, put_bytes, signed_url
 from connector_core.text import clip
 
 log = logging.getLogger(__name__)
@@ -224,3 +227,50 @@ async def process_message_result(
         if summaries:
             result["attachment_summary"] = summaries[0]
     return result
+
+
+MAX_IMAGES = 4
+_IMAGE_NAME = re.compile(r"\.(png|jpe?g|webp|gif)$", re.I)
+_IMAGE_MAX_SIDE = 1600
+
+
+def uploaded_images(user_id, uploads: list[dict]) -> list[str]:
+    """Storage keys of this user's uploaded images. Keys come from the client, so only their own count."""
+    keys = []
+    for item in uploads or []:
+        key = str(item.get("key") or "")
+        name = str(item.get("filename") or key)
+        kind = str(item.get("content_type") or "")
+        if key.startswith(f"{user_id}/") and (kind.startswith("image/") or _IMAGE_NAME.search(name)):
+            keys.append(key)
+    return keys[:MAX_IMAGES]
+
+
+def _as_data_url(data: bytes) -> str:
+    """A size the model can take: larger screenshots are scaled down, which also keeps the request small."""
+    from PIL import Image
+
+    with Image.open(io.BytesIO(data)) as img:
+        img = img.convert("RGB")
+        img.thumbnail((_IMAGE_MAX_SIDE, _IMAGE_MAX_SIDE))
+        out = io.BytesIO()
+        img.save(out, "JPEG", quality=85)
+    return "data:image/jpeg;base64," + base64.b64encode(out.getvalue()).decode()
+
+
+async def image_message(keys: list[str]) -> Any:
+    """A message that shows the model the uploaded images, or None if none could be loaded."""
+    from langchain_core.messages import HumanMessage
+
+    parts: list[dict] = []
+    for key in keys:
+        try:
+            data, _ = await asyncio.to_thread(get_bytes, key)
+            url = await asyncio.to_thread(_as_data_url, data)
+        except Exception as exc:  # noqa: BLE001 - the turn still has the file names and any extracted text
+            log.warning("uploaded image not loaded: %s", type(exc).__name__)
+            continue
+        parts.append({"type": "image_url", "image_url": {"url": url}})
+    if not parts:
+        return None
+    return HumanMessage(content=[{"type": "text", "text": "The images the user attached to their message:"}, *parts])

@@ -15,6 +15,7 @@ use tokio::process::Command;
 use tokio::sync::Mutex;
 
 mod browser;
+mod office;
 mod updates;
 mod grants;
 mod os;
@@ -165,6 +166,22 @@ fn read_granted(file: &Path) -> Value {
     };
     match bytes {
         Ok(bytes) if table => table_report(file, &bytes),
+        Ok(bytes) if office::is_office(file) => match office::text_of(file, &bytes) {
+            Ok(text) => json!({
+                "ok": true,
+                "path": file.to_string_lossy(),
+                "bytes": bytes.len(),
+                "content": clip(text, FILE_TEXT_LIMIT),
+                "ran_on": "local_computer"
+            }),
+            Err(err) => json!({ "ok": false, "error": err, "ran_on": "local_computer" }),
+        },
+        // Raw bytes would only fill the agent's context with noise and hide the real problem.
+        Ok(bytes) if bytes.contains(&0) => json!({
+            "ok": false,
+            "error": format!("{} is a binary file, so its text can't be read here. Say so and ask the user to attach it to the chat.", file.display()),
+            "ran_on": "local_computer"
+        }),
         Ok(bytes) => json!({
             "ok": true,
             "path": file.to_string_lossy(),
