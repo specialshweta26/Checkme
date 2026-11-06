@@ -770,6 +770,22 @@ The code exists only in the app window, is single-use, and expires after 10 minu
 `[A-Za-z0-9_-]{32,96}`, and `desktop` is refused for account linking. It works with existing desktop builds:
 `open_external` was already there.
 
+### Context trimming
+
+Every browser tool returns the whole page again: text, element tree and tables, up to 60,000 characters. On a long
+form-filling run those copies piled up in the conversation, and each model call carried 100,000+ tokens and took
+long enough to look stuck.
+
+`app/agent/context_trim.py` adds a middleware (`TRIM_OLD_PAGES`, on by default) that changes only what is sent to the
+model on each call:
+- **Older page results** (browser and computer tools, all but the latest one) shrink to a short note: address,
+  title, ok, error, warnings, result, need_user, downloads.
+- **Other old results:** any other tool result older than the last 4 messages and longer than 4,000 characters is
+  cut to that size.
+
+The stored conversation keeps everything, and `inspect_result` can reread it. A 15-step page run went from about
+156,000 to about 11,000 tokens per model call.
+
 ## 13. Error handling
 
 | Failure | Behavior |

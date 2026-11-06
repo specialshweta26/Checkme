@@ -48,12 +48,15 @@
   if (mode === 'calendar') {
     const want = parseDate(text);
     if (!want) return { ok: false };
+    let dated = 0;
     for (const el of document.querySelectorAll('[aria-label], [data-date], [datetime], [title], [role="gridcell"], td')) {
       if (!vis(el)) continue;
       if (el.getAttribute('aria-disabled') === 'true' || String(el.className).toLowerCase().includes('disabled')) continue;
       const parts = [el.getAttribute('aria-label'), el.getAttribute('data-date'), el.getAttribute('datetime'), el.getAttribute('title')].filter(Boolean);
+      if (parts.some((p) => parseDate(p))) dated += 1;
       if (parts.some((p) => parseDate(p) === want)) return { ok: true, cell: centre(el) };
     }
+    if (!dated) return { ok: false };  // no calendar on screen: never click some other "next" arrow (a carousel)
     const next = Array.from(document.querySelectorAll('button, [role="button"], span, div, a')).find((el) => {
       if (!vis(el) || el.getBoundingClientRect().width >= 80) return false;
       const t = [el.getAttribute('aria-label'), el.getAttribute('title'), el.className && String(el.className)].join(' ').toLowerCase();
