@@ -1,3 +1,7 @@
+"use client";
+
+import { useEffect, useRef, useState, type JSX } from "react";
+import { isLumioDesktop } from "../lib";
 export function GoogleMark() {
   return (
     <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden>
@@ -20,19 +24,111 @@ export function MicrosoftMark() {
   );
 }
 
+type Provider = "google" | "microsoft";
+
+function newCode() {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  return btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+/**
+ * Sign-in buttons. In the Lumio desktop app the provider's page opens in the system browser (it can't sign in
+ * inside the app window), so the app starts sign-in there with a one-time code and waits until the browser has
+ * finished, then collects its own session (docs/LLD.md "Desktop sign-in").
+ */
 export function AuthProviders({ error = "" }: { error?: string }) {
+  const [waiting, setWaiting] = useState<Provider | null>(null);
+  const [problem, setProblem] = useState("");
+  const stopRef = useRef(false);
+  // Known only in the browser (the server renders the web version first).
+  const [desktop, setDesktop] = useState(false);
+
+  useEffect(() => {
+    setDesktop(isLumioDesktop());
+    return () => {
+      stopRef.current = true;
+    };
+  }, []);
+
+  async function desktopSignIn(provider: Provider) {
+    const tauri = (window as { __TAURI__?: { core?: { invoke?: (name: string, args: { url: string }) => Promise<unknown> } } }).__TAURI__?.core;
+    if (!tauri?.invoke) {
+      window.location.href = `/api/auth/${provider}/login`;
+      return;
+    }
+    const code = newCode();
+    setProblem("");
+    setWaiting(provider);
+    stopRef.current = false;
+    try {
+      await tauri.invoke("open_external", { url: `${window.location.origin}/api/auth/${provider}/login?desktop=${code}` });
+    } catch {
+      setWaiting(null);
+      setProblem("Couldn't open your browser to sign in.");
+      return;
+    }
+    const until = Date.now() + 10 * 60 * 1000;
+    while (!stopRef.current && Date.now() < until) {
+      await new Promise((r) => window.setTimeout(r, 2000));
+      if (stopRef.current) return;
+      try {
+        const res = await fetch("/api/auth/desktop/claim", {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ code }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data.ok) {
+          window.location.replace("/chat");
+          return;
+        }
+      } catch {
+        // Offline for a moment: keep waiting.
+      }
+    }
+    if (!stopRef.current) {
+      setWaiting(null);
+      setProblem("Sign-in timed out. Try again.");
+    }
+  }
+
+  const button = (provider: Provider, label: string, mark: JSX.Element) =>
+    desktop ? (
+      <button className="provider" type="button" disabled={waiting !== null} onClick={() => void desktopSignIn(provider)}>
+        {mark}
+        {label}
+      </button>
+    ) : (
+      <a className="provider" href={`/api/auth/${provider}/login`}>
+        {mark}
+        {label}
+      </a>
+    );
+
   return (
     <>
-      {error ? <p className="err">{error}</p> : null}
+      {error || problem ? <p className="err">{problem || error}</p> : null}
+      {waiting ? (
+        <div className="desktop-wait">
+          <strong>Finish signing in in your browser</strong>
+          <span className="muted">This window signs you in by itself as soon as you're done there.</span>
+          <button
+            className="btn secondary small"
+            type="button"
+            onClick={() => {
+              stopRef.current = true;
+              setWaiting(null);
+            }}
+          >
+            Cancel
+          </button>
+        </div>
+      ) : null}
       <div className="providers">
-        <a className="provider" href="/api/auth/google/login">
-          <GoogleMark />
-          Continue with Google
-        </a>
-        <a className="provider" href="/api/auth/microsoft/login">
-          <MicrosoftMark />
-          Continue with Microsoft
-        </a>
+        {button("google", "Continue with Google", <GoogleMark />)}
+        {button("microsoft", "Continue with Microsoft", <MicrosoftMark />)}
       </div>
     </>
   );

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import logging
+import re
 import secrets
 import uuid
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -37,6 +39,29 @@ def _web(path: str) -> str:
     return f"{get_settings().public_web_url}{path}"
 
 
+# Desktop sign-in (docs/LLD.md "Desktop sign-in"): the app opens sign-in in the system browser with a one-time code
+# only it knows; after the provider, the callback keeps a separate desktop session under that code for a few
+# minutes, and the app claims it once and gets its own session cookie.
+DESKTOP_CODE = re.compile(r"[A-Za-z0-9_-]{32,96}")
+DESKTOP_TTL_S = 600
+
+
+def _desktop_key(code: str) -> str:
+    return f"desktop_signin:{code}"
+
+
+def _session_cookie(resp, token: str) -> None:
+    resp.set_cookie(
+        SESSION_COOKIE,
+        token,
+        max_age=get_settings().session_ttl_days * 86400,
+        httponly=True,
+        samesite="lax",
+        secure=get_settings().secure_cookies,
+        path="/",
+    )
+
+
 @router.get("/status")
 async def oauth_status():
     s = get_settings()
@@ -48,7 +73,7 @@ async def oauth_status():
 
 
 @router.get("/{provider}/login")
-async def login(provider: str, request: Request, mode: str = "signin", user: User | None = Depends(optional_user)):
+async def login(provider: str, request: Request, mode: str = "signin", desktop: str = "", user: User | None = Depends(optional_user)):
     try:
         p = get_provider(provider)
     except KeyError:
@@ -61,10 +86,13 @@ async def login(provider: str, request: Request, mode: str = "signin", user: Use
         )
     if mode == "link" and user is None:
         return RedirectResponse(_web("/login?error=signin_required"))
+    if desktop and (mode != "signin" or not DESKTOP_CODE.fullmatch(desktop)):
+        return RedirectResponse(_web("/login?error=invalid_state"))
     state = secrets.token_urlsafe(24)
     verifier, challenge = pkce_pair()
     cookie = sign_state(
-        {"state": state, "verifier": verifier, "provider": provider, "mode": mode, "link_user": str(user.id) if user and mode == "link" else None}
+        {"state": state, "verifier": verifier, "provider": provider, "mode": mode, "link_user": str(user.id) if user and mode == "link" else None,
+         "desktop": desktop or None}
     )
     resp = RedirectResponse(p.authorization_url(state, challenge))
     resp.set_cookie(
@@ -148,17 +176,46 @@ async def callback(
         background.add_task(seed_letta, user.id)
 
     target = "/connectors?linked=1" if saved.get("mode") == "link" else "/chat"
+    code = saved.get("desktop") or ""
+    if code and saved.get("mode") == "signin" and DESKTOP_CODE.fullmatch(code):
+        # Started from the desktop app: a session of its own waits under the app's code until the app claims it.
+        desk = AuthSession(user_id=user.id, expires_at=session_expiry(), user_agent="Lumio desktop app")
+        db.add(desk)
+        await db.commit()
+        try:
+            await get_redis().set(_desktop_key(code), issue_session_jwt(user.id, desk.id, desk.expires_at).encode(), ex=DESKTOP_TTL_S)
+            target = "/desktop-signed-in"
+        except Exception as exc:  # noqa: BLE001
+            log.warning("desktop sign-in handoff not stored: %s", type(exc).__name__)
+            target = "/desktop-signed-in?error=handoff"
     resp = RedirectResponse(_web(target))
     resp.delete_cookie(OAUTH_COOKIE, path="/")
-    resp.set_cookie(
-        SESSION_COOKIE,
-        issue_session_jwt(user.id, sess.id, sess.expires_at),
-        max_age=get_settings().session_ttl_days * 86400,
-        httponly=True,
-        samesite="lax",
-        secure=get_settings().secure_cookies,
-        path="/",
-    )
+    _session_cookie(resp, issue_session_jwt(user.id, sess.id, sess.expires_at))
+    return resp
+
+
+class DesktopClaimIn(BaseModel):
+    code: str
+
+
+@router.post("/desktop/claim")
+async def desktop_claim(body: DesktopClaimIn):
+    """The desktop app collects the session its sign-in left under its one-time code. Single use; {"ok": false,
+    "pending": true} until the sign-in in the browser has finished."""
+    code = (body.code or "").strip()
+    if not DESKTOP_CODE.fullmatch(code):
+        raise HTTPException(400, "bad code")
+    try:
+        r = get_redis()
+        async with r.pipeline(transaction=True) as pipe:
+            token, _ = await pipe.get(_desktop_key(code)).delete(_desktop_key(code)).execute()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("desktop sign-in claim failed: %s", type(exc).__name__)
+        raise HTTPException(503, "Sign-in is not reachable right now. Try again.") from None
+    if not token:
+        return {"ok": False, "pending": True}
+    resp = JSONResponse({"ok": True})
+    _session_cookie(resp, token.decode() if isinstance(token, bytes) else str(token))
     return resp
 
 
