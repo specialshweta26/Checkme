@@ -16,3 +16,4 @@ apps/desktop/dist/
 .DS_Store
 .cursor-debug-daee2b.log
 .lgraph/
+apps/api/evals/last_run.json
