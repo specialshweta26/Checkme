@@ -129,6 +129,9 @@ async def chat_complete(
     if temperature is not None:
         kwargs["temperature"] = temperature
     resp = await openai_client().responses.create(**kwargs)
+    from app.agent import usage
+
+    usage.from_openai(kwargs["model"], getattr(resp, "usage", None))
     return _as_chat_completion(_output_text(resp))
 
 
@@ -167,6 +170,9 @@ async def embed_texts(texts: list[str]) -> list[list[float]]:
             model=get_settings().openai_embedding_model,
             input=[t for _, t in missing],
         )
+        from app.agent import usage
+
+        usage.from_openai(get_settings().openai_embedding_model, getattr(resp, "usage", None))
         for (i, _text), item in zip(missing, resp.data, strict=True):
             vec = list(item.embedding)
             cached[i] = vec

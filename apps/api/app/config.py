@@ -202,6 +202,7 @@ class Settings(BaseSettings):
     browser_escalate_model: str = ""  # model after repeated failures; empty = OPENAI_MODEL
     browser_fast_max_steps: int = 12  # model rounds per browser_task
     browser_replay: bool = True  # save successful browser_task runs and replay them without model calls
+    model_prices: str = ""  # JSON {"model": [input, output, cached input] USD per 1M tokens}; cost per turn in chat
     browser_run_log: bool = True  # keep each browser_task run's steps, reasons and screenshots for the user to replay
     downloads_to_desktop: bool = True  # a cloud-computer download is also saved to the paired desktop's Downloads folder
     browser_saved_logins: bool = True  # fill a site's saved sign-in as {{login_username}} / {{login_password}}

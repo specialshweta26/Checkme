@@ -92,6 +92,37 @@ function pollProgress(
   };
 }
 
+type TurnUsage = {
+  input: number;
+  output: number;
+  cached?: number;
+  cost_usd: number | null;
+  unpriced?: string[];
+  models?: { model: string; input: number; output: number; cached?: number; calls?: number; cost_usd?: number }[];
+};
+
+/** "12,340 in · 820 out · $0.0213" under a finished turn (docs/LLD.md "Turn usage"). */
+function usageLabel(u?: TurnUsage | null) {
+  if (!u || !(u.input || u.output)) return "";
+  const n = (x: number) => x.toLocaleString("en-US");
+  const parts = [`${n(u.input)} in`, `${n(u.output)} out`];
+  if (u.cost_usd !== null && u.cost_usd !== undefined) {
+    parts.push(`$${u.cost_usd < 0.01 ? u.cost_usd.toFixed(4) : u.cost_usd.toFixed(3)}${u.unpriced?.length ? "+" : ""}`);
+  }
+  return parts.join(" · ");
+}
+
+function usageTitle(u?: TurnUsage | null) {
+  if (!u?.models?.length) return "";
+  return u.models
+    .map((m) => {
+      const cached = m.cached ? ` (${m.cached.toLocaleString("en-US")} cached)` : "";
+      const cost = m.cost_usd !== undefined ? `, $${m.cost_usd.toFixed(4)}` : ", no price set";
+      return `${m.model}: ${m.input.toLocaleString("en-US")} in${cached}, ${m.output.toLocaleString("en-US")} out${cost}`;
+    })
+    .join("\n");
+}
+
 /** True when the chat POST died in transit (Safari "Load failed", proxy 502/504, cut stream), not on the server. */
 function lostInTransit(err: any) {
   return err instanceof TypeError || err?.lostInTransit === true;
@@ -262,6 +293,29 @@ export default function ChatPage() {
   useEffect(() => {
     setHello(greeting(me));
   }, [me]);
+
+  // Web and desktop show the same chats. When this window comes back, and every 15 s while it is visible, re-read the
+  // open chat, so a turn started, finished or stopped on the other device shows here too (docs/LLD.md "Turn status").
+  const openSessionRef = useRef<string | null>(null);
+  openSessionRef.current = sessionId;
+  const reloadRef = useRef<(id: string | null) => Promise<void>>(async () => undefined);
+  useEffect(() => {
+    const sync = () => {
+      if (document.visibilityState !== "visible") return;
+      const id = openSessionRef.current;
+      const key = scopeRef.current;
+      if (!id || inflightRef.current.has(key)) return; // a turn this window is following updates itself
+      void reloadRef.current(id).catch(() => undefined);
+    };
+    document.addEventListener("visibilitychange", sync);
+    window.addEventListener("focus", sync);
+    const timer = window.setInterval(sync, 15000);
+    return () => {
+      document.removeEventListener("visibilitychange", sync);
+      window.removeEventListener("focus", sync);
+      window.clearInterval(timer);
+    };
+  }, []);
 
   useEffect(() => {
     getMe().then(async (u) => {
@@ -527,7 +581,10 @@ export default function ChatPage() {
       }
     }
     if (scopeRef.current === key) showView(view);
+    // A turn running elsewhere (the other device): follow it here too.
+    if (next.some((m) => m.meta?.in_progress) && !progressStopsRef.current[key]) resumeProgress(key, id, next);
   }
+  reloadRef.current = reloadSession;
 
   /** Stop button: cancel the running turn (and its jobs) on the server, keep its partial output, free the composer. */
   async function stopTurn(key: string) {
@@ -970,6 +1027,11 @@ export default function ChatPage() {
                     />
                   ) : null}
                   {sourceLabel(m.meta) ? <div className="source-chip">{sourceLabel(m.meta)}</div> : null}
+                  {usageLabel(m.meta?.usage) ? (
+                    <div className="turn-usage" title={usageTitle(m.meta?.usage)}>
+                      {usageLabel(m.meta?.usage)}
+                    </div>
+                  ) : null}
                   <EmailThreadButton refs={mailRefsFromMeta(m.meta)} />
                   {chatAttachments(m.meta?.attachments).length ? <AttachmentWidget items={chatAttachments(m.meta.attachments)} /> : null}
                   {i === messages.length - 1 && !busyHere && (m.meta?.can_continue || m.meta?.failed) ? (

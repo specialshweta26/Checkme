@@ -281,6 +281,15 @@ export"}`.
   page without reopening the start page.
 - A pause isn't counted as a failure, and `browser_task` never works past an approval step on its own.
 
+## Deep links
+
+A search-results address the agent builds itself (route, date and filters in the URL) often won't open: the site
+refuses direct links, wants its own session first, or has changed its link format. `browser_navigate` (cloud and
+desktop) now marks such a failure (`ok: false`, a bot wall, HTTP 400 or above, a browser error page, or an empty page)
+with `deep_link_failed` and `fallback_url` (the site's home page), plus a hint: open the home page, use the site's own
+search form and filters like a person (`browser_task` does this quickly), and only switch sources if the home page is
+blocked too. A home page that fails is left as it is. No site names are involved.
+
 ## Configuration
 
 All optional. Defaults need no new account.

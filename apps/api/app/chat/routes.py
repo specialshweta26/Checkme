@@ -57,20 +57,88 @@ class CancelIn(BaseModel):
 
 
 @router.get("/progress/{progress_id}")
-async def chat_progress(progress_id: str, user: User = Depends(current_user)):
-    """Live status lines for an in-flight chat turn (polled by the web app)."""
+async def chat_progress(progress_id: str, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Live status lines for an in-flight chat turn (polled by the web and desktop apps).
+
+    ``done`` comes from the live feed or from the stored reply, so every client sees a turn end, wherever it was
+    stopped: the feed is per process and expires, the stored reply is shared (docs/LLD.md "Turn status")."""
     if not valid_progress_id(progress_id):
         raise HTTPException(400, "Bad progress id")
     steps = await read_progress(user.id, progress_id)
     session_id = await read_progress_session(user.id, progress_id)
     draft = await read_progress_draft(user.id, progress_id)
+    done = bool(steps and steps[-1].get("kind") == "done")
+    status = "done" if done else "running"
+    if not done:
+        stored, created = await _stored_turn_status(db, user, progress_id, session_id)
+        if stored == "running" and _feed_silent(steps) and _older_than(created, DEAD_TURN_S) and session_id:
+            # No status line for DEAD_TURN_S: the turn's process is gone (a live turn is stopped by its own
+            # no-progress limit long before this). Mark it stopped so no client waits on it forever.
+            try:
+                if await _unstick(db, user, uuid.UUID(str(session_id)), progress_id=progress_id):
+                    await db.commit()
+                    stored = "stopped"
+            except Exception:  # noqa: BLE001
+                log.info("dead turn not marked stopped", exc_info=True)
+        if stored in {"finished", "stopped"}:
+            done, status = True, stored
+            if stored == "stopped":
+                draft = ""
     return {
         "steps": steps,
-        "done": bool(steps and steps[-1].get("kind") == "done"),
+        "done": done,
+        "status": status,
         "session_id": session_id or None,
         # The reply streaming in, so the web app can show text before the turn finishes.
         "draft": draft,
     }
+
+
+DEAD_TURN_S = 15 * 60
+
+
+def _feed_silent(steps: list[dict], now: float | None = None) -> bool:
+    """True when a turn's live feed has had no line for DEAD_TURN_S (or expired: the feed lives 15 minutes)."""
+    import time as _time
+
+    if not steps:
+        return True
+    try:
+        last = max(float(s.get("at") or 0) for s in steps)
+    except (TypeError, ValueError):
+        return False
+    return last > 0 and (now or _time.time()) - last > DEAD_TURN_S
+
+
+def _older_than(when, seconds: float) -> bool:
+    if when is None:
+        return False
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - when).total_seconds() > seconds
+
+
+async def _stored_turn_status(db, user, progress_id: str, session_id: str | None = None) -> tuple[str, datetime | None]:
+    """("running" | "finished" | "stopped", created_at) from the stored assistant reply of the turn with this
+    progress id, or ("", None) when there is none. Looks at the user's latest replies only (cheap, no JSON index)."""
+    if db is None:
+        return "", None
+    try:
+        q = select(ChatMessage).where(ChatMessage.user_id == user.id, ChatMessage.role == "assistant")
+        if session_id:
+            q = q.where(ChatMessage.session_id == uuid.UUID(str(session_id)))
+        rows = (await db.execute(q.order_by(ChatMessage.id.desc()).limit(40))).scalars().all()
+    except Exception:  # noqa: BLE001
+        return "", None
+    for m in rows:
+        meta = m.meta if isinstance(m.meta, dict) else {}
+        if meta.get("progress_id") != progress_id:
+            continue
+        created = getattr(m, "created_at", None)
+        if meta.get("in_progress"):
+            return "running", created
+        return ("stopped" if meta.get("stopped") else "finished"), created
+    return "", None
 
 
 @router.get("/sessions")
@@ -187,16 +255,27 @@ async def chat(
         db.add(sess)
         await db.flush()
 
+    from app.chat import quick
+
+    # Small talk gets an instant reply: no agent run, and it never stops a task that is running in this chat.
+    if quick.instant(text, uploads=bool(uploads), confirms=bool(body.confirmations), group=group is not None,
+                     resuming=bool(body.resume_request_id)):  # fmt: skip
+        return await _instant_reply(db, user, sess, workspace_agent, text, body.progress_id)
+    resume_id = body.resume_request_id
+    if not resume_id and not uploads and quick.is_continue(text):
+        # "continue" typed after a stopped turn picks it up, like the Continue button.
+        state = await quick.last_turn_state(db, sess)
+        resume_id = state.get("stopped") or None
     interrupted = await _settle_running(user, sess, body.mode)
     if interrupted:
         agent_text = run_cancel.resume_prompt(
             interrupted.get("text") or "", interrupted.get("partial") or "", interrupted.get("steps") or [], interrupted_by=text
         ) + f"\n\nNew message from the user:\n{agent_text}"
-    if body.resume_request_id:
-        resumed = await _resume_context(db, sess, body.resume_request_id)
+    if resume_id:
+        resumed = await _resume_context(db, sess, resume_id)
         if resumed:
             agent_text = run_cancel.resume_prompt(resumed["text"], resumed["partial"], resumed["steps"]) + (
-                f"\n\nThe user says: {text}" if text.strip().lower() not in {"continue", "continue."} else ""
+                f"\n\nThe user says: {text}" if not quick.is_continue(text) else ""
             )
 
     if not user.letta_agent_id:
@@ -283,6 +362,7 @@ async def chat(
         progress_id=body.progress_id if progress is not None else None,
     )
     run.extra = {"text": text}
+    await run_cancel.clear_session_stop(user.id, sess.id)
     turn_started = datetime.now(timezone.utc)
 
     async def finish_turn() -> dict:
@@ -305,6 +385,9 @@ async def chat(
                 await run_cancel.clear_remote(run)
 
     async def _run_turn() -> dict:
+        from app.agent import usage as turn_usage
+
+        tally, usage_token = turn_usage.start()
         try:
             result = await run_deep_agent(
                 db,
@@ -324,6 +407,7 @@ async def chat(
                 recent_files=list(working.get("recent_files") or []),
             )
         except Exception as exc:  # noqa: BLE001
+            turn_usage.end(usage_token)
             if run.cancelled or isinstance(exc, run_cancel.TurnCancelled):
                 raise run_cancel.TurnCancelled("stopped") from exc
             log.exception("chat agent failed")
@@ -335,6 +419,9 @@ async def chat(
                 if progress is not None:
                     await progress.finish()
             raise HTTPException(502, str(exc)[:400]) from exc
+        turn_usage.end(usage_token)
+        if isinstance(result, dict):
+            result["usage"] = turn_usage.summary(tally)
         if run.cancelled:
             raise run_cancel.TurnCancelled("stopped")
         run_cancel.unregister(request_id, run)
@@ -370,6 +457,7 @@ async def chat(
                 "steps": [s.get("text") for s in (progress.steps if progress else []) if s.get("kind") != "done"][:40],
                 "jobs": result.get("jobs_started") or [],
                 "job": (result.get("jobs_started") or [None])[0],
+                "usage": result.get("usage"),
             }
             if isinstance(result.get("question"), dict) and result["question"].get("options"):
                 # ask_user in a chat turn: the web shows the options as buttons that send the option text.
@@ -696,6 +784,31 @@ async def _wait_done(runs: list, timeout: float) -> None:
         await asyncio.wait(tasks, timeout=timeout)
 
 
+async def _instant_reply(db, user, sess, agent, text: str, progress_id: str | None) -> dict:
+    """Answer small talk at once (see app.chat.quick), aware of a stopped or running task in this chat."""
+    from app.chat import quick
+
+    state = await quick.last_turn_state(db, sess)
+    if not state.get("running") and run_cancel.find(user.id, session_id=sess.id, kind="turn"):
+        state = {"running": True, "task": state.get("task") or ""}
+    answer = quick.reply(text, getattr(agent, "name", "") or "", state)
+    request_id = random_token(12)
+    meta = {"request_id": request_id, "route": "instant", "used_tools": [], "agent_id": str(agent.id) if agent else None,
+            "agent_name": getattr(agent, "name", None), "agent_avatar": getattr(agent, "avatar", "") or ""}  # fmt: skip
+    if state.get("stopped"):
+        meta["choices"] = {"question": "", "options": ["Continue"]}
+    await _store(db, sess, user.id, request_id, text, answer, meta)
+    sess.updated_at = datetime.now(timezone.utc)
+    await db.commit()
+    if progress_id and valid_progress_id(progress_id):
+        try:
+            await ProgressReporter(user.id, progress_id).finish()
+        except Exception:  # noqa: BLE001
+            pass
+    return {"session_id": str(sess.id), "text": answer, "route": "instant", "request_id": request_id, "used_tools": [],
+            "pending_confirms": [], "uploads": [], "attachments": [], "steps": [], "choices": meta.get("choices")}  # fmt: skip
+
+
 async def _settle_running(user, sess, mode: str | None) -> dict | None:
     """A new message while a turn runs in this chat: interrupt it (default) or wait for it ("queue").
 
@@ -846,4 +959,10 @@ async def _unstick(db, user, session_id, request_id=None, progress_id=None) -> i
         m.content = run_cancel.stopped_text("", list(meta.get("steps") or []))
         m.meta = {**meta, "in_progress": False, "stopped": True, "can_continue": True, "pending_confirms": []}
         n += 1
+        if meta.get("progress_id") and valid_progress_id(str(meta["progress_id"])):
+            # The turn's own process is gone or elsewhere: end its live feed here, so every open client stops waiting.
+            try:
+                await ProgressReporter(user.id, str(meta["progress_id"])).finish()
+            except Exception:  # noqa: BLE001
+                pass
     return n

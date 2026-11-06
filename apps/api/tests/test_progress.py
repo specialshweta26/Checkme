@@ -308,6 +308,12 @@ def test_progress_route_returns_steps_and_done(monkeypatch):
     app = FastAPI()
     app.include_router(routes.router)
     app.dependency_overrides[current_user] = lambda: SimpleNamespace(id=uid)
+    from app.db import get_db
+
+    async def no_db():
+        yield None
+
+    app.dependency_overrides[get_db] = no_db
     client = TestClient(app)
 
     import asyncio
@@ -315,7 +321,7 @@ def test_progress_route_returns_steps_and_done(monkeypatch):
     rep = P.ProgressReporter(uid, "turn_12345678", redis_client=r)
     asyncio.run(rep.emit("Gmail: search messages for “invoice”"))
     body = client.get("/chat/progress/turn_12345678").json()
-    assert body == {"steps": [rep.steps[0]], "done": False, "session_id": None, "draft": ""}
+    assert body == {"steps": [rep.steps[0]], "done": False, "status": "running", "session_id": None, "draft": ""}
     asyncio.run(rep.set_session("sess-1"))
     assert client.get("/chat/progress/turn_12345678").json()["session_id"] == "sess-1"
     asyncio.run(rep.finish())

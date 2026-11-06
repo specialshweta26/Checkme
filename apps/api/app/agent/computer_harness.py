@@ -265,6 +265,50 @@ async def _try_local(ctx, tool_name: str, args: dict | None = None) -> Any | Non
     return result
 
 
+_NAVIGATE_TOOLS = {"browser_navigate", "browse_open"}
+_ERROR_PAGE = re.compile(r"^(chrome-error|about:neterror|about:blank)", re.I)
+
+
+def deep_link_fallback(tool_name: str, args: dict | None, result: Any) -> Any:
+    """A deep link (a search-results URL the agent built, with a path or query) that did not open: point the agent at
+    the site's home page and its own search form instead of giving up (docs/BROWSING.md "Deep links"). Generic: no
+    site names. A home page that does not open is left alone."""
+    if tool_name not in _NAVIGATE_TOOLS or not isinstance(result, dict):
+        return result
+    from urllib.parse import urlparse
+
+    url = str((args or {}).get("url") or "")
+    try:
+        parts = urlparse(url)
+    except ValueError:
+        return result
+    if parts.scheme not in {"http", "https"} or not parts.netloc or (parts.path in {"", "/"} and not parts.query):
+        return result
+    landed = str(result.get("url") or "")
+    text = str(result.get("text") or "").strip()
+    status = result.get("status")
+    failed = (
+        result.get("ok") is False
+        or bool(result.get("bot_wall"))
+        or (isinstance(status, int) and status >= 400)
+        or bool(_ERROR_PAGE.match(landed))
+        or (len(text) < 40 and not str(result.get("tree") or "").strip())
+    )
+    if not failed:
+        return result
+    home = f"{parts.scheme}://{parts.netloc}/"
+    result["deep_link_failed"] = True
+    result["fallback_url"] = home
+    result["hint"] = (
+        "This exact address did not open (the site may refuse direct links, or its link format changed). Don't give up "
+        f"or fall back to web search yet: browser_navigate to {home}, then use the site's own search form the way a "
+        "person would (fill the from / to / date fields, pick the matching suggestion, press Search; browser_task does "
+        "this quickly), apply its filters (time of day, price, stops) and read the results. Only if the home page is "
+        "blocked too, say plainly which site blocked it and use another source."
+    )
+    return result
+
+
 async def run_computer(ctx, tool_name: str, args: dict | None = None, *, force_cloud: bool = False) -> Any:
     from app.agent.deep import call_user_tool
     from app.connectors.computer_daemon import annotate_page
@@ -272,7 +316,7 @@ async def run_computer(ctx, tool_name: str, args: dict | None = None, *, force_c
     if not force_cloud:
         local = await _try_local(ctx, tool_name, args or {})
         if local is not None:
-            return local
+            return deep_link_fallback(tool_name, args, local)
         from app.desktop.client import prefer_local
 
         if prefer_local() and tool_name in LOCAL_TOOLS:
@@ -292,6 +336,7 @@ async def run_computer(ctx, tool_name: str, args: dict | None = None, *, force_c
     if not isinstance(result, dict):
         return result
     annotate_page(result)
+    deep_link_fallback(tool_name, args, result)
     if tool_name in {"browser_act", "browse_act"} and result.get("downloads"):
         result = await _publish_downloads(ctx, result)
     if tool_name in {"browser_handoff", "computer_handoff"}:
