@@ -78,6 +78,12 @@ class BrowserTrace(Base):
     uses: Mapped[int] = mapped_column(Integer, default=0)
     successes: Mapped[int] = mapped_column(Integer, default=0)
     failures: Mapped[int] = mapped_column(Integer, default=0)
+    # A fix the recovery step found when the site changed (docs/BROWSING.md "Healing saved runs"). Replays keep
+    # using ``steps`` until the user accepts it; ``prior_steps`` keeps the replaced version for one undo.
+    proposed_steps: Mapped[list | None] = mapped_column(JSONB, nullable=True, default=None)
+    proposed_note: Mapped[list | None] = mapped_column(JSONB, nullable=True, default=None)
+    proposed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, default=None)
+    prior_steps: Mapped[list | None] = mapped_column(JSONB, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 

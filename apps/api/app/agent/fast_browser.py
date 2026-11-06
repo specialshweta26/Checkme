@@ -346,6 +346,112 @@ class TraceStore:
             log.info("browser trace mark skipped: %s", type(exc).__name__)
 
 
+    async def propose(self, trace_id: str, steps: list[dict], note: list[dict]) -> bool:
+        """Keep a fix found while replaying. Nothing the replay uses changes until ``accept``."""
+        try:
+            from datetime import datetime, timezone
+
+            from app.db import SessionLocal
+            from app.models import BrowserTrace
+
+            async with SessionLocal() as db:
+                row = await db.get(BrowserTrace, uuid.UUID(str(trace_id)))
+                if row is None:
+                    return False
+                row.proposed_steps, row.proposed_note = steps, note
+                row.proposed_at = datetime.now(timezone.utc)
+                await db.commit()
+                return True
+        except Exception as exc:  # noqa: BLE001
+            log.info("browser trace propose skipped: %s", type(exc).__name__)
+            return False
+
+    async def _owned(self, db, user_id, trace_id: str):
+        from app.models import BrowserTrace
+
+        try:
+            row = await db.get(BrowserTrace, uuid.UUID(str(trace_id)))
+        except (ValueError, TypeError):
+            return None
+        if row is None or str(row.user_id) != str(user_id):
+            return None
+        return row
+
+    async def resolve(self, user_id, trace_id: str, accept: bool) -> dict:
+        """Accept (the fix becomes the saved steps; the old ones are kept for one undo) or reject a proposed fix."""
+        from app.db import SessionLocal
+
+        async with SessionLocal() as db:
+            row = await self._owned(db, user_id, trace_id)
+            if row is None:
+                return {"ok": False, "error": "no such saved run"}
+            if not row.proposed_steps:
+                return {"ok": False, "error": "this saved run has no proposed fix"}
+            if accept:
+                row.prior_steps, row.steps = list(row.steps or []), list(row.proposed_steps)
+                row.params = trace_params(row.steps)
+                row.failures = 0
+            row.proposed_steps, row.proposed_note, row.proposed_at = None, None, None
+            await db.commit()
+            return {"ok": True, "accepted": accept, "id": str(row.id), "name": row.name, "steps": len(row.steps or [])}
+
+    async def listing(self, user_id, trace_id: str = "") -> list[dict]:
+        """The user's saved runs as describe_trace rows, newest first (one row when trace_id is given)."""
+        from sqlalchemy import select
+
+        from app.db import SessionLocal
+        from app.models import BrowserTrace
+
+        async with SessionLocal() as db:
+            if trace_id:
+                row = await self._owned(db, user_id, trace_id)
+                return [describe_trace(row)] if row is not None else []
+            q = select(BrowserTrace).where(BrowserTrace.user_id == uuid.UUID(str(user_id)))
+            rows = (await db.execute(q.order_by(BrowserTrace.updated_at.desc()).limit(200))).scalars().all()
+            return [describe_trace(r) for r in rows]
+
+    async def delete(self, user_id, trace_id: str) -> bool:
+        from app.db import SessionLocal
+
+        async with SessionLocal() as db:
+            row = await self._owned(db, user_id, trace_id)
+            if row is None:
+                return False
+            await db.delete(row)
+            await db.commit()
+            return True
+
+    async def undo(self, user_id, trace_id: str) -> dict:
+        """Put back the steps an accepted fix replaced."""
+        from app.db import SessionLocal
+
+        async with SessionLocal() as db:
+            row = await self._owned(db, user_id, trace_id)
+            if row is None:
+                return {"ok": False, "error": "no such saved run"}
+            if not row.prior_steps:
+                return {"ok": False, "error": "nothing to undo"}
+            row.steps, row.prior_steps = list(row.prior_steps), None
+            row.params = trace_params(row.steps)
+            await db.commit()
+            return {"ok": True, "id": str(row.id), "name": row.name, "steps": len(row.steps or [])}
+
+
+def describe_trace(row) -> dict:
+    """A saved run as the user sees it: plain-English steps, stats, and any fix waiting for approval."""
+    proposed = list(row.proposed_steps or []) if row.proposed_steps else []
+    return {
+        "id": str(row.id), "name": row.name, "goal": row.goal, "host": row.host, "start_url": row.start_url,
+        "source": row.source, "skill_id": row.skill_id, "params": list(row.params or []),
+        "steps": [describe_step(s) for s in row.steps or []],
+        "uses": row.uses or 0, "successes": row.successes or 0, "failures": row.failures or 0,
+        "proposed_fix": {"steps": [describe_step(s) for s in proposed], "changes": list(row.proposed_note or []),
+                         "at": row.proposed_at.isoformat() if row.proposed_at else None} if proposed else None,
+        "can_undo": bool(row.prior_steps),
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+    }  # fmt: skip
+
+
 STORE: TraceStore = TraceStore()
 
 
@@ -409,10 +515,60 @@ def _blocked(state: dict) -> bool:
 
 
 # --- replay ------------------------------------------------------------------------------------------------------
-async def replay(ctx, trace: dict, values: dict[str, str]) -> dict:
+# --- healing saved runs ------------------------------------------------------------------------------------------
+MAX_HEALS = 3
+HEAL_ROUNDS = 4
+
+
+def describe_step(step: dict) -> str:
+    """One saved step in plain English, e.g. 'click the button "Reports"' or 'fill the textbox "Email" with {{email}}'."""
+    kind = str(step.get("kind") or "").lower()
+    if kind == "navigate":
+        return f"open {step.get('url') or 'the page'}"
+    t = step.get("target") if isinstance(step.get("target"), dict) else {}
+    label = next((str(t[k]) for k in ("name", "aria_label", "label", "placeholder", "testid", "name_attr", "id") if t.get(k)), "")
+    role = str(t.get("role") or t.get("tag") or "element")
+    what = f'the {role} "{label[:60]}"' if label else f"the {role}"
+    value = "{{%s}}" % step["param"] if step.get("param") else f'"{str(step.get("text") or "")[:60]}"'
+    if kind in {"fill", "type"}:
+        return f"fill {what} with {value}" + (" and press Enter" if kind == "type" else "")
+    if kind in {"select", "pick"}:
+        return f"choose {value} in {what}"
+    if kind in {"press", "key"}:
+        return f"press {step.get('text') or 'Enter'}"
+    if kind == "scroll":
+        return "scroll the page"
+    if kind in {"wait", "wait_for"}:
+        return f'wait for "{step.get("text")}"' if step.get("text") else "wait"
+    if kind in {"check", "uncheck", "hover", "dblclick", "download", "upload"}:
+        return f"{kind} {what}"
+    return f"click {what}"
+
+
+async def heal_step(ctx, trace: dict, step: dict, values: dict[str, str], allow_final: bool = False) -> list[dict] | None:
+    """The site changed under a saved step: let the model do just that step on the current page and return the
+    steps it took (saved form), or None. Nothing is saved here; the caller proposes the fix."""
+    intent = describe_step(step)
+    goal = (
+        f'A saved run of "{trace.get("goal") or trace.get("name") or "a task"}" reached a step whose page changed. '
+        f"Do only this step on the current page, then reply done: {intent}. If the page needs something first for it "
+        "(open the menu that holds it, close a popup), do that too. Do not do any later step."
+    )
+    out = await browser_task(ctx, goal, values=values, max_steps=HEAL_ROUNDS, allow_final_action=allow_final,
+                             use_saved=False, save=False)  # fmt: skip
+    steps = out.get("_recorded") if isinstance(out, dict) else None
+    if not (isinstance(out, dict) and out.get("ok") and out.get("done") and steps):
+        return None
+    return [dict(s) for s in steps]
+
+
+async def replay(ctx, trace: dict, values: dict[str, str], heal: bool = False, allow_final: bool = False) -> dict:
     """Run a saved trace without model calls. Navigate steps go through browser_navigate; the rest through the
-    daemon's verified replay. Returns {ok, state, completed, mismatch?, missing?}."""
-    steps, missing = replay_steps(list(trace.get("steps") or []), values)
+    daemon's verified replay. With ``heal``, a step whose element changed is redone by the model (only that step)
+    and the replay carries on. Returns {ok, state, completed, mismatch?, missing?, healed?, steps?}: ``steps`` is
+    the saved-form run with the fixes in, for a proposal."""
+    raw = [dict(s) for s in trace.get("steps") or []]
+    steps, missing = replay_steps(raw, values)
     if missing:
         return {"ok": False, "missing": missing, "completed": 0}
     started = time.monotonic()
@@ -422,41 +578,72 @@ async def replay(ctx, trace: dict, values: dict[str, str]) -> dict:
         if state.get("ok") is False or _blocked(state):
             return {"ok": False, "state": state, "completed": 0, "error": state.get("error") or "start page did not load"}
     done = 0
-    segment: list[dict] = []
-
-    async def flush() -> dict | None:
-        nonlocal done, segment, state
-        if not segment:
-            return None
-        res = await _internal(ctx, "browser_replay", {"steps": segment})
+    healed: list[dict] = []
+    fixed: list[dict] = []  # saved-form steps as they ran, fixes included
+    i = 0
+    while i < len(steps):
+        if steps[i].get("kind") == "navigate":
+            state = await _navigate(ctx, str(steps[i].get("url") or ""))
+            if state.get("ok") is False or _blocked(state):
+                return {"ok": False, "state": state, "completed": done, "error": state.get("error") or "page did not load"}
+            fixed.append(raw[i])
+            done, i = done + 1, i + 1
+            continue
+        j = i
+        while j < len(steps) and steps[j].get("kind") != "navigate":
+            j += 1
+        res = await _internal(ctx, "browser_replay", {"steps": steps[i:j]})
         res = res if isinstance(res, dict) else {"ok": False, "error": str(res)[:300]}
         if res.get("downloads"):
             from app.agent import computer_harness as computer
 
             res = await computer._publish_downloads(ctx, res)
         state = res
-        done += int(res.get("completed") or 0)
-        segment = []
-        if res.get("ok") is False:
-            return {"ok": False, "state": res, "completed": done, "mismatch": bool(res.get("mismatch")), "error": res.get("error")}
-        return None
-
-    for step in steps:
-        if step.get("kind") == "navigate":
-            failed = await flush()
-            if failed:
-                return failed
-            state = await _navigate(ctx, str(step.get("url") or ""))
-            if state.get("ok") is False or _blocked(state):
-                return {"ok": False, "state": state, "completed": done, "error": state.get("error") or "page did not load"}
-            done += 1
+        completed = max(0, min(int(res.get("completed") or 0), j - i))
+        fixed.extend(raw[i : i + completed])
+        done += completed
+        if res.get("ok") is not False:
+            i = j
             continue
-        segment.append(step)
-    failed = await flush()
-    if failed:
-        return failed
-    log.info("browser.replay trace=%s steps=%d ms=%d", trace.get("id"), done, int((time.monotonic() - started) * 1000))
-    return {"ok": True, "state": state, "completed": done}
+        bad = i + completed
+        failed = {"ok": False, "state": res, "completed": done, "mismatch": bool(res.get("mismatch")), "error": res.get("error"),
+                  **({"healed": healed} if healed else {})}  # fmt: skip
+        if not heal or bad >= j or len(healed) >= MAX_HEALS or _blocked(res):
+            return failed
+        fix = await heal_step(ctx, trace, raw[bad], values, allow_final)
+        if not fix:
+            log.info("browser.replay heal failed trace=%s step=%d", trace.get("id"), bad + 1)
+            return failed
+        healed.append({"step": bad + 1, "was": describe_step(raw[bad]), "now": [describe_step(s) for s in fix],
+                       "error": str(res.get("error") or "")[:200]})  # fmt: skip
+        log.info("browser.replay healed trace=%s step=%d with=%d", trace.get("id"), bad + 1, len(fix))
+        fixed.extend(fix)
+        done, i = done + 1, bad + 1
+        state = await _snapshot(ctx)
+    log.info("browser.replay trace=%s steps=%d healed=%d ms=%d", trace.get("id"), done, len(healed), int((time.monotonic() - started) * 1000))
+    out: dict[str, Any] = {"ok": True, "state": state, "completed": done}
+    if healed:
+        out.update(healed=healed, steps=fixed)
+    return out
+
+
+async def _propose_fix(trace: dict, rep: dict) -> bool:
+    """A replay that only finished thanks to fixes: keep them as a proposal for the user to accept."""
+    if not (rep.get("ok") and rep.get("healed") and rep.get("steps") and trace.get("id")):
+        return False
+    return await STORE.propose(str(trace["id"]), list(rep["steps"]), list(rep["healed"]))
+
+
+def heal_fields(rep: dict, proposed: bool) -> dict:
+    """What the caller (and the user) should know about a healed replay."""
+    if not rep.get("healed"):
+        return {}
+    changes = "; ".join(f"step {h['step']}: was '{h['was']}', now " + " then ".join(f"'{n}'" for n in h["now"]) for h in rep["healed"])
+    note = f"The site changed, so this run fixed itself ({changes})."
+    if proposed:
+        note += (" The fix is saved as a proposal; the saved run is unchanged until the user accepts it. Tell the user "
+                 "what changed and ask whether to keep the fix (browser_saved_runs action=accept_fix or reject_fix).")  # fmt: skip
+    return {"healed": rep["healed"], "proposed_fix": proposed, "heal_note": note}
 
 
 # --- the fast loop -----------------------------------------------------------------------------------------------
@@ -594,8 +781,9 @@ def _result(state: dict, values: dict[str, str], **fields: Any) -> dict:
 
 
 async def browser_task(ctx, goal: str, url: str = "", values: dict | None = None, max_steps: int = 0,
-                       allow_final_action: bool = False, use_saved: bool = True) -> dict:  # fmt: skip
-    """See the module docstring. Never raises: problems come back as ``fallback: true`` with the page."""
+                       allow_final_action: bool = False, use_saved: bool = True, save: bool = True) -> dict:  # fmt: skip
+    """See the module docstring. Never raises: problems come back as ``fallback: true`` with the page.
+    ``save=False`` (healing a saved run) keeps the run unsaved and returns its steps as ``_recorded``."""
     vals = {str(k): str(v) for k, v in (values or {}).items() if v is not None}
     goal = str(goal or "").strip()
     started = time.monotonic()
@@ -616,13 +804,15 @@ async def browser_task(ctx, goal: str, url: str = "", values: dict | None = None
                 trace = None  # the model loop below stops at that control and asks
             if trace is not None:
                 t0 = time.monotonic()
-                rep = await replay(ctx, trace, vals)
-                await STORE.mark(trace["id"], bool(rep.get("ok")))
-                log_steps.append({"via": "replay", "ok": bool(rep.get("ok")), "steps": rep.get("completed"), "ms": int((time.monotonic() - t0) * 1000)})
+                rep = await replay(ctx, trace, vals, heal=setting("browser_heal", True), allow_final=allow_final_action)
+                await STORE.mark(trace["id"], bool(rep.get("ok")) and not rep.get("healed"))
+                log_steps.append({"via": "replay", "ok": bool(rep.get("ok")), "steps": rep.get("completed"),
+                                  "healed": len(rep.get("healed") or []), "ms": int((time.monotonic() - t0) * 1000)})  # fmt: skip
                 if rep.get("ok"):
+                    proposed = await _propose_fix(trace, rep)
                     return _result(rep.get("state") or {}, vals, ok=True, done=True, via="replay", trace=trace.get("name"),
                                    result="Replayed the saved steps; check the page below.", log=log_steps,
-                                   took_ms=int((time.monotonic() - started) * 1000))  # fmt: skip
+                                   took_ms=int((time.monotonic() - started) * 1000), **heal_fields(rep, proposed))  # fmt: skip
                 if rep.get("state"):
                     state = rep["state"]
         # 2. The model loop.
@@ -656,6 +846,9 @@ async def browser_task(ctx, goal: str, url: str = "", values: dict | None = None
                 return _result(state, vals, ok=False, done=False, need_user=plan["need_user"], log=log_steps,
                                took_ms=int((time.monotonic() - started) * 1000))  # fmt: skip
             elif plan["done"] and not plan["actions"]:
+                if not save:
+                    return _result(state, vals, ok=True, done=True, via="model", result=scrub(plan["result"], vals),
+                                   log=log_steps, _recorded=recorded)  # fmt: skip
                 trace_id = await _save(user_id, goal, start_url, recorded, vals)
                 log_steps.append({"step": i + 1, "model": model, "plan_ms": plan_ms, "done": True})
                 return _result(state, vals, ok=True, done=True, via="model", result=scrub(plan["result"], vals),
@@ -691,6 +884,9 @@ async def browser_task(ctx, goal: str, url: str = "", values: dict | None = None
                 if ok and not (warned and not plan["done"]):
                     last = f"Ran {len(actions)} action(s): {', '.join(str(a.get('kind')) for a in actions)}. All worked."
                     if plan["done"]:
+                        if not save:
+                            return _result(state, vals, ok=True, done=True, via="model", result=scrub(plan["result"], vals),
+                                           log=log_steps, _recorded=recorded)  # fmt: skip
                         trace_id = await _save(user_id, goal, start_url, recorded, vals)
                         return _result(state, vals, ok=True, done=True, via="model", result=scrub(plan["result"], vals),
                                        saved_trace=bool(trace_id), log=log_steps, took_ms=int((time.monotonic() - started) * 1000))  # fmt: skip
@@ -895,12 +1091,13 @@ async def replay_named(ctx, name: str = "", url: str = "", skill_id: str = "", v
         return {"ok": False, "trace": trace.get("name"), "stopped_before": blocked,
                 "hint": f"This saved run clicks '{blocked}' (a final action), so it was not run. If the user asked for it in chat, call again with allow_final_action; otherwise ask them first."}  # fmt: skip
     started = time.monotonic()
-    rep = await replay(ctx, trace, vals)
+    rep = await replay(ctx, trace, vals, heal=setting("browser_heal", True), allow_final=allow_final_action)
     if rep.get("missing"):
         return {"ok": False, "missing_values": rep["missing"], "params": trace.get("params"), "hint": "Pass them in values."}
-    await STORE.mark(trace["id"], bool(rep.get("ok")))
+    await STORE.mark(trace["id"], bool(rep.get("ok")) and not rep.get("healed"))
+    proposed = await _propose_fix(trace, rep)
     fields: dict[str, Any] = {"ok": bool(rep.get("ok")), "via": "replay", "trace": trace.get("name"), "steps": rep.get("completed"),
-                              "took_ms": int((time.monotonic() - started) * 1000)}  # fmt: skip
+                              "took_ms": int((time.monotonic() - started) * 1000), **heal_fields(rep, proposed)}  # fmt: skip
     if not rep.get("ok"):
         fields.update(mismatch=bool(rep.get("mismatch")), error=scrub(str(rep.get("error") or ""), vals),
                       hint="The site changed. Continue from this page with browser_task (same goal) or browser_act.")  # fmt: skip
