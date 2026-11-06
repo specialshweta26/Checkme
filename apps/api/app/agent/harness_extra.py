@@ -78,6 +78,11 @@ class BrowserDownloadInput(BaseModel):
     filename: str = Field(default="", description="Optional file name.")
 
 
+class SnapshotInput(BaseModel):
+    tab: str = Field(default="", description="Optional tab id (t1, t2 from browser_tabs); default is the active tab.")
+    find: str = Field(default="", description="Optional words to look for (menu item, report or button name); matching elements are listed first.")
+
+
 class TabInput(BaseModel):
     tab: str = Field(default="", description="Optional tab id (t1, t2 from browser_tabs); works on that tab without switching the screen. Default: active tab.")
 
@@ -332,10 +337,16 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         await note_browser(ctx, url, raw if isinstance(raw, dict) else None)
         return _dumps(fast.for_model(raw))
 
-    async def browser_snapshot(tab: str = "") -> str:
-        """Re-read the live computer browser: URL, title, page text, and interactive refs (e0, e1). browser_navigate and browser_act already return one."""
+    async def browser_snapshot(tab: str = "", find: str = "") -> str:
+        """Re-read the live computer browser: URL, title, page text, and interactive refs (e0, e1). browser_navigate and browser_act already return one.
+        When the element list ends with '… N more elements', pass find (words such as a menu item or report name) to list matching elements first."""
         ctx.used_tools.append("browser_snapshot")
-        return _dumps(fast.for_model(await computer.run_computer(ctx, "browser_snapshot", {"tab": tab} if tab else {})))
+        args: dict[str, Any] = {}
+        if tab:
+            args["tab"] = tab
+        if find.strip():
+            args["find"] = find.strip()[:120]
+        return _dumps(fast.for_model(await computer.run_computer(ctx, "browser_snapshot", args)))
 
     async def browser_act(actions: list[dict[str, Any]], tab: str = "") -> str:
         """Act on the live computer browser using snapshot refs (e0, e1). kind: click, dblclick, rightclick, fill, type, select, pick, check, hover, drag, press, scroll, wait, wait_for, upload, download, reload, back, forward. fill puts a value in a field. type does that and submits it (Enter, or the Send/Submit button if the draft is still there). For type-ahead lists use type or select/pick (field ref + value). Read composer and the end of text to confirm the result. If composer still holds the draft, it was not submitted. Do not reload the page to check. upload needs path; download saves the file and returns extracted_text plus download_url — analyze that text in your role and skills, then post the analysis in chat. For a deep dive on tabular files, run_code on the saved path. Read verified/alerts/tables/downloads on the returned snapshot. Do not request_takeover for a dropdown. Returns a fresh snapshot."""
@@ -722,7 +733,7 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         StructuredTool.from_function(coroutine=computer_observe, name="computer_observe", description=computer_observe.__doc__),
         StructuredTool.from_function(coroutine=computer_act, name="computer_act", description=computer_act.__doc__, args_schema=ComputerActInput),
         StructuredTool.from_function(coroutine=browser_navigate, name="browser_navigate", description=browser_navigate.__doc__, args_schema=UrlInput),
-        StructuredTool.from_function(coroutine=browser_snapshot, name="browser_snapshot", description=browser_snapshot.__doc__, args_schema=TabInput),
+        StructuredTool.from_function(coroutine=browser_snapshot, name="browser_snapshot", description=browser_snapshot.__doc__, args_schema=SnapshotInput),
         StructuredTool.from_function(coroutine=browser_act, name="browser_act", description=browser_act.__doc__, args_schema=BrowserActInput),
         StructuredTool.from_function(coroutine=browser_collect, name="browser_collect", description=browser_collect.__doc__, args_schema=BrowserCollectInput),
         StructuredTool.from_function(coroutine=browser_tabs, name="browser_tabs", description=browser_tabs.__doc__),

@@ -55,7 +55,13 @@ class Page:
     def get_by_text(self, text, exact=True):
         return Loc(0)
 
+    busy = False
+    busy_checks = 0
+
     def evaluate(self, js, arg=None):
+        if "aria-busy" in str(js):
+            self.busy_checks += 1
+            return self.busy
         self.evaluated.append(arg)
         return True
 

@@ -202,10 +202,14 @@ DAYTONA_TOOLS = [
         description=(
             "Read the live computer browser: URL, title, page text, and up to 150 visible interactive refs (e0, e1), "
             "in-view elements first. Refs stay valid until the page changes. browser_navigate and browser_act already "
-            "return a fresh snapshot, so call this only when you need to re-read. If it returns fallback computer_act, "
-            "observe the screen instead."
+            "return a fresh snapshot, so call this only when you need to re-read. When the list ends with '… N more "
+            "elements', pass find with the words you are looking for (a menu item, report or button name) to list "
+            "matching elements first. If it returns fallback computer_act, observe the screen instead."
         ),
-        input_schema={"type": "object", "properties": {"tab": {"type": "string", "description": "Optional tab id (t1, t2 from browser_tabs). Works on that tab without switching the screen; default is the active tab."},}},
+        input_schema={"type": "object", "properties": {
+            "tab": {"type": "string", "description": "Optional tab id (t1, t2 from browser_tabs). Works on that tab without switching the screen; default is the active tab."},
+            "find": {"type": "string", "description": "Optional words to look for; matching elements are listed first."},
+        }},
         group="computer",
         tags=("computer", "browser"),
     ),
@@ -1610,7 +1614,7 @@ async def _invoke_daytona(row, name: str, args: dict[str, Any]) -> Any:
         if name == "browser_search":
             return await browser_search(proc, fs, str(args.get("query") or ""), int(args.get("count") or 8), args.get("engines"))
         if name == "browser_snapshot":
-            return await _browser_rpc(proc, {"command": "snapshot", "tab": tab}, 60, fs)
+            return await _browser_rpc(proc, {"command": "snapshot", "tab": tab, "find": str(args.get("find") or "")[:120]}, 60, fs)
         if name == "browser_act":
             actions = args.get("actions")
             if isinstance(actions, str):

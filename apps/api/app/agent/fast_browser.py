@@ -36,7 +36,7 @@ log = logging.getLogger(__name__)
 
 ALLOWED_KINDS = {
     "click", "dblclick", "fill", "type", "select", "pick", "check", "uncheck", "hover", "press", "scroll",
-    "wait", "wait_for", "download", "back", "forward", "reload", "navigate",
+    "wait", "wait_for", "download", "back", "forward", "reload", "navigate", "find",
 }  # fmt: skip
 MAX_BATCH = 12
 PLAN_TIMEOUT_S = 45.0
@@ -111,7 +111,10 @@ def page_brief(state: dict | None, text_chars: int = 3000, tree_chars: int = 700
         text = text[:half] + "\n…\n" + text[-half:]
     parts.append("Text:\n" + text)
     tree = str(st.get("tree") or "")
-    parts.append("Elements:\n" + (tree[:tree_chars] or "(none)"))
+    omitted = int(st.get("elements_omitted") or 0)
+    if omitted and len(tree) > tree_chars:
+        tree = tree[:tree_chars] + f"\n… {omitted} more elements are not listed (use find)."
+    parts.append("Elements:\n" + (tree[:tree_chars + 80] or "(none)"))
     return "\n".join(parts)
 
 
@@ -394,10 +397,10 @@ async def _navigate(ctx, url: str) -> dict:
     return out if isinstance(out, dict) else {"ok": False, "error": str(out)[:300]}
 
 
-async def _snapshot(ctx) -> dict:
+async def _snapshot(ctx, find: str = "") -> dict:
     from app.agent import computer_harness as computer
 
-    out = await computer.run_computer(ctx, "browser_snapshot", {})
+    out = await computer.run_computer(ctx, "browser_snapshot", {"find": find[:120]} if find.strip() else {})
     return out if isinstance(out, dict) else {"ok": False, "error": str(out)[:300]}
 
 
@@ -461,8 +464,11 @@ FAST_SYSTEM = """You drive a web browser for an AI assistant, quickly and carefu
 Each turn you get the goal, the current page (URL, title, alerts, a text excerpt and numbered interactive elements such as "- e3 textbox Email [email]") and what happened last turn.
 Reply with a JSON object only: {"actions": [...], "done": false, "result": "", "need_user": ""}.
 - actions: every step you can already predict, in order, in ONE batch, e.g. [{"kind":"fill","ref":"e3","text":"{{email}}"},{"kind":"fill","ref":"e4","text":"{{password}}"},{"kind":"click","ref":"e5"}].
-  kinds: click, fill, type, select (text = option to pick; also for type-ahead lists), check, uncheck, press (text = key), scroll, wait_for (text), download (ref of a file link), back, navigate (url).
-  Use only refs from the current Elements list. End the batch at a step whose result you must see first (a type-ahead suggestion list, a page that loads new fields, a new page).
+  kinds: click, fill, type, select (text = option to pick; also for type-ahead lists), check, uncheck, hover (menus that open on mouse-over), press (text = key), scroll, wait_for (text), download (ref of a file link), back, navigate (url), find (text = words to look for).
+  Use only refs from the current Elements list. End the batch at a step whose result you must see first (a type-ahead suggestion list, a menu that opens, a page that loads new fields, a new page).
+- The Elements list may end with "… N more elements are not listed". If what you need is not listed, send ONE action {"kind":"find","text":"words from its label"} to re-list the page with matching elements first (or scroll).
+- Dates: fill the date field itself with the date written as YYYY-MM-DD (the tool converts it for the field); open the calendar and click days only if filling did not work. Before Apply / Submit, check the date fields show the dates you meant.
+- Menus: if clicking a menu does not open it, hover it, then click the item in the next batch. When "Last turn" says a step may not have done anything, do not repeat the same step: try its label, its parent, hover, or another way.
 - Values the user provided are placeholders: write {{name}} exactly; never type a real value yourself and never invent personal data. Available placeholders: %s
 - done=true when the goal is met (or the information asked for is on the page): put the proof or the requested data in result, briefly.
 - need_user: a short reason when only the user can continue (CAPTCHA, a one-time code or value you do not have, an ambiguous choice).
@@ -661,6 +667,13 @@ async def browser_task(ctx, goal: str, url: str = "", values: dict | None = None
                     return _result(state, vals, ok=True, done=False, stopped_before=blocked,
                                    result=f"Stopped before '{blocked}' (a final action). If the user asked for it in chat, call again with allow_final_action; otherwise ask them first.",
                                    log=log_steps, took_ms=int((time.monotonic() - started) * 1000))  # fmt: skip
+                finds = [a for a in actions if str(a.get("kind") or "").lower() == "find"]
+                if finds:
+                    words = " ".join(str(a.get("text") or a.get("value") or "") for a in finds).strip()
+                    state = await _snapshot(ctx, words)
+                    last = f"Re-listed the page with elements matching {words!r} first. Pick refs from the new list."
+                    log_steps.append({"step": i + 1, "model": model, "plan_ms": plan_ms, "actions": ["find"], "ok": True})
+                    continue
                 t1 = time.monotonic()
                 state, ok, err, kept = await _run_batch(ctx, actions, vals)
                 recorded.extend(kept)
@@ -674,7 +687,8 @@ async def browser_task(ctx, goal: str, url: str = "", values: dict | None = None
                     return _result(state, vals, ok=False, done=False, need_user="The page needs a person (bot check or hand-off).", log=log_steps)
                 if isinstance(err, list):
                     return _result(state, vals, ok=False, done=False, need_user="Missing values: " + ", ".join(err), log=log_steps)
-                if ok:
+                warned = [str(w) for w in (state.get("warnings") or [])][:3] if ok else []
+                if ok and not (warned and not plan["done"]):
                     last = f"Ran {len(actions)} action(s): {', '.join(str(a.get('kind')) for a in actions)}. All worked."
                     if plan["done"]:
                         trace_id = await _save(user_id, goal, start_url, recorded, vals)
@@ -682,7 +696,11 @@ async def browser_task(ctx, goal: str, url: str = "", values: dict | None = None
                                        saved_trace=bool(trace_id), log=log_steps, took_ms=int((time.monotonic() - started) * 1000))  # fmt: skip
                     continue
                 failures += 1
-                last = scrub(f"A step failed: {err}. Use the refs in the fresh page below.", vals)
+                if ok:
+                    # Every step ran, but a click changed nothing: count it like a failure so a repeat escalates.
+                    last = f"Ran {len(actions)} action(s), but: " + " ".join(warned)
+                else:
+                    last = scrub(f"A step failed: {err}. Use the refs in the fresh page below.", vals)
             if failures >= 2:
                 if not escalated:
                     model, escalated, failures = strong, True, 0
