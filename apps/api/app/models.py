@@ -120,6 +120,7 @@ class BrowserTrace(Base):
     proposed_note: Mapped[list | None] = mapped_column(JSONB, nullable=True, default=None)
     proposed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, default=None)
     prior_steps: Mapped[list | None] = mapped_column(JSONB, nullable=True, default=None)
+    run_key_hash: Mapped[str] = mapped_column(String(64), default="")  # sha256 of the key outside systems start it with
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 

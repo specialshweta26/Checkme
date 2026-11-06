@@ -3070,3 +3070,6 @@ body.lumio-desktop .screen-rail.overlay.fullscreen {
 .run-timeline img { width: 300px; border-radius: 8px; border: 1px solid color-mix(in srgb, currentColor 15%, transparent); }
 @media (max-width: 720px) { .run-timeline li { grid-template-columns: 1fr; } .run-timeline img { width: 100%; } }
 .sheet.run-sheet { z-index: 60; }
+.run-ai.run-ok { background: color-mix(in srgb, #2563eb 16%, transparent); color: #2563eb; }
+.run-api { margin-top: 12px; padding-top: 12px; border-top: 1px solid color-mix(in srgb, currentColor 10%, transparent); display: grid; gap: 6px; }
+.run-code { margin: 0; padding: 10px 12px; border-radius: 8px; background: #0f172a; color: #e2e8f0; font-size: 12px; overflow-x: auto; white-space: pre; }

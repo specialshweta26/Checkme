@@ -179,7 +179,7 @@ def test_build_steps_keeps_reorders_and_adds_ai_steps():
     assert new[0] == OLD[0] and new[2] == OLD[2]
     assert new[1] == {"kind": "goal", "text": "Set the date range to {{from_date}} to {{to_date}}"}
     assert fb.trace_params(new) == [{"name": "from_date", "secret": False}, {"name": "to_date", "secret": False}]
-    for bad, msg in (([], "at least one"), ([{"keep": 7}], "no saved step 8"), ([{"goal": " "}], "write what"), ([{"x": 1}], "keep or goal")):
+    for bad, msg in (([], "at least one"), ([{"keep": 7}], "no saved step 8"), ([{"goal": " "}], "write what"), ([{"x": 1}], "keep, goal or approve")):
         with pytest.raises(ValueError, match=msg):
             fb.build_steps(OLD, bad)
 

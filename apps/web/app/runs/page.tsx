@@ -8,7 +8,7 @@ import { apiError, getMe, type Me } from "../lib";
 // recording, replayed without a model call per step. Exact steps replay by selector; AI steps are sentences the
 // model carries out each run. A fix found when a site changed waits here for approval.
 
-type StepRow = { index: number; text: string; ai: boolean };
+type StepRow = { index: number; text: string; ai: boolean; approve?: boolean };
 type Change = { step: number; was: string; now: string[]; error?: string };
 type SavedRun = {
   id: string;
@@ -25,6 +25,7 @@ type SavedRun = {
   failures: number;
   proposed_fix: { steps: string[]; changes: Change[]; at: string | null } | null;
   can_undo: boolean;
+  has_run_key?: boolean;
   updated_at: string | null;
 };
 
@@ -44,7 +45,18 @@ const RUN_STATUS: Record<string, string> = {
 type SavedLogin = { id: string; host: string; label: string; username_hint: string; last_used_at: string | null };
 
 // One row of the editor: an exact saved step (kept by its index) or an AI step (a sentence).
-type Draft = { key: string; keep?: number; goal?: string; text: string };
+type Draft = { key: string; keep?: number; goal?: string; approve?: string; text: string };
+
+// "from_date,to_date\n2026-05-01,2026-05-07" -> [{from_date, to_date}]
+function parseRows(csv: string): Record<string, string>[] {
+  const lines = csv.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  if (lines.length < 2) return [];
+  const head = lines[0].split(",").map((h) => h.trim());
+  return lines.slice(1).map((line) => {
+    const cells = line.split(",");
+    return Object.fromEntries(head.map((h, i) => [h, (cells[i] || "").trim()]));
+  });
+}
 
 export default function SavedRunsPage() {
   const [me, setMe] = useState<Me | null>(null);
@@ -63,6 +75,11 @@ export default function SavedRunsPage() {
   const [history, setHistory] = useState<RunSummary[]>([]);
   const [historyFor, setHistoryFor] = useState<SavedRun | null>(null);
   const [viewing, setViewing] = useState<RunDetail | null>(null);
+  const [running, setRunning] = useState<SavedRun | null>(null);
+  const [runValues, setRunValues] = useState<Record<string, string>>({});
+  const [runCsv, setRunCsv] = useState("");
+  const [notice, setNotice] = useState("");
+  const [newKey, setNewKey] = useState<{ run: string; key: string } | null>(null);
 
   useEffect(() => {
     getMe().then((u) => {
@@ -91,6 +108,48 @@ export default function SavedRunsPage() {
     const saved = await fetch("/api/browser/logins", { credentials: "include" });
     const rows = await saved.json().catch(() => []);
     if (saved.ok && Array.isArray(rows)) setLogins(rows);
+  }
+
+  async function startRun() {
+    if (!running) return;
+    const rows = runCsv.trim() ? parseRows(runCsv) : [];
+    if (runCsv.trim() && rows.length === 0) {
+      setError("Paste a header line with the value names, then one line per run.");
+      return;
+    }
+    setBusy("run");
+    setError("");
+    try {
+      const res = await fetch(`/api/browser/saved-runs/${running.id}/run`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(rows.length ? { values: runValues, rows } : { values: runValues }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(apiError(data, "Could not start the run"));
+      setNotice(`Started in the background (${data.rows} run${data.rows === 1 ? "" : "s"}). Follow it in the chat list under “${running.name || running.goal}”.`);
+      setRunning(null);
+      setRunCsv("");
+    } catch (err: any) {
+      setError(err.message || "Could not start the run");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function makeKey(run: SavedRun) {
+    if (run.has_run_key && !window.confirm("Make a new key? The old one stops working.")) return;
+    setBusy("key");
+    const res = await fetch(`/api/browser/saved-runs/${run.id}/key`, { method: "POST", credentials: "include" });
+    const data = await res.json().catch(() => ({}));
+    setBusy("");
+    if (!res.ok || !data.key) {
+      setError(apiError(data, "Could not make a key"));
+      return;
+    }
+    setNewKey({ run: run.id, key: data.key });
+    await refresh();
   }
 
   async function loadHistory(traceId: string) {
@@ -179,7 +238,11 @@ export default function SavedRunsPage() {
     setDraftName(run.name);
     setDraft(
       run.step_rows.map((row) =>
-        row.ai ? { key: `g${row.index}`, goal: row.text, text: row.text } : { key: `k${row.index}`, keep: row.index, text: row.text },
+        row.approve
+          ? { key: `a${row.index}`, approve: row.text.replace(/^Wait for your OK: /, ""), text: row.text }
+          : row.ai
+            ? { key: `g${row.index}`, goal: row.text, text: row.text }
+            : { key: `k${row.index}`, keep: row.index, text: row.text },
       ),
     );
   }
@@ -195,7 +258,7 @@ export default function SavedRunsPage() {
   }
 
   async function saveEdit(run: SavedRun) {
-    const steps = draft.map((row) => (row.goal !== undefined ? { goal: row.goal } : { keep: row.keep }));
+    const steps = draft.map((row) => (row.approve !== undefined ? { approve: row.approve } : row.goal !== undefined ? { goal: row.goal } : { keep: row.keep }));
     const ok = await call(run.id, "/steps", "PUT", { steps, name: draftName });
     if (ok) setEditing("");
   }
@@ -227,6 +290,7 @@ export default function SavedRunsPage() {
           </div>
 
           {error ? <p className="err">{error}</p> : null}
+          {notice ? <p className="att-summary">{notice}</p> : null}
 
           <div className="task-list">
             {loaded && visible.length === 0 ? (
@@ -259,6 +323,17 @@ export default function SavedRunsPage() {
                     </div>
                   </button>
                   <div className="task-actions">
+                    <button
+                      className="icon-btn"
+                      disabled={!!busy}
+                      onClick={() => {
+                        setRunning(run);
+                        setRunValues({});
+                        setRunCsv("");
+                      }}
+                    >
+                      Run
+                    </button>
                     <button
                       className="icon-btn"
                       title="Runs of this saved run"
@@ -319,6 +394,7 @@ export default function SavedRunsPage() {
                         {run.step_rows.map((row) => (
                           <li key={row.index}>
                             {row.ai ? <span className="run-ai">AI</span> : null}
+                            {row.approve ? <span className="run-ai run-ok">OK?</span> : null}
                             {row.text}
                           </li>
                         ))}
@@ -333,6 +409,29 @@ export default function SavedRunsPage() {
                           Starts at {run.start_url}
                         </p>
                       ) : null}
+                      <div className="run-api">
+                        <strong>Start it from another system</strong>
+                        <span className="muted">
+                          {run.has_run_key ? "This run has a key. Make a new one if you lost it; the old one stops working." : "Make a key, then call the address below from any tool that can send a web request."}
+                        </span>
+                        {newKey && newKey.run === run.id ? (
+                          <pre className="run-code">{`curl -X POST ${window.location.origin}/api/run-hooks/${run.id} \\
+  -H "Authorization: Bearer ${newKey.key}" \\
+  -H "Content-Type: application/json" \\
+  -d '${JSON.stringify({ values: Object.fromEntries(run.params.filter((p) => !p.secret && !p.name.startsWith("login_")).map((p) => [p.name, "…"])) })}'`}</pre>
+                        ) : null}
+                        {newKey && newKey.run === run.id ? <span className="faint">Copy the key now; it is not shown again.</span> : null}
+                        <div className="row">
+                          <button className="btn secondary" disabled={!!busy} onClick={() => makeKey(run)}>
+                            {run.has_run_key ? "New key" : "Make a key"}
+                          </button>
+                          {run.has_run_key ? (
+                            <button className="btn secondary" disabled={!!busy} onClick={() => call(run.id, "/key", "DELETE")}>
+                              Remove key
+                            </button>
+                          ) : null}
+                        </div>
+                      </div>
                     </div>
                   ) : null}
 
@@ -349,7 +448,14 @@ export default function SavedRunsPage() {
                       <ol className="run-steps editing">
                         {draft.map((row, i) => (
                           <li key={row.key}>
-                            {row.goal !== undefined ? (
+                            {row.approve !== undefined ? (
+                              <input
+                                className="field"
+                                value={row.approve}
+                                placeholder="What should you check before it goes on?"
+                                onChange={(e) => setDraft((rows) => rows.map((r, j) => (j === i ? { ...r, approve: e.target.value } : r)))}
+                              />
+                            ) : row.goal !== undefined ? (
                               <textarea
                                 className="field"
                                 rows={2}
@@ -361,7 +467,7 @@ export default function SavedRunsPage() {
                               <span className="run-exact">{row.text}</span>
                             )}
                             <span className="run-step-tools">
-                              {row.goal === undefined ? (
+                              {row.goal === undefined && row.approve === undefined ? (
                                 <button type="button" className="icon-btn" onClick={() => setDraft((rows) => rows.map((r, j) => (j === i ? { key: r.key, goal: r.text, text: r.text } : r)))}>
                                   Rewrite
                                 </button>
@@ -386,6 +492,13 @@ export default function SavedRunsPage() {
                           onClick={() => setDraft((rows) => [...rows, { key: `n${Date.now()}`, goal: "", text: "" }])}
                         >
                           Add AI step
+                        </button>
+                        <button
+                          type="button"
+                          className="btn secondary"
+                          onClick={() => setDraft((rows) => [...rows, { key: `p${Date.now()}`, approve: "Check the page, then continue?", text: "" }])}
+                        >
+                          Add approval step
                         </button>
                         <span style={{ flex: 1 }} />
                         <button type="button" className="btn secondary" onClick={() => setEditing("")}>
@@ -523,6 +636,48 @@ export default function SavedRunsPage() {
           </div>
         </div>
       </div>
+      {running ? (
+        <div className="sheet run-sheet" onClick={() => setRunning(null)}>
+          <form
+            className="panel stack"
+            onClick={(e) => e.stopPropagation()}
+            onSubmit={(e) => {
+              e.preventDefault();
+              startRun();
+            }}
+          >
+            <strong>Run “{running.name || running.goal}”</strong>
+            <p className="muted">It runs in the background and shows up in your chats. Sign-ins come from your saved sign-ins.</p>
+            {running.params
+              .filter((p) => !p.secret && !p.name.startsWith("login_"))
+              .map((p) => (
+                <label key={p.name} className="stack">
+                  <span className="muted">{p.name.replace(/_/g, " ")}</span>
+                  <input className="field" value={runValues[p.name] || ""} onChange={(e) => setRunValues({ ...runValues, [p.name]: e.target.value })} />
+                </label>
+              ))}
+            <label className="stack">
+              <span className="muted">Or run it once per row (up to 50): a header line with the value names, then one line per run</span>
+              <textarea
+                className="field"
+                rows={4}
+                placeholder={`${running.params.filter((p) => !p.secret && !p.name.startsWith("login_")).map((p) => p.name).join(",") || "name"}\n…`}
+                value={runCsv}
+                onChange={(e) => setRunCsv(e.target.value)}
+              />
+            </label>
+            <div className="row">
+              <span style={{ flex: 1 }} />
+              <button type="button" className="btn secondary" onClick={() => setRunning(null)}>
+                Cancel
+              </button>
+              <button className="btn" disabled={busy === "run"}>
+                {busy === "run" ? "Starting…" : runCsv.trim() ? `Run ${parseRows(runCsv).length || ""} times` : "Run"}
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
       {viewing ? (
         <div className="sheet run-sheet" onClick={() => setViewing(null)}>
           <div className="panel run-viewer" onClick={(e) => e.stopPropagation()}>

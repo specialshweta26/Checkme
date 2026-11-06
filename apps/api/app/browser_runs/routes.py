@@ -3,8 +3,11 @@ replay found when a site changed."""
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.db import get_db
 
 from app.agent.fast_browser import STORE
 from app.browser_runs import logins
@@ -65,6 +68,32 @@ async def delete_login(login_id: str, user: User = Depends(current_user)) -> dic
     return {"ok": True}
 
 
+class RunIn(BaseModel):
+    values: dict = {}
+    rows: list[dict] = []
+
+
+hook_router = APIRouter(prefix="/run-hooks", tags=["browser"])
+
+
+@hook_router.post("/{trace_id}")
+async def run_by_key(trace_id: str, body: RunIn, authorization: str = Header(default=""), db: AsyncSession = Depends(get_db)) -> dict:
+    """Start a saved run from another system: Authorization: Bearer <run key>, body {values, rows}."""
+    from app.browser_runs import launch
+
+    key = authorization.removeprefix("Bearer ").strip()
+    try:
+        user, trace = await launch.trace_for_key(db, trace_id, key)
+        rows = launch.clean_rows(trace["params"], body.values, body.rows)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from None
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from None
+    except launch.RunError as exc:
+        raise HTTPException(400, str(exc)) from None
+    return await launch.queue_run(db, user, trace, rows, "the API")
+
+
 class FixIn(BaseModel):
     accept: bool
 
@@ -102,6 +131,42 @@ async def edit_steps(trace_id: str, body: EditIn, user: User = Depends(current_u
     if not out.get("ok"):
         raise HTTPException(404 if "no such" in str(out.get("error")) else 400, out.get("error"))
     return out["run"]
+
+
+@router.post("/{trace_id}/run")
+async def run_now(trace_id: str, body: RunIn, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)) -> dict:
+    """Run a saved run in the background, once or once per row."""
+    from app.browser_runs import launch
+
+    rows = await STORE.candidates(user.id, trace_id=trace_id)
+    if not rows:
+        raise HTTPException(404, "no such saved run")
+    try:
+        clean = launch.clean_rows(rows[0].get("params") or [], body.values, body.rows)
+    except launch.RunError as exc:
+        raise HTTPException(400, str(exc)) from None
+    return await launch.queue_run(db, user, rows[0], clean, "the Saved runs page")
+
+
+@router.post("/{trace_id}/key")
+async def make_key(trace_id: str, user: User = Depends(current_user)) -> dict:
+    """A new run key for starting this run from other systems (shown once; replaces any old key)."""
+    from app.browser_runs import launch
+
+    out = await launch.set_key(user.id, trace_id, rotate=True)
+    if not out.get("ok"):
+        raise HTTPException(404, out.get("error"))
+    return out
+
+
+@router.delete("/{trace_id}/key")
+async def remove_key(trace_id: str, user: User = Depends(current_user)) -> dict:
+    from app.browser_runs import launch
+
+    out = await launch.set_key(user.id, trace_id, rotate=False)
+    if not out.get("ok"):
+        raise HTTPException(404, out.get("error"))
+    return out
 
 
 @router.post("/{trace_id}/undo")
