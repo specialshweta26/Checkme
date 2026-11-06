@@ -422,6 +422,9 @@ class ProgressReporter:
     async def emit(self, text: str | None, kind: str = "step", tool: str = "") -> None:
         if not text:
             return
+        from app.agent import cancel as run_cancel
+
+        run_cancel.touch()  # a status line is progress, so the turn isn't stuck
         if self._parent is not None:
             await self._parent.emit(self.prefix + text, kind, tool)
             return
