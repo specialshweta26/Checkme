@@ -2250,7 +2250,8 @@ body.lumio-desktop .screen-rail.overlay.fullscreen {
 .profile-menu {
   position: absolute;
   z-index: 40;
-  right: 0;
+  /* The profile button sits in the sidebar's left column: open the menu rightwards so it stays on screen. */
+  left: 0;
   bottom: calc(100% + 8px);
   width: min(260px, calc(100vw - 32px));
   display: grid;
@@ -3096,3 +3097,6 @@ body.lumio-desktop .screen-rail.overlay.fullscreen {
 .run-check-edit { flex: 1; display: grid; grid-template-columns: 1fr auto auto; gap: 6px; align-items: center; }
 .run-branch { display: flex; gap: 4px; align-items: center; font-size: 12px; }
 .run-branch .field { padding: 4px 6px; }
+.desktop-wait { display: grid; gap: 6px; justify-items: start; padding: 12px 14px; margin-bottom: 12px; border-radius: 12px; border: 1px solid var(--line); background: color-mix(in srgb, #2563eb 6%, transparent); }
+button.provider { width: 100%; font: inherit; cursor: pointer; }
+button.provider:disabled { opacity: .6; cursor: default; }

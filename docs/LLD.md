@@ -750,6 +750,26 @@ much sooner) is marked stopped. The chat page re-reads the open chat when its wi
 prefix) to `[input, output, cached input]` US dollars per million tokens. A model without a price shows tokens only,
 and a `+` after the cost means some calls weren't priced.
 
+### Desktop sign-in
+
+Google and Microsoft sign-in pages can't run inside the desktop app's window: the app sends any page outside Lumio to
+the system browser. So sign-in that started in the app used to finish in the browser. The browser got the session,
+the app didn't, and its half of the OAuth state was left behind ("Sign-in expired").
+
+Now, in the desktop app, the sign-in buttons work like this:
+1. The app makes a one-time code (32 random bytes, base64url) and opens
+   `/api/auth/{provider}/login?desktop=<code>` in the system browser (`open_external`).
+2. The code travels in the signed OAuth state. After the provider, the callback signs the browser in as usual and
+   creates a **separate** `AuthSession` for the app (`user_agent` "Lumio desktop app"). Its JWT goes in Redis under
+   `desktop_signin:<code>` for 10 minutes, and the browser goes to `/desktop-signed-in` ("go back to the app").
+3. The app polls `POST /api/auth/desktop/claim {code}` every 2 s. The first claim takes the token out of Redis
+   (get and delete in one transaction) and sets the app's own session cookie, and the app goes to `/chat`. Until
+   then the claim answers `{"ok": false, "pending": true}`.
+
+The code exists only in the app window, is single-use, and expires after 10 minutes. Codes are checked against
+`[A-Za-z0-9_-]{32,96}`, and `desktop` is refused for account linking. It works with existing desktop builds:
+`open_external` was already there.
+
 ## 13. Error handling
 
 | Failure | Behavior |
