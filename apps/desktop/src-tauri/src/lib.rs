@@ -772,6 +772,164 @@ async fn run_browser(slot: &Mutex<Option<browser::Chrome>>, tool: &str, args: &V
     }
 }
 
+const MAX_DOWNLOAD_BYTES: u64 = 250 * 1024 * 1024;
+
+/// Only Lumio's own signed file links (`https://<app host>/api/files?t=…`) are fetched into Downloads.
+fn is_lumio_file_link(raw: &str) -> bool {
+    is_file_link_for(raw, &app_host())
+}
+
+fn is_file_link_for(raw: &str, app: &str) -> bool {
+    let Ok(url) = Url::parse(raw) else { return false };
+    let host = url.host_str().unwrap_or("");
+    let secure = url.scheme() == "https" || (url.scheme() == "http" && (host == "localhost" || host == "127.0.0.1"));
+    secure && !app.is_empty() && host == app && url.path() == "/api/files" && url.query().is_some_and(|q| q.starts_with("t="))
+}
+
+/// A safe file name: the last path part, without control or path characters or a leading dot.
+fn safe_file_name(raw: &str) -> String {
+    let last = raw.rsplit(['/', '\\']).next().unwrap_or("");
+    let cleaned: String = last
+        .chars()
+        .filter(|c| !c.is_control() && !matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'))
+        .collect();
+    let trimmed = cleaned.trim().trim_start_matches('.').trim();
+    let name: String = trimmed.chars().take(180).collect();
+    if name.is_empty() {
+        "download".into()
+    } else {
+        name
+    }
+}
+
+/// `dir/name`, or `dir/name (2).ext`, … so an existing file is never overwritten.
+fn unique_path(dir: &Path, name: &str) -> PathBuf {
+    let first = dir.join(name);
+    if !first.exists() {
+        return first;
+    }
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((s, e)) if !s.is_empty() => (s.to_string(), format!(".{e}")),
+        _ => (name.to_string(), String::new()),
+    };
+    for n in 2..1000 {
+        let candidate = dir.join(format!("{stem} ({n}){ext}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    dir.join(format!("{stem} ({}){ext}", std::process::id()))
+}
+
+/// Save a file the cloud computer downloaded into this computer's Downloads folder.
+async fn run_save_download(args: &Value) -> Value {
+    let url = args.get("url").and_then(Value::as_str).unwrap_or("");
+    if !is_lumio_file_link(url) {
+        return json!({ "ok": false, "error": "only Lumio file links are saved", "ran_on": "local_computer" });
+    }
+    let Some(dir) = dirs::download_dir().or_else(|| dirs::home_dir().map(|h| h.join("Downloads"))) else {
+        return json!({ "ok": false, "error": "no Downloads folder", "ran_on": "local_computer" });
+    };
+    save_into(url, args.get("filename").and_then(Value::as_str).unwrap_or(""), &dir).await
+}
+
+async fn save_into(url: &str, filename: &str, dir: &Path) -> Value {
+    let name = safe_file_name(filename);
+    let client = match reqwest::Client::builder().timeout(Duration::from_secs(120)).build() {
+        Ok(c) => c,
+        Err(err) => return json!({ "ok": false, "error": err.to_string(), "ran_on": "local_computer" }),
+    };
+    let resp = match client.get(url).send().await.and_then(|r| r.error_for_status()) {
+        Ok(r) => r,
+        Err(err) => return json!({ "ok": false, "error": format!("download failed: {err}"), "ran_on": "local_computer" }),
+    };
+    if resp.content_length().unwrap_or(0) > MAX_DOWNLOAD_BYTES {
+        return json!({ "ok": false, "error": "file is larger than 250 MB", "ran_on": "local_computer" });
+    }
+    let bytes = match resp.bytes().await {
+        Ok(b) if (b.len() as u64) <= MAX_DOWNLOAD_BYTES => b,
+        Ok(_) => return json!({ "ok": false, "error": "file is larger than 250 MB", "ran_on": "local_computer" }),
+        Err(err) => return json!({ "ok": false, "error": format!("download failed: {err}"), "ran_on": "local_computer" }),
+    };
+    if fs::create_dir_all(dir).is_err() {
+        return json!({ "ok": false, "error": "could not open the Downloads folder", "ran_on": "local_computer" });
+    }
+    let path = unique_path(dir, &name);
+    let partial = path.with_extension(format!("{}lumio-part", path.extension().map(|e| format!("{}.", e.to_string_lossy())).unwrap_or_default()));
+    if let Err(err) = fs::write(&partial, &bytes).and_then(|_| fs::rename(&partial, &path)) {
+        let _ = fs::remove_file(&partial);
+        return json!({ "ok": false, "error": format!("could not save: {err}"), "ran_on": "local_computer" });
+    }
+    json!({ "ok": true, "path": path.to_string_lossy(), "bytes": bytes.len(), "ran_on": "local_computer" })
+}
+
+#[cfg(test)]
+mod download_tests {
+    use super::*;
+
+    #[test]
+    fn only_lumio_file_links_are_fetched() {
+        let app = "app.example.test";
+        assert!(is_file_link_for("https://app.example.test/api/files?t=abc", app));
+        assert!(!is_file_link_for("http://app.example.test/api/files?t=abc", app));
+        assert!(!is_file_link_for("https://app.example.test/api/other?t=abc", app));
+        assert!(!is_file_link_for("https://app.example.test/api/files", app));
+        assert!(!is_file_link_for("https://evil.example/api/files?t=abc", app));
+        assert!(!is_file_link_for("file:///etc/passwd", app));
+        assert!(!is_file_link_for("https://app.example.test/api/files?t=abc", ""));
+        assert!(is_file_link_for("http://localhost/api/files?t=abc", "localhost"));
+    }
+
+    #[test]
+    fn file_names_are_made_safe() {
+        assert_eq!(safe_file_name("report.csv"), "report.csv");
+        assert_eq!(safe_file_name("../../etc/passwd"), "passwd");
+        assert_eq!(safe_file_name("..\\x\\.hidden"), "hidden");
+        assert_eq!(safe_file_name("a:b*c?.txt"), "abc.txt");
+        assert_eq!(safe_file_name(""), "download");
+        assert_eq!(safe_file_name("..."), "download");
+    }
+
+    #[tokio::test]
+    async fn a_file_is_fetched_and_saved_without_overwriting() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await;
+                let body = b"a,b\n1,2\n";
+                let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/csv\r\nConnection: close\r\n\r\n", body.len());
+                sock.write_all(head.as_bytes()).await.unwrap();
+                sock.write_all(body).await.unwrap();
+            }
+        });
+        let dir = std::env::temp_dir().join(format!("lumio-save-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let url = format!("http://127.0.0.1:{port}/api/files?t=x");
+        let first = save_into(&url, "../Order Status.csv", &dir).await;
+        let second = save_into(&url, "Order Status.csv", &dir).await;
+        assert_eq!(first["ok"], true, "{first}");
+        assert_eq!(fs::read(dir.join("Order Status.csv")).unwrap(), b"a,b\n1,2\n");
+        assert!(second["path"].as_str().unwrap().ends_with("Order Status (2).csv"));
+        assert!(fs::read_dir(&dir).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().contains("lumio-part")));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn existing_files_are_not_overwritten() {
+        let dir = std::env::temp_dir().join(format!("lumio-dl-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("r.csv"), b"x").unwrap();
+        fs::write(dir.join("r (2).csv"), b"x").unwrap();
+        assert_eq!(unique_path(&dir, "r.csv"), dir.join("r (3).csv"));
+        assert_eq!(unique_path(&dir, "new.csv"), dir.join("new.csv"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+
 async fn run_job(tool: &str, args: &Value, chrome: &Mutex<Option<browser::Chrome>>) -> Value {
     match tool {
         "exec" => {
@@ -795,6 +953,7 @@ async fn run_job(tool: &str, args: &Value, chrome: &Mutex<Option<browser::Chrome
         "move_file" | "rename_file" => run_copy_move(args, true),
         "delete_file" => run_delete_file(args),
         "publish_file" => run_publish_file(args),
+        "save_download" => run_save_download(args).await,
         "open_path" => run_open_path(args),
         "launch_app" => run_launch_app(args),
         "app_discover" => os::discover_apps(),
