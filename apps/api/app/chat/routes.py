@@ -57,20 +57,88 @@ class CancelIn(BaseModel):
 
 
 @router.get("/progress/{progress_id}")
-async def chat_progress(progress_id: str, user: User = Depends(current_user)):
-    """Live status lines for an in-flight chat turn (polled by the web app)."""
+async def chat_progress(progress_id: str, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Live status lines for an in-flight chat turn (polled by the web and desktop apps).
+
+    ``done`` comes from the live feed or from the stored reply, so every client sees a turn end, wherever it was
+    stopped: the feed is per process and expires, the stored reply is shared (docs/LLD.md "Turn status")."""
     if not valid_progress_id(progress_id):
         raise HTTPException(400, "Bad progress id")
     steps = await read_progress(user.id, progress_id)
     session_id = await read_progress_session(user.id, progress_id)
     draft = await read_progress_draft(user.id, progress_id)
+    done = bool(steps and steps[-1].get("kind") == "done")
+    status = "done" if done else "running"
+    if not done:
+        stored, created = await _stored_turn_status(db, user, progress_id, session_id)
+        if stored == "running" and _feed_silent(steps) and _older_than(created, DEAD_TURN_S) and session_id:
+            # No status line for DEAD_TURN_S: the turn's process is gone (a live turn is stopped by its own
+            # no-progress limit long before this). Mark it stopped so no client waits on it forever.
+            try:
+                if await _unstick(db, user, uuid.UUID(str(session_id)), progress_id=progress_id):
+                    await db.commit()
+                    stored = "stopped"
+            except Exception:  # noqa: BLE001
+                log.info("dead turn not marked stopped", exc_info=True)
+        if stored in {"finished", "stopped"}:
+            done, status = True, stored
+            if stored == "stopped":
+                draft = ""
     return {
         "steps": steps,
-        "done": bool(steps and steps[-1].get("kind") == "done"),
+        "done": done,
+        "status": status,
         "session_id": session_id or None,
         # The reply streaming in, so the web app can show text before the turn finishes.
         "draft": draft,
     }
+
+
+DEAD_TURN_S = 15 * 60
+
+
+def _feed_silent(steps: list[dict], now: float | None = None) -> bool:
+    """True when a turn's live feed has had no line for DEAD_TURN_S (or expired: the feed lives 15 minutes)."""
+    import time as _time
+
+    if not steps:
+        return True
+    try:
+        last = max(float(s.get("at") or 0) for s in steps)
+    except (TypeError, ValueError):
+        return False
+    return last > 0 and (now or _time.time()) - last > DEAD_TURN_S
+
+
+def _older_than(when, seconds: float) -> bool:
+    if when is None:
+        return False
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - when).total_seconds() > seconds
+
+
+async def _stored_turn_status(db, user, progress_id: str, session_id: str | None = None) -> tuple[str, datetime | None]:
+    """("running" | "finished" | "stopped", created_at) from the stored assistant reply of the turn with this
+    progress id, or ("", None) when there is none. Looks at the user's latest replies only (cheap, no JSON index)."""
+    if db is None:
+        return "", None
+    try:
+        q = select(ChatMessage).where(ChatMessage.user_id == user.id, ChatMessage.role == "assistant")
+        if session_id:
+            q = q.where(ChatMessage.session_id == uuid.UUID(str(session_id)))
+        rows = (await db.execute(q.order_by(ChatMessage.id.desc()).limit(40))).scalars().all()
+    except Exception:  # noqa: BLE001
+        return "", None
+    for m in rows:
+        meta = m.meta if isinstance(m.meta, dict) else {}
+        if meta.get("progress_id") != progress_id:
+            continue
+        created = getattr(m, "created_at", None)
+        if meta.get("in_progress"):
+            return "running", created
+        return ("stopped" if meta.get("stopped") else "finished"), created
+    return "", None
 
 
 @router.get("/sessions")
@@ -883,4 +951,10 @@ async def _unstick(db, user, session_id, request_id=None, progress_id=None) -> i
         m.content = run_cancel.stopped_text("", list(meta.get("steps") or []))
         m.meta = {**meta, "in_progress": False, "stopped": True, "can_continue": True, "pending_confirms": []}
         n += 1
+        if meta.get("progress_id") and valid_progress_id(str(meta["progress_id"])):
+            # The turn's own process is gone or elsewhere: end its live feed here, so every open client stops waiting.
+            try:
+                await ProgressReporter(user.id, str(meta["progress_id"])).finish()
+            except Exception:  # noqa: BLE001
+                pass
     return n

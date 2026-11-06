@@ -263,6 +263,29 @@ export default function ChatPage() {
     setHello(greeting(me));
   }, [me]);
 
+  // Web and desktop show the same chats. When this window comes back, and every 15 s while it is visible, re-read the
+  // open chat, so a turn started, finished or stopped on the other device shows here too (docs/LLD.md "Turn status").
+  const openSessionRef = useRef<string | null>(null);
+  openSessionRef.current = sessionId;
+  const reloadRef = useRef<(id: string | null) => Promise<void>>(async () => undefined);
+  useEffect(() => {
+    const sync = () => {
+      if (document.visibilityState !== "visible") return;
+      const id = openSessionRef.current;
+      const key = scopeRef.current;
+      if (!id || inflightRef.current.has(key)) return; // a turn this window is following updates itself
+      void reloadRef.current(id).catch(() => undefined);
+    };
+    document.addEventListener("visibilitychange", sync);
+    window.addEventListener("focus", sync);
+    const timer = window.setInterval(sync, 15000);
+    return () => {
+      document.removeEventListener("visibilitychange", sync);
+      window.removeEventListener("focus", sync);
+      window.clearInterval(timer);
+    };
+  }, []);
+
   useEffect(() => {
     getMe().then(async (u) => {
       if (!u) {
@@ -527,7 +550,10 @@ export default function ChatPage() {
       }
     }
     if (scopeRef.current === key) showView(view);
+    // A turn running elsewhere (the other device): follow it here too.
+    if (next.some((m) => m.meta?.in_progress) && !progressStopsRef.current[key]) resumeProgress(key, id, next);
   }
+  reloadRef.current = reloadSession;
 
   /** Stop button: cancel the running turn (and its jobs) on the server, keep its partial output, free the composer. */
   async function stopTurn(key: string) {

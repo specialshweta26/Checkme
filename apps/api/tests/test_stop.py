@@ -694,3 +694,84 @@ def test_quick_replies_and_continue_words():
     assert quick.instant("Hello", uploads=False, confirms=False, group=False, resuming=False)
     assert not quick.instant("Hello", uploads=True, confirms=False, group=False, resuming=False)
     assert not quick.instant("Hello, book me a flight", uploads=False, confirms=False, group=False, resuming=False)
+
+
+# ---- every client sees a turn end, wherever it was stopped (docs/LLD.md "Turn status") ----
+
+
+@pytest.mark.asyncio
+async def test_progress_reports_done_from_the_stored_reply(env):
+    """Stopped in the desktop app on another server process: the web app's poll still sees it end."""
+    from datetime import datetime, timezone
+
+    pid = "turn_web000000001"
+    stopped = SimpleNamespace(role="assistant", request_id="r1", created_at=datetime.now(timezone.utc),
+                              meta={"progress_id": pid, "in_progress": False, "stopped": True})  # fmt: skip
+
+    async def execute(*_a, **_k):
+        return _Result([stopped])
+
+    env.db.execute = execute
+    out = await chat_routes.chat_progress(pid, env.user, env.db)
+    assert out["done"] is True and out["status"] == "stopped" and out["draft"] == ""
+    stopped.meta = {"progress_id": pid, "in_progress": False}
+    assert (await chat_routes.chat_progress(pid, env.user, env.db))["status"] == "finished"
+    stopped.meta = {"progress_id": pid, "in_progress": True}
+    running = await chat_routes.chat_progress(pid, env.user, env.db)
+    assert running["done"] is False and running["status"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_a_dead_turn_is_marked_stopped_but_a_new_one_is_not(env):
+    from datetime import datetime, timedelta, timezone
+
+    pid = "turn_dead00000002"
+    sess_id = uuid.uuid4()
+    await env.redis.set(f"chat:progress:{env.user.id}:{pid}:session", str(sess_id).encode())
+    msg = SimpleNamespace(role="assistant", content="tony is working on this…", request_id="r2", session_id=sess_id,
+                          created_at=datetime.now(timezone.utc), meta={"progress_id": pid, "in_progress": True})  # fmt: skip
+
+    async def execute(*_a, **_k):
+        return _Result([msg])
+
+    env.db.execute = execute
+
+    async def session_of(user_id, progress_id, redis_client=None):
+        return str(sess_id)
+
+    import app.chat.routes as routes_mod
+
+    routes_mod_read = routes_mod.read_progress_session
+    routes_mod.read_progress_session = session_of
+    try:
+        fresh = await chat_routes.chat_progress(pid, env.user, env.db)
+        assert fresh["done"] is False and msg.meta["in_progress"] is True  # just started: not dead
+        msg.created_at = datetime.now(timezone.utc) - timedelta(minutes=20)
+        dead = await chat_routes.chat_progress(pid, env.user, env.db)
+        assert dead["done"] is True and dead["status"] == "stopped"
+        assert msg.meta["in_progress"] is False and msg.meta["stopped"] is True and "Stopped" in msg.content
+    finally:
+        routes_mod.read_progress_session = routes_mod_read
+
+
+def test_feed_silence():
+    import time as _t
+
+    now = _t.time()
+    assert chat_routes._feed_silent([], now)
+    assert not chat_routes._feed_silent([{"at": now - 60}], now)
+    assert chat_routes._feed_silent([{"at": now - chat_routes.DEAD_TURN_S - 5}], now)
+
+
+@pytest.mark.asyncio
+async def test_unstick_ends_the_live_feed_so_open_clients_stop_waiting(env):
+    pid = "turn_open00000003"
+    stuck = SimpleNamespace(role="assistant", content="working", request_id="r3", meta={"in_progress": True, "progress_id": pid})
+
+    async def execute(*_a, **_k):
+        return _Result([stuck])
+
+    env.db.execute = execute
+    assert await chat_routes._unstick(env.db, env.user, uuid.uuid4()) == 1
+    feed = [v for k, v in env.redis.lists.items() if pid in k]
+    assert feed and b'"kind": "done"' in feed[0][-1] if isinstance(feed[0][-1], bytes) else '"done"' in str(feed[0][-1])
