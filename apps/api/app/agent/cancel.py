@@ -166,14 +166,17 @@ def _remote_key(user_id: Any, ref: Any) -> str:
 
 
 async def request_remote(user_id: Any, refs: list[Any], redis_client: Any = None) -> bool:
+    """Ask another process to stop a turn. The flag holds the time Stop was pressed, so a turn that starts later in the
+    same chat never mistakes it for its own (a stop with no running turn used to stop every message for 10 minutes)."""
     try:
         if redis_client is None:
             from app.cache import get_redis
 
             redis_client = get_redis()
+        stamp = f"{time.time():.6f}".encode()
         for ref in refs:
             if ref:
-                await redis_client.set(_remote_key(user_id, ref), b"1", ex=REMOTE_TTL_S)
+                await redis_client.set(_remote_key(user_id, ref), stamp, ex=REMOTE_TTL_S)
         return True
     except Exception as exc:  # noqa: BLE001
         log.debug("remote cancel flag failed: %s", type(exc).__name__)
@@ -187,11 +190,41 @@ async def remote_requested(run: Run, redis_client: Any = None) -> bool:
 
             redis_client = get_redis()
         for ref in (run.request_id, run.progress_id, run.session_id):
-            if ref and await redis_client.get(_remote_key(run.user_id, ref)):
+            if not ref:
+                continue
+            raw = await redis_client.get(_remote_key(run.user_id, ref))
+            if raw and stop_applies(raw, run, by_session=ref == run.session_id):
                 return True
     except Exception:  # noqa: BLE001
         return False
     return False
+
+
+def stop_applies(raw: Any, run: Run, *, by_session: bool) -> bool:
+    """A remote stop flag stops this run only if it was set after the run started. A flag on the turn's own request or
+    progress id always applies; an old-style flag ("1", no time) on the chat itself is treated as stale."""
+    text = raw.decode() if isinstance(raw, (bytes, bytearray)) else str(raw)
+    try:
+        stamp = float(text)
+    except ValueError:
+        return not by_session
+    if stamp < 1e9:  # the old "1"
+        return not by_session
+    return stamp >= run.started
+
+
+async def clear_session_stop(user_id: Any, session_id: Any, redis_client: Any = None) -> None:
+    """A new turn in a chat supersedes any chat-wide stop pressed before it (best effort)."""
+    if not session_id:
+        return
+    try:
+        if redis_client is None:
+            from app.cache import get_redis
+
+            redis_client = get_redis()
+        await redis_client.delete(_remote_key(user_id, str(session_id)))
+    except Exception:  # noqa: BLE001
+        pass
 
 
 async def clear_remote(run: Run, redis_client: Any = None) -> None:

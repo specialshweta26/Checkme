@@ -187,16 +187,27 @@ async def chat(
         db.add(sess)
         await db.flush()
 
+    from app.chat import quick
+
+    # Small talk gets an instant reply: no agent run, and it never stops a task that is running in this chat.
+    if quick.instant(text, uploads=bool(uploads), confirms=bool(body.confirmations), group=group is not None,
+                     resuming=bool(body.resume_request_id)):  # fmt: skip
+        return await _instant_reply(db, user, sess, workspace_agent, text, body.progress_id)
+    resume_id = body.resume_request_id
+    if not resume_id and not uploads and quick.is_continue(text):
+        # "continue" typed after a stopped turn picks it up, like the Continue button.
+        state = await quick.last_turn_state(db, sess)
+        resume_id = state.get("stopped") or None
     interrupted = await _settle_running(user, sess, body.mode)
     if interrupted:
         agent_text = run_cancel.resume_prompt(
             interrupted.get("text") or "", interrupted.get("partial") or "", interrupted.get("steps") or [], interrupted_by=text
         ) + f"\n\nNew message from the user:\n{agent_text}"
-    if body.resume_request_id:
-        resumed = await _resume_context(db, sess, body.resume_request_id)
+    if resume_id:
+        resumed = await _resume_context(db, sess, resume_id)
         if resumed:
             agent_text = run_cancel.resume_prompt(resumed["text"], resumed["partial"], resumed["steps"]) + (
-                f"\n\nThe user says: {text}" if text.strip().lower() not in {"continue", "continue."} else ""
+                f"\n\nThe user says: {text}" if not quick.is_continue(text) else ""
             )
 
     if not user.letta_agent_id:
@@ -283,6 +294,7 @@ async def chat(
         progress_id=body.progress_id if progress is not None else None,
     )
     run.extra = {"text": text}
+    await run_cancel.clear_session_stop(user.id, sess.id)
     turn_started = datetime.now(timezone.utc)
 
     async def finish_turn() -> dict:
@@ -694,6 +706,31 @@ async def _wait_done(runs: list, timeout: float) -> None:
     tasks = {r.task for r in runs if r.task is not None and not r.task.done()}
     if tasks:
         await asyncio.wait(tasks, timeout=timeout)
+
+
+async def _instant_reply(db, user, sess, agent, text: str, progress_id: str | None) -> dict:
+    """Answer small talk at once (see app.chat.quick), aware of a stopped or running task in this chat."""
+    from app.chat import quick
+
+    state = await quick.last_turn_state(db, sess)
+    if not state.get("running") and run_cancel.find(user.id, session_id=sess.id, kind="turn"):
+        state = {"running": True, "task": state.get("task") or ""}
+    answer = quick.reply(text, getattr(agent, "name", "") or "", state)
+    request_id = random_token(12)
+    meta = {"request_id": request_id, "route": "instant", "used_tools": [], "agent_id": str(agent.id) if agent else None,
+            "agent_name": getattr(agent, "name", None), "agent_avatar": getattr(agent, "avatar", "") or ""}  # fmt: skip
+    if state.get("stopped"):
+        meta["choices"] = {"question": "", "options": ["Continue"]}
+    await _store(db, sess, user.id, request_id, text, answer, meta)
+    sess.updated_at = datetime.now(timezone.utc)
+    await db.commit()
+    if progress_id and valid_progress_id(progress_id):
+        try:
+            await ProgressReporter(user.id, progress_id).finish()
+        except Exception:  # noqa: BLE001
+            pass
+    return {"session_id": str(sess.id), "text": answer, "route": "instant", "request_id": request_id, "used_tools": [],
+            "pending_confirms": [], "uploads": [], "attachments": [], "steps": [], "choices": meta.get("choices")}  # fmt: skip
 
 
 async def _settle_running(user, sess, mode: str | None) -> dict | None:

@@ -608,3 +608,89 @@ async def test_whatsapp_stop_cancels_routed_agents_job(monkeypatch):
     monkeypatch.setattr(jobs, "stop_chat_jobs", none)
     assert await service.stop_running(db, user, SimpleNamespace()) == "stop_idle"
     assert "Nothing is running" in sent[-1]
+
+
+# ---- stale stops, instant small talk, typed "continue" (docs/LLD.md "Instant turns") ----
+
+
+def test_a_stop_only_applies_to_turns_running_when_it_was_pressed():
+    import time as _t
+
+    run = run_cancel.Run(key="k", user_id="u", session_id="s", request_id="r")
+    later = f"{run.started + 5:.3f}".encode()
+    earlier = f"{run.started - 60:.3f}".encode()
+    assert run_cancel.stop_applies(later, run, by_session=True)
+    assert not run_cancel.stop_applies(earlier, run, by_session=True)  # pressed for an earlier turn
+    assert not run_cancel.stop_applies(b"1", run, by_session=True)  # old flag on the whole chat
+    assert run_cancel.stop_applies(b"1", run, by_session=False)  # old flag on this very turn
+    assert _t.time() >= run.started
+
+
+@pytest.mark.asyncio
+async def test_a_stop_with_nothing_running_does_not_stop_the_next_message(env):
+    """The bug: Stop with no running turn left a chat-wide flag, and every new message stopped for 10 minutes."""
+    sess = SimpleNamespace(id=uuid.uuid4(), user_id=env.user.id, state={}, title="t")
+    env.db.objects[sess.id] = sess
+    await chat_routes.cancel_turn(chat_routes.CancelIn(session_id=sess.id), env.user, env.db)
+    assert any(k.endswith(str(sess.id)) for k in env.redis.kv)
+    await asyncio.sleep(0.02)
+    later = run_cancel.Run(key="next", user_id=str(env.user.id), session_id=str(sess.id), request_id="next-turn")
+    assert not await run_cancel.remote_requested(later, env.redis)
+    # A stop pressed while that turn runs still reaches it.
+    await run_cancel.request_remote(env.user.id, [str(sess.id)], env.redis)
+    assert await run_cancel.remote_requested(later, env.redis)
+
+
+@pytest.mark.asyncio
+async def test_hello_is_instant_and_never_stops_a_running_task(env):
+    first = await _start(env, "Research the Render CLI install steps")
+    (run,) = await _wait_run(env)
+    t0 = asyncio.get_running_loop().time()
+    reply = await asyncio.wait_for(await _start(env, "Hello", session_id=uuid.UUID(run.session_id), progress_id="turn_hhhhhh123456"), 5)
+    assert asyncio.get_running_loop().time() - t0 < 0.5
+    assert reply["route"] == "instant" and "still working" in reply["text"]
+    assert not run.cancelled and not first.done() and "Hello" not in env.calls
+    run.cancel()
+    await asyncio.wait_for(first, 5)
+
+
+@pytest.mark.asyncio
+async def test_hello_after_a_stop_offers_to_continue_and_continue_resumes(env):
+    sess = SimpleNamespace(id=uuid.uuid4(), user_id=env.user.id, state={}, title="t", agent_id=env.agent.id, group_id=None)
+    env.db.objects[sess.id] = sess
+    asked = SimpleNamespace(role="user", content="Check exact prices on MakeMyTrip for Delhi to Goa", meta={}, request_id="req9")
+    stopped = SimpleNamespace(role="assistant", content="⏹ Stopped. Send a new message, or tap Continue to pick up where I left off.",
+                              meta={"stopped": True, "can_continue": True, "steps": ["Opened makemytrip.com"]}, request_id="req9")  # fmt: skip
+
+    async def execute(*_a, **_k):
+        return _Result([stopped, asked])
+
+    env.db.execute = execute
+    hello = await asyncio.wait_for(await _start(env, "Hello", session_id=sess.id), 5)
+    assert hello["route"] == "instant" and "I stopped “Check exact prices on MakeMyTrip" in hello["text"]
+    assert hello["choices"]["options"] == ["Continue"] and env.calls == []
+    task = await _start(env, "continue", session_id=sess.id, progress_id="turn_cccccc123456")
+    await asyncio.sleep(0.1)
+    assert "continue it from where it stopped" in env.calls[-1] and "MakeMyTrip" in env.calls[-1]
+    assert "Opened makemytrip.com" in env.calls[-1] and "The user says" not in env.calls[-1]
+    for r in run_cancel.find(env.user.id, kind="turn"):
+        r.cancel()
+    await asyncio.wait_for(task, 5)
+
+
+def test_quick_replies_and_continue_words():
+    from datetime import datetime
+
+    from app.chat import quick
+
+    morning = datetime(2026, 11, 6, 9, 0)
+    assert quick.reply("hello", "Chief", {}, morning) == "Good morning! Chief here. What can I do for you?"
+    assert quick.reply("thanks", "Chief", {}) == "You're welcome!"
+    assert "still working on “x”" in quick.reply("hi", "", {"running": True, "task": "x"})
+    for word in ("continue", "Continue.", "go on", "ok continue", "please resume", "keep going!", "continue where you left off"):
+        assert quick.is_continue(word), word
+    for text in ("continue with the npm route", "how do I continue my visa", "resume writing"):
+        assert not quick.is_continue(text), text
+    assert quick.instant("Hello", uploads=False, confirms=False, group=False, resuming=False)
+    assert not quick.instant("Hello", uploads=True, confirms=False, group=False, resuming=False)
+    assert not quick.instant("Hello, book me a flight", uploads=False, confirms=False, group=False, resuming=False)
