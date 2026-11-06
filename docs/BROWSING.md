@@ -221,6 +221,20 @@ partway through.
 - **Step budget:** a background worker job gets 320 graph steps, growing to at most 400 when it hits the limit,
   instead of 160–200.
 
+## Downloads on your computer
+
+Why: a file the cloud computer downloaded only arrived as a chat attachment, so a skill step like "check it in
+Finder → Downloads" could never be done, and users had to save each file by hand.
+
+When the cloud computer downloads a file and the user's desktop app is connected (`DOWNLOADS_TO_DESKTOP`, on by
+default), the API sends the app a `save_download` job with the file's signed Lumio link. The app saves the file into
+the Mac's or PC's Downloads folder. It only fetches `https://<app host>/api/files?t=…` links, makes the file name
+safe (no paths or special characters), never overwrites an existing file (`Report (2).csv`), stops at 250 MB, and
+writes to a temporary name before renaming. At most 5 files per result. The download gets
+`saved_on_your_computer` (the path) or `desktop_save_error`, and the agent says where the file is. The chat attachment
+is still there either way. Files the desktop app's own browser downloads are already on the computer and are skipped.
+An older desktop app answers that it can't do this, so nothing breaks.
+
 ## Configuration
 
 All optional. Defaults need no new account.

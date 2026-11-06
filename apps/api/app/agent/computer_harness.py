@@ -71,6 +71,47 @@ def computer_missing() -> dict:
     return {"error": reason, "computer_unavailable": True}
 
 
+DESKTOP_SAVE_MAX = 5
+DESKTOP_SAVE_TIMEOUT_S = 75
+
+
+async def save_on_desktop(ctx, items: list[dict]) -> int:
+    """A file the cloud computer downloaded also goes to the user's own Downloads folder when their desktop app is
+    connected (docs/BROWSING.md "Downloads on your computer"). The app fetches the signed file link itself and only
+    accepts Lumio file links. Best effort: each item gets saved_on_your_computer (the path) or desktop_save_error."""
+    from app.config import get_settings
+
+    if not getattr(get_settings(), "downloads_to_desktop", True):
+        return 0
+    user_id = getattr(getattr(ctx, "user", None), "id", None)
+    if user_id is None:
+        return 0
+    from app.desktop.agent import LocalOffline, call_local, is_online
+
+    try:
+        if not await is_online(user_id):
+            return 0
+    except Exception:  # noqa: BLE001 - Redis down: skip, the chat attachment is still there
+        return 0
+    saved = 0
+    for item in [i for i in items if i.get("download_url")][:DESKTOP_SAVE_MAX]:
+        args = {"url": item["download_url"], "filename": str(item.get("filename") or ""), "timeout": 60}
+        try:
+            out = await asyncio.wait_for(call_local(user_id, "save_download", args), DESKTOP_SAVE_TIMEOUT_S)
+        except (LocalOffline, asyncio.TimeoutError) as exc:
+            item["desktop_save_error"] = str(exc)[:120] or "the desktop app did not answer"
+            continue
+        except Exception as exc:  # noqa: BLE001
+            item["desktop_save_error"] = type(exc).__name__
+            continue
+        if isinstance(out, dict) and out.get("ok") and out.get("path"):
+            item["saved_on_your_computer"] = str(out["path"])
+            saved += 1
+        else:
+            item["desktop_save_error"] = str((out or {}).get("error") or "not saved")[:160]
+    return saved
+
+
 async def _publish_downloads(ctx, result: dict) -> dict:
     published = []
     for item in result.get("downloads") or []:
@@ -93,6 +134,8 @@ async def _publish_downloads(ctx, result: dict) -> dict:
             )
         else:
             published.append(item)
+    if published and result.get("ran_on") != "local_computer":
+        await save_on_desktop(ctx, published)
     if published:
         result["downloads"] = published
         result.setdefault(
@@ -100,7 +143,8 @@ async def _publish_downloads(ctx, result: dict) -> dict:
             "Read each download's extracted_text and analyze it in your role and skills (get_skill if one matches). "
             "If the user asked for a deep dive, or this file is tabular/numeric and extracted_text is not enough, "
             "run_code on path with pandas and print real figures. Post that analysis in chat and cite download_url. "
-            "Never cite a sandbox path. If extracted_text is empty, still attach the file and say what kind it is.",
+            "Never cite a sandbox path. If extracted_text is empty, still attach the file and say what kind it is. "
+            "When a download has saved_on_your_computer, also tell the user it is in their Downloads folder at that path.",
         )
     return result
 

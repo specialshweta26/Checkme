@@ -25,6 +25,7 @@ ONLINE_TTL_S = 90
 RESULT_TTL_S = 180
 LOCAL_TOOLS = {
     "exec",
+    "save_download",
     "list_dir",
     "read_file",
     "write_file",
