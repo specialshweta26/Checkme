@@ -162,6 +162,7 @@ _browser_page = None
 _browser_context = None
 _elements: list[dict] = []
 _elements_url = ""
+MAX_ELEMENTS = 150
 # Tabs: id -> Page, the active tab (what the live screen shows), and each tab's last snapshot (refs are per tab).
 _tabs: dict = {}
 _active_tab = ""
@@ -477,7 +478,11 @@ def _dump(page):
 
 # Snapshot collector: open overlays / listboxes first, then other controls. Walks open shadow roots.
 # start is the first ref index so iframes can share one e0..eN sequence.
-_SNAPSHOT_JS = """(start) => {
+_SNAPSHOT_JS = """(arg) => {
+  const opts = (arg && typeof arg === 'object') ? arg : {start: arg};
+  const start = opts.start;
+  const limit = Number(opts.limit) || 150;
+  const find = String(opts.find || '').toLowerCase().split(/\\s+/).filter((w) => w.length > 1);
   const BASE = 'a, button, input, textarea, select, option, label, summary, [role="button"], [role="link"], [role="textbox"], [role="searchbox"], [role="checkbox"], [role="radio"], [role="combobox"], [role="option"], [role="listbox"], [role="tab"], [role="menuitem"], [role="menuitemradio"], [role="treeitem"], [role="row"], [contenteditable="true"]';
   const SUGGEST = '[role="option"], [role="menuitem"], [role="menuitemradio"], [role="treeitem"], [role="listbox"] li, [role="listbox"] button, [role="menu"] li, [role="menu"] button, [role="dialog"] li, [role="listbox"] [tabindex]';
   const tags = {A: 'link', BUTTON: 'button', INPUT: 'textbox', TEXTAREA: 'textbox', SELECT: 'combobox', OPTION: 'option', LABEL: 'label', SUMMARY: 'button', LI: 'option'};
@@ -525,8 +530,13 @@ _SNAPSHOT_JS = """(start) => {
   for (const el of collect(document, BASE)) add(el, rest);
   const ordered = suggest.filter(inView).concat(suggest.filter((el) => !inView(el)))
     .concat(rest.filter(inView)).concat(rest.filter((el) => !inView(el)));
+  const hay = (el) => [el.getAttribute('aria-label'), el.innerText, el.getAttribute('placeholder'), el.getAttribute('title'), el.getAttribute('name'), el.id]
+    .filter(Boolean).join(' ').toLowerCase();
+  const hits = (el) => find.reduce((n, w) => n + (hay(el).includes(w) ? 1 : 0), 0);
+  const ranked = find.length ? ordered.map((el, i) => [el, hits(el), i]).sort((a, b) => (b[1] - a[1]) || (a[2] - b[2])).map((row) => row[0]) : ordered;
+  try { window.__checkmeSnapTotal = ordered.length; } catch (e) {}
   const origin = Number(start) || 0;
-  return ordered.slice(0, 150).map((el, i) => {
+  return ranked.slice(0, limit).map((el, i) => {
     const ref = 'e' + (origin + i);
     try { el.setAttribute('data-checkme-ref', ref); } catch (e) {}
     const secretField = el.tagName === 'INPUT' && (el.getAttribute('type') || '').toLowerCase() === 'password';
@@ -617,28 +627,56 @@ def _frames_of(page):
     return frames[:16] if frames else [page]
 
 
-def _snapshot(page):
+def max_elements() -> int:
+    try:
+        return max(40, min(400, int(CONFIG.get("max_elements") or MAX_ELEMENTS)))
+    except (TypeError, ValueError):
+        return MAX_ELEMENTS
+
+
+def omitted_line(omitted: int) -> str:
+    """The note under a cut-off element list, so the model knows the page has more than it sees."""
+    if omitted <= 0:
+        return ""
+    return (
+        f"… {omitted} more elements are not listed. Scroll to them, or call browser_snapshot with find=\"words\" "
+        "(for example the menu item or report name) to list the matching ones first."
+    )
+
+
+def _snapshot(page, find: str = ""):
     nodes: list[dict] = []
     start = 0
+    cap = max_elements()
+    total = 0
     for frame in _frames_of(page):
         try:
-            part = frame.evaluate(_SNAPSHOT_JS, start)
+            part = frame.evaluate(_SNAPSHOT_JS, {"start": start, "find": find, "limit": cap - start})
         except Exception:
             continue
         if not isinstance(part, list):
             continue
+        try:
+            total += int(frame.evaluate("() => window.__checkmeSnapTotal || 0") or 0)
+        except Exception:
+            total += len(part)
         nodes.extend(n for n in part if isinstance(n, dict))
         start = len(nodes)
-        if start >= 150:
-            nodes = nodes[:150]
+        if start >= cap:
+            nodes = nodes[:cap]
             break
     global _elements, _elements_url
     _elements = nodes
     _elements_url = page.url
     _tab_refs[id(page)] = (_elements, _elements_url)
     tree = "\n".join(tree_line(n) for n in _elements)
+    omitted = max(0, total - len(_elements))
+    if omitted:
+        tree += "\n" + omitted_line(omitted)
     data = _dump(page)
     data["tree"] = tree
+    if omitted:
+        data["elements_omitted"] = omitted
     data["elements"] = _elements
     facts = _page_facts(page)
     if facts:
@@ -782,6 +820,70 @@ _QUIET_JS = """([quiet, cap]) => new Promise((resolve) => {
 _CLICKY = {"click", "dblclick", "double_click", "doubleclick", "press", "key", "select", "select_option", "pick", "check", "uncheck"}
 
 
+# A visible loading indicator: spinners, progress bars, aria-busy regions. Finished progress bars don't count.
+_BUSY_JS = """() => {
+  const sel = '[aria-busy="true"], [role="progressbar"], .spinner, .loading, .loader, .spinner-border, .MuiCircularProgress-root, .ant-spin-spinning, [class*="spinner"], [data-loading="true"]';
+  for (const el of document.querySelectorAll(sel)) {
+    const r = el.getBoundingClientRect();
+    if (r.width < 4 || r.height < 4 || r.bottom < 0 || r.top > window.innerHeight) continue;
+    const st = window.getComputedStyle(el);
+    if (st.visibility === 'hidden' || st.display === 'none' || Number(st.opacity || 1) < 0.05) continue;
+    const now = el.getAttribute('aria-valuenow');
+    if (now !== null && Number(now) >= Number(el.getAttribute('aria-valuemax') || 100)) continue;
+    return true;
+  }
+  return false;
+}"""
+BUSY_CAP_MS = 8000
+
+
+def wait_not_busy(page, cap_ms: int = BUSY_CAP_MS) -> int:
+    """If a loading indicator is showing, wait (up to cap_ms) for it to go away. Returns the ms waited."""
+    started = time.monotonic()
+    try:
+        if not page.evaluate(_BUSY_JS):
+            return 0
+        page.wait_for_function(f"() => !({_BUSY_JS})()", timeout=cap_ms, polling=250)
+    except Exception:
+        pass  # still busy at the cap, or the page navigated: carry on with what is there
+    return int((time.monotonic() - started) * 1000)
+
+
+# What a click is expected to change: address, title, page size and text, the focused field, open menus and
+# dialogs, checked / selected / pressed controls, scroll. Equal before and after = the click did nothing visible.
+_PAGE_SIG_JS = """() => {
+  const a = document.activeElement;
+  const field = a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || a.tagName === 'SELECT' || a.isContentEditable);
+  const count = (sel) => document.querySelectorAll(sel).length;
+  return [
+    location.href, document.title, document.getElementsByTagName('*').length,
+    ((document.body && document.body.innerText) || '').length,
+    field ? (a.tagName + '#' + (a.id || a.getAttribute('name') || '')) : '',
+    count('[role="dialog"], [role="menu"], [role="listbox"], [aria-expanded="true"], [open]'),
+    count('input:checked, option:checked, [aria-selected="true"], [aria-pressed="true"], [aria-checked="true"]'),
+    Math.round(window.scrollY),
+  ].join('|');
+}"""
+# Steps that should visibly change something; a no-op is worth telling the model about.
+EFFECT_KINDS = {"click", "dblclick", "double_click", "doubleclick", "check", "uncheck", "hover"}
+
+
+def page_signature(page) -> str | None:
+    try:
+        sig = page.evaluate(_PAGE_SIG_JS)
+    except Exception:
+        return None  # navigating, or a page that blocks scripts
+    return str(sig) if sig is not None else None
+
+
+def no_effect_note(index: int, kind: str, ref: str) -> str:
+    what = f"{kind} {ref}".strip()
+    return (
+        f"step {index + 1} ({what}) may not have done anything: the page looks the same as before. Check the page; "
+        "if nothing opened or changed, try another element (its label or parent), hover first, or use computer_act at its x,y."
+    )
+
+
 def wait_ready(page, kind: str = "", before_url: str | None = None) -> int:
     """Wait for the page to be ready after a step instead of a fixed pause. Returns the ms waited.
     DOMContentLoaded when the URL changed, then DOM quiet (no mutations for 150-250 ms, capped)."""
@@ -806,6 +908,13 @@ def wait_ready(page, kind: str = "", before_url: str | None = None) -> int:
             page.evaluate(_QUIET_JS, [quiet, cap])
         except Exception:
             pass
+    if clicky or navigated:
+        # Report screens and search pages often show a spinner while results load: wait it out, then settle again.
+        if wait_not_busy(page):
+            try:
+                page.evaluate(_QUIET_JS, [quiet, cap])
+            except Exception:
+                pass
     return int((time.monotonic() - started) * 1000)
 
 
@@ -1094,6 +1203,7 @@ def _act_page(page, actions: list, verify: bool = False):
     extras: list[dict] = []
     timings: list[dict] = []
     trace: list[dict] = []
+    warnings: list[str] = []
     started = time.monotonic()
     smart = smart_waits()
     try:
@@ -1101,6 +1211,7 @@ def _act_page(page, actions: list, verify: bool = False):
             kind = str(step.get("kind") or "").lower()
             t0 = time.monotonic()
             before = str(getattr(page, "url", "") or "")
+            sig_before = page_signature(page) if kind in EFFECT_KINDS else None
             ref = str(step.get("ref") or step.get("selector") or "").strip()
             node = _find(ref) if ref else None
             if verify and _step_target(step) and kind not in {"press", "key", "scroll", "wait", "reload", "back", "forward"}:
@@ -1124,6 +1235,9 @@ def _act_page(page, actions: list, verify: bool = False):
                 page.wait_for_timeout(pause)
                 wait_ms = pause
             timings.append({"kind": kind, "act_ms": act_ms, "wait_ms": wait_ms})
+            if sig_before is not None and page_signature(page) == sig_before:
+                trace[-1]["no_effect"] = True
+                warnings.append(no_effect_note(completed - 1, kind, ref))
     except Exception as exc:
         _settle(page)
         data = _snapshot(page)
@@ -1142,6 +1256,8 @@ def _act_page(page, actions: list, verify: bool = False):
         )
         _merge_extras(data, extras)
         data["trace"] = trace
+        if warnings:
+            data["warnings"] = warnings
         data["timing"] = {"steps": timings, "total_ms": int((time.monotonic() - started) * 1000)}
         return data
     _settle(page)
@@ -1149,6 +1265,8 @@ def _act_page(page, actions: list, verify: bool = False):
     data["completed"] = completed
     _merge_extras(data, extras)
     data["trace"] = trace
+    if warnings:
+        data["warnings"] = warnings
     data["timing"] = {"steps": timings, "total_ms": int((time.monotonic() - started) * 1000)}
     return data
 
@@ -1232,6 +1350,9 @@ def _combobox_info(loc) -> dict:
               list: el.getAttribute('list') || '',
               tag: (el.tagName || '').toLowerCase(),
               ce: !!el.isContentEditable,
+              type: (el.getAttribute('type') || '').toLowerCase(),
+              hint: [el.getAttribute('placeholder'), el.getAttribute('name'), el.id, el.getAttribute('aria-label'),
+                     el.getAttribute('data-date-format'), el.className && String(el.className)].filter(Boolean).join(' ').slice(0, 200),
             })"""
         ) or {}
     except Exception:
@@ -1311,8 +1432,142 @@ def _click_send_if_draft(page) -> None:
             continue
 
 
+# --- date fields and values that must stick -----------------------------------------------------------------
+NATIVE_DATE_TYPES = {"date", "datetime-local", "month", "time", "week"}
+_DATE_HINT = re.compile(
+    r"(\bdate|\bdob\b|birth|dd\s*[/.-]\s*mm|mm\s*[/.-]\s*dd|yyyy|\bcheck-?in\b|\bcheck-?out\b|datepicker|calendar)", re.I
+)
+_DATE_FORMATS = (
+    "%Y-%m-%d", "%Y/%m/%d", "%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y", "%m/%d/%Y", "%d/%m/%y", "%Y%m%d",
+    "%d %b %Y", "%d %B %Y", "%b %d %Y", "%B %d %Y", "%a %d %b %Y", "%A %d %B %Y", "%a %b %d %Y",
+)  # fmt: skip
+_MONTH_FORMATS = ("%Y-%m", "%Y/%m", "%m/%Y", "%m-%Y", "%b %Y", "%B %Y")
+_TIME = re.compile(r"(\d{1,2}):(\d{2})(?::\d{2})?\s*([ap]\.?m\.?)?", re.I)
+
+
+def _clean_date_text(text: str) -> str:
+    t = re.sub(r"(\d)(st|nd|rd|th)\b", r"\1", str(text or ""), flags=re.I)
+    return " ".join(t.replace(",", " ").split())
+
+
+def parse_date(text: str):
+    """A calendar date from the usual ways people and sites write one (ISO, 13/05/2026, 13 May 2026, May 13 2026).
+    Day-first wins when both readings are valid. Returns a ``datetime.date`` or None."""
+    import datetime as _dt
+
+    t = _clean_date_text(text)
+    t = _TIME.sub("", t).strip().rstrip("T").strip()
+    if "T" in t and re.match(r"\d{4}-\d{2}-\d{2}T", t):
+        t = t.split("T", 1)[0]
+    for fmt in _DATE_FORMATS:
+        try:
+            return _dt.datetime.strptime(t, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _parse_time(text: str) -> str:
+    m = _TIME.search(str(text or ""))
+    if not m:
+        return ""
+    hour, minute, half = int(m.group(1)), int(m.group(2)), (m.group(3) or "").lower().replace(".", "")
+    if half == "pm" and hour < 12:
+        hour += 12
+    if half == "am" and hour == 12:
+        hour = 0
+    if hour > 23 or minute > 59:
+        return ""
+    return f"{hour:02d}:{minute:02d}"
+
+
+def native_date_value(text: str, input_type: str) -> str | None:
+    """The value a native <input type=date|datetime-local|month|time> accepts (always ISO), or None if unclear."""
+    import datetime as _dt
+
+    kind = (input_type or "").lower()
+    raw = str(text or "").strip()
+    if kind == "time":
+        return _parse_time(raw) or None
+    if kind == "month":
+        t = _clean_date_text(raw)
+        for fmt in _MONTH_FORMATS:
+            try:
+                return _dt.datetime.strptime(t, fmt).strftime("%Y-%m")
+            except ValueError:
+                continue
+        day = parse_date(raw)
+        return day.strftime("%Y-%m") if day else None
+    if kind == "week":
+        return raw if re.fullmatch(r"\d{4}-W\d{2}", raw) else None
+    day = parse_date(raw)
+    if day is None:
+        return None
+    if kind == "datetime-local":
+        return f"{day.isoformat()}T{_parse_time(raw) or '00:00'}"
+    return day.isoformat()
+
+
+def date_field_kind(node: dict | None, info: dict | None = None) -> str:
+    """"native" for a browser date input, "text" for a text box that holds a date (custom pickers), else ""."""
+    node, info = node or {}, info or {}
+    typ = str(node.get("input_type") or info.get("type") or "").lower()
+    if typ in NATIVE_DATE_TYPES:
+        return "native"
+    if typ and typ not in {"text", "search", ""}:
+        return ""
+    hay = " ".join(str(node.get(k) or "") for k in ("placeholder", "name_attr", "aria_label", "label", "id", "name"))
+    hay += " " + str(info.get("hint") or "")
+    return "text" if _DATE_HINT.search(hay) else ""
+
+
+def _norm_value(text: str) -> str:
+    return re.sub(r"[^0-9a-z]", "", str(text or "").lower())
+
+
+def value_kept(want: str, got: str, date_like: bool = False) -> bool:
+    """Did the field keep what we typed? Tolerates input masks and a picker that rewrites the date's format."""
+    w, g = _norm_value(want), _norm_value(got)
+    if not w:
+        return True
+    if not g:
+        return False
+    if w == g or w in g:
+        return True
+    if date_like:
+        a, b = parse_date(want), parse_date(got)
+        return a is not None and a == b
+    return len(g) >= len(w) * 0.6 and g in w
+
+
+def _keep_value(page, loc, text: str, date_like: bool) -> None:
+    """After fill(): a React-controlled or masked field can silently drop the value. If it did, type it like a
+    person instead. A date text box then gets Tab so the picker commits the date and closes its calendar."""
+    try:
+        got = loc.input_value(timeout=1500)
+    except Exception:
+        return  # contenteditable or a custom widget: nothing to read back
+    if not value_kept(text, got, date_like):
+        try:
+            loc.click(timeout=4000)
+        except Exception:
+            pass
+        _type_keys(page, text, replace=True)
+        page.wait_for_timeout(150)
+    if date_like:
+        page.keyboard.press("Tab")
+        page.wait_for_timeout(150)
+
+
 def _type_into(page, loc, node, text: str, replace: bool) -> None:
     info = _combobox_info(loc)
+    dates = date_field_kind(node, info) if replace else ""
+    if dates == "native" and loc is not None:
+        value = native_date_value(text, str((node or {}).get("input_type") or info.get("type") or "date"))
+        if value is None:
+            raise RuntimeError(f"could not read {text!r} as a date for this date field; give it as YYYY-MM-DD")
+        loc.fill(value, timeout=8000)
+        return
     suggest = looks_combobox(node, info)
     if suggest:
         _click_target(page, loc, node)
@@ -1324,6 +1579,8 @@ def _type_into(page, loc, node, text: str, replace: bool) -> None:
         try:
             if replace:
                 loc.fill(text, timeout=8000)
+                if not is_secret_target(node) and info.get("type") != "password":
+                    _keep_value(page, loc, text, dates == "text")
             else:
                 loc.click(timeout=8000)
                 page.keyboard.type(text, delay=random.randint(30, 70))
@@ -2148,7 +2405,7 @@ def _handle_page(command: str, cmd: dict, page) -> dict:
                     data["hint"] = f"{wall['reason']} Use the read-only copy if one is attached, else other sites."
         return data
     if command == "snapshot":
-        return _snapshot(page)
+        return _snapshot(page, str(cmd.get("find") or "")[:120])
     if command == "collect":
         return _collect_listing(page, cmd)
     if command == "act":

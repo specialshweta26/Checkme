@@ -31,6 +31,56 @@ const SUBMIT_IF_DRAFT_JS: &str = r#"(() => {
 })()"#;
 
 const MAX_ELEMENTS: usize = 150;
+// What a click is expected to change (address, title, page size and text, the focused field, open menus and dialogs,
+// checked / selected controls, scroll). The same before and after means the click did nothing visible.
+const PAGE_SIG_JS: &str = r#"(() => {
+  const a = document.activeElement;
+  const field = a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || a.tagName === 'SELECT' || a.isContentEditable);
+  const count = (sel) => document.querySelectorAll(sel).length;
+  return [
+    location.href, document.title, document.getElementsByTagName('*').length,
+    ((document.body && document.body.innerText) || '').length,
+    field ? (a.tagName + '#' + (a.id || a.getAttribute('name') || '')) : '',
+    count('[role="dialog"], [role="menu"], [role="listbox"], [aria-expanded="true"], [open]'),
+    count('input:checked, option:checked, [aria-selected="true"], [aria-pressed="true"], [aria-checked="true"]'),
+    Math.round(window.scrollY),
+  ].join('|');
+})()"#;
+// Resolves when the DOM has been quiet for a moment and no loading indicator (spinner, progress bar, aria-busy)
+// shows, or at the caps. Replaces fixed sleeps after an action.
+const SETTLE_JS: &str = r#"new Promise((resolve) => {
+  const BUSY = '[aria-busy="true"], [role="progressbar"], .spinner, .loading, .loader, .spinner-border, .MuiCircularProgress-root, .ant-spin-spinning, [class*="spinner"], [data-loading="true"]';
+  const busy = () => {
+    for (const el of document.querySelectorAll(BUSY)) {
+      const r = el.getBoundingClientRect();
+      if (r.width < 4 || r.height < 4 || r.bottom < 0 || r.top > window.innerHeight) continue;
+      const st = getComputedStyle(el);
+      if (st.visibility === 'hidden' || st.display === 'none' || Number(st.opacity || 1) < 0.05) continue;
+      const now = el.getAttribute('aria-valuenow');
+      if (now !== null && Number(now) >= Number(el.getAttribute('aria-valuemax') || 100)) continue;
+      return true;
+    }
+    return false;
+  };
+  const started = Date.now();
+  let last = Date.now();
+  let obs = null;
+  try {
+    obs = new MutationObserver(() => { last = Date.now(); });
+    obs.observe(document.documentElement || document, { subtree: true, childList: true, attributes: true, characterData: true });
+  } catch (e) {}
+  const tick = () => {
+    const quiet = Date.now() - last >= 250;
+    const waited = Date.now() - started;
+    if ((quiet && !busy()) || waited > 8000 || (quiet && waited > 2500 && !busy())) {
+      try { obs && obs.disconnect(); } catch (e) {}
+      resolve(waited);
+      return;
+    }
+    setTimeout(tick, 100);
+  };
+  setTimeout(tick, 120);
+})"#;
 const MAX_FRAMES: usize = 8;
 const MAX_FRAME_TEXT: usize = 3000;
 // Enough text, a visible field (sign-in and OTP pages are short), or a loaded frame that may hold the form.
@@ -103,6 +153,30 @@ fn merge_frame(page: &mut Value, frame: &Value) {
             page["composer"] = composer.clone();
         }
     }
+}
+
+/// Tell the agent the element list was cut, and how to reach the rest.
+fn note_omitted(page: &mut Value, total: usize) {
+    let shown = page.get("elements").and_then(Value::as_array).map_or(0, Vec::len);
+    if total <= shown {
+        return;
+    }
+    let omitted = total - shown;
+    let line = format!(
+        "… {omitted} more elements are not listed. Scroll to them, or call browser_snapshot with find=\"words\" (for example the menu item or report name) to list the matching ones first."
+    );
+    let tree = format!("{}\n{line}", page["tree"].as_str().unwrap_or(""));
+    page["tree"] = json!(tree.trim_start());
+    page["elements_omitted"] = json!(omitted);
+}
+
+fn no_effect_note(index: usize, kind: &str, ref_id: &str) -> String {
+    let what = format!("{kind} {ref_id}");
+    format!(
+        "step {} ({}) may not have done anything: the page looks the same as before. Check the page; if nothing opened or changed, try another element (its label or parent), hover first, or use computer_act at its x,y.",
+        index + 1,
+        what.trim()
+    )
 }
 
 pub struct Chrome {
@@ -350,11 +424,19 @@ impl Chrome {
     }
 
     pub async fn snapshot(&self) -> Result<Value, String> {
+        self.snapshot_find("").await
+    }
+
+    /// The page as the agent reads it. `find` (words such as a menu item or report name) lists matching elements
+    /// first; when the page has more than MAX_ELEMENTS, the tree says how many were left out.
+    pub async fn snapshot_find(&self, find: &str) -> Result<Value, String> {
         self.arm_teach().await;
-        let mut data = self.eval(&format!("({SNAPSHOT_JS})(0, {MAX_ELEMENTS})")).await?;
+        let find: String = find.chars().filter(|c| !c.is_control()).take(120).collect();
+        let mut data = self.eval(&format!("({SNAPSHOT_JS})(0, {MAX_ELEMENTS}, {find:?})")).await?;
         if !data.is_object() {
             data = json!({ "url": "", "title": "", "text": "", "tree": "", "elements": [] });
         }
+        let mut total = data.get("total").and_then(Value::as_u64).unwrap_or(0) as usize;
         for ws_url in self.frame_targets().await {
             let start = data["elements"].as_array().map_or(0, Vec::len);
             if start >= MAX_ELEMENTS {
@@ -362,10 +444,15 @@ impl Chrome {
             }
             let limit = MAX_ELEMENTS - start;
             // A frame that can't be read (still loading, or just closed) shouldn't lose the rest of the page.
-            if let Ok(frame) = self.eval_on(&ws_url, &format!("({SNAPSHOT_JS})({start}, {limit})")).await {
+            if let Ok(frame) = self.eval_on(&ws_url, &format!("({SNAPSHOT_JS})({start}, {limit}, {find:?})")).await {
+                total += frame.get("total").and_then(Value::as_u64).unwrap_or(0) as usize;
                 merge_frame(&mut data, &frame);
             }
         }
+        if let Some(obj) = data.as_object_mut() {
+            obj.remove("total");
+        }
+        note_omitted(&mut data, total);
         if let Ok(shot) = self.screenshot_b64().await {
             data["screenshot_b64"] = json!(shot);
         }
@@ -383,9 +470,45 @@ impl Chrome {
             .ok_or_else(|| "no screenshot".into())
     }
 
+    /// Wait for the page to settle after an action: DOM quiet and no spinner, capped (see SETTLE_JS).
+    async fn settle(&self) {
+        let _ = self
+            .cdp_wait(
+                "Runtime.evaluate",
+                json!({ "expression": SETTLE_JS, "returnByValue": true, "awaitPromise": true }),
+                Duration::from_secs(10),
+            )
+            .await;
+    }
+
+    async fn page_sig(&self) -> Option<String> {
+        self.eval(PAGE_SIG_JS).await.ok().and_then(|v| v.as_str().map(str::to_string))
+    }
+
+    /// A real mouse at (x, y) on the main page: move there, and press / release `clicks` times (0 = hover only).
+    async fn mouse_at(&self, target: &str, x: i64, y: i64, clicks: u64) -> Result<(), String> {
+        let wait = Duration::from_secs(8);
+        self.cdp_on(target, "Input.dispatchMouseEvent", json!({ "type": "mouseMoved", "x": x, "y": y }), wait).await?;
+        for n in 1..=clicks {
+            for phase in ["mousePressed", "mouseReleased"] {
+                self.cdp_on(
+                    target,
+                    "Input.dispatchMouseEvent",
+                    json!({ "type": phase, "x": x, "y": y, "button": "left", "clickCount": n }),
+                    wait,
+                )
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
     pub async fn act(&self, actions: &[Value]) -> Result<Value, String> {
-        for step in actions {
+        let mut warnings: Vec<String> = vec![];
+        for (index, step) in actions.iter().enumerate() {
             let kind = step.get("kind").and_then(Value::as_str).unwrap_or("click");
+            let check_effect = matches!(kind, "click" | "dblclick" | "hover" | "check" | "uncheck");
+            let sig_before = if check_effect { self.page_sig().await } else { None };
             if kind == "wait" {
                 let ms = step.get("ms").and_then(Value::as_u64).unwrap_or(800);
                 tokio::time::sleep(Duration::from_millis(ms)).await;
@@ -423,13 +546,15 @@ impl Chrome {
             }
             let ref_id = step.get("ref").and_then(Value::as_str).unwrap_or("");
             let text = step.get("text").and_then(Value::as_str).unwrap_or("");
-            let js = format!("({ACT_JS})({ref_id:?}, {kind:?}, {text:?})");
+            // A real mouse only on the main page: an other-site frame's coordinates are not the page's.
+            let js = format!("({ACT_JS})({ref_id:?}, {kind:?}, {text:?}, true)");
+            let frame_js = format!("({ACT_JS})({ref_id:?}, {kind:?}, {text:?}, false)");
             // The ref is on the page or in one of its other-site frames. Keyboard input goes to whichever has it.
             let mut target = self.page_ws().await?;
             let mut result = self.eval_on(&target, &js).await?;
             if result.get("not_found").and_then(Value::as_bool) == Some(true) {
                 for ws_url in self.frame_targets().await {
-                    if let Ok(found) = self.eval_on(&ws_url, &js).await {
+                    if let Ok(found) = self.eval_on(&ws_url, &frame_js).await {
                         if found.get("not_found").and_then(Value::as_bool) != Some(true) {
                             result = found;
                             target = ws_url;
@@ -445,6 +570,13 @@ impl Chrome {
             if result.get("ok").and_then(Value::as_bool) == Some(false) {
                 return Err(result.get("error").and_then(Value::as_str).unwrap_or("browser action failed").to_string());
             }
+            if let Some(at) = result.get("mouse") {
+                let (x, y) = (at.get("x").and_then(Value::as_i64), at.get("y").and_then(Value::as_i64));
+                if let (Some(x), Some(y)) = (x, y) {
+                    let clicks = result.get("clicks").and_then(Value::as_u64).unwrap_or(1);
+                    self.mouse_at(&target, x, y, clicks).await?;
+                }
+            }
             if result.get("insert").and_then(Value::as_bool) == Some(true) && !text.is_empty() {
                 self.cdp_on(&target, "Input.insertText", json!({ "text": text }), Duration::from_secs(8)).await?;
             }
@@ -458,9 +590,19 @@ impl Chrome {
                     self.eval_on(&target, SUBMIT_IF_DRAFT_JS).await.ok();
                 }
             }
+            if check_effect {
+                self.settle().await;
+                if sig_before.is_some() && self.page_sig().await == sig_before {
+                    warnings.push(no_effect_note(index, kind, ref_id));
+                }
+            }
         }
-        tokio::time::sleep(Duration::from_millis(700)).await;
-        self.snapshot().await
+        self.settle().await;
+        let mut data = self.snapshot().await?;
+        if !warnings.is_empty() {
+            data["warnings"] = json!(warnings);
+        }
+        Ok(data)
     }
 
     pub async fn type_text(&self, text: &str) -> Result<(), String> {
@@ -897,6 +1039,32 @@ mod frame_tests {
 
     fn snapshot() -> Value {
         json!({ "url": "https://a.test/", "text": "page", "tree": "- e0 button Go", "composer": "", "elements": [{ "ref": "e0", "x": 5, "y": 5 }] })
+    }
+
+    #[test]
+    fn a_cut_element_list_says_how_many_are_left_out() {
+        let mut page = snapshot();
+        note_omitted(&mut page, 1);
+        assert!(page.get("elements_omitted").is_none());
+        note_omitted(&mut page, 41);
+        assert_eq!(page["elements_omitted"], 40);
+        assert!(page["tree"].as_str().unwrap().ends_with("to list the matching ones first."));
+        assert!(page["tree"].as_str().unwrap().contains("… 40 more elements"));
+    }
+
+    #[test]
+    fn a_click_that_changed_nothing_is_named() {
+        let note = no_effect_note(2, "click", "e9");
+        assert!(note.starts_with("step 3 (click e9) may not have done anything"));
+        assert!(note.contains("hover first"));
+    }
+
+    #[test]
+    fn act_script_moves_a_real_mouse_and_reads_dates() {
+        assert!(ACT_JS.contains("allowMouse") && ACT_JS.contains("mouse: at"));
+        assert!(ACT_JS.contains("nativeDate") && ACT_JS.contains("datetime-local"));
+        assert!(SNAPSHOT_JS.contains("(start, limit, find)") && SNAPSHOT_JS.contains("total: ordered.length"));
+        assert!(SETTLE_JS.contains("aria-busy") && PAGE_SIG_JS.contains("aria-expanded"));
     }
 
     #[test]

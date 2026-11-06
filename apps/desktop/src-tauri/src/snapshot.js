@@ -1,4 +1,4 @@
-(function (start, limit) {
+(function (start, limit, find) {
   const BASE = 'a, button, input, textarea, select, option, label, summary, [role="button"], [role="link"], [role="textbox"], [role="searchbox"], [role="checkbox"], [role="radio"], [role="combobox"], [role="option"], [role="listbox"], [role="tab"], [role="menuitem"], [contenteditable="true"]';
   const tags = {A: 'link', BUTTON: 'button', INPUT: 'textbox', TEXTAREA: 'textbox', SELECT: 'combobox', OPTION: 'option', LABEL: 'label', SUMMARY: 'button', LI: 'option'};
   const inputRole = {submit: 'button', button: 'button', reset: 'button', checkbox: 'checkbox', radio: 'radio', search: 'searchbox', file: 'file'};
@@ -43,7 +43,16 @@
     }
   }
   const first = Number(start) || 0;
-  const shown = ordered.filter(inView).concat(ordered.filter((item) => !inView(item))).slice(0, Number(limit) || 150);
+  // find: words the agent is looking for; matching elements go first so a long page doesn't hide them.
+  const words = String(find || '').toLowerCase().split(/\s+/).filter((w) => w.length > 1);
+  const hay = (el) => [el.getAttribute('aria-label'), el.innerText, el.getAttribute('placeholder'), el.getAttribute('title'), el.getAttribute('name'), el.id]
+    .filter(Boolean).join(' ').toLowerCase();
+  const byView = ordered.filter(inView).concat(ordered.filter((item) => !inView(item)));
+  const ranked = words.length
+    ? byView.map((item, i) => [item, words.reduce((n, w) => n + (hay(item.el).includes(w) ? 1 : 0), 0), i])
+        .sort((a, b) => (b[1] - a[1]) || (a[2] - b[2])).map((row) => row[0])
+    : byView;
+  const shown = ranked.slice(0, Number(limit) || 150);
   const elements = shown.map((item, i) => {
     const el = item.el;
     const ref = 'e' + (first + i);
@@ -83,6 +92,7 @@
     text_omitted: omitted,
     composer: composer.slice(0, 500),
     tree,
-    elements
+    elements,
+    total: ordered.length
   };
 })
