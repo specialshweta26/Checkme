@@ -274,6 +274,9 @@ class TimingCallback(AsyncCallbackHandler):  # type: ignore[misc]
     async def on_llm_end(self, response, *, run_id=None, **kwargs) -> None:  # noqa: ANN001
         t0 = self._llm.pop(run_id, None)
         self.timer.llm_calls += 1
+        from app.agent import usage
+
+        usage.from_langchain(response)
         if t0 is not None:
             self.timer.llm_ms += int((time.monotonic() - t0) * 1000)
 

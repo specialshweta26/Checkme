@@ -385,6 +385,9 @@ async def chat(
                 await run_cancel.clear_remote(run)
 
     async def _run_turn() -> dict:
+        from app.agent import usage as turn_usage
+
+        tally, usage_token = turn_usage.start()
         try:
             result = await run_deep_agent(
                 db,
@@ -404,6 +407,7 @@ async def chat(
                 recent_files=list(working.get("recent_files") or []),
             )
         except Exception as exc:  # noqa: BLE001
+            turn_usage.end(usage_token)
             if run.cancelled or isinstance(exc, run_cancel.TurnCancelled):
                 raise run_cancel.TurnCancelled("stopped") from exc
             log.exception("chat agent failed")
@@ -415,6 +419,9 @@ async def chat(
                 if progress is not None:
                     await progress.finish()
             raise HTTPException(502, str(exc)[:400]) from exc
+        turn_usage.end(usage_token)
+        if isinstance(result, dict):
+            result["usage"] = turn_usage.summary(tally)
         if run.cancelled:
             raise run_cancel.TurnCancelled("stopped")
         run_cancel.unregister(request_id, run)
@@ -450,6 +457,7 @@ async def chat(
                 "steps": [s.get("text") for s in (progress.steps if progress else []) if s.get("kind") != "done"][:40],
                 "jobs": result.get("jobs_started") or [],
                 "job": (result.get("jobs_started") or [None])[0],
+                "usage": result.get("usage"),
             }
             if isinstance(result.get("question"), dict) and result["question"].get("options"):
                 # ask_user in a chat turn: the web shows the options as buttons that send the option text.

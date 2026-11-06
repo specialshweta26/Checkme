@@ -3073,3 +3073,4 @@ body.lumio-desktop .screen-rail.overlay.fullscreen {
 .run-ai.run-ok { background: color-mix(in srgb, #2563eb 16%, transparent); color: #2563eb; }
 .run-api { margin-top: 12px; padding-top: 12px; border-top: 1px solid color-mix(in srgb, currentColor 10%, transparent); display: grid; gap: 6px; }
 .run-code { margin: 0; padding: 10px 12px; border-radius: 8px; background: #0f172a; color: #e2e8f0; font-size: 12px; overflow-x: auto; white-space: pre; }
+.turn-usage { font-size: 11px; color: var(--faint, #94a3b8); margin-top: 4px; font-variant-numeric: tabular-nums; }

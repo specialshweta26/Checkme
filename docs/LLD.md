@@ -713,6 +713,43 @@ Staff `learn_voice` updates the speaking agent’s voice block from sent mail.
 | Agent focus card | Empty chat of a custom agent with no `focus` → `FocusOnboarding` (A–D). Pick → `updateAgent(id, {focus})` then `send(answer)`; × saves `checkme.focusCard.dismissed.<id>` |
 | Sidebar refresh | Chat response `workspace_changed` → `announceWorkspaceChanged()` → `AgentsNav` listens for `checkme:workspace-changed` and calls `loadWorkspace()` |
 
+### Instant turns
+
+Small talk ("hi", "thanks", "ok", "bye", `fast_path.is_small_talk`) with no uploads, approvals or group is answered
+in `app/chat/quick.py` without an agent run: no connectors, computer, memory, skills or model call, and in
+milliseconds. It never interrupts a turn that is running in the chat; the reply says that task is still running. If
+the chat's last turn was stopped, the reply names it and offers **Continue**. Typing "continue", "go on",
+"resume" or similar right after a stopped turn resumes it exactly like the Continue button (`resume_prompt` with
+the stopped turn's request, steps and partial reply).
+
+### Stop flags across processes
+
+Stop finds the turn in its own process, or sets a Redis flag (`cancel:{user}:{ref}`) that the owning process's
+watcher sees. The flag holds the time Stop was pressed, to the microsecond. A turn honours a chat-wide flag only if it
+was set after the turn started, and a new turn clears the chat's flag when it starts. Before this, a Stop with no
+running turn left a chat-wide flag that stopped every new message in the chat for 10 minutes.
+
+### Turn status
+
+Every client (web app, desktop app, a second tab) learns that a turn ended from `GET /api/chat/progress/{id}`.
+`done` is true when the live feed has its "Done" line, or when the stored reply for that progress id is no longer
+`in_progress` (`status`: `running`, `done`, `finished` or `stopped`). The feed lives in Redis per turn and is written by
+the process that ran the turn; the stored reply is shared, so a turn stopped from another device or process still
+ends everywhere. Every stop path ends the feed, including the clean-up of a dead turn. A stored turn that is still
+`in_progress` after 15 minutes with no feed line (its process is gone; a live turn's own no-progress limit stops it
+much sooner) is marked stopped. The chat page re-reads the open chat when its window comes back into view and every
+15 s while visible, and follows a turn that another device started.
+
+### Turn usage
+
+`app/agent/usage.py` adds up the tokens of every model call in a chat turn: LangChain calls through
+`TimingCallback.on_llm_end`, and direct OpenAI calls (fast browser loop, routing, finish check, embeddings) in
+`app/llm.py`. Nested runs add to the outer turn. The reply carries
+`usage {input, output, cached, cost_usd, unpriced, models[]}`, stored in the message meta and shown under the reply
+("12,340 in · 820 out · $0.0213"; hover for each model). Cost uses `MODEL_PRICES`, a JSON map of model name (or name
+prefix) to `[input, output, cached input]` US dollars per million tokens. A model without a price shows tokens only,
+and a `+` after the cost means some calls weren't priced.
+
 ## 13. Error handling
 
 | Failure | Behavior |
