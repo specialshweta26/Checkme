@@ -38,6 +38,11 @@ dependencies = [
 [dependency-groups]
 dev = ["pytest>=8", "pytest-asyncio>=0.24"]
 
+# Only the app is shipped. Without this, setuptools sees app/, evals/ and tests/ side by side and refuses to build,
+# which is what broke the Render deploys.
+[tool.setuptools.packages.find]
+include = ["app*"]
+
 [tool.uv.sources]
 connector-core = { path = "../../packages/connector_core", editable = true }
 gmail-mcp = { path = "../../packages/gmail_mcp", editable = true }
