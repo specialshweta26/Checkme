@@ -219,8 +219,39 @@ def trace_steps(planned: list[dict], daemon_trace: list[dict], values: dict[str,
     return steps
 
 
+def field_label(target: dict | None) -> str:
+    t = target or {}
+    for key in ("label", "placeholder", "aria_label", "name", "name_attr", "id"):
+        if t.get(key):
+            return " ".join(str(t[key]).split())[:80]
+    return ""
+
+
+def make_variables(steps: list[dict]) -> list[dict]:
+    """Saved-run steps where every value typed or picked in a form field is a variable: {{name}} named after the field,
+    with the field's label and the recorded value as its example (docs/BROWSING.md "Variables"). Secret fields already
+    keep only a name. The run then takes new values each time, filled from what the user writes."""
+    taken = {str(s.get("param")) for s in steps if s.get("param")}
+    out = []
+    for step in steps:
+        row = dict(step)
+        kind = str(row.get("kind") or "").lower()
+        text = row.get("text")
+        if kind in {"fill", "type", "select", "pick"} and not row.get("param") and isinstance(text, str) and text.strip() and not row.get("secret"):
+            target = row.get("target") if isinstance(row.get("target"), dict) else {}
+            row["param"] = param_name(target, taken)
+            row["example"] = text[:200]
+            label = field_label(target)
+            if label:
+                row["label"] = label
+            row.pop("text", None)
+        out.append(row)
+    return out
+
+
 def trace_params(steps: list[dict]) -> list[dict]:
-    """The values a saved run needs: step parameters, and {{names}} written in AI steps."""
+    """The values a saved run needs: step parameters (with a label and example when known), and {{names}} written in
+    AI steps."""
     seen: dict[str, dict] = {}
     for step in steps:
         names = [step.get("param")] if step.get("param") else []
@@ -228,7 +259,13 @@ def trace_params(steps: list[dict]) -> list[dict]:
             names += _PLACEHOLDER.findall(str(step.get("text") or ""))
         for name in names:
             if name and name not in seen:
-                seen[name] = {"name": name, "secret": bool(step.get("secret")) or secret_param(name)}
+                row = {"name": name, "secret": bool(step.get("secret")) or secret_param(name)}
+                if step.get("param") == name:
+                    if step.get("label"):
+                        row["label"] = str(step["label"])
+                    if step.get("example") and not row["secret"]:
+                        row["example"] = str(step["example"])
+                seen[name] = row
     return list(seen.values())
 
 
@@ -237,8 +274,8 @@ def replay_steps(steps: list[dict], values: dict[str, str]) -> tuple[list[dict],
     out: list[dict] = []
     missing: list[str] = []
     for step in steps:
-        row = {k: v for k, v in step.items() if k != "param"}
-        if row.get("kind") == "goal":
+        row = {k: v for k, v in step.items() if k not in {"param", "example", "label"}}
+        if row.get("kind") in {"goal", "check"}:
             # An AI step keeps its {{names}}: the fast loop sees names, code types the values.
             missing.extend(n for n in _PLACEHOLDER.findall(str(row.get("text") or "")) if values.get(n) is None)
             out.append(row)
@@ -247,6 +284,8 @@ def replay_steps(steps: list[dict], values: dict[str, str]) -> tuple[list[dict],
         if name:
             if name in values and values[name] is not None:
                 row["text"] = str(values[name])
+            elif step.get("example") and not step.get("secret"):
+                row["text"] = str(step["example"])  # not given this time: the value it was recorded with
             else:
                 missing.append(name)
                 continue
@@ -300,6 +339,7 @@ class TraceStore:
                 if row is None:
                     row = BrowserTrace(user_id=uid, host=host, name=name)
                     db.add(row)
+                steps = make_variables(steps)
                 row.goal, row.start_url, row.steps, row.params = goal[:2000], start_url[:2000], steps, trace_params(steps)
                 row.source, row.skill_id = source, skill_id
                 await db.commit()
@@ -397,7 +437,7 @@ class TraceStore:
             if not row.proposed_steps:
                 return {"ok": False, "error": "this saved run has no proposed fix"}
             if accept:
-                row.prior_steps, row.steps = list(row.steps or []), list(row.proposed_steps)
+                row.prior_steps, row.steps = list(row.steps or []), make_variables(list(row.proposed_steps))
                 row.params = trace_params(row.steps)
                 row.failures = 0
             row.proposed_steps, row.proposed_note, row.proposed_at = None, None, None
@@ -491,6 +531,21 @@ def build_steps(old: list[dict], items: list[dict]) -> list[dict]:
             if not 0 <= i < len(old):
                 raise ValueError(f"step {n}: there is no saved step {i + 1}")
             out.append(dict(old[i]))
+        elif "check" in item:
+            text = " ".join(str(item.get("check") or "").split())
+            if not text:
+                raise ValueError(f"step {n}: write the yes/no question to check on the page")
+            row = {"kind": "check", "text": text[:MAX_GOAL_CHARS]}
+            for branch in ("yes", "no"):
+                raw = item.get(branch)
+                try:
+                    target = int(raw) if raw not in (None, "") else n + 1
+                except (TypeError, ValueError):
+                    raise ValueError(f"step {n}: {branch} must be a step number or 0 for the end") from None
+                if target < 0 or target > len(items) or target == n:
+                    raise ValueError(f"step {n}: {branch} goes to step {target}, which isn't another step")
+                row[branch] = target
+            out.append(row)
         elif "approve" in item:
             text = " ".join(str(item.get("approve") or "").split())
             out.append({"kind": "approve", "text": (text or "Check the page, then continue?")[:MAX_GOAL_CHARS]})
@@ -500,7 +555,7 @@ def build_steps(old: list[dict], items: list[dict]) -> list[dict]:
                 raise ValueError(f"step {n}: write what the step should do")
             out.append({"kind": "goal", "text": text[:MAX_GOAL_CHARS]})
         else:
-            raise ValueError(f"step {n}: use keep, goal or approve")
+            raise ValueError(f"step {n}: use keep, goal, approve or check")
     return out
 
 
@@ -512,7 +567,10 @@ def describe_trace(row) -> dict:
         "source": row.source, "skill_id": row.skill_id, "params": list(row.params or []),
         "steps": [describe_step(s) for s in row.steps or []],
         "step_rows": [{"index": i, "text": describe_step(s), "ai": str(s.get("kind") or "") == "goal",
-                       "approve": str(s.get("kind") or "") == "approve"} for i, s in enumerate(row.steps or [])],
+                       "approve": str(s.get("kind") or "") == "approve",
+                       **({"check": {"text": s.get("text"), "yes": s.get("yes"), "no": s.get("no")}} if s.get("kind") == "check" else {}),
+                       **({"variable": s.get("param"), "label": s.get("label")} if s.get("param") else {})}
+                      for i, s in enumerate(row.steps or [])],
         "has_run_key": bool(getattr(row, "run_key_hash", "")),
         "uses": row.uses or 0, "successes": row.successes or 0, "failures": row.failures or 0,
         "proposed_fix": {"steps": [describe_step(s) for s in proposed], "changes": list(row.proposed_note or []),
@@ -599,6 +657,11 @@ def describe_step(step: dict) -> str:
         return str(step.get("text") or "").strip()
     if kind == "approve":
         return "Wait for your OK: " + (str(step.get("text") or "").strip() or "continue?")
+    if kind == "check":
+        def goto(n: Any) -> str:
+            return f"step {int(n)}" if n else "the end"
+
+        return f"Check: {str(step.get('text') or '').strip()} (yes → {goto(step.get('yes'))}, no → {goto(step.get('no'))})"
     t = step.get("target") if isinstance(step.get("target"), dict) else {}
     label = next((str(t[k]) for k in ("name", "aria_label", "label", "placeholder", "testid", "name_attr", "id") if t.get(k)), "")
     role = str(t.get("role") or t.get("tag") or "element")
@@ -637,6 +700,79 @@ async def heal_step(ctx, trace: dict, step: dict, values: dict[str, str], allow_
 
 
 GOAL_ROUNDS = 6
+MAX_VISITS = 3
+FILL_SYSTEM = (
+    "A saved web task has fields to fill. From the user's request, give each field's value. Reply with JSON only: "
+    '{"values": {"<field name>": "<value>" or null}}. Each field has a label (what the form calls it) and an example '
+    "(a value it was used with before): use them to know what the field means and to write the value in the same "
+    "format (a date like the example's date, a city or airport like the example). Work out relative dates from today's "
+    "date. Never invent a value: null when the request doesn't say."
+)
+
+
+async def fill_variables(params: list[dict], text: str, given: dict[str, str]) -> dict[str, str]:
+    """Values for a saved run's variables taken from what the user wrote ("Mumbai to Deoghar on 21 Nov"), for the
+    ones the caller did not pass. Secret ones are never filled this way. Best effort: {} on any problem."""
+    wanted = [p for p in params or [] if p.get("name") and not p.get("secret") and p["name"] not in given]
+    text = str(text or "").strip()
+    if not wanted or not text:
+        return {}
+    from datetime import date
+
+    from app.llm import chat_complete
+
+    fields = [{"name": p["name"], "label": p.get("label") or "", "example": p.get("example") or ""} for p in wanted]
+    user = (
+        f"Today is {date.today().isoformat()}.\nUser's request:\n{text[:3000]}\n\nFields:\n"
+        + json.dumps(fields, ensure_ascii=False)
+        + "\n\nReply in json."
+    )
+    try:
+        resp = await chat_complete([{"role": "system", "content": FILL_SYSTEM}, {"role": "user", "content": user}],
+                                   response_format={"type": "json_object"}, max_tokens=400, model=fast_model())  # fmt: skip
+        data = json.loads(resp.choices[0].message.content or "{}")
+    except Exception as exc:  # noqa: BLE001
+        log.info("variables not filled: %s", type(exc).__name__)
+        return {}
+    values = data.get("values") if isinstance(data, dict) else None
+    names = {f["name"] for f in fields}
+    out = {}
+    for name, value in (values or {}).items() if isinstance(values, dict) else []:
+        if name in names and value not in (None, "") and len(str(value)) <= 500:
+            out[name] = str(value).strip()
+    return out
+
+
+async def add_filled_variables(ctx, trace: dict, vals: dict[str, str], extra_text: str = "") -> dict[str, str]:
+    """Fill a saved run's missing variables from the user's message (and the task text). Returns what was filled."""
+    if not setting("browser_fill_variables", True):
+        return {}
+    text = "\n".join(t for t in (str(getattr(ctx, "query", "") or ""), extra_text) if t.strip())
+    filled = await fill_variables(list(trace.get("params") or []), text, vals)
+    for key, value in filled.items():
+        vals.setdefault(key, value)
+    return filled
+CHECK_SYSTEM = (
+    "You answer one yes/no question about a web page for an automation. Read the page and reply with JSON only: "
+    '{"answer": "yes" or "no", "why": "a few words"}. If the page does not show it, answer no.'
+)
+
+
+async def check_page(ctx, question: str, state: dict | None) -> bool:
+    """A check step: ask the fast model a yes/no question about the current page. Anything unclear is "no"."""
+    from app.llm import chat_complete
+
+    page = state if isinstance(state, dict) and (state.get("tree") or state.get("text")) else await _snapshot(ctx)
+    try:
+        resp = await chat_complete(
+            [{"role": "system", "content": CHECK_SYSTEM}, {"role": "user", "content": f"Question: {question}\n\n{page_brief(page, 3000, 4000)}\n\nReply in json."}],
+            response_format={"type": "json_object"}, max_tokens=200, model=fast_model(),
+        )  # fmt: skip
+        data = json.loads(resp.choices[0].message.content or "{}")
+        return str(data.get("answer") or "").strip().lower().startswith("y")
+    except Exception as exc:  # noqa: BLE001
+        log.info("check step answered no: %s", type(exc).__name__)
+        return False
 
 
 async def run_goal_step(ctx, trace: dict, step: dict, values: dict[str, str], allow_final: bool = False) -> dict:
@@ -677,7 +813,20 @@ async def replay(ctx, trace: dict, values: dict[str, str], heal: bool = False, a
     healed: list[dict] = []
     fixed: list[dict] = list(raw[:first])  # saved-form steps as they ran, fixes included
     i = first
+    visits: dict[int, int] = {}
     while i < len(steps):
+        visits[i] = visits.get(i, 0) + 1
+        if visits[i] > MAX_VISITS:
+            return {"ok": False, "state": state, "completed": done, "error": f"step {i + 1} ran {MAX_VISITS} times; the run seems to loop"}
+        if steps[i].get("kind") == "check":
+            answer = await check_page(ctx, str(raw[i].get("text") or ""), state)
+            target = int(raw[i].get("yes" if answer else "no") or 0)
+            await _log(f"Check: {raw[i].get('text')} → {'yes' if answer else 'no'}",
+                       f"Going to {'step ' + str(target) if target else 'the end'}.", True, state, shot=False)  # fmt: skip
+            fixed.append(raw[i])
+            done += 1
+            i = target - 1 if target > 0 else len(steps)
+            continue
         if steps[i].get("kind") == "approve":
             if i == first and first > 0:
                 # The user approved this step; carry on past it.
@@ -706,7 +855,7 @@ async def replay(ctx, trace: dict, values: dict[str, str], heal: bool = False, a
             done, i = done + 1, i + 1
             continue
         j = i
-        while j < len(steps) and steps[j].get("kind") not in {"navigate", "goal", "approve"}:
+        while j < len(steps) and steps[j].get("kind") not in {"navigate", "goal", "approve", "check"}:
             j += 1
         res = await _internal(ctx, "browser_replay", {"steps": steps[i:j]})
         res = res if isinstance(res, dict) else {"ok": False, "error": str(res)[:300]}
@@ -1025,6 +1174,7 @@ async def _browser_task(ctx, goal: str, url: str = "", values: dict | None = Non
                 trace = None  # the model loop below stops at that control and asks
             if trace is not None:
                 t0 = time.monotonic()
+                await add_filled_variables(ctx, trace, vals, goal)
                 rep = await replay(ctx, trace, vals, heal=setting("browser_heal", True), allow_final=allow_final_action)
                 if rep.get("needs_approval"):
                     ask = rep["needs_approval"]
@@ -1333,6 +1483,7 @@ async def replay_named(ctx, name: str = "", url: str = "", skill_id: str = "", v
                 "hint": f"This saved run clicks '{blocked}' (a final action), so it was not run. If the user asked for it in chat, call again with allow_final_action; otherwise ask them first."}  # fmt: skip
     if setting("browser_saved_logins", True):
         await add_saved_login(user_id, str(trace.get("host") or host_of(str(trace.get("start_url") or ""))), vals)
+    filled = await add_filled_variables(ctx, trace, vals, name)
     started = time.monotonic()
     rep = await replay(ctx, trace, vals, heal=setting("browser_heal", True), allow_final=allow_final_action, start_step=start_step)
     if rep.get("missing"):
@@ -1342,6 +1493,8 @@ async def replay_named(ctx, name: str = "", url: str = "", skill_id: str = "", v
     proposed = await _propose_fix(trace, rep)
     fields: dict[str, Any] = {"ok": bool(rep.get("ok")), "via": "replay", "trace": trace.get("name"), "steps": rep.get("completed"),
                               "took_ms": int((time.monotonic() - started) * 1000), **heal_fields(rep, proposed)}  # fmt: skip
+    if filled:
+        fields["variables_filled"] = filled
     if rep.get("needs_approval"):
         ask = rep["needs_approval"]
         fields.update(needs_approval=ask, run_id=str(trace.get("id") or ""),

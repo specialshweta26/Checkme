@@ -290,6 +290,34 @@ with `deep_link_failed` and `fallback_url` (the site's home page), plus a hint: 
 search form and filters like a person (`browser_task` does this quickly), and only switch sources if the home page is
 blocked too. A home page that fails is left as it is. No site names are involved.
 
+## Variables
+
+A saved run is a form filled once, kept as a template. When a run is saved (a finished `browser_task`, a taught
+skill's recording, or an accepted fix), every value typed or picked in a form field becomes a **variable**: a
+`{{name}}` named after the field (`from`, `to`, `departure_date`), with the field's label and the recorded value as
+its example. Secret fields keep only a name, as before.
+
+When the run is used again, the variables the caller didn't pass are filled from what the user wrote
+(`BROWSER_FILL_VARIABLES`). The fast model gets the user's message (and the task text), today's date, and each
+variable's name, label and example. It writes each value in the example's format, works out relative dates, and
+leaves a variable empty rather than invent one.
+- **Never filled this way:** secret variables. They come from the caller or a saved sign-in.
+- **Not mentioned:** a variable the user didn't mention keeps its example (the value it was recorded with).
+- **Reported back:** the result lists what was filled in `variables_filled`.
+
+The Saved runs page shows each run's variables with label and example. **Run** and run keys pass them by name.
+
+## Checks
+
+Saved runs are a graph, not only a list. A **check** step (`{"kind": "check", "text": "Does the page say no flights
+found?", "yes": 0, "no": 6}`) asks the fast model a yes/no question about the current page. The replay then jumps to
+the `yes` or `no` step (1-based; `0` is the end), and every other step goes on to the next one. Anything unclear is
+answered "no". A step that runs more than 3 times stops the replay as a loop.
+
+The page draws the run as a graph: numbered nodes with arrows, and checks show their yes/no branches. In **Edit**,
+**Add check** adds a question with a "go to" picker for each answer. Checks are logged in the run history with their
+answer.
+
 ## Configuration
 
 All optional. Defaults need no new account.

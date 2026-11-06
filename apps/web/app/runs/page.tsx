@@ -8,7 +8,15 @@ import { apiError, getMe, type Me } from "../lib";
 // recording, replayed without a model call per step. Exact steps replay by selector; AI steps are sentences the
 // model carries out each run. A fix found when a site changed waits here for approval.
 
-type StepRow = { index: number; text: string; ai: boolean; approve?: boolean };
+type StepRow = {
+  index: number;
+  text: string;
+  ai: boolean;
+  approve?: boolean;
+  check?: { text: string; yes: number; no: number };
+  variable?: string;
+  label?: string;
+};
 type Change = { step: number; was: string; now: string[]; error?: string };
 type SavedRun = {
   id: string;
@@ -17,7 +25,7 @@ type SavedRun = {
   host: string;
   start_url: string;
   source: string;
-  params: { name: string; secret: boolean }[];
+  params: { name: string; secret: boolean; label?: string; example?: string }[];
   steps: string[];
   step_rows: StepRow[];
   uses: number;
@@ -45,7 +53,43 @@ const RUN_STATUS: Record<string, string> = {
 type SavedLogin = { id: string; host: string; label: string; username_hint: string; last_used_at: string | null };
 
 // One row of the editor: an exact saved step (kept by its index) or an AI step (a sentence).
-type Draft = { key: string; keep?: number; goal?: string; approve?: string; text: string };
+type Draft = { key: string; keep?: number; goal?: string; approve?: string; check?: string; yes?: number; no?: number; text: string };
+
+// The saved run as a graph: each step a node, arrows to the next one, and a check node branching to its yes / no
+// steps (docs/BROWSING.md "Checks").
+function FlowGraph({ rows }: { rows: StepRow[] }) {
+  const goto = (n: number) => (n ? `step ${n}` : "end");
+  return (
+    <div className="flow">
+      {rows.map((row, i) => {
+        const kind = row.check ? "check" : row.approve ? "approve" : row.ai ? "ai" : row.variable ? "var" : "exact";
+        const label = row.check ? row.check.text : row.text;
+        return (
+          <div key={row.index} className="flow-item">
+            <div className={`flow-node ${kind}`}>
+              <span className="flow-num">{i + 1}</span>
+              <span className="flow-text">
+                {kind === "ai" ? <span className="run-ai">AI</span> : null}
+                {kind === "approve" ? <span className="run-ai run-ok">OK?</span> : null}
+                {kind === "check" ? <span className="run-ai run-check">Check</span> : null}
+                {label}
+                {row.variable && !label.includes(`{{${row.variable}}}`) ? <code className="flow-var">{`{{${row.variable}}}`}</code> : null}
+              </span>
+            </div>
+            {row.check ? (
+              <div className="flow-branches">
+                <span className="flow-branch yes">yes → {goto(row.check.yes)}</span>
+                <span className="flow-branch no">no → {goto(row.check.no)}</span>
+              </div>
+            ) : i < rows.length - 1 ? (
+              <div className="flow-arrow" aria-hidden />
+            ) : null}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 
 // "from_date,to_date\n2026-05-01,2026-05-07" -> [{from_date, to_date}]
 function parseRows(csv: string): Record<string, string>[] {
@@ -238,7 +282,9 @@ export default function SavedRunsPage() {
     setDraftName(run.name);
     setDraft(
       run.step_rows.map((row) =>
-        row.approve
+        row.check
+          ? { key: `c${row.index}`, check: row.check.text, yes: row.check.yes, no: row.check.no, text: row.text }
+          : row.approve
           ? { key: `a${row.index}`, approve: row.text.replace(/^Wait for your OK: /, ""), text: row.text }
           : row.ai
             ? { key: `g${row.index}`, goal: row.text, text: row.text }
@@ -258,7 +304,15 @@ export default function SavedRunsPage() {
   }
 
   async function saveEdit(run: SavedRun) {
-    const steps = draft.map((row) => (row.approve !== undefined ? { approve: row.approve } : row.goal !== undefined ? { goal: row.goal } : { keep: row.keep }));
+    const steps = draft.map((row) =>
+      row.check !== undefined
+        ? { check: row.check, yes: row.yes ?? 0, no: row.no ?? 0 }
+        : row.approve !== undefined
+          ? { approve: row.approve }
+          : row.goal !== undefined
+            ? { goal: row.goal }
+            : { keep: row.keep },
+    );
     const ok = await call(run.id, "/steps", "PUT", { steps, name: draftName });
     if (ok) setEditing("");
   }
@@ -390,19 +444,25 @@ export default function SavedRunsPage() {
 
                   {open && !isEditing ? (
                     <div className="task-detail">
-                      <ol className="run-steps">
-                        {run.step_rows.map((row) => (
-                          <li key={row.index}>
-                            {row.ai ? <span className="run-ai">AI</span> : null}
-                            {row.approve ? <span className="run-ai run-ok">OK?</span> : null}
-                            {row.text}
-                          </li>
-                        ))}
-                      </ol>
+                      <FlowGraph rows={run.step_rows} />
                       {run.params.length ? (
-                        <p className="muted" style={{ fontSize: 12 }}>
-                          Asks for: {run.params.map((p) => (p.secret ? `${p.name} (secret)` : p.name)).join(", ")}
-                        </p>
+                        <div className="run-vars">
+                          <strong>Variables</strong>
+                          <span className="muted">Filled from what you write when you ask for this task (or given when you press Run); left out, a variable keeps its example.</span>
+                          <table>
+                            <tbody>
+                              {run.params.map((p) => (
+                                <tr key={p.name}>
+                                  <td>
+                                    <code>{`{{${p.name}}}`}</code>
+                                  </td>
+                                  <td>{p.label || ""}</td>
+                                  <td className="muted">{p.secret ? "secret (saved sign-in)" : p.example ? `e.g. ${p.example}` : ""}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
                       ) : null}
                       {run.start_url ? (
                         <p className="faint" style={{ fontSize: 12 }}>
@@ -443,12 +503,34 @@ export default function SavedRunsPage() {
                       </label>
                       <p className="muted" style={{ fontSize: 12 }}>
                         Rewrite a step in your own words to make it an AI step, for example “Set the date range to last month”. Use {"{{name}}"} for a
-                        value you give each run.
+                        value you give each run. A check asks a yes/no question about the page and jumps to the step you pick.
                       </p>
                       <ol className="run-steps editing">
                         {draft.map((row, i) => (
                           <li key={row.key}>
-                            {row.approve !== undefined ? (
+                            {row.check !== undefined ? (
+                              <span className="run-check-edit">
+                                <input
+                                  className="field"
+                                  value={row.check}
+                                  placeholder="A yes/no question about the page, e.g. Does it say no flights found?"
+                                  onChange={(e) => setDraft((rows) => rows.map((r, j) => (j === i ? { ...r, check: e.target.value } : r)))}
+                                />
+                                {(["yes", "no"] as const).map((branch) => (
+                                  <label key={branch} className="run-branch">
+                                    {branch} →
+                                    <select
+                                      className="field"
+                                      value={String(row[branch] ?? 0)}
+                                      onChange={(e) => setDraft((rows) => rows.map((r, j) => (j === i ? { ...r, [branch]: Number(e.target.value) } : r)))}
+                                    >
+                                      <option value="0">End</option>
+                                      {draft.map((_, n) => (n === i ? null : <option key={n} value={n + 1}>{`Step ${n + 1}`}</option>))}
+                                    </select>
+                                  </label>
+                                ))}
+                              </span>
+                            ) : row.approve !== undefined ? (
                               <input
                                 className="field"
                                 value={row.approve}
@@ -467,7 +549,7 @@ export default function SavedRunsPage() {
                               <span className="run-exact">{row.text}</span>
                             )}
                             <span className="run-step-tools">
-                              {row.goal === undefined && row.approve === undefined ? (
+                              {row.goal === undefined && row.approve === undefined && row.check === undefined ? (
                                 <button type="button" className="icon-btn" onClick={() => setDraft((rows) => rows.map((r, j) => (j === i ? { key: r.key, goal: r.text, text: r.text } : r)))}>
                                   Rewrite
                                 </button>
@@ -500,6 +582,15 @@ export default function SavedRunsPage() {
                         >
                           Add approval step
                         </button>
+                        <button
+                          type="button"
+                          className="btn secondary"
+                          onClick={() =>
+                            setDraft((rows) => [...rows, { key: `c${Date.now()}`, check: "", yes: 0, no: 0, text: "" }])
+                          }
+                        >
+                          Add check
+                        </button>
                         <span style={{ flex: 1 }} />
                         <button type="button" className="btn secondary" onClick={() => setEditing("")}>
                           Cancel
@@ -507,7 +598,11 @@ export default function SavedRunsPage() {
                         <button
                           type="button"
                           className="btn"
-                          disabled={!!busy || draft.length === 0 || draft.some((r) => r.goal !== undefined && !r.goal.trim())}
+                          disabled={
+                            !!busy ||
+                            draft.length === 0 ||
+                            draft.some((r) => (r.goal !== undefined && !r.goal.trim()) || (r.check !== undefined && !r.check.trim()))
+                          }
                           onClick={() => saveEdit(run)}
                         >
                           {busy === run.id + "/steps" ? "Saving…" : "Save steps"}
