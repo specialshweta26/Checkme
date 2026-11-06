@@ -1630,7 +1630,10 @@ def pick_calendar_day(page, text: str, months: int = 14) -> bool:
             data = page.evaluate(_CALENDAR_JS) or {}
         except Exception:
             return False
-        cell = calendar_cell(data.get("cells") or [], want)
+        cells = data.get("cells") or []
+        if not any(parse_date(part.strip()) for c in cells for part in str(c.get("text") or "").split("|") if part.strip()):
+            return False  # no calendar on screen: never click some other "next" arrow (a carousel)
+        cell = calendar_cell(cells, want)
         if cell is not None:
             page.mouse.click(int(cell["x"]), int(cell["y"]))
             page.wait_for_timeout(250)

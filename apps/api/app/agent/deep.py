@@ -2772,6 +2772,11 @@ def build_agent(ctx: RunContext, prompt: str):
         "checkpointer": _durable_saver(ctx) or InMemorySaver(),
     }
     middleware = _todo_middleware()
+    from app.agent import context_trim
+
+    trim = context_trim.middleware() if getattr(get_settings(), "trim_old_pages", True) else None
+    if trim is not None:
+        middleware = [*middleware, trim]
     if middleware:
         kwargs["middleware"] = middleware
     return create_deep_agent(**kwargs)
