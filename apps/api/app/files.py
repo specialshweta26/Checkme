@@ -79,7 +79,7 @@ async def upload_files(files: list[UploadFile] = File(...), user: User = Depends
                 "download_url": signed_url(key, upload.filename or filename, inline=False, content_type=content_type),
                 "preview_url": signed_url(key, upload.filename or filename, inline=True, content_type=content_type) if preview else None,
                 "previewable": preview,
-                "extracted_text": clip(await asyncio.to_thread(extract_text, filename, content_type, data, limit=8000) or "", 4000),
+                "extracted_text": clip(await asyncio.to_thread(extract_text, filename, content_type, data, limit=16000) or "", 12000),
             }
         )
     return {"files": out}

@@ -26,6 +26,8 @@ class Scenario:
     web: dict[str, str] = field(default_factory=dict)  # search words -> result text
     history: list[dict] = field(default_factory=list)
     images: list[bytes] = field(default_factory=list)
+    recent_files: list[str] = field(default_factory=list)  # file paths earlier turns' tools returned
+    uploads: dict[str, bytes] = field(default_factory=dict)  # attachment_key -> bytes; keys use "{user}/..."
     must_call: list[str] = field(default_factory=list)  # each must be called; "a|b" means either
     must_not_call: list[str] = field(default_factory=list)  # fnmatch patterns, e.g. "browser_*"
     reply_has: list[str] = field(default_factory=list)  # regexes, case-insensitive
@@ -88,6 +90,11 @@ class FakeComputer:
             data = self.files.get(self._norm(args.get("path", "")))
             if data is None:
                 return {"ok": False, "error": f"{args.get('path')} does not exist", "ran_on": "local_computer"}
+            if isinstance(data, bytes) and re.search(r"\.(pptx|docx|xlsx|xlsm)$", str(args.get("path", "")), re.I):
+                from app.storage import extract_text  # the real computers convert these documents too
+
+                text = extract_text(str(args.get("path")), "", data, limit=80000)
+                return {"ok": True, "path": args.get("path"), "content": text, "ran_on": "local_computer"}
             if isinstance(data, bytes):
                 return {"ok": False, "error": f"{args.get('path')} is a binary file, so its text can't be read here. Say so and ask the user to attach it to the chat.", "ran_on": "local_computer"}
             return {"ok": True, "path": args.get("path"), "content": data, "ran_on": "local_computer"}
@@ -181,6 +188,13 @@ async def run_scenario(s: Scenario) -> Result:
         return {"ok": False, "error": NOT_IN_EVAL}
 
     shown = _png_message(s.images)
+    user_id = uuid.uuid4()
+    stored = {k.replace("{user}", str(user_id)): v for k, v in s.uploads.items()}
+
+    async def load_upload(key):
+        if key not in stored:
+            raise FileNotFoundError(key)
+        return stored[key]
     original_build = deep.build_agent
 
     async def image_message(keys):
@@ -203,18 +217,21 @@ async def run_scenario(s: Scenario) -> Result:
         patch((web_tools, "web_read"), web_read)
         patch((web_tools, "run_computer"), computer.run)
         stack.enter_context(mock.patch("app.agent.attachments.image_message", image_message))
+        stack.enter_context(mock.patch("app.agent.uploads._load", load_upload))
+        stack.enter_context(mock.patch.object(computer_harness, "write_bytes", _fake_write_bytes(computer)))
         started = time.monotonic()
         try:
             out = await asyncio.wait_for(
                 deep.run_deep_agent(
                     None,
-                    SimpleNamespace(id=uuid.uuid4(), email="eval@example.test", name="Eval", timezone="Asia/Kolkata"),
+                    SimpleNamespace(id=user_id, email="eval@example.test", name="Eval", timezone="Asia/Kolkata"),
                     uuid.uuid4(),
                     f"eval-{s.name}",
-                    list(s.history),
+                    [{**h, "content": str(h.get("content", "")).replace("{user}", str(user_id))} for h in s.history],
                     s.message,
                     client_kind="desktop",
                     images=["eval-image"] if shown is not None else None,
+                    recent_files=list(s.recent_files),
                 ),
                 timeout=s.max_seconds * 3,
             )
@@ -231,6 +248,15 @@ async def run_scenario(s: Scenario) -> Result:
     if reply.startswith("<error"):
         problems.insert(0, reply)
     return Result(s.name, not problems, s.known_issue, seconds, calls, reply, problems)
+
+
+def _fake_write_bytes(computer: "FakeComputer"):
+    async def write_bytes(ctx, path, data):
+        computer.calls.append(("write_bytes", {"path": path}))
+        computer.files[computer._norm(path)] = data
+        return {"ok": True, "path": path, "verified": True}
+
+    return write_bytes
 
 
 async def _same(value):

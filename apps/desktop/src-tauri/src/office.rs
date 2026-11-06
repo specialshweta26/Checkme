@@ -53,6 +53,63 @@ fn numbered_parts(names: &[String], prefix: &str) -> Vec<(u32, String)> {
     parts
 }
 
+const MAX_SHEET_ROWS: usize = 500;
+
+/// The value of `name="..."` in a tag's attributes.
+fn attr(attrs: &str, name: &str) -> String {
+    let key = format!(" {name}=\"");
+    attrs.find(&key).map_or(String::new(), |at| {
+        let rest = &attrs[at + key.len()..];
+        rest[..rest.find('"').unwrap_or(rest.len())].to_string()
+    })
+}
+
+/// Each `<c ...>...</c>` in a row: its type attribute and body. Empty `<c .../>` cells keep their place.
+fn cells_of(row: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut rest = row;
+    while let Some(start) = rest.find("<c") {
+        let after = &rest[start + 2..];
+        if !(after.starts_with(' ') || after.starts_with('>') || after.starts_with('/')) {
+            rest = after;
+            continue;
+        }
+        let Some(end_of_open) = after.find('>') else { break };
+        let attrs = &after[..end_of_open];
+        if attrs.ends_with('/') {
+            out.push((attr(attrs, "t"), String::new()));
+            rest = &after[end_of_open + 1..];
+            continue;
+        }
+        let body = &after[end_of_open + 1..];
+        let Some(end) = body.find("</c>") else { break };
+        out.push((attr(attrs, "t"), body[..end].to_string()));
+        rest = &body[end + 4..];
+    }
+    out
+}
+
+fn cell_text(kind: &str, body: &str, shared: &[String]) -> String {
+    let value = texts_of(body, "v").into_iter().next().unwrap_or_default();
+    match kind {
+        "s" => value.parse::<usize>().ok().and_then(|i| shared.get(i).cloned()).unwrap_or_default(),
+        "inlineStr" => texts_of(body, "t").concat(),
+        _ => value,
+    }
+}
+
+fn sheet_names(workbook: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = workbook;
+    while let Some(start) = rest.find("<sheet ") {
+        let after = &rest[start..];
+        let end = after.find('>').unwrap_or(after.len());
+        out.push(unescape(&attr(&after[..end], "name")));
+        rest = &after[end..];
+    }
+    out
+}
+
 pub fn text_of(file: &Path, bytes: &[u8]) -> Result<String, String> {
     let unreadable = |err: String| format!("{} couldn't be read: {err}", file.display());
     let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| unreadable(e.to_string()))?;
@@ -76,9 +133,27 @@ pub fn text_of(file: &Path, bytes: &[u8]) -> Result<String, String> {
             texts_of(&xml, "w:p").iter().map(|p| texts_of(p, "w:t").concat()).filter(|p| !p.is_empty()).collect::<Vec<_>>().join("\n")
         }
         _ => {
-            // Cell text lives in one shared list; numbers are in the sheets, which the agent can ask for as CSV.
-            let shared = part("xl/sharedStrings.xml").unwrap_or_default();
-            texts_of(&shared, "t").join("\n")
+            let shared: Vec<String> = texts_of(&part("xl/sharedStrings.xml").unwrap_or_default(), "si")
+                .iter()
+                .map(|item| texts_of(item, "t").concat())
+                .collect();
+            let titles = sheet_names(&part("xl/workbook.xml").unwrap_or_default());
+            let mut out = Vec::new();
+            for (index, (number, name)) in numbered_parts(&names, "xl/worksheets/sheet").into_iter().enumerate() {
+                let title = titles.get(index).cloned().unwrap_or_else(|| format!("Sheet {number}"));
+                out.push(format!("Sheet: {title}"));
+                for (count, row) in texts_of(&part(&name)?, "row").iter().enumerate() {
+                    if count >= MAX_SHEET_ROWS {
+                        out.push("(more rows not shown)".into());
+                        break;
+                    }
+                    let cells: Vec<String> = cells_of(row).iter().map(|(kind, body)| cell_text(kind, body, &shared)).collect();
+                    if cells.iter().any(|c| !c.is_empty()) {
+                        out.push(cells.join("\t"));
+                    }
+                }
+            }
+            out.join("\n")
         }
     };
     if text.trim().is_empty() {
@@ -121,9 +196,17 @@ mod tests {
     }
 
     #[test]
-    fn xlsx_reads_shared_text() {
-        let bytes = archive(&[("xl/sharedStrings.xml", "<si><t>Region</t></si><si><t xml:space=\"preserve\">West</t></si>")]);
-        assert_eq!(text_of(Path::new("a.xlsx"), &bytes).unwrap(), "Region\nWest");
+    fn xlsx_reads_every_cell_by_row() {
+        let bytes = archive(&[
+            ("xl/workbook.xml", "<sheets><sheet name=\"Shoes &amp; prices\" sheetId=\"1\"/></sheets>"),
+            ("xl/sharedStrings.xml", "<si><t>Name</t></si><si><t xml:space=\"preserve\">Price</t></si><si><r><t>Run</t></r><r><t>ner X</t></r></si>"),
+            ("xl/worksheets/sheet1.xml", concat!(
+                "<sheetData><row r=\"1\"><c r=\"A1\" t=\"s\"><v>0</v></c><c r=\"B1\" t=\"s\"><v>1</v></c></row>",
+                "<row r=\"2\"><c r=\"A2\" t=\"s\"><v>2</v></c><c r=\"B2\"><v>7499</v></c><c r=\"C2\" t=\"inlineStr\"><is><t>new</t></is></c></row>",
+                "<row r=\"3\"><c r=\"A3\"/></row></sheetData>",
+            )),
+        ]);
+        assert_eq!(text_of(Path::new("a.xlsx"), &bytes).unwrap(), "Sheet: Shoes & prices\nName\tPrice\nRunner X\t7499\tnew");
     }
 
     #[test]

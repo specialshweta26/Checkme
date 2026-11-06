@@ -218,6 +218,12 @@ async def chat(
     history = []
     for m in reversed(history_rows):
         content = m.content
+        uploaded = (m.meta or {}).get("uploads") if isinstance(m.meta, dict) and m.role == "user" else None
+        if uploaded:
+            # The upload's text was only in that turn's prompt, so name the files and their keys for read_upload.
+            names = ", ".join(f"{u.get('filename') or 'file'} (attachment_key={u.get('key')})" for u in uploaded if u.get("key"))
+            if names:
+                content = f"{content}\n\n[Attached: {names}]"
         src = (m.meta or {}).get("source") if isinstance(m.meta, dict) else None
         if m.role == "assistant" and src:
             content = f"{content}\n\nTool evidence (cite source_tool if asked): {json.dumps(src, default=str)[:2000]}"
@@ -315,6 +321,7 @@ async def chat(
                 progress=progress,
                 client_kind=(request.headers.get("x-lumio-client") or "web"),
                 images=uploaded_images(user.id, uploads),
+                recent_files=list(working.get("recent_files") or []),
             )
         except Exception as exc:  # noqa: BLE001
             if run.cancelled or isinstance(exc, run_cancel.TurnCancelled):
@@ -334,9 +341,12 @@ async def chat(
         try:
             if result.get("source"):
                 working["last_source"] = result["source"]
+            from app.agent.file_memory import merge
+
             sess.state = {
                 **working,
                 "last_tools": result.get("used_tools") or [],
+                "recent_files": merge(working.get("recent_files"), result.get("files_seen")),
             }
             meta = {
                 "request_id": request_id,

@@ -34,6 +34,12 @@ def _image_with_text(text: str) -> bytes:
     return out.getvalue()
 
 
+def _shoes() -> bytes:
+    from tests.xlsx_sample import xlsx
+
+    return xlsx([["Name", "Price", "Rating"], ["Runner X", "7499", "4.3"], ["Trail Pro", "6999", "4.1"]])
+
+
 def scenarios() -> list[Scenario]:
     return [
         # Conversation: no tools, quick.
@@ -48,10 +54,9 @@ def scenarios() -> list[Scenario]:
         Scenario("open folder", "open organic_farming folder and list files", files=DESKTOP, must_call=[LIST],
                  must_not_call=[APPS], reply_has=[r"organic_farming\.pptx"], max_seconds=40),
         Scenario("analyze listed ppt", "analyze that ppt", files=DESKTOP, history=LISTED, must_call=["read_file"],
+                 recent_files=["~/Desktop/organic_farming", "~/Desktop/organic_farming/organic_farming.pptx"],
                  must_not_call=[APPS, "search_files"], reply_has=["compost|crop rotation"], max_seconds=60,
-                 note="The file and folder were named in the last reply, so no search.",
-                 known_issue="Searches again: earlier turns keep only reply text, not the paths tools returned. "
-                 "A prompt rule alone didn't fix it (3 of 3 runs still searched)."),
+                 note="The last turn's listing returned the file's path, so no search."),
         Scenario("unreadable file", "what's inside archive.zip in the old folder on my desktop", files=DESKTOP,
                  must_not_call=[APPS], reply_has=["binary|can't read|cannot read|unable|attach"], max_seconds=60),
         Scenario("missing folder", "list the files in my Projects folder", files=DESKTOP, must_not_call=[APPS],
@@ -79,6 +84,21 @@ def scenarios() -> list[Scenario]:
                  "them on the computer.\n- deck.pptx (attachment_key=u/k/deck.pptx)\nSlide 1: Q3 revenue grew 12%\n"
                  "Slide 2: Churn fell to 3%",
                  must_not_call=[LIST, "read_file", "search_files", APPS], reply_has=["12", "churn"], max_seconds=50),
+        # An upload from an earlier message: it's stored with the chat, not on the computer.
+        Scenario("upload follow-up", "Open it on computer and let me know",
+                 history=[{"role": "user", "content": "What is this file\n\n[Attached: shoes_under_8000_live 3.xlsx "
+                           "(attachment_key={user}/k1/shoes_under_8000_live_3.xlsx)]"},
+                          {"role": "assistant", "content": "It's an Excel spreadsheet. I can't see its contents yet."}],
+                 uploads={"{user}/k1/shoes_under_8000_live_3.xlsx": _shoes()},
+                 must_call=["save_upload_to_computer|write_bytes"], must_not_call=["search_files", "run_code", "exec", "shell"],
+                 reply_has=["Runner X|7,?499|Trail Pro"], max_seconds=60,
+                 note="Opening it with an app is fine: the user asked to open it on the computer."),
+        Scenario("upload question later", "which shoe in that file is cheapest?",
+                 history=[{"role": "user", "content": "here's my list\n\n[Attached: shoes.xlsx (attachment_key={user}/k2/shoes.xlsx)]"},
+                          {"role": "assistant", "content": "Got it."}],
+                 uploads={"{user}/k2/shoes.xlsx": _shoes()},
+                 must_call=["read_upload|save_upload_to_computer"], must_not_call=["search_files", APPS],
+                 reply_has=["Trail Pro"], max_seconds=60),
         # Web.
         Scenario("web question", "what's the latest on the Artemis III launch date?",
                  web={"artemis launch": "NASA says Artemis III is now targeted for mid-2027."},

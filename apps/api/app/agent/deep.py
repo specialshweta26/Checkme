@@ -118,6 +118,7 @@ class RunContext:
     task_state: dict | None = None  # the skill this task follows and how far it got (checkpointed)
     task_resumed: bool = False
     shared_task_used: bool = False
+    files_seen: list = field(default_factory=list)  # file paths tools returned this turn (agent/file_memory.py)
 
 
 def _json_size(value: Any) -> int:
@@ -3177,6 +3178,7 @@ async def run_deep_agent(
     task_key: str | None = None,
     client_kind: str | None = None,
     images: list[str] | None = None,
+    recent_files: list[str] | None = None,
 ) -> dict[str, Any]:
     from app.desktop.client import client_kind as current_client
     from app.desktop.client import reset_client_kind, set_client_kind
@@ -3204,6 +3206,7 @@ async def run_deep_agent(
             job,
             task_key,
             images,
+            recent_files,
         )
     finally:
         reset_client_kind(token)
@@ -3227,6 +3230,7 @@ async def _run_deep_agent(
     job: Any = None,
     task_key: str | None = None,
     images: list[str] | None = None,
+    recent_files: list[str] | None = None,
 ) -> dict[str, Any]:
     from app.connectors.platform import ensure_platform_connectors
 
@@ -3434,6 +3438,9 @@ async def _run_deep_agent(
     if not matched_skills and not ctx.task_state:
         # A saved skill's own steps win over the fast-path hint.
         prompt += fast_path.prompt_hint(plan)
+    from app.agent import file_memory
+
+    prompt += file_memory.prompt_block(recent_files)
     graph = build_agent(ctx, prompt)
     timer.mark("build", _t)
     _t = _time.monotonic()
@@ -3532,5 +3539,6 @@ async def _run_deep_agent(
         "merged": ctx.merged,
         "repo": ctx.repo,
         "thread": list(ctx.thread),
+        "files_seen": list(ctx.files_seen),
         "timing": timer.summary(),
     }
