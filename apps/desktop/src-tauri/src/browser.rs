@@ -11,6 +11,7 @@ use tokio_tungstenite::tungstenite::Message;
 const SNAPSHOT_JS: &str = include_str!("snapshot.js");
 const COLLECT_JS: &str = include_str!("collect.js");
 const ACT_JS: &str = include_str!("act.js");
+const PICKER_JS: &str = include_str!("picker.js");
 const TEACH_JS: &str = include_str!("teach.js");
 const DRAIN_TEACH_JS: &str = r#"(() => { const b = window.__lumioTeachBuf || []; window.__lumioTeachBuf = []; return b.slice(0, 200); })()"#;
 const SUBMIT_IF_DRAFT_JS: &str = r#"(() => {
@@ -485,6 +486,50 @@ impl Chrome {
         self.eval(PAGE_SIG_JS).await.ok().and_then(|v| v.as_str().map(str::to_string))
     }
 
+    async fn picker(&self, target: &str, mode: &str, text: &str) -> Value {
+        self.eval_on(target, &format!("({PICKER_JS})({mode:?}, {text:?})")).await.unwrap_or(Value::Null)
+    }
+
+    /// Fill a box that takes no typing, after it was clicked: pick the day in the calendar it opened (moving to the
+    /// next month as needed), or type into the search box it opened and click the best suggestion.
+    async fn fill_picker(&self, target: &str, text: &str) -> Result<(), String> {
+        tokio::time::sleep(Duration::from_millis(450)).await;
+        for _ in 0..14 {
+            let found = self.picker(target, "calendar", text).await;
+            if let Some(cell) = found.get("cell") {
+                let (x, y) = (cell["x"].as_i64().unwrap_or(0), cell["y"].as_i64().unwrap_or(0));
+                self.mouse_at(target, x, y, 1).await?;
+                return Ok(());
+            }
+            match found.get("next") {
+                Some(next) => {
+                    let (x, y) = (next["x"].as_i64().unwrap_or(0), next["y"].as_i64().unwrap_or(0));
+                    self.mouse_at(target, x, y, 1).await?;
+                    tokio::time::sleep(Duration::from_millis(350)).await;
+                }
+                None => break,
+            }
+        }
+        if self.picker(target, "focus", text).await.get("ok").and_then(Value::as_bool) != Some(true) {
+            return Err("clicking this field opened nothing to type in; look at the page and pick the value from what opened".into());
+        }
+        self.cdp_on(target, "Input.insertText", json!({ "text": text }), Duration::from_secs(8)).await?;
+        tokio::time::sleep(Duration::from_millis(900)).await;
+        let hit = self.picker(target, "suggest", text).await;
+        if let Some(at) = hit.get("at") {
+            let (x, y) = (at["x"].as_i64().unwrap_or(0), at["y"].as_i64().unwrap_or(0));
+            self.mouse_at(target, x, y, 1).await?;
+        } else {
+            for key in ["ArrowDown", "Enter"] {
+                for phase in ["keyDown", "keyUp"] {
+                    self.cdp_on(target, "Input.dispatchKeyEvent", key_event(phase, key), Duration::from_secs(8)).await?;
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        Ok(())
+    }
+
     /// A real mouse at (x, y) on the main page: move there, and press / release `clicks` times (0 = hover only).
     async fn mouse_at(&self, target: &str, x: i64, y: i64, clicks: u64) -> Result<(), String> {
         let wait = Duration::from_secs(8);
@@ -576,6 +621,9 @@ impl Chrome {
                     let clicks = result.get("clicks").and_then(Value::as_u64).unwrap_or(1);
                     self.mouse_at(&target, x, y, clicks).await?;
                 }
+            }
+            if result.get("picker").and_then(Value::as_bool) == Some(true) {
+                self.fill_picker(&target, text).await?;
             }
             if result.get("insert").and_then(Value::as_bool) == Some(true) && !text.is_empty() {
                 self.cdp_on(&target, "Input.insertText", json!({ "text": text }), Duration::from_secs(8)).await?;
@@ -1065,6 +1113,7 @@ mod frame_tests {
         assert!(ACT_JS.contains("nativeDate") && ACT_JS.contains("datetime-local"));
         assert!(SNAPSHOT_JS.contains("(start, limit, find)") && SNAPSHOT_JS.contains("total: ordered.length"));
         assert!(SETTLE_JS.contains("aria-busy") && PAGE_SIG_JS.contains("aria-expanded"));
+        assert!(ACT_JS.contains("picker: true") && PICKER_JS.contains("mode === 'calendar'") && PICKER_JS.contains("mode === 'suggest'"));
     }
 
     #[test]

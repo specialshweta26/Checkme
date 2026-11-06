@@ -307,6 +307,30 @@ leaves a variable empty rather than invent one.
 
 The Saved runs page shows each run's variables with label and example. **Run** and run keys pass them by name.
 
+### New values in an old run
+
+Saved runs recorded before variables existed get them when they load, too. When a run is used with values that
+differ from the ones it was recorded with:
+- **Clicks on old values:** a recorded click that refers to an old value becomes an AI step that picks the new one
+  ("Choose “Chennai” for From"). That covers the old suggestion ("Bengaluru, India") and the old calendar day ("Sat
+  Dec 19 2026" for `2026-12-19`).
+- **Start address:** a start address with a query (a results page carrying the old search) is opened without it.
+
+## Pickers
+
+Many forms show a value in a box that takes no typing: a read-only input, a label or a div. Clicking it opens a
+search box with suggestions, or a calendar, and a site often pre-fills these boxes with the user's last search.
+`fill` on such a box, in the cloud browser and the desktop app, now works like this:
+1. Note the text boxes already on the page, then click the box (with a real mouse on desktop).
+2. If the value is a date and a calendar opened, click the cell whose `aria-label` / `data-date` / `title` reads
+   as that date, and click the next-month arrow (up to 14 times) until it shows. Disabled days are skipped.
+3. Otherwise, type into the box that has focus, or the one that just appeared, then click the best-matching
+   suggestion (or press Down and Enter).
+
+If nothing opens, the step fails with a hint to look at what did open. The prompt says to change every pre-filled
+field to what the user asked, and never to hand the screen over because a form is awkward (only sign-in, MFA,
+CAPTCHA and payment are handed over). No site names are involved.
+
 ## Checks
 
 Saved runs are a graph, not only a list. A **check** step (`{"kind": "check", "text": "Does the page say no flights

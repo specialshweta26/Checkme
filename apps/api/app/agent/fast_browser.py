@@ -269,6 +269,64 @@ def trace_params(steps: list[dict]) -> list[dict]:
     return list(seen.values())
 
 
+def _changed_values(steps: list[dict], values: dict[str, str]) -> dict[str, tuple[str, str]]:
+    """{recorded example: (new value, field label)} for the variables this run gets a different value for."""
+    changed: dict[str, tuple[str, str]] = {}
+    for st in steps:
+        name, example = st.get("param"), st.get("example")
+        if not name or not example or st.get("secret"):
+            continue
+        new = values.get(name)
+        if new not in (None, "") and str(new).strip().lower() != str(example).strip().lower():
+            changed[str(example)] = (str(new), str(st.get("label") or name))
+    return changed
+
+
+def _mentions(hay: str, example: str) -> bool:
+    """Does a recorded element's text refer to a recorded value: the same words, or the same date written another way."""
+    h, e = hay.lower(), example.strip().lower()
+    if len(e) >= 3 and e in h:
+        return True
+    first = e.split(",")[0].strip()
+    if len(first) >= 4 and first in h:
+        return True
+    try:
+        from app.connectors.computer_daemon import parse_date
+
+        day = parse_date(example)
+        return day is not None and any(parse_date(part) == day for part in (hay, *hay.split("|")) if part.strip())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def adapt_to_values(steps: list[dict], values: dict[str, str]) -> tuple[list[dict], bool]:
+    """A saved run used with new values: a recorded click on an old value (the suggestion "Bengaluru", the calendar
+    day "Fri Dec 19 2026") would pick the old value again, so it becomes an AI step that picks the new one. Returns
+    (steps, whether any value changed)."""
+    changed = _changed_values(steps, values)
+    if not changed:
+        return steps, False
+    out: list[dict] = []
+    for st in steps:
+        kind = str(st.get("kind") or "").lower()
+        target = st.get("target") if isinstance(st.get("target"), dict) else {}
+        if kind in {"click", "dblclick", "select", "pick", "check"} and not st.get("param") and target:
+            hay = " | ".join(str(target.get(k) or "") for k in ("name", "aria_label", "label", "text", "title"))
+            hit = next(((old, new) for old, new in changed.items() if _mentions(hay, old)), None)
+            if hit:
+                old, (new, label) = hit
+                out.append({"kind": "goal", "text": f"Choose “{new}” for {label} (the recorded run picked “{old}” here)"})
+                continue
+        out.append(st)
+    return out, True
+
+
+def bare_start(url: str) -> str:
+    """The start address without its query: a recorded results page carries the old search in it."""
+    parts = urlparse(url)
+    return parts._replace(query="", fragment="").geturl() if parts.query else url
+
+
 def replay_steps(steps: list[dict], values: dict[str, str]) -> tuple[list[dict], list[str]]:
     """Saved steps -> daemon replay steps with parameters filled in. Returns (steps, missing parameter names)."""
     out: list[dict] = []
@@ -368,7 +426,8 @@ class TraceStore:
                 rows = (await db.execute(q)).scalars().all()
             return [
                 {"id": str(r.id), "host": r.host, "name": r.name, "goal": r.goal, "start_url": r.start_url,
-                 "steps": list(r.steps or []), "params": list(r.params or []), "source": r.source, "skill_id": r.skill_id,
+                 "steps": make_variables(list(r.steps or [])), "params": trace_params(make_variables(list(r.steps or []))),
+                 "source": r.source, "skill_id": r.skill_id,
                  "uses": r.uses, "successes": r.successes, "failures": r.failures}  # fmt: skip
                 for r in rows
             ]
@@ -798,7 +857,7 @@ async def replay(ctx, trace: dict, values: dict[str, str], heal: bool = False, a
     daemon's verified replay. With ``heal``, a step whose element changed is redone by the model (only that step)
     and the replay carries on. Returns {ok, state, completed, mismatch?, missing?, healed?, steps?}: ``steps`` is
     the saved-form run with the fixes in, for a proposal."""
-    raw = [dict(s) for s in trace.get("steps") or []]
+    raw, new_values = adapt_to_values([dict(s) for s in trace.get("steps") or []], values)
     steps, missing = replay_steps(raw, values)
     if missing:
         return {"ok": False, "missing": missing, "completed": 0}
@@ -806,7 +865,8 @@ async def replay(ctx, trace: dict, values: dict[str, str], heal: bool = False, a
     state: dict = {}
     first = max(0, min(int(start_step or 1) - 1, len(steps)))  # resuming after an approval: the page is already there
     if first == 0 and trace.get("start_url") and not (steps and steps[0].get("kind") == "navigate"):
-        state = await _navigate(ctx, str(trace["start_url"]))
+        start = bare_start(str(trace["start_url"])) if new_values else str(trace["start_url"])
+        state = await _navigate(ctx, start)
         if state.get("ok") is False or _blocked(state):
             return {"ok": False, "state": state, "completed": 0, "error": state.get("error") or "start page did not load"}
     done = 0
