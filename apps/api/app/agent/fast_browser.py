@@ -220,11 +220,15 @@ def trace_steps(planned: list[dict], daemon_trace: list[dict], values: dict[str,
 
 
 def trace_params(steps: list[dict]) -> list[dict]:
+    """The values a saved run needs: step parameters, and {{names}} written in AI steps."""
     seen: dict[str, dict] = {}
     for step in steps:
-        name = step.get("param")
-        if name and name not in seen:
-            seen[name] = {"name": name, "secret": bool(step.get("secret"))}
+        names = [step.get("param")] if step.get("param") else []
+        if str(step.get("kind") or "") == "goal":
+            names += _PLACEHOLDER.findall(str(step.get("text") or ""))
+        for name in names:
+            if name and name not in seen:
+                seen[name] = {"name": name, "secret": bool(step.get("secret")) or secret_param(name)}
     return list(seen.values())
 
 
@@ -234,6 +238,11 @@ def replay_steps(steps: list[dict], values: dict[str, str]) -> tuple[list[dict],
     missing: list[str] = []
     for step in steps:
         row = {k: v for k, v in step.items() if k != "param"}
+        if row.get("kind") == "goal":
+            # An AI step keeps its {{names}}: the fast loop sees names, code types the values.
+            missing.extend(n for n in _PLACEHOLDER.findall(str(row.get("text") or "")) if values.get(n) is None)
+            out.append(row)
+            continue
         name = step.get("param")
         if name:
             if name in values and values[name] is not None:
@@ -395,6 +404,29 @@ class TraceStore:
             await db.commit()
             return {"ok": True, "accepted": accept, "id": str(row.id), "name": row.name, "steps": len(row.steps or [])}
 
+    async def edit(self, user_id, trace_id: str, items: list[dict], name: str = "") -> dict:
+        """Rewrite a saved run: ``items`` is the new step list, each {"keep": i} (saved step i, unchanged) or
+        {"goal": "sentence"} (an AI step the model does each run). The old steps are kept for one undo, and a
+        pending fix is dropped (it was made for the old steps)."""
+        from app.db import SessionLocal
+
+        async with SessionLocal() as db:
+            row = await self._owned(db, user_id, trace_id)
+            if row is None:
+                return {"ok": False, "error": "no such saved run"}
+            old = list(row.steps or [])
+            try:
+                new = build_steps(old, items)
+            except ValueError as exc:
+                return {"ok": False, "error": str(exc)}
+            row.prior_steps, row.steps = old, new
+            row.params = trace_params(new)
+            if name.strip():
+                row.name = name.strip()[:200]
+            row.proposed_steps, row.proposed_note, row.proposed_at = None, None, None
+            await db.commit()
+            return {"ok": True, "run": describe_trace(row)}
+
     async def listing(self, user_id, trace_id: str = "") -> list[dict]:
         """The user's saved runs as describe_trace rows, newest first (one row when trace_id is given)."""
         from sqlalchemy import select
@@ -437,6 +469,38 @@ class TraceStore:
             return {"ok": True, "id": str(row.id), "name": row.name, "steps": len(row.steps or [])}
 
 
+MAX_STEPS = 200
+MAX_GOAL_CHARS = 600
+
+
+def build_steps(old: list[dict], items: list[dict]) -> list[dict]:
+    """New saved steps from an edit list (see TraceStore.edit). Raises ValueError for a bad item."""
+    if not isinstance(items, list) or not items:
+        raise ValueError("a saved run needs at least one step")
+    if len(items) > MAX_STEPS:
+        raise ValueError(f"at most {MAX_STEPS} steps")
+    out: list[dict] = []
+    for n, item in enumerate(items, 1):
+        if not isinstance(item, dict):
+            raise ValueError(f"step {n} is not an object")
+        if "keep" in item:
+            try:
+                i = int(item["keep"])
+            except (TypeError, ValueError):
+                raise ValueError(f"step {n}: keep must be a step number") from None
+            if not 0 <= i < len(old):
+                raise ValueError(f"step {n}: there is no saved step {i + 1}")
+            out.append(dict(old[i]))
+        elif "goal" in item:
+            text = " ".join(str(item.get("goal") or "").split())
+            if not text:
+                raise ValueError(f"step {n}: write what the step should do")
+            out.append({"kind": "goal", "text": text[:MAX_GOAL_CHARS]})
+        else:
+            raise ValueError(f"step {n}: use keep or goal")
+    return out
+
+
 def describe_trace(row) -> dict:
     """A saved run as the user sees it: plain-English steps, stats, and any fix waiting for approval."""
     proposed = list(row.proposed_steps or []) if row.proposed_steps else []
@@ -444,6 +508,7 @@ def describe_trace(row) -> dict:
         "id": str(row.id), "name": row.name, "goal": row.goal, "host": row.host, "start_url": row.start_url,
         "source": row.source, "skill_id": row.skill_id, "params": list(row.params or []),
         "steps": [describe_step(s) for s in row.steps or []],
+        "step_rows": [{"index": i, "text": describe_step(s), "ai": str(s.get("kind") or "") == "goal"} for i, s in enumerate(row.steps or [])],
         "uses": row.uses or 0, "successes": row.successes or 0, "failures": row.failures or 0,
         "proposed_fix": {"steps": [describe_step(s) for s in proposed], "changes": list(row.proposed_note or []),
                          "at": row.proposed_at.isoformat() if row.proposed_at else None} if proposed else None,
@@ -525,6 +590,8 @@ def describe_step(step: dict) -> str:
     kind = str(step.get("kind") or "").lower()
     if kind == "navigate":
         return f"open {step.get('url') or 'the page'}"
+    if kind == "goal":
+        return str(step.get("text") or "").strip()
     t = step.get("target") if isinstance(step.get("target"), dict) else {}
     label = next((str(t[k]) for k in ("name", "aria_label", "label", "placeholder", "testid", "name_attr", "id") if t.get(k)), "")
     role = str(t.get("role") or t.get("tag") or "element")
@@ -562,6 +629,26 @@ async def heal_step(ctx, trace: dict, step: dict, values: dict[str, str], allow_
     return [dict(s) for s in steps]
 
 
+GOAL_ROUNDS = 6
+
+
+async def run_goal_step(ctx, trace: dict, step: dict, values: dict[str, str], allow_final: bool = False) -> dict:
+    """Run one AI step of a saved run (a sentence the user wrote) with the fast loop. Returns {ok, state, error?}."""
+    text = str(step.get("text") or "").strip()
+    if not text:
+        return {"ok": True}
+    goal = (
+        f'Part of the saved run "{trace.get("goal") or trace.get("name") or "a task"}". Do only this on the current '
+        f"page, then reply done with what you see: {text}"
+    )
+    out = await browser_task(ctx, goal, values=values, max_steps=GOAL_ROUNDS, allow_final_action=allow_final,
+                             use_saved=False, save=False)  # fmt: skip
+    ok = bool(isinstance(out, dict) and out.get("ok") and out.get("done"))
+    page = out.get("page") if isinstance(out, dict) else None
+    error = "" if ok else str((out or {}).get("need_user") or (out or {}).get("stopped_before") or (out or {}).get("note") or "did not finish")
+    return {"ok": ok, "state": page if isinstance(page, dict) else {}, "error": f"AI step '{text[:80]}': {error}" if error else ""}
+
+
 async def replay(ctx, trace: dict, values: dict[str, str], heal: bool = False, allow_final: bool = False) -> dict:
     """Run a saved trace without model calls. Navigate steps go through browser_navigate; the rest through the
     daemon's verified replay. With ``heal``, a step whose element changed is redone by the model (only that step)
@@ -582,6 +669,16 @@ async def replay(ctx, trace: dict, values: dict[str, str], heal: bool = False, a
     fixed: list[dict] = []  # saved-form steps as they ran, fixes included
     i = 0
     while i < len(steps):
+        if steps[i].get("kind") == "goal":
+            # An AI step: the fast loop does this sentence on the current page, every run.
+            out = await run_goal_step(ctx, trace, raw[i], values, allow_final)
+            state = out.get("state") or state
+            if not out.get("ok"):
+                return {"ok": False, "state": state, "completed": done, "error": out.get("error") or "an AI step did not finish",
+                        "ai_step": i + 1, **({"healed": healed} if healed else {})}  # fmt: skip
+            fixed.append(raw[i])
+            done, i = done + 1, i + 1
+            continue
         if steps[i].get("kind") == "navigate":
             state = await _navigate(ctx, str(steps[i].get("url") or ""))
             if state.get("ok") is False or _blocked(state):
@@ -590,7 +687,7 @@ async def replay(ctx, trace: dict, values: dict[str, str], heal: bool = False, a
             done, i = done + 1, i + 1
             continue
         j = i
-        while j < len(steps) and steps[j].get("kind") != "navigate":
+        while j < len(steps) and steps[j].get("kind") not in {"navigate", "goal"}:
             j += 1
         res = await _internal(ctx, "browser_replay", {"steps": steps[i:j]})
         res = res if isinstance(res, dict) else {"ok": False, "error": str(res)[:300]}
@@ -760,6 +857,12 @@ def trace_final_step(steps: list[dict]) -> str:
     """Name of a final/irreversible control a saved run clicks, else "". A run saved when the final action was
     allowed must not repeat it later just because the goal matches."""
     for step in steps or []:
+        if str(step.get("kind") or "").lower() == "goal":
+            text = _PLACEHOLDER.sub(" ", str(step.get("text") or ""))
+            if _is_final_label(text):
+                hit = _FINAL.search(text) or _FINAL_HI.search(text)
+                return hit.group(0) if hit else text[:60]
+            continue
         if str(step.get("kind") or "").lower() not in {"click", "dblclick"}:
             continue
         target = step.get("target") if isinstance(step.get("target"), dict) else {}

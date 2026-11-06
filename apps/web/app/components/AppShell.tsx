@@ -21,7 +21,7 @@ import { AgentsNav } from "./AgentsNav";
 import { BrandMark } from "./BrandMark";
 import { AgentAvatar } from "./AgentAvatar";
 
-type Nav = "chat" | "inbox" | "tasks" | "connectors";
+type Nav = "chat" | "inbox" | "tasks" | "connectors" | "runs";
 
 function IconInbox() {
   return (
@@ -55,6 +55,16 @@ function IconPlug() {
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
       <path d="M9 7v4M15 7v4M8 11h8v3a4 4 0 0 1-8 0v-3Z" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
       <path d="M12 18v2" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function IconReplay() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <path d="M4 12a8 8 0 1 0 2.4-5.7" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+      <path d="M4 4v4h4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="m10.5 9 4 3-4 3V9Z" fill="currentColor" />
     </svg>
   );
 }
@@ -279,7 +289,7 @@ export function AppShell({
   }
 
   const rows = conversations || own;
-  const titles: Record<Nav, string> = { chat: "Chat", inbox: "Inbox", tasks: "Tasks", connectors: "Connectors" };
+  const titles: Record<Nav, string> = { chat: "Chat", inbox: "Inbox", tasks: "Tasks", connectors: "Connectors", runs: "Saved runs" };
   const agentId = activeAgentId || scope.agent || null;
   const groupId = activeGroupId || scope.group || null;
 
@@ -393,6 +403,9 @@ export function AppShell({
           ))}
         </div>
         <div className="side-user">
+          <a className={`side-bottom-link${current === "runs" ? " on" : ""}`} href="/runs" onClick={(e) => { e.preventDefault(); visit("/runs"); }}>
+            <IconReplay /> Saved runs
+          </a>
           <a className={`side-bottom-link${current === "connectors" ? " on" : ""}`} href="/connectors" onClick={(e) => { e.preventDefault(); visit("/connectors"); }}>
             <IconPlug /> Connectors
           </a>
