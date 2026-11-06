@@ -883,6 +883,18 @@ def _result(state: dict, values: dict[str, str], **fields: Any) -> dict:
     return {**fields, "page": page}
 
 
+async def add_saved_login(user_id, host: str, vals: dict[str, str]) -> bool:
+    """Add the saved sign-in for this site to a run's values (the caller's own values win). True if one was added."""
+    if not host:
+        return False
+    from app.browser_runs import logins
+
+    saved = await logins.values_for(user_id, host)
+    for key, value in saved.items():
+        vals.setdefault(key, value)
+    return bool(saved)
+
+
 async def browser_task(ctx, goal: str, url: str = "", values: dict | None = None, max_steps: int = 0,
                        allow_final_action: bool = False, use_saved: bool = True, save: bool = True) -> dict:  # fmt: skip
     """See the module docstring. Never raises: problems come back as ``fallback: true`` with the page.
@@ -896,6 +908,12 @@ async def browser_task(ctx, goal: str, url: str = "", values: dict | None = None
     try:
         state: dict = {}
         target_host = host_of(url)
+        # 0. A sign-in the user saved for this site: code types it as {{login_username}} / {{login_password}}.
+        if user_id is not None and setting("browser_saved_logins", True):
+            if not target_host:
+                state = await _snapshot(ctx)
+                target_host = host_of(str(state.get("url") or ""))
+            await add_saved_login(user_id, target_host, vals)
         # 1. A saved run of the same task: replay it with no model calls.
         if setting("browser_replay", True) and use_saved and user_id is not None:
             if not target_host:
@@ -1193,6 +1211,8 @@ async def replay_named(ctx, name: str = "", url: str = "", skill_id: str = "", v
     if blocked:
         return {"ok": False, "trace": trace.get("name"), "stopped_before": blocked,
                 "hint": f"This saved run clicks '{blocked}' (a final action), so it was not run. If the user asked for it in chat, call again with allow_final_action; otherwise ask them first."}  # fmt: skip
+    if setting("browser_saved_logins", True):
+        await add_saved_login(user_id, str(trace.get("host") or host_of(str(trace.get("start_url") or ""))), vals)
     started = time.monotonic()
     rep = await replay(ctx, trace, vals, heal=setting("browser_heal", True), allow_final=allow_final_action)
     if rep.get("missing"):
@@ -1230,6 +1250,12 @@ def prompt_hint() -> str:
         )
     if setting("browser_replay", True):
         bits.append("A taught skill or a task done before on that site: browser_replay (skill_id, or name/url) runs the saved steps without model calls. ")
+    if setting("browser_saved_logins", True) and setting("browser_fast_loop", True):
+        bits.append(
+            "Sign-ins the user saved in the app (browser_logins lists the sites) are filled in by code: in browser_task write "
+            "{{login_username}} and {{login_password}} for the fields, never the values. Never ask the user to type a password "
+            "in chat; if a site has no saved sign-in, ask them to add it on the Saved runs page or sign in themselves (browser_handoff). "
+        )
     if setting("browser_direct_downloads", True):
         bits.append("To get a file whose link is on the page, browser_download (url or ref) fetches it directly with the signed-in session. ")
     bits.append(

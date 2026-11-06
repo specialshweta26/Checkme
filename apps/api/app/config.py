@@ -202,6 +202,7 @@ class Settings(BaseSettings):
     browser_escalate_model: str = ""  # model after repeated failures; empty = OPENAI_MODEL
     browser_fast_max_steps: int = 12  # model rounds per browser_task
     browser_replay: bool = True  # save successful browser_task runs and replay them without model calls
+    browser_saved_logins: bool = True  # fill a site's saved sign-in as {{login_username}} / {{login_password}}
     browser_heal: bool = True  # a replay step whose page changed is redone by the model; the fix waits for approval
     browser_direct_downloads: bool = True  # fetch file links with the session cookies instead of clicking through
     browser_teach_dom: bool = True  # teach mode also records selectors (not just screen coordinates)

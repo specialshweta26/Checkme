@@ -28,6 +28,8 @@ type SavedRun = {
   updated_at: string | null;
 };
 
+type SavedLogin = { id: string; host: string; label: string; username_hint: string; last_used_at: string | null };
+
 // One row of the editor: an exact saved step (kept by its index) or an AI step (a sentence).
 type Draft = { key: string; keep?: number; goal?: string; text: string };
 
@@ -42,6 +44,9 @@ export default function SavedRunsPage() {
   const [draftName, setDraftName] = useState("");
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
+  const [logins, setLogins] = useState<SavedLogin[]>([]);
+  const [loginForm, setLoginForm] = useState({ host: "", username: "", password: "", label: "" });
+  const [addingLogin, setAddingLogin] = useState(false);
 
   useEffect(() => {
     getMe().then((u) => {
@@ -66,6 +71,40 @@ export default function SavedRunsPage() {
     }
     setRuns(Array.isArray(data) ? data : []);
     setLoaded(true);
+    const saved = await fetch("/api/browser/logins", { credentials: "include" });
+    const rows = await saved.json().catch(() => []);
+    if (saved.ok && Array.isArray(rows)) setLogins(rows);
+  }
+
+  async function addLogin() {
+    setBusy("login");
+    setError("");
+    try {
+      const res = await fetch("/api/browser/logins", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(loginForm),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(apiError(data, "Could not save the sign-in"));
+      setLoginForm({ host: "", username: "", password: "", label: "" });
+      setAddingLogin(false);
+      await refresh();
+    } catch (err: any) {
+      setError(err.message || "Could not save the sign-in");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function removeLogin(row: SavedLogin) {
+    if (!window.confirm(`Remove the saved sign-in for ${row.host}?`)) return;
+    setBusy("login");
+    const res = await fetch(`/api/browser/logins/${row.id}`, { method: "DELETE", credentials: "include" });
+    if (!res.ok) setError("Could not remove the sign-in");
+    setBusy("");
+    await refresh();
   }
 
   useEffect(() => {
@@ -322,6 +361,84 @@ export default function SavedRunsPage() {
                 </div>
               );
             })}
+          </div>
+
+          <div className="page-hero" style={{ marginTop: 28 }}>
+            <div>
+              <h2>Saved sign-ins</h2>
+              <p className="muted">
+                For sites the assistant signs in to on its own (scheduled runs, saved runs). Stored encrypted. The assistant types them into the
+                site but never sees them, and you never type a password in chat. Codes sent to your phone or email, and CAPTCHAs, still come
+                to you.
+              </p>
+            </div>
+            {!addingLogin ? (
+              <button className="btn" onClick={() => setAddingLogin(true)}>
+                Add sign-in
+              </button>
+            ) : null}
+          </div>
+          {addingLogin ? (
+            <form
+              className="task-card login-form"
+              autoComplete="off"
+              onSubmit={(e) => {
+                e.preventDefault();
+                addLogin();
+              }}
+            >
+              <input className="field" required placeholder="Site, for example portal.example.com" value={loginForm.host} onChange={(e) => setLoginForm({ ...loginForm, host: e.target.value })} />
+              <input className="field" placeholder="Name (optional)" value={loginForm.label} onChange={(e) => setLoginForm({ ...loginForm, label: e.target.value })} />
+              <input className="field" required autoComplete="off" placeholder="Username or email" value={loginForm.username} onChange={(e) => setLoginForm({ ...loginForm, username: e.target.value })} />
+              <input
+                className="field"
+                type="password"
+                autoComplete="new-password"
+                placeholder="Password (leave empty to keep the saved one)"
+                value={loginForm.password}
+                onChange={(e) => setLoginForm({ ...loginForm, password: e.target.value })}
+              />
+              <div className="row">
+                <span style={{ flex: 1 }} />
+                <button type="button" className="btn secondary" onClick={() => setAddingLogin(false)}>
+                  Cancel
+                </button>
+                <button className="btn" disabled={busy === "login" || !loginForm.host.trim() || !loginForm.username.trim()}>
+                  {busy === "login" ? "Saving…" : "Save sign-in"}
+                </button>
+              </div>
+            </form>
+          ) : null}
+          <div className="task-list">
+            {logins.length === 0 && !addingLogin ? <p className="muted">No saved sign-ins.</p> : null}
+            {logins.map((row) => (
+              <div key={row.id} className="task-card">
+                <div className="task-main">
+                  <strong>{row.label}</strong>
+                  <div className="task-meta">
+                    <span className="app-pill">{row.host}</span>
+                    <span className="muted">{row.username_hint}</span>
+                    <span className="faint">{row.last_used_at ? `last used ${new Date(row.last_used_at).toLocaleDateString()}` : "not used yet"}</span>
+                  </div>
+                </div>
+                <div className="task-actions">
+                  <button
+                    className="icon-btn"
+                    title="Change the username or password"
+                    disabled={!!busy}
+                    onClick={() => {
+                      setLoginForm({ host: row.host, username: "", password: "", label: row.label === row.host ? "" : row.label });
+                      setAddingLogin(true);
+                    }}
+                  >
+                    Change
+                  </button>
+                  <button className="icon-btn" disabled={!!busy} onClick={() => removeLogin(row)}>
+                    Remove
+                  </button>
+                </div>
+              </div>
+            ))}
           </div>
         </div>
       </div>

@@ -58,6 +58,24 @@ class BrowserProfile(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
 
+class SiteLogin(Base):
+    """A website sign-in the user saved for the browser (docs/BROWSING.md "Saved sign-ins"). The user enters it in the
+    app, never in chat; both values are encrypted with the app key. Code types them into the page as
+    {{login_username}} / {{login_password}}: the model only ever sees those names."""
+
+    __tablename__ = "site_logins"
+    __table_args__ = (UniqueConstraint("user_id", "host"),)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    host: Mapped[str] = mapped_column(String(255))
+    label: Mapped[str] = mapped_column(String(200), default="")
+    username_enc: Mapped[str] = mapped_column(Text, default="")
+    password_enc: Mapped[str] = mapped_column(Text, default="")
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
 class BrowserTrace(Base):
     """A browser flow that worked before (a finished browser_task, or a teach-mode DOM recording), stored as
     selector steps so it can be replayed without a model call per step (docs/BROWSING.md "Fast browser").

@@ -69,6 +69,7 @@ async def _migrate() -> None:
         )
         await conn.execute(text("ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS agent_id UUID"))
         await conn.execute(text("ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS group_id UUID"))
+        # site_logins is a new table: create_all above makes it.
         for column in ("proposed_steps JSONB", "proposed_note JSONB", "proposed_at TIMESTAMPTZ", "prior_steps JSONB"):
             await conn.execute(text(f"ALTER TABLE browser_traces ADD COLUMN IF NOT EXISTS {column}"))
         await conn.execute(
