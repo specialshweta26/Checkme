@@ -570,7 +570,8 @@ export default function ChatPage() {
     const key = scopeKey(loaded.session?.agent_id, loaded.session?.group_id);
     const view = { sessionId: id, messages: next, pending: pendingFor(next) };
     viewsRef.current[key] = view;
-    if (!next.some((m) => m.meta?.in_progress) && progressStopsRef.current[key]) {
+    const latestReply = [...next].reverse().find((m) => m.role === "assistant");
+    if (!latestReply?.meta?.in_progress && progressStopsRef.current[key]) {
       progressStopsRef.current[key]();
       delete progressStopsRef.current[key];
       inflightRef.current.delete(key);
@@ -582,7 +583,7 @@ export default function ChatPage() {
     }
     if (scopeRef.current === key) showView(view);
     // A turn running elsewhere (the other device): follow it here too.
-    if (next.some((m) => m.meta?.in_progress) && !progressStopsRef.current[key]) resumeProgress(key, id, next);
+    if (!progressStopsRef.current[key]) resumeProgress(key, id, next);
   }
   reloadRef.current = reloadSession;
 
@@ -632,7 +633,10 @@ export default function ChatPage() {
   }
 
   function resumeProgress(key: string, id: string, loadedMessages: Msg[]) {
-    const active = [...loadedMessages].reverse().find((m) => m.role === "assistant" && m.meta?.in_progress && m.meta?.progress_id);
+    // Only the chat's latest reply can still be running: an older one marked working is a dead turn (the server
+    // settles it when the chat loads), and following it would show "working" forever.
+    const latest = [...loadedMessages].reverse().find((m) => m.role === "assistant");
+    const active = latest?.meta?.in_progress && latest?.meta?.progress_id ? latest : undefined;
     if (!active || progressStopsRef.current[key]) return;
     const progressId = String(active.meta.progress_id);
     turnsRef.current[key] = { gen: (turnsRef.current[key]?.gen || 0) + 1, progressId, sessionId: id, agentId: active.meta?.agent_id || null };
