@@ -8,6 +8,7 @@ from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
 from app.agent import computer_harness as computer
+from app.agent import uploads
 from app.agent import fast_browser as fast
 from app.agent import scratchpad as pad
 from app.agent import task_catalog as tasks
@@ -15,6 +16,17 @@ from app.agent import web_tools
 from app.agent.memory import forget_memory, read_history, recall_memory, remember_fact, search_history
 from app.skills import service as skills
 
+
+
+def _seen(ctx, result):
+    """Keep the paths a file tool returned, for later messages. Never changes or fails the result."""
+    try:
+        from app.agent.file_memory import remember
+
+        remember(ctx, result)
+    except Exception:  # noqa: BLE001
+        pass
+    return result
 
 def _dumps(value: Any, limit: int = 60000) -> str:
     from app.agent.deep import dumps
@@ -109,6 +121,15 @@ class PathInput(BaseModel):
 class SearchFilesInput(BaseModel):
     query: str = Field(description="Words the user used for the file or folder name.")
     path: str = Field(default="", description="Optional folder to search. Empty searches every granted folder on this computer.")
+
+
+class UploadInput(BaseModel):
+    attachment_key: str = Field(description="The attachment_key shown with the file the user attached.")
+
+
+class SaveUploadInput(BaseModel):
+    attachment_key: str = Field(description="The attachment_key shown with the file the user attached.")
+    path: str = Field(description="Where to save it on the computer, including the file name, e.g. ~/Downloads/report.xlsx.")
 
 
 class WriteFileInput(BaseModel):
@@ -412,22 +433,34 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
     async def search_files(query: str, path: str = "") -> str:
         """Find files and folders by name. In the desktop app this searches every granted folder on this computer. Pass the words the user used. Do not use the cloud computer, and do not treat a missing cloud path as the answer."""
         ctx.used_tools.append("search_files")
-        return _dumps(await computer.search_files(ctx, query, path))
+        return _dumps(_seen(ctx, await computer.search_files(ctx, query, path)))
 
     async def list_files(path: str = "") -> str:
         """List a folder. In the desktop app this is the user's computer: leave path empty for the granted folders, or pass ~/Desktop, ~/Documents, or ~/Downloads. On the website this is the cloud workspace. A path missing on the cloud machine is not a result about this Mac."""
         ctx.used_tools.append("list_files")
-        return _dumps(await computer.list_files(ctx, path))
+        return _dumps(_seen(ctx, await computer.list_files(ctx, path)))
 
     async def read_file(path: str) -> str:
         """Read a file on this computer. Desktop, Documents, and Downloads are already allowed. CSV and TSV files return a full-table summary (counts, breakdowns, totals) without Terminal."""
         ctx.used_tools.append("read_file")
-        return _dumps(await computer.read_file(ctx, path), 32000)
+        return _dumps(_seen(ctx, await computer.read_file(ctx, path)), 32000)
+
+    async def read_upload(attachment_key: str) -> str:
+        """Read a file the user attached earlier in this chat, by its attachment_key. Use this rather than searching
+        the computer: uploads are stored with the chat, not on the computer."""
+        ctx.used_tools.append("read_upload")
+        return _dumps(await uploads.read_upload(ctx, attachment_key), 32000)
+
+    async def save_upload_to_computer(attachment_key: str, path: str) -> str:
+        """Copy a file the user attached in this chat onto the computer at path (for example ~/Downloads/report.xlsx),
+        when they ask to open or work on it there. Uploads aren't on the computer until you do this."""
+        ctx.used_tools.append("save_upload_to_computer")
+        return _dumps(_seen(ctx, await uploads.save_upload_to_computer(ctx, attachment_key, path)))
 
     async def write_file(path: str, content: str) -> str:
         """Write a UTF-8 file on the computer, creating parent directories."""
         ctx.used_tools.append("write_file")
-        return _dumps(await computer.write_file(ctx, path, content))
+        return _dumps(_seen(ctx, await computer.write_file(ctx, path, content)))
 
     async def save_mail_attachments(query: str, path: str, account: str = "", page_token: str = "") -> str:
         """Save attachments from the user's mail into a folder on this computer. Searches every connected Gmail and Outlook account unless account is set. Pages past the first 50 messages, downloads the files, and writes them into path. Do not stop at a chat download link."""
@@ -717,6 +750,8 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         StructuredTool.from_function(coroutine=search_files, name="search_files", description=search_files.__doc__, args_schema=SearchFilesInput),
         StructuredTool.from_function(coroutine=list_files, name="list_files", description=list_files.__doc__, args_schema=PathInput),
         StructuredTool.from_function(coroutine=read_file, name="read_file", description=read_file.__doc__, args_schema=PathInput),
+        StructuredTool.from_function(coroutine=read_upload, name="read_upload", description=read_upload.__doc__, args_schema=UploadInput),
+        StructuredTool.from_function(coroutine=save_upload_to_computer, name="save_upload_to_computer", description=save_upload_to_computer.__doc__, args_schema=SaveUploadInput),
         StructuredTool.from_function(coroutine=write_file, name="write_file", description=write_file.__doc__, args_schema=WriteFileInput),
         StructuredTool.from_function(
             coroutine=save_mail_attachments,

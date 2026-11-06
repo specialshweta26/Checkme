@@ -163,7 +163,59 @@ def extract_text(filename: str, content_type: str, data: bytes, limit: int = 400
         return "\n".join(p.text for p in doc.paragraphs)[:limit]
     if name.endswith(".pptx"):
         return _pptx_text(data)[:limit]
+    if name.endswith((".xlsx", ".xlsm")):
+        return _xlsx_text(data, limit)
     return ""
+
+
+MAX_SHEET_ROWS = 500
+
+
+def _xlsx_text(data: bytes, limit: int) -> str:
+    """Each sheet's rows as tab-separated text, from the XML inside the file. Formulas show their last saved value."""
+    import re
+    import zipfile
+    from xml.etree import ElementTree
+
+    ns = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+
+    def number(name: str) -> int:
+        found = re.search(r"(\d+)\.xml$", name)
+        return int(found.group(1)) if found else 0
+
+    with zipfile.ZipFile(io.BytesIO(data)) as book:
+        names = book.namelist()
+        shared: list[str] = []
+        if "xl/sharedStrings.xml" in names:
+            for item in ElementTree.fromstring(book.read("xl/sharedStrings.xml")).iter(f"{ns}si"):
+                shared.append("".join(t.text or "" for t in item.iter(f"{ns}t")))
+        titles = []
+        if "xl/workbook.xml" in names:
+            titles = [s.get("name") or "" for s in ElementTree.fromstring(book.read("xl/workbook.xml")).iter(f"{ns}sheet")]
+        out: list[str] = []
+        sheets = sorted((n for n in names if re.fullmatch(r"xl/worksheets/sheet\d+\.xml", n)), key=number)
+        for index, sheet in enumerate(sheets):
+            title = titles[index] if index < len(titles) else f"Sheet {number(sheet)}"
+            out.append(f"Sheet: {title}")
+            for count, row in enumerate(ElementTree.fromstring(book.read(sheet)).iter(f"{ns}row")):
+                if count >= MAX_SHEET_ROWS:
+                    out.append(f"(more rows not shown)")
+                    break
+                cells = []
+                for cell in row.iter(f"{ns}c"):
+                    kind = cell.get("t") or ""
+                    value = cell.find(f"{ns}v")
+                    text = value.text if value is not None and value.text is not None else ""
+                    if kind == "s" and text.isdigit() and int(text) < len(shared):
+                        text = shared[int(text)]
+                    elif kind == "inlineStr":
+                        text = "".join(t.text or "" for t in cell.iter(f"{ns}t"))
+                    cells.append(text)
+                if any(cells):
+                    out.append("\t".join(cells))
+            if sum(len(line) for line in out) > limit:
+                break
+    return "\n".join(out)[:limit]
 
 
 def _pptx_text(data: bytes) -> str:

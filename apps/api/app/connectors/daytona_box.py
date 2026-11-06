@@ -1743,9 +1743,9 @@ async def _invoke_daytona(row, name: str, args: dict[str, Any]) -> Any:
             if fs is not None and hasattr(fs, "download_file"):
                 data = await fs.download_file(path)
                 if isinstance(data, bytes):
-                    return {"path": path, "content": _clip(data.decode("utf-8", "replace"))}
+                    return _readable(path, data)
                 return {"path": path, "content": _clip(str(data))}
-            response = await proc.exec(f"cat {path!s}", timeout=30)
+            response = await proc.exec(f"cat {shlex.quote(path)}", timeout=30)
             return {"path": path, "content": _clip(getattr(response, "result", "") or "")}
         if name == "write_file":
             import base64 as _b64
@@ -1777,7 +1777,7 @@ async def _invoke_daytona(row, name: str, args: dict[str, Any]) -> Any:
                 for item in entries or []:
                     names.append(getattr(item, "name", None) or str(item))
                 return {"path": path, "entries": names}
-            response = await proc.exec(f"ls -la {path}", timeout=30)
+            response = await proc.exec(f"ls -la {shlex.quote(path)}", timeout=30)
             return {"path": path, "listing": _clip(getattr(response, "result", "") or "")}
         if name == "publish_file":
             from pathlib import Path as FilePath
@@ -1797,3 +1797,20 @@ async def _invoke_daytona(row, name: str, args: dict[str, Any]) -> Any:
         close = getattr(client, "close", None)
         if callable(close):
             await close()
+
+_DOCUMENTS = (".pdf", ".docx", ".pptx", ".xlsx", ".xlsm")
+
+
+def _readable(path: str, data: bytes) -> dict:
+    """A file's text for the agent. Documents are converted, and other binary files are refused rather than returned
+    as garbled text, which only buries the real problem."""
+    from app.storage import extract_text
+
+    if path.lower().endswith(_DOCUMENTS):
+        text = extract_text(path.rsplit("/", 1)[-1], "", data, limit=80000)
+        if text:
+            return {"path": path, "bytes": len(data), "content": _clip(text)}
+        return {"ok": False, "path": path, "error": f"{path} has no text to read, so its content may be images."}
+    if b"\x00" in data[:8192]:
+        return {"ok": False, "path": path, "error": f"{path} is a binary file, so its text can't be read here."}
+    return {"path": path, "content": _clip(data.decode("utf-8", "replace"))}
