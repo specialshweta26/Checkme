@@ -127,6 +127,20 @@
     }
   }
 
+  // A box that shows a value but takes no typing (a read-only input, a label, a div) opens a picker when clicked:
+  // mark the boxes already on the page, then let the app click it and fill what opens (picker.js).
+  const typableField = (el) => el.isContentEditable || ((el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') && !el.readOnly && !el.disabled
+    && !['button', 'submit', 'checkbox', 'radio', 'hidden', 'file', 'image', 'reset'].includes((el.getAttribute('type') || '').toLowerCase()));
+  if ((kind === 'fill' || kind === 'type') && !typableField(target)) {
+    for (const el of document.querySelectorAll('input, textarea, [contenteditable="true"]')) {
+      const r = el.getBoundingClientRect();
+      if (r.width > 4 && r.height > 4) el.setAttribute('data-checkme-seen', '1');
+    }
+    const at = point(target);
+    if (!at) target.click();
+    return { ok: true, picker: true, mouse: at || undefined, clicks: 1 };
+  }
+
   if (kind === 'click' || kind === 'dblclick') {
     // A real mouse press opens menus and widgets that ignore a synthetic click (pointerdown / mousedown handlers).
     const at = point(target);

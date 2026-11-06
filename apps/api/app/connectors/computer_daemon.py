@@ -1351,6 +1351,8 @@ def _combobox_info(loc) -> dict:
               tag: (el.tagName || '').toLowerCase(),
               ce: !!el.isContentEditable,
               type: (el.getAttribute('type') || '').toLowerCase(),
+              editable: !!(el.isContentEditable || ((el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') && !el.readOnly && !el.disabled
+                && !['button', 'submit', 'checkbox', 'radio', 'hidden', 'file', 'image', 'reset'].includes((el.getAttribute('type') || '').toLowerCase()))),
               hint: [el.getAttribute('placeholder'), el.getAttribute('name'), el.id, el.getAttribute('aria-label'),
                      el.getAttribute('data-date-format'), el.className && String(el.className)].filter(Boolean).join(' ').slice(0, 200),
             })"""
@@ -1559,8 +1561,124 @@ def _keep_value(page, loc, text: str, date_like: bool) -> None:
         page.wait_for_timeout(150)
 
 
+# --- click-to-open pickers -------------------------------------------------------------------------------------
+# Many forms show a value in a box that takes no typing (a read-only input, a label, a div): clicking it opens a small
+# search box with suggestions, or a calendar. Generic: no site names (docs/BROWSING.md "Pickers").
+_MARK_INPUTS_JS = """() => {
+  const vis = (el) => { const r = el.getBoundingClientRect(); const st = getComputedStyle(el);
+    return r.width > 4 && r.height > 4 && st.visibility !== 'hidden' && st.display !== 'none'; };
+  for (const el of document.querySelectorAll('input, textarea, [contenteditable="true"]')) if (vis(el)) el.setAttribute('data-checkme-seen', '1');
+  return true;
+}"""
+
+# After the click: the field to type in is the focused one if it takes typing, else a text box that just appeared.
+_FOCUS_NEW_INPUT_JS = """() => {
+  const vis = (el) => { const r = el.getBoundingClientRect(); const st = getComputedStyle(el);
+    return r.width > 4 && r.height > 4 && st.visibility !== 'hidden' && st.display !== 'none'; };
+  const typable = (el) => el && (el.isContentEditable || ((el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') && !el.readOnly && !el.disabled
+    && !['button', 'submit', 'checkbox', 'radio', 'hidden', 'file', 'image', 'reset'].includes((el.getAttribute('type') || '').toLowerCase())));
+  let el = document.activeElement;
+  if (!typable(el) || !vis(el)) {
+    el = Array.from(document.querySelectorAll('input, textarea, [contenteditable="true"]'))
+      .find((n) => !n.hasAttribute('data-checkme-seen') && typable(n) && vis(n)) || null;
+    if (el) el.focus();
+  }
+  document.querySelectorAll('[data-checkme-seen]').forEach((n) => n.removeAttribute('data-checkme-seen'));
+  return !!el;
+}"""
+
+# Calendar cells and month arrows, as text the API can read a date from.
+_CALENDAR_JS = """() => {
+  const vis = (el) => { const r = el.getBoundingClientRect(); const st = getComputedStyle(el);
+    return r.width > 2 && r.height > 2 && st.visibility !== 'hidden' && st.display !== 'none' && r.bottom > 0 && r.top < innerHeight; };
+  const cells = [];
+  for (const el of document.querySelectorAll('[aria-label], [data-date], [datetime], [title], [data-day], td, [role="gridcell"]')) {
+    if (!vis(el) || cells.length >= 400) continue;
+    const disabled = el.getAttribute('aria-disabled') === 'true' || el.classList.toString().toLowerCase().includes('disabled');
+    const text = [el.getAttribute('aria-label'), el.getAttribute('data-date'), el.getAttribute('datetime'), el.getAttribute('title')].filter(Boolean).join(' | ');
+    if (!text) continue;
+    const r = el.getBoundingClientRect();
+    cells.push({ text: text.slice(0, 120), x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2), disabled });
+  }
+  const next = Array.from(document.querySelectorAll('button, [role="button"], span, div, a')).filter((el) => {
+    if (!vis(el)) return false;
+    const t = [el.getAttribute('aria-label'), el.getAttribute('title'), el.className && String(el.className)].join(' ').toLowerCase();
+    return /next( month)?\\b|navbutton--next|arrow-?right|chevron-?right|\\bnext\\b/.test(t) && el.getBoundingClientRect().width < 80;
+  }).map((el) => { const r = el.getBoundingClientRect(); return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }; });
+  return { cells, next: next[0] || null };
+}"""
+
+
+def calendar_cell(cells: list[dict], want) -> dict | None:
+    """The visible calendar cell whose label is the wanted date (``datetime.date``), not disabled."""
+    for cell in cells or []:
+        if cell.get("disabled"):
+            continue
+        for part in str(cell.get("text") or "").split("|"):
+            if part.strip() and parse_date(part.strip()) == want:
+                return cell
+    return None
+
+
+def pick_calendar_day(page, text: str, months: int = 14) -> bool:
+    """In an open calendar, click the day for ``text``, moving to the next month until it shows. True when picked."""
+    want = parse_date(text)
+    if want is None:
+        return False
+    for _ in range(months):
+        try:
+            data = page.evaluate(_CALENDAR_JS) or {}
+        except Exception:
+            return False
+        cell = calendar_cell(data.get("cells") or [], want)
+        if cell is not None:
+            page.mouse.click(int(cell["x"]), int(cell["y"]))
+            page.wait_for_timeout(250)
+            return True
+        nxt = data.get("next")
+        if not nxt:
+            return False
+        page.mouse.click(int(nxt["x"]), int(nxt["y"]))
+        page.wait_for_timeout(300)
+    return False
+
+
+def open_picker_and_type(page, loc, node, text: str, date_like: bool) -> str:
+    """Fill a field that takes no typing: click it, then pick the day in the calendar it opens, or type into the
+    search box it opens and click the best suggestion. Returns how it was done."""
+    try:
+        page.evaluate(_MARK_INPUTS_JS)
+    except Exception:
+        pass
+    _click_target(page, loc, node)
+    page.wait_for_timeout(400)
+    if (date_like or parse_date(text) is not None) and pick_calendar_day(page, text):
+        return "calendar"
+    try:
+        found = bool(page.evaluate(_FOCUS_NEW_INPUT_JS))
+    except Exception:
+        found = False
+    if not found:
+        raise RuntimeError("clicking this field opened nothing to type in; look at the page and pick the value from what opened")
+    _type_keys(page, text, replace=True)
+    hit = _wait_suggestion(page, text)
+    if hit is not None and hit.get("x") is not None:
+        page.mouse.click(int(hit["x"]), int(hit["y"]))
+        page.wait_for_timeout(250)
+        return "option"
+    page.keyboard.press("ArrowDown")
+    page.wait_for_timeout(120)
+    page.keyboard.press("Enter")
+    page.wait_for_timeout(200)
+    return "keyboard"
+
+
 def _type_into(page, loc, node, text: str, replace: bool) -> None:
     info = _combobox_info(loc)
+    if loc is not None and info and info.get("editable") is False and not info.get("ce"):
+        # A box that shows a value but takes no typing: it opens a picker when clicked.
+        open_picker_and_type(page, loc, node, text, date_field_kind(node, info) != "")
+        return
     dates = date_field_kind(node, info) if replace else ""
     if dates == "native" and loc is not None:
         value = native_date_value(text, str((node or {}).get("input_type") or info.get("type") or "date"))
