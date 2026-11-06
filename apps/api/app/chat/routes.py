@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import uuid
+from typing import Any
 from datetime import datetime, timezone
 
 import anyio
@@ -70,16 +71,19 @@ async def chat_progress(progress_id: str, user: User = Depends(current_user), db
     done = bool(steps and steps[-1].get("kind") == "done")
     status = "done" if done else "running"
     if not done:
-        stored, created = await _stored_turn_status(db, user, progress_id, session_id)
-        if stored == "running" and _feed_silent(steps) and _older_than(created, DEAD_TURN_S) and session_id:
-            # No status line for DEAD_TURN_S: the turn's process is gone (a live turn is stopped by its own
-            # no-progress limit long before this). Mark it stopped so no client waits on it forever.
-            try:
-                if await _unstick(db, user, uuid.UUID(str(session_id)), progress_id=progress_id):
+        stored, created, msg = await _stored_turn_status(db, user, progress_id)
+        if stored == "running" and msg is not None:
+            superseded = await _has_later_reply(db, msg)
+            if superseded or (_feed_silent(steps) and _older_than(created, DEAD_TURN_S)):
+                # A newer reply in the chat (turns there run one at a time), or no status line for DEAD_TURN_S (the
+                # turn's process is gone; a live turn's own no-progress limit stops it much sooner): mark it stopped
+                # so no client waits on it forever.
+                try:
+                    await _mark_stopped(user, msg)
                     await db.commit()
                     stored = "stopped"
-            except Exception:  # noqa: BLE001
-                log.info("dead turn not marked stopped", exc_info=True)
+                except Exception:  # noqa: BLE001
+                    log.info("dead turn not marked stopped", exc_info=True)
         if stored in {"finished", "stopped"}:
             done, status = True, stored
             if stored == "stopped":
@@ -118,27 +122,74 @@ def _older_than(when, seconds: float) -> bool:
     return (datetime.now(timezone.utc) - when).total_seconds() > seconds
 
 
-async def _stored_turn_status(db, user, progress_id: str, session_id: str | None = None) -> tuple[str, datetime | None]:
-    """("running" | "finished" | "stopped", created_at) from the stored assistant reply of the turn with this
-    progress id, or ("", None) when there is none. Looks at the user's latest replies only (cheap, no JSON index)."""
+async def _stored_turn_status(db, user, progress_id: str) -> tuple[str, datetime | None, Any]:
+    """("running" | "finished" | "stopped", created_at, message) for the stored assistant reply of the turn with this
+    progress id, however old, or ("", None, None) when there is none."""
     if db is None:
-        return "", None
+        return "", None, None
     try:
-        q = select(ChatMessage).where(ChatMessage.user_id == user.id, ChatMessage.role == "assistant")
-        if session_id:
-            q = q.where(ChatMessage.session_id == uuid.UUID(str(session_id)))
-        rows = (await db.execute(q.order_by(ChatMessage.id.desc()).limit(40))).scalars().all()
+        q = (
+            select(ChatMessage)
+            .where(ChatMessage.user_id == user.id, ChatMessage.role == "assistant", ChatMessage.meta["progress_id"].astext == progress_id)
+            .order_by(ChatMessage.id.desc())
+            .limit(5)
+        )
+        rows = (await db.execute(q)).scalars().all()
     except Exception:  # noqa: BLE001
-        return "", None
+        return "", None, None
     for m in rows:
         meta = m.meta if isinstance(m.meta, dict) else {}
         if meta.get("progress_id") != progress_id:
             continue
         created = getattr(m, "created_at", None)
         if meta.get("in_progress"):
-            return "running", created
-        return ("stopped" if meta.get("stopped") else "finished"), created
-    return "", None
+            return "running", created, m
+        return ("stopped" if meta.get("stopped") else "finished"), created, m
+    return "", None, None
+
+
+async def _has_later_reply(db, msg) -> bool:
+    """A newer assistant reply in the same chat: this turn can't still be running (a new turn interrupts it)."""
+    try:
+        q = select(ChatMessage.id).where(ChatMessage.session_id == msg.session_id, ChatMessage.role == "assistant", ChatMessage.id > msg.id).limit(1)
+        return (await db.execute(q)).first() is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def _mark_stopped(user, msg) -> None:
+    """Settle a turn that is no longer running: keep any partial text, mark it stopped, and end its live feed."""
+    meta = dict(msg.meta or {})
+    placeholder = str(msg.content or "").endswith("is working on this…")
+    msg.content = run_cancel.stopped_text("" if placeholder else str(msg.content or ""), list(meta.get("steps") or []))
+    msg.meta = {**meta, "in_progress": False, "stopped": True, "can_continue": True, "pending_confirms": []}
+    pid = str(meta.get("progress_id") or "")
+    if pid and valid_progress_id(pid):
+        try:
+            await ProgressReporter(user.id, pid).finish()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+async def _settle_dead_turns(user, rows: list) -> int:
+    """When a chat is loaded: a reply still marked working that has a newer reply after it, or that has had no status
+    line for DEAD_TURN_S, is no longer running. Mark it stopped so every device shows the same chat."""
+    replies = [m for m in rows if m.role == "assistant"]
+    n = 0
+    for i, m in enumerate(replies):
+        meta = m.meta if isinstance(m.meta, dict) else {}
+        if not meta.get("in_progress"):
+            continue
+        superseded = i < len(replies) - 1
+        silent = False
+        if not superseded and _older_than(getattr(m, "created_at", None), DEAD_TURN_S):
+            pid = str(meta.get("progress_id") or "")
+            steps = await read_progress(user.id, pid) if pid and valid_progress_id(pid) else []
+            silent = _feed_silent(steps)
+        if superseded or silent:
+            await _mark_stopped(user, m)
+            n += 1
+    return n
 
 
 @router.get("/sessions")
@@ -175,6 +226,8 @@ async def session_messages(session_id: uuid.UUID, user: User = Depends(current_u
             .limit(200)
         )
     ).scalars().all()
+    if await _settle_dead_turns(user, rows):
+        await db.commit()
     return {
         "session": {
             "id": str(sess.id),
