@@ -185,6 +185,24 @@ Send, Delete…) makes the run count as final, so it is not replayed without `al
 `PUT /api/browser/saved-runs/{id}/steps {"steps": [{"keep": 0}, {"goal": "…"}, …], "name": "…"}` saves the edit (at
 most 200 steps), keeps the old steps for one undo, and drops a pending fix (it was made for the old steps).
 
+## Saved sign-ins
+
+Why: a scheduled or saved run stopped at every sign-in page and waited for the user (`browser_handoff`), so nothing
+could run unattended, and users were tempted to paste passwords into chat.
+
+The user adds a site's username and password under **Saved sign-ins** on the Saved runs page
+(`POST /api/browser/logins {host, username, password, label}`; `GET` lists site, label and a username hint such as
+`o•••@example.com`; `DELETE /api/browser/logins/{id}`). Values never pass through chat or a model, and the API never
+returns them. Both are encrypted with the app key (`site_logins.username_enc` / `password_enc`, one row per user and
+site, deleted with the user). Saving a new username with an empty password keeps the saved password.
+
+When `browser_task` or `browser_replay` runs on a site with a saved sign-in (or a subdomain of it), code adds
+`login_username` / `login_password` to the run's values (`BROWSER_SAVED_LOGINS`). The planner only sees the
+`{{login_username}}` / `{{login_password}}` names, the daemon or desktop app types the values, and results, logs and
+saved runs are scrubbed, so a saved run keeps the names and fills them again next time. Values the caller passes win.
+`browser_logins` tells the agent which sites have one; the prompt says never to ask for a password in chat. One-time
+codes and CAPTCHAs still go to the user.
+
 ## Configuration
 
 All optional. Defaults need no new account.

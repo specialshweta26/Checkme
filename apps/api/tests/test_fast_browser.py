@@ -321,6 +321,16 @@ LOGIN = {
 HOME = {"ok": True, "url": "https://acme.test/home", "title": "Home", "text": "Welcome a@b.c", "tree": "- e1 link Statements", "elements": []}
 
 
+@pytest.fixture(autouse=True)
+def no_saved_logins(monkeypatch):
+    from app.browser_runs import logins
+
+    async def none(user_id, host):
+        return {}
+
+    monkeypatch.setattr(logins, "values_for", none)
+
+
 @pytest.fixture
 def ctx(monkeypatch):
     store = FakeStore()

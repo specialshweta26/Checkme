@@ -7,10 +7,42 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from app.agent.fast_browser import STORE
+from app.browser_runs import logins
 from app.deps import current_user
 from app.models import User
 
 router = APIRouter(prefix="/browser/saved-runs", tags=["browser"])
+
+
+class LoginIn(BaseModel):
+    host: str
+    username: str
+    password: str = ""
+    label: str = ""
+
+
+login_router = APIRouter(prefix="/browser/logins", tags=["browser"])
+
+
+@login_router.get("")
+async def list_logins(user: User = Depends(current_user)) -> list[dict]:
+    """Saved sign-ins: site, label and a username hint. Passwords never leave the server."""
+    return await logins.list_logins(user.id)
+
+
+@login_router.post("")
+async def save_login(body: LoginIn, user: User = Depends(current_user)) -> dict:
+    try:
+        return await logins.save_login(user.id, body.host, body.username, body.password, body.label)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+
+
+@login_router.delete("/{login_id}")
+async def delete_login(login_id: str, user: User = Depends(current_user)) -> dict:
+    if not await logins.delete_login(user.id, login_id):
+        raise HTTPException(404, "no such saved sign-in")
+    return {"ok": True}
 
 
 class FixIn(BaseModel):

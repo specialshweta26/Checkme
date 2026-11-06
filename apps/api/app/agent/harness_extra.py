@@ -421,6 +421,19 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
             return _dumps(await fast.STORE.undo(user_id, run_id))
         return _dumps({"ok": False, "error": "action must be list, accept_fix, reject_fix or undo"})
 
+    async def browser_logins() -> str:
+        """Sites the user saved a sign-in for (site, label, username hint; never the password). In browser_task on one of
+        these sites, write {{login_username}} and {{login_password}} for the sign-in fields: code types the values. To add
+        one, the user uses the Saved runs page in the app; never ask for a password in chat."""
+        ctx.used_tools.append("browser_logins")
+        user_id = getattr(getattr(ctx, "user", None), "id", None)
+        if user_id is None:
+            return _dumps({"ok": False, "error": "no user"})
+        from app.browser_runs import logins
+
+        rows = await logins.list_logins(user_id)
+        return _dumps({"ok": True, "sites": [{"host": r["host"], "label": r["label"], "username_hint": r["username_hint"]} for r in rows]})
+
     async def browser_download(url: str = "", ref: str = "", filename: str = "") -> str:
         """Download a file from the site directly with the browser's signed-in cookies (no click-through), given its URL (a link href) or the ref of its link/button. Returns the saved file with extracted_text and download_url, like browser_act download."""
         ctx.used_tools.append("browser_download")
@@ -771,6 +784,11 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
             [StructuredTool.from_function(coroutine=browser_replay, name="browser_replay", description=browser_replay.__doc__, args_schema=BrowserReplayInput),
              StructuredTool.from_function(coroutine=browser_saved_runs, name="browser_saved_runs", description=browser_saved_runs.__doc__, args_schema=SavedRunsInput)]
             if fast.setting("browser_replay", True)
+            else []
+        ),
+        *(
+            [StructuredTool.from_function(coroutine=browser_logins, name="browser_logins", description=browser_logins.__doc__)]
+            if fast.setting("browser_saved_logins", True)
             else []
         ),
         *(
