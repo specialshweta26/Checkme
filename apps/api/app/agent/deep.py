@@ -2471,6 +2471,7 @@ def system_prompt(
     query: str = "",
     task_state: dict | None = None,
     task_resumed: bool = False,
+    can_background: bool = False,
 ) -> str:
     tz = getattr(user, "timezone", None) or "Asia/Kolkata"
     now = _now(tz)
@@ -2492,7 +2493,7 @@ def system_prompt(
     identity += capabilities_block(agent, skills, matched_skills, query)
     from app.skills.task_state import prompt_block
 
-    identity += prompt_block(task_state, task_resumed)
+    identity += prompt_block(task_state, task_resumed, can_background)
     identity += (
         "Your memory and scheduled routines belong only to you, not to other agents. "
         "User memory below is labeled: Persona is how you should talk and work with this user; Standing facts are already known; "
@@ -2783,6 +2784,10 @@ def _message_text(content: Any) -> str:
                 parts.append(getattr(block, "text") or "")
         return "\n".join(p for p in parts if p).strip()
     return str(content or "").strip()
+
+
+BACKGROUND_STEP_LIMIT = 320  # graph steps for a background worker job (a long skill is ~40 steps x a few tool calls)
+BACKGROUND_STEP_CAP = 400
 
 
 def _is_recursion_limit(exc: BaseException) -> bool:
@@ -3437,6 +3442,7 @@ async def _run_deep_agent(
         query=query,
         task_state=ctx.task_state,
         task_resumed=ctx.task_resumed,
+        can_background=job is None and db is not None and workspace_agent is not None and not teammate_depth,
     )
     if not matched_skills and not ctx.task_state:
         # A saved skill's own steps win over the fast-path hint.
@@ -3455,6 +3461,9 @@ async def _run_deep_agent(
     if coding:
         # Plan-and-build turns clone, edit, test and push: give them more steps.
         limit = max(limit, 200)
+    if job is not None and getattr(job, "role", "") == "worker" and not teammate_depth:
+        # A background task (a long skill, many pages): no chat timeout, so let it take the steps it needs.
+        limit = max(limit, BACKGROUND_STEP_LIMIT)
     if teammate_depth:
         limit = min(max(24, get_settings().max_agent_steps * 3), 120 if coding else 48)
     text = ""
@@ -3490,7 +3499,8 @@ async def _run_deep_agent(
             if isinstance(exc, run_cancel.TurnCancelled) or run_cancel.is_cancelled():
                 raise run_cancel.TurnCancelled("stopped") from exc
             if _is_recursion_limit(exc) and attempt < 2:
-                limit = min(limit + 40, 280 if coding else 200)
+                cap = 280 if coding else (BACKGROUND_STEP_CAP if limit >= BACKGROUND_STEP_LIMIT else 200)
+                limit = min(limit + 40, cap)
                 resumed = await _can_resume(graph, thread)
                 next_input = None if resumed else payload  # None continues from the checkpoint
                 if progress is not None:
