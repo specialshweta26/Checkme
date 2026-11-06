@@ -26,6 +26,11 @@ log = logging.getLogger(__name__)
 
 REMOTE_TTL_S = 600
 WATCH_EVERY_S = 2.0
+# A turn with nothing happening is stuck: no status line, no model output, no tool starting or finishing.
+IDLE_LIMIT_S = 180
+# A tool can legitimately run quietly for a while (a build, a long page load), so allow longer while one is running.
+TOOL_IDLE_LIMIT_S = 600
+NO_PROGRESS = "no progress"
 
 
 class TurnCancelled(Exception):
@@ -47,6 +52,16 @@ class Run:
     cancelled: bool = False
     reason: str = ""
     extra: dict = field(default_factory=dict)  # e.g. the request text and, once stopped, its partial reply/steps
+    last_active: float = field(default_factory=time.monotonic)
+    tools_running: set = field(default_factory=set)
+
+    def touch(self) -> None:
+        self.last_active = time.monotonic()
+
+    def stalled(self, now: float | None = None) -> bool:
+        """Nothing has happened for too long, allowing more time while a tool is running."""
+        quiet = (now if now is not None else time.monotonic()) - self.last_active
+        return quiet > (TOOL_IDLE_LIMIT_S if self.tools_running else IDLE_LIMIT_S)
 
     def cancel(self, reason: str = "stopped") -> bool:
         first = not self.cancelled
@@ -129,6 +144,13 @@ def is_cancelled(run: Run | None = None) -> bool:
     return bool(run is not None and run.cancelled)
 
 
+def touch() -> None:
+    """Note that the current run is making progress."""
+    run = current.get()
+    if run is not None:
+        run.touch()
+
+
 def check() -> None:
     """Raise ``TurnCancelled`` if the current run was stopped. Call between steps."""
     run = current.get()
@@ -186,10 +208,17 @@ async def clear_remote(run: Run, redis_client: Any = None) -> None:
 
 
 async def watch(run: Run, every_s: float = WATCH_EVERY_S, redis_client: Any = None) -> None:
-    """Poll the Redis flag for a run started in this process but stopped from another one."""
+    """Poll the Redis flag for a run started in this process but stopped from another one, and stop a turn that has
+    made no progress for too long. A broken Redis only ends the first check, never the second."""
     failures = 0
     while not run.cancelled:
         await asyncio.sleep(every_s)
+        if run.kind == "turn" and run.stalled():
+            log.warning("stopping turn %s: no progress for %.0fs (tools running: %d)", run.key, time.monotonic() - run.last_active, len(run.tools_running))
+            run.cancel(NO_PROGRESS)
+            return
+        if failures >= 3:
+            continue
         try:
             if await remote_requested(run, redis_client):
                 run.cancel("stopped")
@@ -199,8 +228,6 @@ async def watch(run: Run, every_s: float = WATCH_EVERY_S, redis_client: Any = No
             raise
         except Exception:  # noqa: BLE001
             failures += 1
-            if failures >= 3:
-                return
 
 
 # ---------------------------------------------------------------- LangChain hook
@@ -217,8 +244,14 @@ def callback():
             self.run = run
 
         def _check(self) -> None:
-            if self.run is not None and self.run.cancelled:
-                raise TurnCancelled(self.run.reason or "stopped")
+            if self.run is not None:
+                self.run.touch()
+                if self.run.cancelled:
+                    raise TurnCancelled(self.run.reason or "stopped")
+
+        def _touch(self) -> None:
+            if self.run is not None:
+                self.run.touch()
 
         async def on_chat_model_start(self, serialized, messages, **kwargs) -> None:  # noqa: ANN001
             self._check()
@@ -226,13 +259,32 @@ def callback():
         async def on_llm_start(self, serialized, prompts, **kwargs) -> None:  # noqa: ANN001
             self._check()
 
+        async def on_llm_new_token(self, token, **kwargs) -> None:  # noqa: ANN001
+            self._touch()
+
+        async def on_llm_end(self, response, **kwargs) -> None:  # noqa: ANN001
+            self._touch()
+
         async def on_tool_start(self, serialized, input_str, **kwargs) -> None:  # noqa: ANN001
             self._check()
+            if self.run is not None:
+                self.run.tools_running.add(kwargs.get("run_id"))
+
+        async def on_tool_end(self, output, **kwargs) -> None:  # noqa: ANN001
+            self._finish_tool(kwargs.get("run_id"))
+
+        async def on_tool_error(self, error, **kwargs) -> None:  # noqa: ANN001
+            self._finish_tool(kwargs.get("run_id"))
+
+        def _finish_tool(self, run_id: Any) -> None:
+            if self.run is not None:
+                self.run.tools_running.discard(run_id)
+                self.run.touch()
 
     return CancelCallback(current.get())
 
 
-def stopped_text(partial: str = "", steps: list[str] | None = None) -> str:
+def stopped_text(partial: str = "", steps: list[str] | None = None, reason: str = "") -> str:
     body = (partial or "").strip()
     done = [s for s in (steps or []) if s][-6:]
     lines = []
@@ -240,7 +292,11 @@ def stopped_text(partial: str = "", steps: list[str] | None = None) -> str:
         lines.append(body)
     elif done:
         lines.append("Progress before stopping:\n" + "\n".join(f"- {s}" for s in done))
-    lines.append("⏹ Stopped. Send a new message, or tap Continue to pick up where I left off.")
+    if reason == NO_PROGRESS:
+        lines.append("⏹ I stopped this because nothing happened for several minutes. Tap Continue to try again from "
+                     "where it stopped, or send a new message.")
+    else:
+        lines.append("⏹ Stopped. Send a new message, or tap Continue to pick up where I left off.")
     return "\n\n".join(lines)
 
 

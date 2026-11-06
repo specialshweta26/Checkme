@@ -720,7 +720,7 @@ async def _store_stopped(db, user, sess, working_message, progress, run, since, 
 
     partial = (getattr(progress, "draft_text", "") or "") if progress is not None else ""
     steps = [st.get("text") for st in (progress.steps if progress is not None else []) if st.get("kind") != "done" and st.get("text")][:40]
-    content = run_cancel.stopped_text(partial, steps)
+    content = run_cancel.stopped_text(partial, steps, run.reason)
     run.extra = {**(getattr(run, "extra", None) or {}), "stopped": {"partial": partial, "steps": steps}}
     try:
         with anyio.CancelScope(shield=True):
