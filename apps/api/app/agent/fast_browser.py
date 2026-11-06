@@ -36,7 +36,7 @@ log = logging.getLogger(__name__)
 
 ALLOWED_KINDS = {
     "click", "dblclick", "fill", "type", "select", "pick", "check", "uncheck", "hover", "press", "scroll",
-    "wait", "wait_for", "download", "back", "forward", "reload", "navigate", "find",
+    "wait", "wait_for", "download", "back", "forward", "reload", "navigate", "find", "pick_date",
 }  # fmt: skip
 MAX_BATCH = 12
 PLAN_TIMEOUT_S = 45.0
@@ -192,7 +192,7 @@ def trace_steps(planned: list[dict], daemon_trace: list[dict], values: dict[str,
         if target:
             row["target"] = target
         raw = step.get("text") if isinstance(step.get("text"), str) else step.get("value")
-        if kind in {"fill", "type", "select", "pick"}:
+        if kind in {"fill", "type", "select", "pick", "pick_date"}:
             raw = str(raw or "")
             m = _PLACEHOLDER.fullmatch(raw.strip())
             secret = bool(done.get("secret")) or (m is not None and secret_param(m.group(1)))
@@ -237,7 +237,7 @@ def make_variables(steps: list[dict]) -> list[dict]:
         row = dict(step)
         kind = str(row.get("kind") or "").lower()
         text = row.get("text")
-        if kind in {"fill", "type", "select", "pick"} and not row.get("param") and isinstance(text, str) and text.strip() and not row.get("secret"):
+        if kind in {"fill", "type", "select", "pick", "pick_date"} and not row.get("param") and isinstance(text, str) and text.strip() and not row.get("secret"):
             target = row.get("target") if isinstance(row.get("target"), dict) else {}
             row["param"] = param_name(target, taken)
             row["example"] = text[:200]
@@ -982,7 +982,7 @@ Reply with a JSON object only: {"why": "", "actions": [...], "done": false, "res
   kinds: click, fill, type, select (text = option to pick; also for type-ahead lists), check, uncheck, hover (menus that open on mouse-over), press (text = key), scroll, wait_for (text), download (ref of a file link), back, navigate (url), find (text = words to look for).
   Use only refs from the current Elements list. End the batch at a step whose result you must see first (a type-ahead suggestion list, a menu that opens, a page that loads new fields, a new page).
 - The Elements list may end with "… N more elements are not listed". If what you need is not listed, send ONE action {"kind":"find","text":"words from its label"} to re-list the page with matching elements first (or scroll).
-- Dates: fill the date field itself with the date written as YYYY-MM-DD (the tool converts it for the field); open the calendar and click days only if filling did not work. Before Apply / Submit, check the date fields show the dates you meant.
+- Dates: use {"kind":"pick_date","ref":<the date field>,"text":"YYYY-MM-DD"}: it opens the field's calendar, moves to the month and clicks the day (or fills a date box). Never click calendar days or month arrows one by one. Before Apply / Submit, check the date fields show the dates you meant.
 - Menus: if clicking a menu does not open it, hover it, then click the item in the next batch. When "Last turn" says a step may not have done anything, do not repeat the same step: try its label, its parent, hover, or another way.
 - Values the user provided are placeholders: write {{name}} exactly; never type a real value yourself and never invent personal data. Available placeholders: %s
 - done=true when the goal is met (or the information asked for is on the page): put the proof or the requested data in result, briefly.
