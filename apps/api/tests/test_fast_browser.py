@@ -308,6 +308,10 @@ class FakeStore:
     async def mark(self, trace_id, ok):
         self.marks.append((trace_id, ok))
 
+    async def propose(self, trace_id, steps, note):
+        self.proposals = getattr(self, "proposals", []) + [(trace_id, steps, note)]
+        return True
+
 
 LOGIN = {
     "ok": True, "url": "https://acme.test/login", "title": "Sign in", "text": "Sign in to Acme",
@@ -428,6 +432,7 @@ async def test_browser_task_replays_a_saved_trace_without_model_calls(monkeypatc
 
 
 async def test_replay_mismatch_falls_back_to_the_model(monkeypatch, ctx):
+    monkeypatch.setattr(get_settings(), "browser_heal", False)
     ctx.store.rows = [{"id": "t1", "host": "acme.test", "name": "log in to acme", "goal": "log in to acme", "start_url": "https://acme.test/login",
                        "steps": [{"kind": "click", "target": {"role": "button", "name": "Old button"}}]}]  # fmt: skip
 
@@ -656,7 +661,7 @@ async def test_replay_named_runs_a_final_action_the_user_asked_for(monkeypatch, 
     ctx.store.rows = [dict(FINAL_TRACE)]
     ran = []
 
-    async def replay(c, trace, values):
+    async def replay(c, trace, values, **k):
         ran.append(trace["id"])
         return {"ok": True, "completed": 1, "state": {}}
 
@@ -669,7 +674,7 @@ async def test_browser_task_replays_a_final_action_the_user_asked_for(monkeypatc
     ctx.store.rows = [dict(FINAL_TRACE)]
     ran = []
 
-    async def replay(c, trace, values):
+    async def replay(c, trace, values, **k):
         ran.append(trace["id"])
         return {"ok": True, "completed": 1, "state": {}}
 
@@ -691,3 +696,133 @@ def test_browser_replay_tool_accepts_the_permission():
 
     assert BrowserReplayInput(allow_final_action=True).allow_final_action is True
     assert BrowserReplayInput().allow_final_action is False
+
+
+# --- healing saved runs (docs/BROWSING.md "Healing saved runs") ---------------------------------------------------
+REPORT_TRACE = {
+    "id": "t5", "host": "acme.test", "name": "download order status", "goal": "Download the order status report",
+    "start_url": "https://acme.test/reports",
+    "steps": [
+        {"kind": "click", "target": {"role": "link", "name": "Reporting"}},
+        {"kind": "click", "target": {"role": "button", "name": "Old Order Status"}},
+        {"kind": "fill", "target": {"role": "textbox", "label": "From"}, "param": "from_date"},
+    ],
+}  # fmt: skip
+
+
+def test_describe_step_reads_like_english():
+    steps = REPORT_TRACE["steps"]
+    assert fb.describe_step(steps[0]) == 'click the link "Reporting"'
+    assert fb.describe_step(steps[2]) == 'fill the textbox "From" with {{from_date}}'
+    assert fb.describe_step({"kind": "navigate", "url": "https://a.test/"}) == "open https://a.test/"
+    assert fb.describe_step({"kind": "hover", "target": {"role": "link", "name": "WMS"}}) == 'hover the link "WMS"'
+
+
+async def test_replay_heals_a_changed_step_and_proposes_the_fix(monkeypatch, ctx):
+    ctx.store.rows = [dict(REPORT_TRACE)]
+    sent = []
+
+    async def internal(c, name, args):
+        sent.append([s.get("target", {}).get("name") or s.get("target", {}).get("label") for s in args["steps"]])
+        if len(sent) == 1:  # step 2's button was renamed
+            return {**HOME, "ok": False, "mismatch": True, "completed": 1, "error": "mismatch: the recorded element is not on this page"}
+        return {**HOME, "completed": len(args["steps"])}
+
+    healed_with = {"kind": "click", "target": {"role": "button", "name": "Order Status Report"}}
+    asked = []
+
+    async def task(c, goal, url="", values=None, max_steps=0, allow_final_action=False, use_saved=True, save=True):
+        asked.append({"goal": goal, "save": save, "use_saved": use_saved, "max_steps": max_steps})
+        return {"ok": True, "done": True, "_recorded": [healed_with], "page": {}}
+
+    monkeypatch.setattr(fb, "_internal", internal)
+    monkeypatch.setattr(fb, "browser_task", task)
+    out = await fb.replay_named(ctx, "download order status", "https://acme.test/reports", values={"from_date": "2026-05-01"})
+    assert out["ok"] is True and out["proposed_fix"] is True
+    # Only the broken step went to the model, and it was told not to do later steps or save a run.
+    assert len(asked) == 1 and 'click the button "Old Order Status"' in asked[0]["goal"] and "Do not do any later step" in asked[0]["goal"]
+    assert asked[0]["save"] is False and asked[0]["use_saved"] is False and asked[0]["max_steps"] == fb.HEAL_ROUNDS
+    # The replay carried on after the fix with the remaining step.
+    assert sent == [["Reporting", "Old Order Status", "From"], ["From"]]
+    trace_id, steps, note = ctx.store.proposals[0]
+    assert trace_id == "t5" and steps == [REPORT_TRACE["steps"][0], healed_with, REPORT_TRACE["steps"][2]]
+    assert note[0]["step"] == 2 and note[0]["now"] == ['click the button "Order Status Report"']
+    assert "unchanged until the user accepts" in out["heal_note"]
+    # A healed run does not count as a clean success.
+    assert ctx.store.marks == [("t5", False)]
+
+
+async def test_replay_stops_when_healing_fails(monkeypatch, ctx):
+    ctx.store.rows = [dict(REPORT_TRACE)]
+
+    async def internal(c, name, args):
+        return {**HOME, "ok": False, "mismatch": True, "completed": 0, "error": "mismatch"}
+
+    async def task(*a, **k):
+        return {"ok": False, "done": False, "fallback": True, "page": {}}
+
+    monkeypatch.setattr(fb, "_internal", internal)
+    monkeypatch.setattr(fb, "browser_task", task)
+    out = await fb.replay_named(ctx, "download order status", "https://acme.test/reports", values={"from_date": "x"})
+    assert out["ok"] is False and out["mismatch"] is True and not getattr(ctx.store, "proposals", [])
+
+
+async def test_replay_heals_at_most_max_heals(monkeypatch, ctx):
+    trace = {**REPORT_TRACE, "steps": [{"kind": "click", "target": {"role": "button", "name": f"B{i}"}} for i in range(5)]}
+    calls = []
+
+    async def internal(c, name, args):
+        return {**HOME, "ok": False, "mismatch": True, "completed": 0, "error": "mismatch"}
+
+    async def task(*a, **k):
+        calls.append(1)
+        return {"ok": True, "done": True, "_recorded": [{"kind": "click", "target": {"role": "button", "name": "new"}}], "page": {}}
+
+    monkeypatch.setattr(fb, "_internal", internal)
+    monkeypatch.setattr(fb, "browser_task", task)
+    out = await fb.replay(ctx, trace, {}, heal=True)
+    assert out["ok"] is False and len(calls) == fb.MAX_HEALS and len(out["healed"]) == fb.MAX_HEALS
+
+
+async def test_browser_task_save_false_returns_steps_instead_of_saving(monkeypatch, ctx):
+    _plans(monkeypatch, ctx, [{"actions": [{"kind": "click", "ref": "e3"}], "done": True, "result": "clicked", "need_user": ""}])
+
+    async def act(c, actions):
+        return {**HOME, "completed": 1, "trace": [{"i": 0, "target": {"role": "button", "name": "Sign in"}}]}
+
+    monkeypatch.setattr(fb, "_act", act)
+    out = await fb.browser_task(ctx, "click sign in", "", {}, use_saved=False, save=False)
+    assert out["_recorded"] == [{"kind": "click", "target": {"role": "button", "name": "Sign in"}}]
+    assert ctx.store.saved == []
+
+
+async def test_fast_loop_counts_a_no_effect_batch_and_says_so(monkeypatch, ctx):
+    _plans(monkeypatch, ctx, [
+        {"actions": [{"kind": "click", "ref": "e3"}], "done": False, "result": "", "need_user": ""},
+        {"actions": [], "done": True, "result": "ok", "need_user": ""},
+    ])  # fmt: skip
+
+    async def act(c, actions):
+        return {**LOGIN, "completed": 1, "trace": [{"i": 0, "target": {"name": "Sign in"}}], "warnings": ["step 1 (click e3) may not have done anything"]}
+
+    monkeypatch.setattr(fb, "_act", act)
+    out = await fb.browser_task(ctx, "sign in", "https://acme.test/login", {})
+    assert out["done"] is True
+    second = ctx.calls["plan"][1]["brief"]
+    assert second  # the planner was called again after the no-op
+
+
+async def test_fast_loop_find_relists_the_page(monkeypatch, ctx):
+    _plans(monkeypatch, ctx, [
+        {"actions": [{"kind": "find", "text": "Order Status"}], "done": False, "result": "", "need_user": ""},
+        {"actions": [], "done": True, "result": "found", "need_user": ""},
+    ])  # fmt: skip
+    finds = []
+
+    async def snap(c, find=""):
+        finds.append(find)
+        return dict(LOGIN)
+
+    monkeypatch.setattr(fb, "_snapshot", snap)
+    out = await fb.browser_task(ctx, "find the report", "https://acme.test/login", {})
+    assert out["done"] and "Order Status" in finds

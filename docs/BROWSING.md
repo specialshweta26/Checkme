@@ -145,6 +145,32 @@ fill email + password + click Sign in 1.79 s → 0.70 s (and the new page was re
 before); open the dashboard 2.3–3.2 s → 0.65 s; a direct file download 4 ms. Not measured: E2B round trips and
 model latency.
 
+## Healing saved runs
+
+Why: a saved run (a finished `browser_task`, or a taught skill's recording) replays by stable selectors with no
+model call per step. When a site renames or moves a control, the old replay stopped at that step and the whole task
+fell back to the model, and the saved run stayed broken for every later run.
+
+Now (`BROWSER_HEAL`, on by default), when a replay step's element is gone or its value does not stick:
+
+1. The fast loop (`browser_task`, at most 4 rounds, never saved, saved runs off) is asked to do **only that step**
+   on the current page, described in plain English from the saved step (`click the button "Order Status"`,
+   `fill the textbox "From" with {{from_date}}`). It may open the menu or close the popup the step needs first, and
+   is told not to do later steps. The final-action rule is unchanged.
+2. The replay carries on with the next saved step. At most 3 steps are healed per run; a step the model cannot do
+   stops the replay as before and hands the page over.
+3. A run that finished thanks to a fix stores the fixed steps as a **proposal** on the saved run
+   (`proposed_steps`, `proposed_note`, `proposed_at`). Replays keep using the old steps until the user accepts it, and a
+   healed run is not counted as a clean success. The tool result carries `healed`, `proposed_fix` and a `heal_note`
+   telling the agent to say what changed and ask before accepting.
+4. The user (or the agent, after the user says so in chat) accepts or rejects with `browser_saved_runs`
+   (`list`, `accept_fix`, `reject_fix`, `undo`) or the API: `GET /api/browser/saved-runs`,
+   `POST /api/browser/saved-runs/{id}/fix {"accept": true|false}`, `POST …/{id}/undo`, `DELETE …/{id}`. Accepting
+   keeps the replaced steps in `prior_steps` for one undo.
+
+The schema change is additive (`ALTER TABLE browser_traces ADD COLUMN IF NOT EXISTS …`), so old and new API
+instances can overlap during a deploy.
+
 ## Configuration
 
 All optional. Defaults need no new account.
