@@ -3056,3 +3056,17 @@ body.lumio-desktop .screen-rail.overlay.fullscreen {
 .login-form { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 16px; }
 .login-form .row { grid-column: 1 / -1; }
 @media (max-width: 640px) { .login-form { grid-template-columns: 1fr; } }
+.run-row { text-align: left; width: 100%; cursor: pointer; }
+.run-status { font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 999px; background: color-mix(in srgb, currentColor 12%, transparent); }
+.run-status.completed, .run-status.replayed { color: #16a34a; }
+.run-status.recovered { color: #d97706; }
+.run-status.stopped { color: #dc2626; }
+.run-status.needs_you { color: #2563eb; }
+.run-viewer { width: min(920px, 94vw); max-height: 88vh; overflow: auto; display: grid; gap: 12px; }
+.run-timeline { margin: 0; padding-left: 22px; display: grid; gap: 14px; }
+.run-timeline li { display: grid; grid-template-columns: 1fr 300px; gap: 12px; align-items: start; }
+.run-timeline li.bad .run-step-text strong { color: #dc2626; }
+.run-step-text { display: grid; gap: 3px; }
+.run-timeline img { width: 300px; border-radius: 8px; border: 1px solid color-mix(in srgb, currentColor 15%, transparent); }
+@media (max-width: 720px) { .run-timeline li { grid-template-columns: 1fr; } .run-timeline img { width: 100%; } }
+.sheet.run-sheet { z-index: 60; }
