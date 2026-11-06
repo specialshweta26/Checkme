@@ -131,6 +131,11 @@
   // mark the boxes already on the page, then let the app click it and fill what opens (picker.js).
   const typableField = (el) => el.isContentEditable || ((el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') && !el.readOnly && !el.disabled
     && !['button', 'submit', 'checkbox', 'radio', 'hidden', 'file', 'image', 'reset'].includes((el.getAttribute('type') || '').toLowerCase()));
+  if (kind === 'pick_date' || kind === 'date') {
+    const at = point(target);
+    if (!at) target.click();
+    return { ok: true, picker: true, dateOnly: true, mouse: at || undefined, clicks: 1 };
+  }
   if ((kind === 'fill' || kind === 'type') && !typableField(target)) {
     for (const el of document.querySelectorAll('input, textarea, [contenteditable="true"]')) {
       const r = el.getBoundingClientRect();

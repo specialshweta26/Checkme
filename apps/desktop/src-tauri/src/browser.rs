@@ -492,9 +492,9 @@ impl Chrome {
 
     /// Fill a box that takes no typing, after it was clicked: pick the day in the calendar it opened (moving to the
     /// next month as needed), or type into the search box it opened and click the best suggestion.
-    async fn fill_picker(&self, target: &str, text: &str) -> Result<(), String> {
+    async fn fill_picker(&self, target: &str, text: &str, date_only: bool) -> Result<(), String> {
         tokio::time::sleep(Duration::from_millis(450)).await;
-        for _ in 0..14 {
+        for _ in 0..24 {
             let found = self.picker(target, "calendar", text).await;
             if let Some(cell) = found.get("cell") {
                 let (x, y) = (cell["x"].as_i64().unwrap_or(0), cell["y"].as_i64().unwrap_or(0));
@@ -509,6 +509,9 @@ impl Chrome {
                 }
                 None => break,
             }
+        }
+        if date_only {
+            return Err(format!("couldn't find {text} in the calendar: take a snapshot and click the day, or use its month arrows"));
         }
         if self.picker(target, "focus", text).await.get("ok").and_then(Value::as_bool) != Some(true) {
             return Err("clicking this field opened nothing to type in; look at the page and pick the value from what opened".into());
@@ -623,7 +626,8 @@ impl Chrome {
                 }
             }
             if result.get("picker").and_then(Value::as_bool) == Some(true) {
-                self.fill_picker(&target, text).await?;
+                let date_only = result.get("dateOnly").and_then(Value::as_bool) == Some(true);
+                self.fill_picker(&target, text, date_only).await?;
             }
             if result.get("insert").and_then(Value::as_bool) == Some(true) && !text.is_empty() {
                 self.cdp_on(&target, "Input.insertText", json!({ "text": text }), Duration::from_secs(8)).await?;

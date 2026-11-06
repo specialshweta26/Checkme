@@ -327,7 +327,25 @@ search box with suggestions, or a calendar, and a site often pre-fills these box
 3. Otherwise, type into the box that has focus, or the one that just appeared, then click the best-matching
    suggestion (or press Down and Enter).
 
-If nothing opens, the step fails with a hint to look at what did open. The prompt says to change every pre-filled
+If nothing opens, the step fails with a hint to look at what did open.
+
+**Calendars** are read three ways, so they work however they're built:
+1. Cells with a full date label (`aria-label`, `data-date`, `datetime`, `title`, such as "Mon Jan 18 2027" or
+   "2027-01-18").
+2. Month grids: a "January 2027" / "Jan '27" heading plus the day numbers in the nearest block holding at least 28 of
+   them. Disabled and other-month days are skipped.
+3. The next and previous month arrows, chosen by comparing the shown months with the wanted one.
+
+With no dated cell or month heading on screen, the step clicks no arrow (so never a carousel's). An unavailable day
+stops it rather than picking another.
+
+**`pick_date`** (`{"kind": "pick_date", "ref": <date field>, "text": "2027-01-18"}`) opens the field's calendar unless one is
+already open, then picks the day. It never types. The fast loop and the main prompt use it for every date instead of
+clicking days and arrows one at a time, and recorded `pick_date` steps become date variables. Calendar day cells
+(`[role=gridcell]`, `[data-date]`, `td[title]`, focusable labelled cells) are now listed in the page snapshot, so a day
+can also be clicked by ref. Checked in real Chromium on four calendar styles (labelled cells; heading plus numbers
+needing the previous arrow; titled table; two months side by side with disabled days), with `fill` and `pick_date`,
+in both the cloud browser and the desktop app. The prompt says to change every pre-filled
 field to what the user asked, and never to hand the screen over because a form is awkward (only sign-in, MFA,
 CAPTCHA and payment are handed over). No site names are involved.
 

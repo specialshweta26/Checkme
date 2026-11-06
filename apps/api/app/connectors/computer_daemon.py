@@ -483,7 +483,8 @@ _SNAPSHOT_JS = """(arg) => {
   const start = opts.start;
   const limit = Number(opts.limit) || 150;
   const find = String(opts.find || '').toLowerCase().split(/\\s+/).filter((w) => w.length > 1);
-  const BASE = 'a, button, input, textarea, select, option, label, summary, [role="button"], [role="link"], [role="textbox"], [role="searchbox"], [role="checkbox"], [role="radio"], [role="combobox"], [role="option"], [role="listbox"], [role="tab"], [role="menuitem"], [role="menuitemradio"], [role="treeitem"], [role="row"], [contenteditable="true"]';
+  // Calendar days too ([role=gridcell], dated cells, focusable labelled cells): without them a date can't be clicked by ref.
+  const BASE = 'a, button, input, textarea, select, option, label, summary, [role="button"], [role="link"], [role="textbox"], [role="searchbox"], [role="checkbox"], [role="radio"], [role="combobox"], [role="option"], [role="listbox"], [role="tab"], [role="menuitem"], [role="menuitemradio"], [role="treeitem"], [role="row"], [contenteditable="true"], [role="gridcell"], [data-date], td[title], [aria-label][tabindex]';
   const SUGGEST = '[role="option"], [role="menuitem"], [role="menuitemradio"], [role="treeitem"], [role="listbox"] li, [role="listbox"] button, [role="menu"] li, [role="menu"] button, [role="dialog"] li, [role="listbox"] [tabindex]';
   const tags = {A: 'link', BUTTON: 'button', INPUT: 'textbox', TEXTAREA: 'textbox', SELECT: 'combobox', OPTION: 'option', LABEL: 'label', SUMMARY: 'button', LI: 'option'};
   const inputRole = {submit: 'button', button: 'button', reset: 'button', image: 'button', checkbox: 'checkbox', radio: 'radio', search: 'searchbox', range: 'slider', file: 'file'};
@@ -1587,26 +1588,75 @@ _FOCUS_NEW_INPUT_JS = """() => {
   return !!el;
 }"""
 
-# Calendar cells and month arrows, as text the API can read a date from.
-_CALENDAR_JS = """() => {
+# A calendar on screen: dated cells, month grids (heading + day numbers) and the month arrows.
+_CALENDAR_JS = r"""() => {
+  // A calendar on screen, read three ways (docs/BROWSING.md "Pickers"): cells with a full date label, month grids
+  // (a "January 2027" heading and its day numbers), and the next / previous month arrows. Generic: no site names.
   const vis = (el) => { const r = el.getBoundingClientRect(); const st = getComputedStyle(el);
     return r.width > 2 && r.height > 2 && st.visibility !== 'hidden' && st.display !== 'none' && r.bottom > 0 && r.top < innerHeight; };
+  const centre = (el) => { const r = el.getBoundingClientRect(); return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }; };
+  const off = (el) => {
+    const c = (String(el.className) + ' ' + String(el.parentElement && el.parentElement.className)).toLowerCase();
+    return el.getAttribute('aria-disabled') === 'true' || el.hasAttribute('disabled') || /disabled|outside|other-?month|muted|past|blocked|unavailable/.test(c);
+  };
   const cells = [];
-  for (const el of document.querySelectorAll('[aria-label], [data-date], [datetime], [title], [data-day], td, [role="gridcell"]')) {
+  for (const el of document.querySelectorAll('[aria-label], [data-date], [datetime], [title], [role="gridcell"], td')) {
     if (!vis(el) || cells.length >= 400) continue;
-    const disabled = el.getAttribute('aria-disabled') === 'true' || el.classList.toString().toLowerCase().includes('disabled');
     const text = [el.getAttribute('aria-label'), el.getAttribute('data-date'), el.getAttribute('datetime'), el.getAttribute('title')].filter(Boolean).join(' | ');
     if (!text) continue;
-    const r = el.getBoundingClientRect();
-    cells.push({ text: text.slice(0, 120), x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2), disabled });
+    cells.push({ text: text.slice(0, 120), ...centre(el), disabled: off(el) });
   }
-  const next = Array.from(document.querySelectorAll('button, [role="button"], span, div, a')).filter((el) => {
-    if (!vis(el)) return false;
-    const t = [el.getAttribute('aria-label'), el.getAttribute('title'), el.className && String(el.className)].join(' ').toLowerCase();
-    return /next( month)?\\b|navbutton--next|arrow-?right|chevron-?right|\\bnext\\b/.test(t) && el.getBoundingClientRect().width < 80;
-  }).map((el) => { const r = el.getBoundingClientRect(); return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }; });
-  return { cells, next: next[0] || null };
+  const MONTH = /^(jan(uary)?|feb(ruary)?|mar(ch)?|apr(il)?|may|june?|july?|aug(ust)?|sep(t(ember)?)?|oct(ober)?|nov(ember)?|dec(ember)?)\.?,?\s+'?(\d{2}|\d{4})$/i;
+  const heads = [];
+  for (const el of document.querySelectorAll('div, span, h1, h2, h3, h4, h5, h6, p, caption, th, strong, b, button, label')) {
+    const t = (el.innerText || '').replace(/\s+/g, ' ').trim();
+    if (t.length > 20 || !MONTH.test(t) || !vis(el)) continue;
+    if (Array.from(el.children).some((c) => MONTH.test((c.innerText || '').replace(/\s+/g, ' ').trim()))) continue;  // the deepest one
+    heads.push({ el, t });
+  }
+  const grids = [];
+  for (const { el, t } of heads.slice(0, 4)) {
+    let box = el.parentElement;
+    for (let level = 0; box && level < 6; level++, box = box.parentElement) {
+      const days = [];
+      for (const n of box.querySelectorAll('*')) {
+        if (n.children.length > 1) continue;
+        const txt = (n.innerText || '').trim();
+        if (!/^\d{1,2}$/.test(txt) || +txt < 1 || +txt > 31 || !vis(n)) continue;
+        if (n.children.length === 1 && (n.children[0].innerText || '').trim() === txt) continue;  // keep the innermost
+        days.push({ d: +txt, ...centre(n), disabled: off(n) });
+      }
+      if (days.length >= 28) {
+        if (days.length <= 45) grids.push({ caption: t, days });
+        break;
+      }
+    }
+  }
+  const arrow = (re) => {
+    const el = Array.from(document.querySelectorAll('button, [role="button"], span, div, a, i, svg')).find((n) => {
+      if (!vis(n) || n.getBoundingClientRect().width >= 80) return false;
+      const s = [n.getAttribute('aria-label'), n.getAttribute('title'), n.getAttribute('data-testid'), n.className && String(n.className.baseVal || n.className)].join(' ').toLowerCase();
+      return re.test(s);
+    });
+    return el ? centre(el) : null;
+  };
+  return {
+    cells, grids,
+    next: arrow(/next( month)?\b|navbutton--next|arrow-?right|chevron-?right|\bnext\b|right-?arrow/),
+    prev: arrow(/prev(ious)?( month)?\b|navbutton--prev|arrow-?left|chevron-?left|\bprev\b|left-?arrow/),
+  };
 }"""
+
+_MONTH_NUM = {m: i for i, m in enumerate(["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
+
+
+def caption_month(text: str) -> tuple[int, int] | None:
+    """(year, month) from a calendar heading such as "January 2027", "Jan '27" or "Sept 2026"."""
+    m = re.match(r"^\s*([a-z]{3})[a-z]*\.?,?\s+'?(\d{2}|\d{4})\s*$", str(text or ""), re.I)
+    if not m or m.group(1).lower() not in _MONTH_NUM:
+        return None
+    year = int(m.group(2))
+    return (year + 2000 if year < 100 else year), _MONTH_NUM[m.group(1).lower()]
 
 
 def calendar_cell(cells: list[dict], want) -> dict | None:
@@ -1620,8 +1670,51 @@ def calendar_cell(cells: list[dict], want) -> dict | None:
     return None
 
 
-def pick_calendar_day(page, text: str, months: int = 14) -> bool:
-    """In an open calendar, click the day for ``text``, moving to the next month until it shows. True when picked."""
+def plan_calendar(data: dict, want) -> tuple[str, dict] | None:
+    """The next move in an open calendar: ("click", cell) for the wanted day, ("next" | "prev", arrow) to reach its
+    month, or None when there is no calendar or the day can't be picked."""
+    cells = data.get("cells") or []
+    cell = calendar_cell(cells, want)
+    if cell is not None:
+        return "click", cell
+    shown: list[tuple[int, int]] = []
+    for grid in data.get("grids") or []:
+        ym = caption_month(str(grid.get("caption") or ""))
+        if ym is None:
+            continue
+        shown.append(ym)
+        if ym == (want.year, want.month):
+            day = next((d for d in grid.get("days") or [] if d.get("d") == want.day and not d.get("disabled")), None)
+            return ("click", day) if day else None
+    if not shown:
+        for c in cells:
+            for part in str(c.get("text") or "").split("|"):
+                day = parse_date(part.strip()) if part.strip() else None
+                if day is not None:
+                    shown.append((day.year, day.month))
+    if not shown:
+        return None  # no calendar on screen: never click some other arrow (a carousel)
+    target = (want.year, want.month)
+    if target > max(shown) and data.get("next"):
+        return "next", data["next"]
+    if target < min(shown) and data.get("prev"):
+        return "prev", data["prev"]
+    return None
+
+
+def calendar_open(page) -> bool:
+    """A calendar is on screen: dated cells or a month heading with its day numbers."""
+    try:
+        data = page.evaluate(_CALENDAR_JS) or {}
+    except Exception:
+        return False
+    if any(caption_month(str(g.get("caption") or "")) for g in data.get("grids") or []):
+        return True
+    return any(parse_date(part.strip()) for c in data.get("cells") or [] for part in str(c.get("text") or "").split("|") if part.strip())
+
+
+def pick_calendar_day(page, text: str, months: int = 24) -> bool:
+    """In an open calendar, click the day for ``text``, moving month by month until it shows. True when picked."""
     want = parse_date(text)
     if want is None:
         return False
@@ -1630,19 +1723,14 @@ def pick_calendar_day(page, text: str, months: int = 14) -> bool:
             data = page.evaluate(_CALENDAR_JS) or {}
         except Exception:
             return False
-        cells = data.get("cells") or []
-        if not any(parse_date(part.strip()) for c in cells for part in str(c.get("text") or "").split("|") if part.strip()):
-            return False  # no calendar on screen: never click some other "next" arrow (a carousel)
-        cell = calendar_cell(cells, want)
-        if cell is not None:
-            page.mouse.click(int(cell["x"]), int(cell["y"]))
-            page.wait_for_timeout(250)
-            return True
-        nxt = data.get("next")
-        if not nxt:
+        move = plan_calendar(data, want)
+        if move is None:
             return False
-        page.mouse.click(int(nxt["x"]), int(nxt["y"]))
-        page.wait_for_timeout(300)
+        kind, at = move
+        page.mouse.click(int(at["x"]), int(at["y"]))
+        page.wait_for_timeout(250 if kind == "click" else 350)
+        if kind == "click":
+            return True
     return False
 
 
@@ -1888,6 +1976,15 @@ def _act_step(page, step: dict) -> dict | None:
             page.keyboard.press("Enter")
             page.wait_for_timeout(400)
             _click_send_if_draft(page)
+    elif kind in {"pick_date", "date"}:
+        value = str(step.get("text") or step.get("value") or "")
+        if parse_date(value) is None:
+            raise RuntimeError(f"pick_date needs a date, e.g. 2027-01-18 (got {value!r})")
+        if (loc is not None or node is not None) and not calendar_open(page):
+            _click_target(page, loc, node)  # the date field: open its calendar
+            page.wait_for_timeout(450)
+        if not pick_calendar_day(page, value):
+            raise RuntimeError(f"couldn't find {value} in the calendar: take a snapshot and click the day, or use its month arrows")
     elif kind in {"select", "select_option", "pick"}:
         if loc is None and node is None:
             raise RuntimeError(f"unknown select ref {ref}; take a new browser_snapshot")
