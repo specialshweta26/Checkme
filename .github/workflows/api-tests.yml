@@ -27,3 +27,7 @@ jobs:
         run: uv sync --frozen --python 3.12
       - name: Run tests
         run: uv run --frozen python -m pytest -q
+      # The Docker image installs this package with pip, so build it the same way here. A packaging problem then
+      # fails the pull request instead of the Render deploy.
+      - name: Build the package like the Docker image does
+        run: uv build --wheel --out-dir "$RUNNER_TEMP/dist" .
