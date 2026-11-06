@@ -171,6 +171,20 @@ Now (`BROWSER_HEAL`, on by default), when a replay step's element is gone or its
 The schema change is additive (`ALTER TABLE browser_traces ADD COLUMN IF NOT EXISTS …`), so old and new API
 instances can overlap during a deploy.
 
+### Editing saved runs: exact steps and AI steps
+
+The **Saved runs** page (`/runs`, side bar) lists every saved run with its steps in plain English, the values it
+asks for, clean-run counts, and any fix waiting for approval (**Keep the fix** / **Discard**). **Edit** lets the user
+rename the run, reorder or remove steps, and **rewrite** a step in their own words, which turns it into an **AI step**
+(`{"kind": "goal", "text": "Set the date range to last month"}`). Exact steps replay by selector with no model
+call; an AI step is done by the fast loop on the current page every run (`GOAL_ROUNDS` = 6, never saved), so the parts
+of a run that change from day to day (pick a date, choose a row) don't break the exact parts. `{{name}}` in an AI
+step is a value given at run time; the planner sees only the name. An AI step that mentions a final action (Pay,
+Send, Delete…) makes the run count as final, so it is not replayed without `allow_final_action`.
+
+`PUT /api/browser/saved-runs/{id}/steps {"steps": [{"keep": 0}, {"goal": "…"}, …], "name": "…"}` saves the edit (at
+most 200 steps), keeps the old steps for one undo, and drops a pending fix (it was made for the old steps).
+
 ## Configuration
 
 All optional. Defaults need no new account.

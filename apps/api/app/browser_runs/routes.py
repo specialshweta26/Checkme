@@ -17,6 +17,11 @@ class FixIn(BaseModel):
     accept: bool
 
 
+class EditIn(BaseModel):
+    steps: list[dict]
+    name: str = ""
+
+
 @router.get("")
 async def list_runs(user: User = Depends(current_user)) -> list[dict]:
     return await STORE.listing(user.id)
@@ -36,6 +41,15 @@ async def resolve_fix(trace_id: str, body: FixIn, user: User = Depends(current_u
     if not out.get("ok"):
         raise HTTPException(404 if "no such" in str(out.get("error")) else 400, out.get("error"))
     return out
+
+
+@router.put("/{trace_id}/steps")
+async def edit_steps(trace_id: str, body: EditIn, user: User = Depends(current_user)) -> dict:
+    """New step list: each {"keep": i} (saved step i) or {"goal": "sentence"} (an AI step)."""
+    out = await STORE.edit(user.id, trace_id, body.steps, body.name)
+    if not out.get("ok"):
+        raise HTTPException(404 if "no such" in str(out.get("error")) else 400, out.get("error"))
+    return out["run"]
 
 
 @router.post("/{trace_id}/undo")
