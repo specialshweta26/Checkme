@@ -58,6 +58,24 @@ class BrowserProfile(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
 
+class BrowserRun(Base):
+    """One browser_task run as the user can watch it afterwards (docs/BROWSING.md "Run history"): each step's action,
+    the planner's one-line reason, whether it worked, the page, and a small screenshot in storage."""
+
+    __tablename__ = "browser_runs"
+    __table_args__ = (Index("ix_browser_runs_user_started", "user_id", "started_at"),)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    trace_id: Mapped[str] = mapped_column(String(64), default="")
+    goal: Mapped[str] = mapped_column(Text, default="")
+    host: Mapped[str] = mapped_column(String(255), default="")
+    status: Mapped[str] = mapped_column(String(20), default="running")  # running | completed | replayed | recovered | stopped | needs_you
+    result: Mapped[str] = mapped_column(Text, default="")
+    steps: Mapped[list] = mapped_column(JSONB, default=list)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, default=None)
+
+
 class SiteLogin(Base):
     """A website sign-in the user saved for the browser (docs/BROWSING.md "Saved sign-ins"). The user enters it in the
     app, never in chat; both values are encrypted with the app key. Code types them into the page as

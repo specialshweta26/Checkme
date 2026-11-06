@@ -235,6 +235,28 @@ writes to a temporary name before renaming. At most 5 files per result. The down
 is still there either way. Files the desktop app's own browser downloads are already on the computer and are skipped.
 An older desktop app answers that it can't do this, so nothing breaks.
 
+## Run history
+
+Why: when a browser task stopped, the only record was the agent's summary in chat, so nobody could see where or
+why it went wrong.
+
+Every `browser_task` run is kept (`BROWSER_RUN_LOG`, table `browser_runs`, the newest 100 per user):
+
+- **Each step:** each batch the planner ran, in words (`fill "Email" with {{login_username}}, click "Sign in"`);
+  the planner's one-line reason (`why`, a new field in its JSON); whether it worked; the error and any no-op
+  warnings; the page title and address; and a 720 px JPEG of the screen afterwards (taken from the frame the cloud
+  computer or desktop app already sends, at most 60 per run).
+- **Saved runs:** replays and healed steps are logged as steps too. Healing and AI steps run inside the run they
+  belong to (`runlog.CURRENT`) and add to it instead of starting their own.
+- **Status:** `completed`, `replayed`, `recovered` (fixed itself), `stopped` or `needs_you`. The run is linked to
+  its saved run (`trace_id`), and the tool result carries `run_id`.
+- **Screenshots and safety:** screenshots are stored with the other files under `{user}/browser-runs/{run}/` and
+  deleted with old runs. Typed values never appear in the log: actions show `{{names}}` or `•••`.
+
+The Saved runs page lists **Recent runs** (or a saved run's runs, via **History**). Opening one shows the timeline
+with screenshots. API: `GET /api/browser/runs[?trace_id=]`, `GET /api/browser/runs/{id}` (with signed screenshot
+links). Only the owner can read a run.
+
 ## Configuration
 
 All optional. Defaults need no new account.

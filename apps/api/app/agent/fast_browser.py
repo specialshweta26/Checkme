@@ -713,6 +713,8 @@ async def replay(ctx, trace: dict, values: dict[str, str], heal: bool = False, a
             return failed
         healed.append({"step": bad + 1, "was": describe_step(raw[bad]), "now": [describe_step(s) for s in fix],
                        "error": str(res.get("error") or "")[:200]})  # fmt: skip
+        await _log(f"Fixed saved step {bad + 1}: {describe_step(raw[bad])} → " + ", then ".join(describe_step(s) for s in fix),
+                   "The page changed, so this step was worked out again.", True, None, shot=False)  # fmt: skip
         log.info("browser.replay healed trace=%s step=%d with=%d", trace.get("id"), bad + 1, len(fix))
         fixed.extend(fix)
         done, i = done + 1, bad + 1
@@ -746,7 +748,8 @@ def heal_fields(rep: dict, proposed: bool) -> dict:
 # --- the fast loop -----------------------------------------------------------------------------------------------
 FAST_SYSTEM = """You drive a web browser for an AI assistant, quickly and carefully.
 Each turn you get the goal, the current page (URL, title, alerts, a text excerpt and numbered interactive elements such as "- e3 textbox Email [email]") and what happened last turn.
-Reply with a JSON object only: {"actions": [...], "done": false, "result": "", "need_user": ""}.
+Reply with a JSON object only: {"why": "", "actions": [...], "done": false, "result": "", "need_user": ""}.
+- why: one short sentence for the user watching the run later: what you see on the page and why these actions.
 - actions: every step you can already predict, in order, in ONE batch, e.g. [{"kind":"fill","ref":"e3","text":"{{email}}"},{"kind":"fill","ref":"e4","text":"{{password}}"},{"kind":"click","ref":"e5"}].
   kinds: click, fill, type, select (text = option to pick; also for type-ahead lists), check, uncheck, hover (menus that open on mouse-over), press (text = key), scroll, wait_for (text), download (ref of a file link), back, navigate (url), find (text = words to look for).
   Use only refs from the current Elements list. End the batch at a step whose result you must see first (a type-ahead suggestion list, a menu that opens, a page that loads new fields, a new page).
@@ -796,6 +799,7 @@ def parse_plan(raw: str) -> dict | None:
         "done": bool(data.get("done")),
         "result": str(data.get("result") or "")[:2000],
         "need_user": str(data.get("need_user") or "")[:500],
+        "why": " ".join(str(data.get("why") or "").split())[:300],
     }
 
 
@@ -918,8 +922,62 @@ async def add_saved_login(user_id, host: str, vals: dict[str, str]) -> bool:
     return bool(saved)
 
 
+def summarize_actions(actions: list[dict], state: dict, values: dict[str, str]) -> str:
+    """A batch in words for the run history: 'fill "Email" with {{login_username}}, click "Sign in"'."""
+    names = {str(e.get("ref")): str(e.get("name") or "") for e in state.get("elements") or [] if isinstance(e, dict)}
+    parts = []
+    for a in actions[:MAX_BATCH]:
+        kind = str(a.get("kind") or "")
+        ref = str(a.get("ref") or "")
+        target = f' "{names[ref][:50]}"' if names.get(ref) else (f" {ref}" if ref else "")
+        text = str(a.get("text") or a.get("value") or a.get("url") or "")
+        placeholder = bool(_PLACEHOLDER.fullmatch(text.strip())) if text.strip() else False
+        shown = text.strip() if placeholder else repr(scrub(text, values)[:50])
+        if kind in {"fill", "type"}:
+            parts.append(f"{kind}{target} with {shown}")
+        elif kind in {"select", "pick"}:
+            parts.append(f"choose {shown} in{target}")
+        elif kind in {"navigate", "press", "find", "wait_for"}:
+            parts.append(f"{kind} {scrub(text, values)[:80]}".strip())
+        else:
+            parts.append(f"{kind}{target}")
+    return ", ".join(parts)[:300]
+
+
 async def browser_task(ctx, goal: str, url: str = "", values: dict | None = None, max_steps: int = 0,
                        allow_final_action: bool = False, use_saved: bool = True, save: bool = True) -> dict:  # fmt: skip
+    """browser_task, kept in the run history (docs/BROWSING.md "Run history"). A call made inside another run (healing
+    a step, an AI step) adds its steps to that run."""
+    from app.browser_runs import runlog
+
+    user_id = getattr(getattr(ctx, "user", None), "id", None)
+    if runlog.CURRENT.get() is not None or user_id is None or not setting("browser_run_log", True):
+        return await _browser_task(ctx, goal, url, values, max_steps, allow_final_action, use_saved, save)
+    run = runlog.RunLog(user_id, goal, host_of(url))
+    token = runlog.CURRENT.set(run)
+    try:
+        out = await _browser_task(ctx, goal, url, values, max_steps, allow_final_action, use_saved, save)
+    finally:
+        runlog.CURRENT.reset(token)
+    if isinstance(out, dict):
+        if not run.host:
+            run.host = host_of(str((out.get("page") or {}).get("url") or ""))
+        await run.finish(out, str(out.pop("_trace_id", "") or ""))
+        if run._saved:
+            out["run_id"] = str(run.id)
+    return out
+
+
+async def _log(action: str, why: str = "", ok: bool = True, state: dict | None = None, error: str = "", shot: bool = True) -> None:
+    from app.browser_runs import runlog
+
+    run = runlog.CURRENT.get()
+    if run is not None:
+        await run.step(action, why, ok, state, error, shot)
+
+
+async def _browser_task(ctx, goal: str, url: str = "", values: dict | None = None, max_steps: int = 0,
+                        allow_final_action: bool = False, use_saved: bool = True, save: bool = True) -> dict:  # fmt: skip
     """See the module docstring. Never raises: problems come back as ``fallback: true`` with the page.
     ``save=False`` (healing a saved run) keeps the run unsaved and returns its steps as ``_recorded``."""
     vals = {str(k): str(v) for k, v in (values or {}).items() if v is not None}
@@ -952,10 +1010,13 @@ async def browser_task(ctx, goal: str, url: str = "", values: dict | None = None
                 await STORE.mark(trace["id"], bool(rep.get("ok")) and not rep.get("healed"))
                 log_steps.append({"via": "replay", "ok": bool(rep.get("ok")), "steps": rep.get("completed"),
                                   "healed": len(rep.get("healed") or []), "ms": int((time.monotonic() - t0) * 1000)})  # fmt: skip
+                await _log(f"Replayed the saved run \"{trace.get('name')}\" ({rep.get('completed') or 0} steps)",
+                           "A saved run of this task exists, so its steps ran without the model.", bool(rep.get("ok")),
+                           rep.get("state"), scrub(str(rep.get("error") or ""), vals))  # fmt: skip
                 if rep.get("ok"):
                     proposed = await _propose_fix(trace, rep)
                     return _result(rep.get("state") or {}, vals, ok=True, done=True, via="replay", trace=trace.get("name"),
-                                   result="Replayed the saved steps; check the page below.", log=log_steps,
+                                   result="Replayed the saved steps; check the page below.", log=log_steps, _trace_id=str(trace.get("id") or ""),
                                    took_ms=int((time.monotonic() - started) * 1000), **heal_fields(rep, proposed))  # fmt: skip
                 if rep.get("state"):
                     state = rep["state"]
@@ -989,6 +1050,7 @@ async def browser_task(ctx, goal: str, url: str = "", values: dict | None = None
                 last = "Your last reply was not a usable JSON plan. Reply with the JSON object only."
                 log_steps.append({"step": i + 1, "model": model, "plan_ms": plan_ms, "ok": False, "why": "no plan"})
             elif plan["need_user"]:
+                await _log("Stopped: needs you", plan["need_user"], False, state)
                 return _result(state, vals, ok=False, done=False, need_user=plan["need_user"], log=log_steps,
                                took_ms=int((time.monotonic() - started) * 1000))  # fmt: skip
             elif plan["done"] and not plan["actions"]:
@@ -998,7 +1060,7 @@ async def browser_task(ctx, goal: str, url: str = "", values: dict | None = None
                 trace_id = await _save(user_id, goal, start_url, recorded, vals)
                 log_steps.append({"step": i + 1, "model": model, "plan_ms": plan_ms, "done": True})
                 return _result(state, vals, ok=True, done=True, via="model", result=scrub(plan["result"], vals),
-                               saved_trace=bool(trace_id), log=log_steps, took_ms=int((time.monotonic() - started) * 1000))  # fmt: skip
+                               saved_trace=bool(trace_id), _trace_id=trace_id or "", log=log_steps, took_ms=int((time.monotonic() - started) * 1000))  # fmt: skip
             else:
                 actions = plan["actions"]
                 blocked = "" if allow_final_action else final_click(actions, state)
@@ -1010,11 +1072,15 @@ async def browser_task(ctx, goal: str, url: str = "", values: dict | None = None
                 if finds:
                     words = " ".join(str(a.get("text") or a.get("value") or "") for a in finds).strip()
                     state = await _snapshot(ctx, words)
+                    await _log(f"find {words}", plan.get("why", ""), True, state, shot=False)
                     last = f"Re-listed the page with elements matching {words!r} first. Pick refs from the new list."
                     log_steps.append({"step": i + 1, "model": model, "plan_ms": plan_ms, "actions": ["find"], "ok": True})
                     continue
                 t1 = time.monotonic()
+                before = state
                 state, ok, err, kept = await _run_batch(ctx, actions, vals)
+                await _log(summarize_actions(actions, before, vals), plan.get("why", ""), bool(ok), state,
+                           "" if ok or isinstance(err, list) else scrub(str(err or ""), vals))  # fmt: skip
                 recorded.extend(kept)
                 act_ms = int((time.monotonic() - t1) * 1000)
                 log_steps.append({"step": i + 1, "model": model, "plan_ms": plan_ms, "act_ms": act_ms, "actions": [a.get("kind") for a in actions], "ok": ok})
@@ -1035,7 +1101,7 @@ async def browser_task(ctx, goal: str, url: str = "", values: dict | None = None
                                            log=log_steps, _recorded=recorded)  # fmt: skip
                         trace_id = await _save(user_id, goal, start_url, recorded, vals)
                         return _result(state, vals, ok=True, done=True, via="model", result=scrub(plan["result"], vals),
-                                       saved_trace=bool(trace_id), log=log_steps, took_ms=int((time.monotonic() - started) * 1000))  # fmt: skip
+                                       saved_trace=bool(trace_id), _trace_id=trace_id or "", log=log_steps, took_ms=int((time.monotonic() - started) * 1000))  # fmt: skip
                     continue
                 failures += 1
                 if ok:

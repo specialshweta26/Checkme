@@ -115,6 +115,21 @@ def put_bytes(key: str, data: bytes, content_type: str) -> None:
     _client().put_object(Bucket=get_settings().s3_bucket, Key=key, Body=data, ContentType=content_type)
 
 
+def delete_keys(keys: list[str]) -> None:
+    """Best-effort delete (old run screenshots)."""
+    keys = [k for k in keys if k]
+    if not keys:
+        return
+    if get_settings().use_disk_storage:
+        for key in keys:
+            dest = _disk_file(key)
+            dest.unlink(missing_ok=True)
+            dest.with_name(dest.name + ".ctype").unlink(missing_ok=True)
+        return
+    for start in range(0, len(keys), 1000):
+        _client().delete_objects(Bucket=get_settings().s3_bucket, Delete={"Objects": [{"Key": k} for k in keys[start : start + 1000]], "Quiet": True})
+
+
 def get_bytes(key: str) -> tuple[bytes, str]:
     if get_settings().use_disk_storage:
         dest = _disk_file(key)

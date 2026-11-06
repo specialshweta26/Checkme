@@ -23,6 +23,7 @@ from app.inbox.routes import router as inbox_router
 from app.storage import ensure_bucket
 from app.skills.routes import router as skills_router
 from app.browser_runs.routes import login_router as browser_logins_router
+from app.browser_runs.routes import runs_router as browser_history_router
 from app.browser_runs.routes import router as browser_runs_router
 from app.tasks.routes import router as tasks_router
 from app.jobs.routes import router as jobs_router
@@ -158,6 +159,7 @@ app.include_router(jobs_router, prefix="/api")
 app.include_router(skills_router, prefix="/api")
 app.include_router(browser_runs_router, prefix="/api")
 app.include_router(browser_logins_router, prefix="/api")
+app.include_router(browser_history_router, prefix="/api")
 app.include_router(inbox_router, prefix="/api")
 app.include_router(files_router, prefix="/api")
 app.include_router(desktop_router, prefix="/api")

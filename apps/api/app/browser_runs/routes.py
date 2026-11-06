@@ -22,6 +22,26 @@ class LoginIn(BaseModel):
 
 
 login_router = APIRouter(prefix="/browser/logins", tags=["browser"])
+runs_router = APIRouter(prefix="/browser/runs", tags=["browser"])
+
+
+@runs_router.get("")
+async def list_runs(trace_id: str = "", user: User = Depends(current_user)) -> list[dict]:
+    """Recent browser runs, newest first (``trace_id``: the runs of one saved run)."""
+    from app.browser_runs import runlog
+
+    return await runlog.list_runs(user.id, trace_id)
+
+
+@runs_router.get("/{run_id}")
+async def get_run(run_id: str, user: User = Depends(current_user)) -> dict:
+    """One run step by step: action, reason, result, page and a screenshot link."""
+    from app.browser_runs import runlog
+
+    run = await runlog.get_run(user.id, run_id)
+    if run is None:
+        raise HTTPException(404, "no such run")
+    return run
 
 
 @login_router.get("")

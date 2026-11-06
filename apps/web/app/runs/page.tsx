@@ -28,6 +28,19 @@ type SavedRun = {
   updated_at: string | null;
 };
 
+type RunSummary = { id: string; goal: string; host: string; status: string; result: string; trace_id: string | null; steps: number; failed_steps: number; started_at: string | null };
+type RunStep = { i: number; at: string; action: string; why: string; ok: boolean; url: string; title: string; error?: string; warnings?: string[]; shot_url: string | null };
+type RunDetail = RunSummary & { step_rows: RunStep[] };
+
+const RUN_STATUS: Record<string, string> = {
+  completed: "Completed",
+  replayed: "Replayed",
+  recovered: "Fixed itself",
+  stopped: "Stopped",
+  needs_you: "Needs you",
+  running: "Running",
+};
+
 type SavedLogin = { id: string; host: string; label: string; username_hint: string; last_used_at: string | null };
 
 // One row of the editor: an exact saved step (kept by its index) or an AI step (a sentence).
@@ -47,6 +60,9 @@ export default function SavedRunsPage() {
   const [logins, setLogins] = useState<SavedLogin[]>([]);
   const [loginForm, setLoginForm] = useState({ host: "", username: "", password: "", label: "" });
   const [addingLogin, setAddingLogin] = useState(false);
+  const [history, setHistory] = useState<RunSummary[]>([]);
+  const [historyFor, setHistoryFor] = useState<SavedRun | null>(null);
+  const [viewing, setViewing] = useState<RunDetail | null>(null);
 
   useEffect(() => {
     getMe().then((u) => {
@@ -71,9 +87,26 @@ export default function SavedRunsPage() {
     }
     setRuns(Array.isArray(data) ? data : []);
     setLoaded(true);
+    loadHistory(historyFor?.id || "");
     const saved = await fetch("/api/browser/logins", { credentials: "include" });
     const rows = await saved.json().catch(() => []);
     if (saved.ok && Array.isArray(rows)) setLogins(rows);
+  }
+
+  async function loadHistory(traceId: string) {
+    const res = await fetch(`/api/browser/runs${traceId ? `?trace_id=${encodeURIComponent(traceId)}` : ""}`, { credentials: "include" });
+    const rows = await res.json().catch(() => []);
+    if (res.ok && Array.isArray(rows)) setHistory(rows);
+  }
+
+  async function openRun(id: string) {
+    const res = await fetch(`/api/browser/runs/${id}`, { credentials: "include" });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data) {
+      setError(apiError(data, "Could not open that run"));
+      return;
+    }
+    setViewing(data);
   }
 
   async function addLogin() {
@@ -226,6 +259,17 @@ export default function SavedRunsPage() {
                     </div>
                   </button>
                   <div className="task-actions">
+                    <button
+                      className="icon-btn"
+                      title="Runs of this saved run"
+                      onClick={() => {
+                        setHistoryFor(run);
+                        loadHistory(run.id);
+                        document.getElementById("run-history")?.scrollIntoView({ behavior: "smooth" });
+                      }}
+                    >
+                      History
+                    </button>
                     {!isEditing ? (
                       <button className="icon-btn" disabled={!!busy} onClick={() => startEdit(run)}>
                         Edit
@@ -363,6 +407,43 @@ export default function SavedRunsPage() {
             })}
           </div>
 
+          <div className="page-hero" id="run-history" style={{ marginTop: 28 }}>
+            <div>
+              <h2>{historyFor ? `Runs of “${historyFor.name || historyFor.goal}”` : "Recent runs"}</h2>
+              <p className="muted">Every browser task, step by step: what was done, why, and what the screen looked like. Open one to see where it stopped.</p>
+            </div>
+            {historyFor ? (
+              <button
+                className="btn secondary"
+                onClick={() => {
+                  setHistoryFor(null);
+                  loadHistory("");
+                }}
+              >
+                Show all runs
+              </button>
+            ) : null}
+          </div>
+          <div className="task-list">
+            {history.length === 0 ? <p className="muted">No runs yet.</p> : null}
+            {history.map((h) => (
+              <button key={h.id} className="task-card run-row ghost" onClick={() => openRun(h.id)}>
+                <div className="task-main">
+                  <strong>{h.goal.split("\n")[0].slice(0, 140)}</strong>
+                  <div className="task-meta">
+                    <span className={`run-status ${h.status}`}>{RUN_STATUS[h.status] || h.status}</span>
+                    {h.host ? <span className="app-pill">{h.host}</span> : null}
+                    <span className="muted">
+                      {h.steps} step{h.steps === 1 ? "" : "s"}
+                      {h.failed_steps ? ` · ${h.failed_steps} failed` : ""}
+                    </span>
+                    <span className="faint">{h.started_at ? new Date(h.started_at).toLocaleString() : ""}</span>
+                  </div>
+                </div>
+              </button>
+            ))}
+          </div>
+
           <div className="page-hero" style={{ marginTop: 28 }}>
             <div>
               <h2>Saved sign-ins</h2>
@@ -442,6 +523,48 @@ export default function SavedRunsPage() {
           </div>
         </div>
       </div>
+      {viewing ? (
+        <div className="sheet run-sheet" onClick={() => setViewing(null)}>
+          <div className="panel run-viewer" onClick={(e) => e.stopPropagation()}>
+            <div className="row">
+              <div style={{ flex: 1 }}>
+                <strong>{viewing.goal.split("\n")[0].slice(0, 160)}</strong>
+                <div className="task-meta">
+                  <span className={`run-status ${viewing.status}`}>{RUN_STATUS[viewing.status] || viewing.status}</span>
+                  {viewing.host ? <span className="app-pill">{viewing.host}</span> : null}
+                  <span className="faint">{viewing.started_at ? new Date(viewing.started_at).toLocaleString() : ""}</span>
+                </div>
+              </div>
+              <button className="icon-btn" onClick={() => setViewing(null)} aria-label="Close">
+                ×
+              </button>
+            </div>
+            {viewing.result ? <div className="att-summary">{viewing.result}</div> : null}
+            <ol className="run-timeline">
+              {viewing.step_rows.map((s) => (
+                <li key={s.i} className={s.ok ? "" : "bad"}>
+                  <div className="run-step-text">
+                    <strong>{s.action}</strong>
+                    {s.why ? <span className="muted">{s.why}</span> : null}
+                    {s.error ? <span className="err">{s.error}</span> : null}
+                    {(s.warnings || []).map((w) => (
+                      <span key={w} className="faint">
+                        {w}
+                      </span>
+                    ))}
+                    {s.title || s.url ? <span className="faint">{s.title || s.url}</span> : null}
+                  </div>
+                  {s.shot_url ? (
+                    <a href={s.shot_url} target="_blank" rel="noreferrer">
+                      <img src={s.shot_url} alt={`Screen after step ${s.i}`} loading="lazy" />
+                    </a>
+                  ) : null}
+                </li>
+              ))}
+            </ol>
+          </div>
+        </div>
+      ) : null}
     </AppShell>
   );
 }

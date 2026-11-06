@@ -136,3 +136,11 @@ def task_store(monkeypatch):
     store = TaskStateStore()
     monkeypatch.setattr(task_state, "STORE", store)
     return store
+
+
+@pytest.fixture(autouse=True)
+def _no_browser_run_log(monkeypatch):
+    """browser_task runs are not written to the run history in tests; run-log tests switch it back on."""
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "browser_run_log", False)
