@@ -257,6 +257,30 @@ The Saved runs page lists **Recent runs** (or a saved run's runs, via **History*
 with screenshots. API: `GET /api/browser/runs[?trace_id=]`, `GET /api/browser/runs/{id}` (with signed screenshot
 links). Only the owner can read a run.
 
+## Running saved runs
+
+A saved run can be started without a chat:
+
+- **From the app:** **Run** on the Saved runs page asks for the run's values, or takes a list of rows (a header line
+  with the value names, then one line per run, at most 50). `POST /api/browser/saved-runs/{id}/run {values, rows}`.
+- **From another system:** **Make a key** gives a run key, shown once and stored only as a SHA-256 hash, plus a ready
+  `curl` command. `POST /api/run-hooks/{id}` with `Authorization: Bearer <key>` and the same body. **New key**
+  replaces it and **Remove key** turns it off.
+- **Values:** only the run's own, non-secret parameters are accepted, at most 500 characters each. Secret ones
+  (passwords, codes, `login_*`) are refused: the saved sign-in for the site covers them, so nothing secret goes into
+  the job's prompt.
+- **How it runs:** one background worker job (its own chat, with the live timeline) runs the saved run once per row,
+  in order, with `browser_replay(run_id=…)`, and finishes with a table of each row's result. A failed row is noted
+  and the next one runs. Rows don't run in parallel: each user has one computer at a time.
+
+**Approval steps:** in **Edit**, **Add approval step** adds `{"kind": "approve", "text": "Check the totals before
+export"}`.
+- The replay stops there with `needs_approval {step, text}`, and the agent asks the user (`ask_user`, or the job's
+  question).
+- Only on a clear yes does it continue with `browser_replay(run_id=…, start_step=N)`. That carries on from the same
+  page without reopening the start page.
+- A pause isn't counted as a failure, and `browser_task` never works past an approval step on its own.
+
 ## Configuration
 
 All optional. Defaults need no new account.
