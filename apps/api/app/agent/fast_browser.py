@@ -883,6 +883,29 @@ def _result(state: dict, values: dict[str, str], **fields: Any) -> dict:
     return {**fields, "page": page}
 
 
+# --- task size: long flows get the main model and more rounds ------------------------------------------------------
+MAX_ROUNDS = 40
+LONG_ROUNDS = 30
+_STEP_LINE = re.compile(r"^\s*(?:[-*•]|\(?\d{1,2}[.)]|step\s*\d+)\s*\S", re.I | re.M)
+_THEN = re.compile(r"\b(?:then|after that|next|and then|finally)\b|[;→]|->", re.I)
+
+
+def is_long_goal(goal: str) -> bool:
+    """A goal that spells out a long flow (several listed steps, many 'then's, or a lot of text): the small model with
+    12 rounds runs out before it ends."""
+    text = str(goal or "")
+    return len(_STEP_LINE.findall(text)) >= 5 or len(_THEN.findall(text)) >= 5 or len(text.split()) > 120
+
+
+def round_budget(goal: str, max_steps: int = 0) -> tuple[int, bool]:
+    """(model rounds, start on the main model) for a browser_task. The caller's max_steps wins (up to MAX_ROUNDS)."""
+    long = is_long_goal(goal)
+    default = int(setting("browser_fast_max_steps", 12) or 12)
+    if max_steps:
+        return max(1, min(int(max_steps), MAX_ROUNDS)), long
+    return (max(default, LONG_ROUNDS) if long else default), long
+
+
 async def add_saved_login(user_id, host: str, vals: dict[str, str]) -> bool:
     """Add the saved sign-in for this site to a run's values (the caller's own values win). True if one was added."""
     if not host:
@@ -903,7 +926,7 @@ async def browser_task(ctx, goal: str, url: str = "", values: dict | None = None
     goal = str(goal or "").strip()
     started = time.monotonic()
     log_steps: list[dict] = []
-    limit = max(1, min(int(max_steps or setting("browser_fast_max_steps", 12) or 12), 25))
+    limit, long_goal = round_budget(goal, max_steps)
     user_id = getattr(getattr(ctx, "user", None), "id", None)
     try:
         state: dict = {}
@@ -949,6 +972,8 @@ async def browser_task(ctx, goal: str, url: str = "", values: dict | None = None
         if _blocked(state):
             return _result(state, vals, ok=False, done=False, need_user="The page needs a person (bot check or hand-off).", log=log_steps)
         model, strong = fast_model(), escalate_model()
+        if long_goal:
+            model = strong  # a long flow needs the planner that keeps the whole plan in mind
         escalated = model == strong
         failures, last = 0, ""
         for i in range(limit):

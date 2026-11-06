@@ -439,7 +439,12 @@ async def finish_job(job) -> None:
 # ---------------------------------------------------------------- prompt
 
 
-def prompt_block(state: dict | None, resumed: bool = False) -> str:
+LONG_SKILL_STEPS = 12
+
+
+def prompt_block(state: dict | None, resumed: bool = False, can_background: bool = False) -> str:
+    """The task-state lines for the system prompt. ``can_background``: this is a chat turn that may start a background
+    job, so a long skill is moved there instead of racing the chat turn's step limit."""
     if not state or not state.get("skill_name"):
         return ""
     lines = [
@@ -449,6 +454,13 @@ def prompt_block(state: dict | None, resumed: bool = False) -> str:
     ]
     if resumed:
         lines.append("You are resuming this task: do not redo finished steps; continue from the next one.")
+    total = int(state.get("step_count") or 0)
+    if can_background and total >= LONG_SKILL_STEPS and int(state.get("step_index") or 0) == 0:
+        lines.append(
+            f"This skill is long ({total} steps). Start it with start_background_task: give the skill name, the user's "
+            "request and every value they gave (dates, names, files), and say it should follow the skill phase by phase and "
+            "call skill_progress after each one. Then reply in a line or two; the job does the work and survives restarts."
+        )
     if state.get("parent_id"):
         lines.append("A teammate handed this task to you with this state. Do your part, then reply with the result; it returns to them.")
     notes = list(state.get("notes") or [])[-6:]

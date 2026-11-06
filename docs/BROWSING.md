@@ -203,6 +203,24 @@ saved runs are scrubbed, so a saved run keeps the names and fills them again nex
 `browser_logins` tells the agent which sites have one; the prompt says never to ask for a password in chat. One-time
 codes and CAPTCHAs still go to the user.
 
+## Long tasks
+
+Why: a skill with many phases (sign in, open a menu, open a report, set dates, apply, export, check) ran inside one
+chat turn. The fast loop gave the small model 12 rounds, and the turn's step limit (about 160 graph steps) ran out
+partway through.
+
+- **Fast loop sizing:** `browser_task` treats a goal with 5 or more listed steps, 5 or more "then"s, or more than 120
+  words as long. A long goal starts on the main model (`BROWSER_ESCALATE_MODEL`) with 30 rounds instead of 12. A
+  caller's `max_steps` wins, up to 40.
+- **Long skills move to the background:** in a chat turn that can start jobs, a matched skill with 12 or more steps
+  that hasn't started yet gets a prompt line to hand it to `start_background_task`, with the skill name, the
+  request and every value the user gave. The job has no chat timeout, survives restarts (durable checkpoints) and
+  shows a live timeline.
+- **Phase checkpoints:** the background worker makes one todo per phase of the skill and calls `skill_progress` after
+  each one, so a restart continues from the next phase instead of starting over.
+- **Step budget:** a background worker job gets 320 graph steps, growing to at most 400 when it hits the limit,
+  instead of 160–200.
+
 ## Configuration
 
 All optional. Defaults need no new account.
