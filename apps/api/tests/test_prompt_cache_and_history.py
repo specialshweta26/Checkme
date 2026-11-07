@@ -187,3 +187,44 @@ def test_questions_about_the_user_are_not_web_lookups():
         assert fast_path.classify_turn(q).kind == fast_path.DIRECT, q
     for q in ("What is the weather today?", "What is the price of gold?", "Any news update on my flight?"):
         assert fast_path.classify_turn(q).kind == fast_path.QUICK_WEB, q
+
+
+async def test_a_turn_that_forgot_something_adds_nothing_back(monkeypatch):
+    """"Forget everything about Priya" mentions Priya; extracting from it re-saved "Priya Nair is a person"."""
+    import uuid as _uuid
+
+    from app.agent import memory_extract
+    from app.models import MemoryExtractJob, User, WorkspaceAgent
+
+    user = SimpleNamespace(id=_uuid.uuid4())
+    agent = SimpleNamespace(id=_uuid.uuid4(), user_id=user.id)
+    calls = []
+
+    async def record_turn(*a, **k):
+        calls.append("episode")
+
+    async def extract(*a, **k):
+        calls.append("extract")
+        return {"facts": [{"text": "Priya Nair is a person"}]}
+
+    monkeypatch.setattr("app.memory_engine.episodes.record_turn", record_turn)
+    monkeypatch.setattr(memory_extract, "_extract_json", extract)
+    monkeypatch.setattr(memory_extract, "known_facts", lambda *a, **k: _async([]))
+
+    class Rows:
+        def scalars(self):
+            return SimpleNamespace(all=lambda: [
+                SimpleNamespace(role="user", content="Forget everything you remember about Priya Nair.", meta={}),
+                SimpleNamespace(role="assistant", content="Forgot everything about Priya Nair.", meta={"used_tools": ["forget_memory"]}),
+            ])
+
+    class DB:
+        async def get(self, model, ident):
+            return user if model is User else agent if model is WorkspaceAgent else None
+
+        async def execute(self, *a, **k):
+            return Rows()
+
+    job = MemoryExtractJob(user_id=user.id, agent_id=agent.id, request_id="r1", payload={})
+    assert await memory_extract.process_job(DB(), job) == "done"
+    assert calls == []
