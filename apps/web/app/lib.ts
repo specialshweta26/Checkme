@@ -444,17 +444,27 @@ export function rememberedScope() {
 
 let meInflight: Promise<Me | null> | null = null;
 
+// Only a 401 means signed out. A server restart (a deploy) or a network blip answers 502/503 or nothing for a few
+// seconds: retry instead of sending the user to the sign-in page.
+async function fetchMe(): Promise<Me | null> {
+  for (let attempt = 0; attempt < 6; attempt++) {
+    try {
+      const res = await fetch("/api/me", { credentials: "include", signal: AbortSignal.timeout(8000) });
+      if (res.status === 401 || res.status === 403) return null;
+      if (res.ok) return res.json();
+    } catch {
+      // network error or timeout: try again
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2000 + attempt * 1000));
+  }
+  return null;
+}
+
 export async function getMe(): Promise<Me | null> {
   if (!meInflight) {
-    meInflight = fetch("/api/me", { credentials: "include", signal: AbortSignal.timeout(8000) })
-      .then((res) => {
-        if (res.status === 401 || !res.ok) return null;
-        return res.json();
-      })
-      .catch(() => null)
-      .finally(() => {
-        meInflight = null;
-      });
+    meInflight = fetchMe().finally(() => {
+      meInflight = null;
+    });
   }
   return meInflight;
 }
