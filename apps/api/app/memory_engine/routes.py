@@ -22,10 +22,10 @@ from app.models import MemoryChange, MemoryEntity, MemoryEntityAlias, MemoryPass
 router = APIRouter(prefix="/memory", tags=["memory"])
 
 USER_SCOPES = ("user", "user_shared")
-UNDOABLE = {"add", "supersede", "fade", "card", "voice"}
+UNDOABLE = {"add", "supersede", "fade", "card", "voice", "self"}
 # Card rewrites and tidy-ups are the assistant's own housekeeping: kept in the log, not shown as learning.
 HIDDEN_OPS = {"card", "tidy"}
-UNDO_LABELS = {"add": "Remove", "supersede": "Restore the old one", "fade": "Keep it", "voice": "Undo"}
+UNDO_LABELS = {"add": "Remove", "supersede": "Restore the old one", "fade": "Keep it", "voice": "Undo", "self": "Undo"}
 SOURCES = {"user_said": "You told me", "inferred": "Worked out from your chats and mail", "third_party": "From someone else's email"}
 OP_LABELS = {
     "add": "Learned", "supersede": "Updated", "fade": "Faded", "merge": "Merged", "card": "Card rewritten",
@@ -87,7 +87,8 @@ async def people(q: str = "", user: User = Depends(current_user), db: AsyncSessi
     counts = dict((await db.execute(select(MemoryPassage.subject_entity_id, func.count()).where(
         MemoryPassage.user_id == user.id, MemoryPassage.status == "active", MemoryPassage.subject_entity_id.in_(ids or [-1]))
         .group_by(MemoryPassage.subject_entity_id))).all())
-    listed = [_person(e, orgs, emails, counts) for e in rows]
+    listed = [_person(e, orgs, emails, counts) for e in rows
+              if " ".join((e.name or "").lower().split()) != " ".join((user.display_name or "").lower().split()) or e.status == "self"]
     return {"people": [p for p in listed if not p["is_me"]], "me": [p for p in listed if p["is_me"]]}
 
 
@@ -164,7 +165,10 @@ async def mark_me(entity_id: int, body: SelfIn, user: User = Depends(current_use
     if row is None:
         raise HTTPException(404, "Not found")
     await db.commit()
-    return {"ok": True, "is_me": body.is_me}
+    change = (await db.execute(select(MemoryChange.id).where(MemoryChange.user_id == user.id, MemoryChange.op == "self",
+                                                             MemoryChange.target == f"entity:{e.id}")
+                               .order_by(MemoryChange.id.desc()).limit(1))).scalar()
+    return {"ok": True, "is_me": body.is_me, "change_id": change}  # lets the page offer Undo straight away
 
 
 @router.delete("/people/{entity_id}")
@@ -264,6 +268,15 @@ async def undo(change_id: int, user: User = Depends(current_user), db: AsyncSess
     if c.undone_at or c.op not in UNDOABLE:
         raise HTTPException(409, "This change can't be undone.")
     kind, _, raw = c.target.partition(":")
+    if kind == "entity" and c.op == "self" and raw.isdigit():
+        # "This is me" / "not me", taken back: the opposite, recorded as the user's own word.
+        e = await _owned(db, MemoryEntity, user, int(raw))
+        emails = (await _emails(db, user.id, [e.id])).get(e.id) or []
+        was_me = bool(c.after)  # the change marked it as the user's
+        await ent.set_self(db, user.id, emails[0] if emails else e.name, not was_me, by_user=True)
+        c.undone_at = datetime.now(timezone.utc)
+        await db.commit()
+        return {"ok": True}
     if kind == "block" and c.op == "voice" and raw.startswith("voice"):
         from app.agent.memory import upsert_core
         from app.agents.service import ensure_default_agent

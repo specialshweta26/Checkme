@@ -70,7 +70,7 @@ function contactLine(p: Person) {
   if (p.mail_out) bits.push(`you emailed ${p.mail_out}×`);
   if (p.mail_in) bits.push(`emailed you ${p.mail_in}×`);
   if (p.meetings) bits.push(plural(p.meetings, "meeting"));
-  bits.push(`last contact ${ago(p.last_contact)}`);
+  bits.push(p.last_contact ? `last contact ${ago(p.last_contact)}` : "no contact yet");
   return bits.join(" · ");
 }
 
@@ -98,6 +98,7 @@ export default function MemoryPage() {
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [undoId, setUndoId] = useState<number | null>(null);
   const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
@@ -139,6 +140,7 @@ export default function MemoryPage() {
   async function act(key: string, fn: () => Promise<unknown>, done = "") {
     setBusy(key);
     setNotice("");
+    setUndoId(null);
     try {
       await fn();
       await load();
@@ -255,10 +257,44 @@ export default function MemoryPage() {
           </div>
 
           {error ? <p className="err">{error}</p> : null}
-          {notice ? <p className="att-summary">{notice}</p> : null}
+          {notice ? (
+            <div className="att-summary row">
+              <span>{notice}</span>
+              {undoId ? (
+                <button
+                  className="btn secondary"
+                  disabled={!!busy}
+                  onClick={() => act("undo-notice", () => call(`/api/memory/changes/${undoId}/undo`, { method: "POST" }), "Undone: it's back in your contacts.")}
+                >
+                  Undo
+                </button>
+              ) : null}
+            </div>
+          ) : null}
 
           {tab === "people" ? (
             <div className="task-list">
+              {mine.length ? (
+                <details>
+                  <summary className="muted">Your own addresses ({mine.length}): not counted as contacts. Marked one by mistake? Open this and choose Not mine.</summary>
+                  {mine.map((p) => (
+                    <div key={p.id} className="task-card">
+                      <div className="task-main">
+                        <strong>{p.emails.join(", ") || p.name}</strong>
+                      </div>
+                      <div className="task-actions">
+                        <button
+                          className="btn secondary"
+                          disabled={!!busy}
+                          onClick={() => act(`notme${p.id}`, () => call(`/api/memory/people/${p.id}/me`, { method: "POST", body: JSON.stringify({ is_me: false }) }), "Moved back to your contacts.")}
+                        >
+                          Not mine
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </details>
+              ) : null}
               {loaded && shownPeople.length === 0 ? (
                 <div className="task-empty">
                   <p className="muted">No people yet. They appear as your assistant reads your mail and calendar, or as you mention them in chat.</p>
@@ -321,12 +357,15 @@ export default function MemoryPage() {
                             className="btn secondary"
                             disabled={!!busy}
                             title="Use this if the address is yours (for example your personal email). It stops being counted as a contact."
-                            onClick={() =>
-                              act(`me${p.id}`, async () => {
-                                await call(`/api/memory/people/${p.id}/me`, { method: "POST", body: JSON.stringify({ is_me: true }) });
+                            onClick={async () => {
+                              let change: number | null = null;
+                              await act(`me${p.id}`, async () => {
+                                const r = await call(`/api/memory/people/${p.id}/me`, { method: "POST", body: JSON.stringify({ is_me: true }) });
+                                change = r.change_id || null;
                                 setOpen(null);
-                              }, `Got it: ${p.emails[0] || p.name} is one of your own addresses.`)
-                            }
+                              }, `Got it: ${p.emails[0] || p.name} is now one of your own addresses and not counted as a contact. You'll find it under "Your own addresses" at the top.`);
+                              setUndoId(change);
+                            }}
                           >
                             This is one of my own addresses
                           </button>
@@ -350,27 +389,6 @@ export default function MemoryPage() {
                   ) : null}
                 </div>
               ))}
-              {mine.length ? (
-                <details>
-                  <summary className="muted">Your own addresses ({mine.length}): not counted as contacts</summary>
-                  {mine.map((p) => (
-                    <div key={p.id} className="task-card">
-                      <div className="task-main">
-                        <strong>{p.emails.join(", ") || p.name}</strong>
-                      </div>
-                      <div className="task-actions">
-                        <button
-                          className="btn secondary"
-                          disabled={!!busy}
-                          onClick={() => act(`notme${p.id}`, () => call(`/api/memory/people/${p.id}/me`, { method: "POST", body: JSON.stringify({ is_me: false }) }), "Moved back to your contacts.")}
-                        >
-                          Not mine
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </details>
-              ) : null}
             </div>
           ) : null}
 
