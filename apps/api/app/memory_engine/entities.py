@@ -315,6 +315,14 @@ async def mark_lookalikes(db: AsyncSession, user) -> int:
                MemoryEntityAlias.user_id == user.id, MemoryEntityAlias.kind == "email")
     )).all()
     marked = 0
+    # A person with exactly the user's own name (from chat, no address) is the user.
+    full = " ".join((getattr(user, "display_name", "") or "").lower().split())
+    if full and " " in full:
+        for e in (await db.execute(select(MemoryEntity).where(
+                MemoryEntity.user_id == user.id, MemoryEntity.kind == "person", MemoryEntity.status == "active",
+                func.lower(MemoryEntity.name) == full))).scalars().all():
+            e.status = "self"
+            marked += 1
     for entity, email in rows:
         if entity.status == "active" and looks_like_user(entity.name, email, user):
             if await set_self(db, user.id, email, True, guessed=True) is not None:

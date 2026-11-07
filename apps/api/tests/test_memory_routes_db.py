@@ -169,3 +169,31 @@ async def test_rooms_and_count_facts_are_tidied_away(factory):
         await db.commit()
         assert (await db.get(MemoryEntity, room.id)).status == "deleted" and (await db.get(MemoryEntity, deepak.id)).status == "active"
         assert (await db.get(MemoryPassage, noise.id)).status == "deleted" and (await db.get(MemoryPassage, real.id)).status == "active"
+
+
+async def test_a_mistaken_this_is_me_can_be_undone_and_the_user_is_not_their_own_contact(factory):
+    from app.memory_engine.entities import mark_lookalikes, resolve
+    from app.models import User
+
+    a, (chief,) = await _user_with_agents(factory)
+    async with factory() as db:
+        row = await db.get(User, a.id)
+        row.display_name = a.display_name = "Gaurav Ranjan"
+        await resolve(db, a.id, name="Gaurav Ranjan")  # the user, mentioned by name in chat
+        await db.commit()
+        assert await mark_lookalikes(db, a) >= 1
+        await db.commit()
+    pid, _, _ = await _seed(factory, a, chief, "Karthik Yermunja", "karthik@agilitas.test")
+    async with _client(factory, a) as http:
+        names = [p["name"] for p in (await http.get("/api/memory/people")).json()["people"]]
+        assert "Gaurav Ranjan" not in names and "Karthik Yermunja" in names
+        marked = (await http.post(f"/api/memory/people/{pid}/me", json={"is_me": True})).json()
+        assert marked["change_id"]  # the page offers Undo straight away
+        assert "Karthik Yermunja" not in [p["name"] for p in (await http.get("/api/memory/people")).json()["people"]]
+        assert (await http.post(f"/api/memory/changes/{marked['change_id']}/undo")).json() == {"ok": True}
+        listed = (await http.get("/api/memory/people")).json()
+        assert "Karthik Yermunja" in [p["name"] for p in listed["people"]] and not [m for m in listed["me"] if m["name"] == "Karthik Yermunja"]
+        # Also from This week.
+        await http.post(f"/api/memory/people/{pid}/me", json={"is_me": True})
+        mark = next(c for c in (await http.get("/api/memory/changes")).json()["changes"] if c["op"] == "self" and not c["undone"])
+        assert mark["can_undo"] and mark["undo_label"] == "Undo"
