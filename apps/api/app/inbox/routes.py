@@ -57,8 +57,12 @@ async def mark_inbox_seen(user: User = Depends(current_user), db: AsyncSession =
 
 
 @router.get("/events")
-async def inbox_events(user: User = Depends(current_user)):
+async def inbox_events(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     user_id = user.id
+    # This stream stays open as long as the page does. Give the request's connection back now (the loop below opens
+    # a short session each tick); otherwise every open tab holds a pooled connection in an idle transaction, which
+    # exhausts the pool with enough users online and blocks startup migrations on deploy.
+    await db.close()
 
     async def gen():
         last = None

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.agent import memory_extract
-from app.agent.memory import SCOPE_SHARED
+from app.agent.memory import SCOPE_SHARED, SCOPE_USER
 from app.models import MemoryExtractJob, MemoryPassage, User, WorkspaceAgent
 
 
@@ -92,7 +92,8 @@ async def test_apply_extract_writes_prefs_and_skips_secrets(monkeypatch):
     assert out["applied"] is True
     assert out["prefs"] is True and out["voice"] is True
     assert any(item[0] == "block" and item[1] == "prefs" and "tables" in item[2] for item in calls)
-    assert any(item[0] == "fact" and "Bengaluru" in item[1] and item[2] == SCOPE_SHARED for item in calls)
+    # Memory belongs to the user: facts are saved user-level (shared by all of the user's agents).
+    assert any(item[0] == "fact" and "Bengaluru" in item[1] and item[2] == SCOPE_USER for item in calls)
     assert not any("password" in str(item).lower() and item[0] == "fact" for item in calls)
 
 

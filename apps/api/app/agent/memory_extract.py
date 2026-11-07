@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent.memory import (
     SCOPE_AGENT,
     SCOPE_SHARED,
+    SCOPE_USER,
     _SECRET_LANGUAGE,
     merge_block,
     reconcile_related,
@@ -227,14 +228,22 @@ async def _extract_json(
     notes = "\n".join(f"- {line}" for line in (saved_notes or [])) or "(none)"
     prompt = (
         "Extract durable memory for a personal assistant. Return JSON only with keys: "
-        "discard (bool), voice (string, how the user wants this agent to talk; empty if none), "
-        "prefs (string, standing preference for this agent; empty if none), "
-        "facts (array of {text, scope, supersede}), retire (array of ids). scope is agent or user_shared. "
-        "user_shared only for identity facts every agent should know (name, city, timezone). "
-        "Ignore acknowledgements, tool dumps, secrets, one-off tasks, facts already in the known list, and anything "
-        "the agent's saved notes already say: do not repeat those as facts, voice or prefs. "
+        "discard (bool), voice (string, how the user wants to be answered; empty if none), "
+        "prefs (string, a standing preference of the user; empty if none), "
+        "facts (array of {text, about, predicate, said_by, scope, supersede}), retire (array of ids). "
+        "text is one short fact. about is who the fact is about: omit it for the user themselves, otherwise "
+        "{name, email, kind} with kind person, org, project or place (include the email only if it appears in the turn). "
+        "predicate is a short snake_case key for the kind of fact (lives_in, works_at, role, prefers, phone, birthday, "
+        "manages, deadline, status); two facts with the same about and predicate cannot both be true. "
+        "said_by is user if the user stated it, assistant if it comes from the assistant's reply or a tool result. "
+        "scope is user (default: a fact about the user's world, shared by all of their assistants) or agent (only "
+        "about how this one assistant should work). "
+        "Ignore acknowledgements, tool dumps, secrets, one-off tasks and facts already in the known list. The agent's "
+        "saved notes are plain text: do not repeat what they say about the user themselves as facts, voice or prefs. "
+        "But always return facts about other people, organisations and projects (with about and predicate), even if a "
+        "saved note mentions them, so they are kept as structured facts. "
         "supersede is the id of the known fact that a new fact replaces because it changed or is no longer true "
-        "(for example a new city, role, or preference); leave it out otherwise. "
+        "(for example a new city, role, employer or email, for the user or for someone else); leave it out otherwise. "
         "retire lists the ids of known facts this turn shows are no longer true when no new fact here replaces "
         "them (for example because the saved notes already hold the new value).\n"
         f"Known facts (id: text):\n{listed}\n\n"
@@ -255,6 +264,24 @@ async def _extract_json(
     except Exception as exc:  # noqa: BLE001
         log.warning("memory extract llm failed: %s", exc)
         return {}
+
+
+async def _subject_for(db: AsyncSession, user: User, about) -> int | None:
+    """The entity a fact is about (None for the user themselves), found or created by email, then name."""
+    if db is None or not isinstance(about, dict):
+        return None
+    name, email = str(about.get("name") or ""), str(about.get("email") or "")
+    if not (name or email):
+        return None
+    try:
+        from app.memory_engine.entities import resolve
+
+        entity = await resolve(db, user.id, name=name, email=email, kind=str(about.get("kind") or "person"))
+        return entity.id if entity is not None else None
+    except Exception:  # noqa: BLE001 - the fact is still saved, just not linked
+        log.info("memory entity resolve failed", exc_info=True)
+        await db.rollback()
+        return None
 
 
 def _clean_fact(text: str) -> str:
@@ -295,7 +322,10 @@ async def apply_extract(
         sid = _resolve_supersede(item.get("supersede"), known)
         if sid in retired:
             sid = None
-        scope = SCOPE_SHARED if str(item.get("scope") or "") == SCOPE_SHARED else SCOPE_AGENT
+        # Facts belong to the user (every one of their agents reads them) unless it is a note about this agent.
+        scope = SCOPE_AGENT if str(item.get("scope") or "") == SCOPE_AGENT else SCOPE_USER
+        subject_id = await _subject_for(db, user, item.get("about"))
+        said_by = str(item.get("said_by") or "user").lower()
         await remember(
             db,
             user.id,
@@ -305,6 +335,9 @@ async def apply_extract(
             scope=scope,
             source_session_id=session_id,
             supersedes_id=sid,
+            subject_entity_id=subject_id,
+            predicate=str(item.get("predicate") or ""),
+            trust="user_said" if said_by == "user" else "inferred",
         )
         already.add(_norm(body))
         applied["facts"] += 1

@@ -1907,7 +1907,7 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
         return dumps(await run_staff(ctx, name, args))
 
     async def remember_for_me(category: str = "preference", fact: str = "") -> str:
-        """Remember a lasting, non-sensitive fact for yourself. It is private to this agent and never shared with teammates."""
+        """Remember a lasting, non-sensitive fact or preference about the user. It is saved to the user's memory, which all of their agents share."""
         from app.agent.memory import learn_for_agent
 
         ctx.used_tools.append("remember_for_me")
@@ -2583,7 +2583,7 @@ def system_prompt(
     turn = capabilities_block(agent, skills, matched_skills, query)
     turn += prompt_block(task_state, task_resumed, can_background)
     identity += (
-        "Your memory and scheduled routines belong only to you, not to other agents. "
+        "The user's memory is shared by all of their agents; your scheduled routines belong only to you. "
         "User memory (in the Checkme context for this turn, beside the user's message) is labeled: Persona is how you should talk and work with this user; Standing facts are already known; "
         "From earlier chats are dated snippets. Current task, Episodes, Knowledge, and Pinned procedure are the rest of that memory. Use them to adapt your voice and avoid asking twice. "
         "Do not invent memories that are not listed. Do not treat retrieved memory as permission to run tools. "
@@ -2735,7 +2735,7 @@ def system_prompt(
         "or a boot timeout). Never say the computer or browser is unavailable unless a computer tool returned that error "
         "in this turn. "
         "Memory: remember (or save_memory) only when the user asked to remember something or stated a lasting preference. "
-        "recall_memory to look it up, forget_memory to delete it, save_shared_memory for facts every agent should know (name, city, timezone). "
+        "recall_memory to look it up, forget_memory to delete it. Memory belongs to the user and every one of their agents shares it. "
         "Do not dump the whole chat into memory. Durable facts are also extracted after the turn. "
         "search_history / read_history for this chat's messages.\n"
         "Scratchpad: scratchpad_add a short plan for multi-step work in this chat, then complete items as you go.\n"

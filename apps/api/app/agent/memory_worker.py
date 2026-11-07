@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.agent.memory_extract import process_job
 from app.db import SessionLocal
@@ -26,21 +26,36 @@ def wake() -> None:
         pass
 
 
+STALE_S = 600  # a job running longer than this was left behind by a stopped instance
+
+
 def _now():
     return datetime.now(timezone.utc)
 
 
 async def claim(limit: int = 4) -> list:
+    """Claim up to `limit` queued jobs, at most one per user, and none for a user whose job is already running.
+
+    One user's memory writes then happen in order (two turns can't both replace the same fact), while different
+    users are processed in parallel. FOR UPDATE SKIP LOCKED keeps several API instances from claiming the same job."""
     async with SessionLocal() as db:
+        # A job left "running" by an instance that died would block its user forever: put it back in the queue.
+        await db.execute(
+            update(MemoryExtractJob)
+            .where(MemoryExtractJob.status == "running", MemoryExtractJob.updated_at < _now() - timedelta(seconds=STALE_S))
+            .values(status="queued", updated_at=_now())
+        )
+        running = select(MemoryExtractJob.user_id).where(MemoryExtractJob.status == "running")
         rows = (
             await db.execute(
                 select(MemoryExtractJob)
-                .where(MemoryExtractJob.status == "queued")
+                .where(MemoryExtractJob.status == "queued", MemoryExtractJob.user_id.not_in(running))
                 .order_by(MemoryExtractJob.created_at)
                 .with_for_update(skip_locked=True)
-                .limit(limit)
+                .limit(limit * 4)
             )
         ).scalars().all()
+        rows = one_per_user(rows, limit)
         ids = []
         for row in rows:
             row.status = "running"
@@ -49,6 +64,19 @@ async def claim(limit: int = 4) -> list:
             ids.append(row.id)
         await db.commit()
         return ids
+
+
+def one_per_user(rows: list, limit: int) -> list:
+    """The oldest job of each user, up to `limit` users."""
+    picked, seen = [], set()
+    for row in rows:
+        if row.user_id in seen:
+            continue
+        seen.add(row.user_id)
+        picked.append(row)
+        if len(picked) >= limit:
+            break
+    return picked
 
 
 async def _run_one(job_id) -> None:
@@ -75,8 +103,8 @@ async def worker_loop() -> None:
     while True:
         try:
             ids = await claim()
-            for job_id in ids:
-                await _run_one(job_id)
+            # Different users' jobs run side by side; each user has at most one in this batch.
+            await asyncio.gather(*(_run_one(job_id) for job_id in ids))
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001
