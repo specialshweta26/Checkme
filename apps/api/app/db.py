@@ -114,6 +114,9 @@ async def _migrate() -> None:
         await conn.execute(text("ALTER TABLE inbox_items ADD COLUMN IF NOT EXISTS ai_draft TEXT DEFAULT ''"))
         await conn.execute(text("ALTER TABLE inbox_items ADD COLUMN IF NOT EXISTS key_person BOOLEAN DEFAULT false"))
         await conn.execute(text("ALTER TABLE inbox_items ADD COLUMN IF NOT EXISTS sender_note VARCHAR(400) DEFAULT ''"))
+        await conn.execute(text("ALTER TABLE inbox_items ADD COLUMN IF NOT EXISTS alert_reason VARCHAR(20) DEFAULT ''"))
+        await conn.execute(text("ALTER TABLE inbox_items ADD COLUMN IF NOT EXISTS alert_state VARCHAR(12) DEFAULT ''"))
+        await conn.execute(text("ALTER TABLE inbox_items ADD COLUMN IF NOT EXISTS alerted_at TIMESTAMPTZ"))
         await conn.execute(
             text("UPDATE users SET timezone = 'Asia/Kolkata' WHERE timezone IS NULL OR timezone IN ('UTC', 'utc', '')")
         )

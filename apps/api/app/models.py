@@ -808,6 +808,10 @@ class InboxItem(Base):
     # From the user's memory at triage: one of their key people, and who the sender is.
     key_person: Mapped[bool] = mapped_column(Boolean, default=False)
     sender_note: Mapped[str] = mapped_column(String(400), default="")
+    # A card in Chief's window for mail that needs the user (inbox/alerts.py): why, and what the user did with it.
+    alert_reason: Mapped[str] = mapped_column(String(20), default="")  # key_contact | urgent | promise
+    alert_state: Mapped[str] = mapped_column(String(12), default="")  # new | dismissed | sent
+    alerted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="pending")  # pending | sent | discarded
     unread: Mapped[bool] = mapped_column(Boolean, default=True)
     seen: Mapped[bool] = mapped_column(Boolean, default=False)

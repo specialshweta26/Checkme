@@ -2,6 +2,7 @@
 
 import { FormEvent, useEffect, useRef, useState, type CSSProperties } from "react";
 import { AttachmentWidget } from "../AttachmentWidget";
+import { ChiefAlerts } from "../components/ChiefAlerts";
 import { AppShell } from "../components/AppShell";
 import { chatAttachments, ComputerIcon, computerFromMeta, ScreenRail } from "../components/ComputerPanel";
 import { cardsFromMeta, ConnectCards } from "../components/ConnectCard";
@@ -882,6 +883,8 @@ export default function ChatPage() {
         </div>
         <div className="transcript">
           <div className="thread">
+            {/* Mail that needs the user, on Chief only; not part of the conversation the model reads. */}
+            {!activeGroup && (activeAgent?.kind || "custom") === "default" ? <ChiefAlerts /> : null}
             {notice ? <p className="notice">{notice}</p> : null}
             {messages.length === 0 && !busyHere && showFocusCard && activeAgent ? (
               <FocusOnboarding

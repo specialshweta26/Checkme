@@ -23,6 +23,11 @@ services:
           property: hostport
       - fromGroup: checkme-secrets
 
+  # Background work runs in its own service (PROCESS_ROLE, apps/api/app/main.py): a Render background worker
+  # "checkme-worker-kw68" (Starter), same image (./apps/api/Dockerfile, context "."), same env vars as the API plus
+  # PROCESS_ROLE=worker; the API runs with PROCESS_ROLE=web. It was created with the Render CLI (cloned from the API),
+  # not from this Blueprint, so it is deliberately not listed here: adding it would make a Blueprint sync create a
+  # second, duplicate worker. When an env var is added to the API, add it to the worker too.
   - type: pserv
     name: checkme-api
     runtime: docker

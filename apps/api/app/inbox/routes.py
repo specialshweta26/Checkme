@@ -177,6 +177,35 @@ async def rephrase_draft(
         raise HTTPException(502, str(exc)[:300]) from exc
 
 
+@router.get("/alerts")
+async def inbox_alerts(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Cards for Chief's window: mail that needs a reply and is from a key contact, urgent, or about a promise."""
+    from app.inbox.alerts import LABELS, open_alerts
+
+    names, slugs = service._connector_labels(await service.mail_connectors(db, user))
+    items = await open_alerts(db, user.id)
+    return {"alerts": [{**service.serialize(i, names.get(i.connector_id, ""), slugs.get(i.connector_id, "")),
+                        "alert_label": LABELS.get(i.alert_reason, "")} for i in items]}
+
+
+class AlertIn(BaseModel):
+    state: str  # dismissed
+
+
+@router.post("/{item_id}/alert")
+async def update_alert(item_id: uuid.UUID, body: AlertIn, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """'Not now' on a card: it leaves Chief's window (the email stays in the inbox)."""
+    if body.state != "dismissed":
+        raise HTTPException(400, "Only dismissing a card is supported.")
+    try:
+        item = await service.get_item(db, user, item_id)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    item.alert_state = "dismissed"
+    await db.commit()
+    return {"ok": True}
+
+
 @router.post("/{item_id}/redraft")
 async def redraft_mail(item_id: uuid.UUID, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     try:
