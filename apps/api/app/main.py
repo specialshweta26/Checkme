@@ -114,6 +114,7 @@ async def lifespan(_app: FastAPI):
         log.warning("object storage not ready: %s", vis_exc)
     from app.agent.memory_worker import start_memory_worker
     from app.memory_engine.learn import start_memory_learner
+    from app.memory_engine.consolidate import start_memory_consolidator
     from app.loop_watch import watch_loop
     from app.inbox.worker import start_inbox_worker
     from app.inbox.push import start_mail_push
@@ -132,6 +133,7 @@ async def lifespan(_app: FastAPI):
         await start_meeting_triggers(),
         await start_memory_worker(),
         await start_memory_learner(),
+        await start_memory_consolidator(),
     ]
     cfg = get_settings()
     log.info(

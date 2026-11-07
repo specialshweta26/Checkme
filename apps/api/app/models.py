@@ -614,6 +614,26 @@ class MemoryEntity(Base):
     mail_out: Mapped[int] = mapped_column(Integer, default=0)  # emails the user sent them (to or cc)
     meetings: Mapped[int] = mapped_column(Integer, default=0)
     last_interaction_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # A short card about this person, rewritten (never appended to) by the nightly pass from their facts.
+    summary: Mapped[str] = mapped_column(Text, default="")
+    card_built_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class MemoryChange(Base):
+    """One change memory made on its own (merge, supersede, fade, card rewrite…), so the user can see what it learned
+    and why, and undo it. Never shared between users."""
+
+    __tablename__ = "memory_changes"
+    __table_args__ = (Index("ix_memory_changes_user_created", "user_id", "created_at"),)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"))
+    op: Mapped[str] = mapped_column(String(20))  # add | supersede | merge | dedupe | fade | card | self | forget
+    target: Mapped[str] = mapped_column(String(60), default="")  # fact:<id> | entity:<id>
+    before: Mapped[str] = mapped_column(Text, default="")
+    after: Mapped[str] = mapped_column(Text, default="")
+    reason: Mapped[str] = mapped_column(String(300), default="")
+    undone_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 

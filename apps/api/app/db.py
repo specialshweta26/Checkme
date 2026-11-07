@@ -342,6 +342,8 @@ async def _migrate_user_memory(conn) -> None:
         "mail_out INTEGER DEFAULT 0",
         "meetings INTEGER DEFAULT 0",
         "last_interaction_at TIMESTAMPTZ",
+        "summary TEXT DEFAULT ''",
+        "card_built_at TIMESTAMPTZ",
     ):
         await conn.execute(text(f"ALTER TABLE memory_entities ADD COLUMN IF NOT EXISTS {ddl}"))
     await conn.execute(text(
