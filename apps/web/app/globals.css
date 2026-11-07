@@ -3113,3 +3113,15 @@ button.provider:disabled { opacity: .6; cursor: default; }
 .usage-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .usage-table th, .usage-table td { text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--line, rgba(0,0,0,0.08)); }
 .usage-table th:first-child, .usage-table td:first-child { text-align: left; }
+
+/* Chief's cards for mail that needs the user (apps/web/app/components/ChiefAlerts.tsx). */
+.chief-alerts { display: grid; gap: 10px; margin: 0 0 18px; padding: 12px; border-radius: 12px; background: var(--accent-soft); }
+.chief-alerts-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; }
+.chief-alert { padding: 12px 14px; border-radius: 10px; background: var(--panel, #fff); border: 1px solid var(--line, rgba(0,0,0,0.08)); }
+.chief-alert header { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; justify-content: space-between; }
+.chief-alert-subject { margin: 4px 0; font-size: 13px; font-weight: 600; }
+.chief-alert-tag { font-size: 11px; padding: 2px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); }
+.chief-alert-tag.urgent { background: #fff1f2; color: #be123c; }
+.chief-alert-tag.promise { background: #fef3c7; color: #92400e; }
+.chief-alert-draft { margin: 8px 0; padding: 8px 10px; border-left: 3px solid var(--accent); white-space: pre-wrap; font-size: 13px; }
+.chief-alert-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
