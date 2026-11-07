@@ -60,3 +60,34 @@ def test_first_name():
 )
 def test_looks_like_the_user(name, email, mine):
     assert looks_like_user(name, email, GAURAV) is mine
+
+
+@pytest.mark.parametrize(
+    "name, email, room",
+    [
+        ("Salarpuria Tower II-Bangalore-First-Floor-1-Bangalore - 1st Floor (6)", "x@agilitas.com", True),
+        ("", "conf.blr2@agilitas.com", True),
+        ("Boardroom 4", "b4@agilitas.com", True),
+        ("Deepak Jha", "deepak.jha@agilitas.com", False),
+        ("Sam Hall", "sam.hall@acme.com", False),
+    ],
+)
+def test_meeting_rooms_are_not_people(name, email, room):
+    from app.memory_engine.learn import is_resource
+
+    assert is_resource(name, email) is room
+
+
+@pytest.mark.parametrize(
+    "fact, noise",
+    [
+        ("Deepak Jha has 8 emails exchanged and 7 meetings noted.", True),
+        ("Gourishanker Jha — 14 emails (13 sent, 1 received); 9 meetings.", True),
+        ("Priya is COO at Zeta Corp", False),
+        ("The user has a meeting with Priya on Friday", False),
+    ],
+)
+def test_count_only_facts_are_noise(fact, noise):
+    from app.memory_engine.consolidate import is_count_fact
+
+    assert is_count_fact(fact) is noise

@@ -76,6 +76,15 @@ def is_automated(email: str) -> bool:
     return bool(AUTOMATED.search((email or "").lower()))
 
 
+# Meeting rooms and other bookable resources show up as attendees ("Salarpuria Tower II - 1st Floor (6)").
+RESOURCE_NAME = re.compile(r"\b(room|floor|tower|conf(erence)?|boardroom|meeting[- ]?room|cabin|auditorium|huddle|projector)\b", re.I)
+RESOURCE_EMAIL = re.compile(r"^(room|rooms|conf|conference|mr|meetingroom|resource|cr)[._-]?\w*@", re.I)
+
+
+def is_resource(name: str, email: str) -> bool:
+    return bool(RESOURCE_NAME.search(name or "") or RESOURCE_EMAIL.search(email or ""))
+
+
 def salience(entity, now: datetime | None = None) -> float:
     """How much this person matters to the user: interaction volume (sending and meeting weigh more), fading with time."""
     now = now or _now()
@@ -174,6 +183,9 @@ async def touch(db: AsyncSession, user_id, name: str, email: str, field: str, wh
 
 async def learn_mail(db: AsyncSession, user, runtime) -> dict:
     """Who writes to the user and whom the user writes to, from the newest inbox and sent mail headers."""
+    from app.memory_engine.consolidate import remove_noise
+
+    await remove_noise(db, user.id)  # meeting rooms and count-only facts learned before these filters
     await ent.unmark_wrong_self(db, user)  # addresses the first Sent-folder rule wrongly took for the user's
     await ent.mark_lookalikes(db, user)  # people learned before this check existed
     own = await own_addresses(db, user)
@@ -200,7 +212,7 @@ async def learn_mail(db: AsyncSession, user, runtime) -> dict:
                 parse_addresses(msg.get("to")) + parse_addresses(msg.get("cc"))
             )[:MAX_RECIPIENTS]
             for name, email in people:
-                if is_automated(email) or await is_me(db, user, own, name, email):
+                if is_automated(email) or is_resource(name, email) or await is_me(db, user, own, name, email):
                     continue
                 if await touch(db, user.id, name, email, kind, when):
                     counts[kind] += 1
@@ -231,7 +243,7 @@ async def learn_calendar(db: AsyncSession, user, runtime) -> dict:
         people = parse_addresses(ev.get("attendees") or []) + parse_addresses(ev.get("organizer") or "")
         seen, met = set(), []
         for name, email in people:
-            if email in seen or is_automated(email) or await is_me(db, user, own, name, email):
+            if email in seen or is_automated(email) or is_resource(name, email) or await is_me(db, user, own, name, email):
                 continue
             seen.add(email)
             entity = await touch(db, user.id, name, email, "meetings", when)

@@ -324,6 +324,10 @@ async def apply_extract(
         body = _clean_fact(str(item.get("text") or ""))
         if not body or _norm(body) in already:
             continue
+        from app.memory_engine.consolidate import is_count_fact
+
+        if is_count_fact(body):  # the assistant's own email/meeting counts read back: not a fact
+            continue
         sid = _resolve_supersede(item.get("supersede"), known)
         if sid in retired:
             sid = None

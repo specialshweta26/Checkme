@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import re
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, or_, select, text, update
@@ -60,7 +61,46 @@ async def record(db: AsyncSession, user_id, op: str, target: str = "", before: s
                         after=(after or "")[:2000], reason=(reason or "")[:300]))
 
 
+# A "fact" that only restates how many emails or meetings there were ("Deepak Jha has 8 emails exchanged and 7
+# meetings noted") is the assistant's own answer read back, not knowledge: the counts live on the person already.
+COUNT_FACT = re.compile(
+    r"\b\d+\s+(?:e-?mails?|messages?|meetings?)\b[^.]*\b(?:exchanged|sent|received|noted|recorded|logged)\b|"
+    r"\b(?:exchanged|sent|received)\s+\d+\s+(?:e-?mails?|messages?)\b",
+    re.I,
+)
+
+
+def is_count_fact(text_: str) -> bool:
+    return bool(COUNT_FACT.search(text_ or ""))
+
+
 # --- passes -----------------------------------------------------------------------------------------------------------
+
+
+async def remove_noise(db: AsyncSession, user_id) -> int:
+    """Remove count-only facts and meeting rooms taken for people. Logged as "tidy" (not shown as learning)."""
+    from app.memory_engine.learn import is_resource
+
+    removed = 0
+    for row in (await db.execute(select(MemoryPassage).where(
+            MemoryPassage.user_id == user_id, MemoryPassage.status == "active"))).scalars().all():
+        if is_count_fact(row.text):
+            row.status, row.valid_to = "deleted", _now()
+            await record(db, user_id, "tidy", f"fact:{row.id}", "", "", "it only repeated email and meeting counts")
+            removed += 1
+    people = (await db.execute(select(MemoryEntity).where(
+        MemoryEntity.user_id == user_id, MemoryEntity.kind == "person", MemoryEntity.status == "active"))).scalars().all()
+    for e in people:
+        emails = (await db.execute(select(MemoryEntityAlias.value).where(
+            MemoryEntityAlias.user_id == user_id, MemoryEntityAlias.entity_id == e.id, MemoryEntityAlias.kind == "email"))).scalars().all()
+        if is_resource(e.name, emails[0] if emails else ""):
+            e.status = "deleted"
+            await db.execute(MemoryRelation.__table__.delete().where(
+                MemoryRelation.user_id == user_id, or_(MemoryRelation.a_id == e.id, MemoryRelation.b_id == e.id)))
+            await record(db, user_id, "tidy", f"entity:{e.id}", "", "", f"{e.name} is a meeting room, not a person")
+            removed += 1
+    await db.flush()
+    return removed
 
 
 async def retire_replaced(db: AsyncSession, user_id) -> int:
@@ -180,7 +220,7 @@ async def _llm(prompt: str, max_tokens: int) -> str:
     return (resp.choices[0].message.content or "").strip()
 
 
-async def rewrite_cards(db: AsyncSession, user_id, limit: int = CARDS_PER_RUN) -> int:
+async def rewrite_cards(db: AsyncSession, user_id, limit: int = CARDS_PER_RUN, only: set[int] | None = None) -> int:
     """Rewrite the card of the most important people whose facts changed since their card was written. The card is
     built from their active facts only, replaces the old one, and is capped in size."""
     newest_fact = (
@@ -188,13 +228,12 @@ async def rewrite_cards(db: AsyncSession, user_id, limit: int = CARDS_PER_RUN) -
         .where(MemoryPassage.user_id == user_id, MemoryPassage.status == "active", MemoryPassage.subject_entity_id.is_not(None))
         .group_by(MemoryPassage.subject_entity_id).subquery()
     )
-    rows = (await db.execute(
-        select(MemoryEntity).join(newest_fact, newest_fact.c.eid == MemoryEntity.id)
-        .where(MemoryEntity.user_id == user_id, MemoryEntity.status == "active", MemoryEntity.kind == "person",
-               or_(MemoryEntity.card_built_at.is_(None), MemoryEntity.card_built_at < newest_fact.c.at,
-                   MemoryEntity.card_built_at < CARD_RULES_SINCE))
-        .order_by(MemoryEntity.salience.desc(), MemoryEntity.id).limit(limit)
-    )).scalars().all()
+    stale = or_(MemoryEntity.card_built_at.is_(None), MemoryEntity.card_built_at < newest_fact.c.at,
+                MemoryEntity.card_built_at < CARD_RULES_SINCE)
+    q = (select(MemoryEntity).join(newest_fact, newest_fact.c.eid == MemoryEntity.id)
+         .where(MemoryEntity.user_id == user_id, MemoryEntity.status == "active", MemoryEntity.kind == "person"))
+    q = q.where(MemoryEntity.id.in_(only)) if only else q.where(stale)
+    rows = (await db.execute(q.order_by(MemoryEntity.salience.desc(), MemoryEntity.id).limit(limit))).scalars().all()
     written = 0
     for e in rows:
         facts = (await db.execute(
@@ -202,6 +241,7 @@ async def rewrite_cards(db: AsyncSession, user_id, limit: int = CARDS_PER_RUN) -
                                         MemoryPassage.subject_entity_id == e.id)
             .order_by(MemoryPassage.confidence.desc(), MemoryPassage.id.desc()).limit(CARD_FACTS)
         )).scalars().all()
+        facts = [f for f in facts if not is_count_fact(f.text)]
         if not facts:
             continue
         listing = "\n".join(f"- {f.text.strip()}{'' if f.trust == 'user_said' else ' (a guess)'}" for f in facts)
