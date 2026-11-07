@@ -342,6 +342,8 @@ async def people_context(db: AsyncSession, user_id, query: str, limit: int = 5) 
         line = f"{e.name}{org}: " + ", ".join(bits) + f"; last contact {_ago(e.last_interaction_at)}"
         if partners:
             line += "; often meets with " + ", ".join(partners)
+        if (e.summary or "").strip():
+            line += f". Card: {e.summary.strip()}"
         lines.append(line)
     if top:
         hidden = await guessed_self(db, user_id)

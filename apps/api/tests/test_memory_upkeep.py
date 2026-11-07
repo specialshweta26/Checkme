@@ -148,7 +148,8 @@ async def test_remember_retires_the_replaced_fact_and_writes_no_second_copy(monk
     assert old.status == STATUS_SUPERSEDED
     assert row.supersedes_id == 12
     assert forgotten == ["Lives in Bangalore"]
-    assert [type(o) for o in db.added] == [MemoryPassage]
+    # One fact row; the rest is the change log (memory_changes), not another copy of the fact.
+    assert [type(o) for o in db.added if type(o).__name__ != "MemoryChange"] == [MemoryPassage]
 
 
 @pytest.mark.asyncio

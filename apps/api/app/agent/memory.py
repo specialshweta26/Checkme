@@ -6,7 +6,7 @@ import time
 import uuid
 
 import httpx
-from sqlalchemy import desc, func, or_, select, text
+from sqlalchemy import delete, desc, func, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,6 +14,8 @@ from app.config import get_settings
 from app.llm import embed_one
 from app.models import ChatMessage, ChatSession, MemoryBlock, MemoryPassage, User, WorkspaceAgent
 from connector_core.http import shared_client
+
+from app.memory_engine.consolidate import effective_confidence  # noqa: E402
 
 log = logging.getLogger(__name__)
 
@@ -487,7 +489,7 @@ async def _ranked_facts(db: AsyncSession, user_id, agent_id, query: str, limit: 
     def score(row) -> float:
         rank = vec_rank.get(row.id)
         vector = 1.0 / (1.0 + rank) if rank is not None else 0.0  # reciprocal rank: the nearest match leads
-        confidence = float(getattr(row, "confidence", None) or 0.8)
+        confidence = effective_confidence(row)  # fades unless said again or confirmed
         return 0.45 * vector + 0.25 * _keyword_score(row.text or "", q) + 0.15 * _recency(row) + 0.15 * confidence
 
     rows.sort(key=lambda row: (-score(row), -(row.id or 0)))
@@ -964,6 +966,16 @@ async def remember(
         if twin is not None:
             await _reinforce(db, twin, confidence)
         return twin
+    try:
+        from app.memory_engine.consolidate import record
+
+        if retired is not None:
+            await record(db, user_id, "supersede", f"fact:{retired.id}", retired.text, text, "the user's newer fact replaces it")
+        await record(db, user_id, "add", f"fact:{row.id}", "", text, "said in chat" if trust == "user_said" else trust.replace("_", " "))
+        await db.commit()
+    except Exception:  # noqa: BLE001 - the fact is saved; only the change log missed it
+        log.info("memory change log skipped", exc_info=True)
+        await db.rollback()
     if retired is not None:
         await _forget_letta_text(owner, retired.text or "")
     await _write_letta_passage(owner, text)
@@ -1141,6 +1153,18 @@ async def _forget_everywhere(db: AsyncSession, user: User, owner, needle: str) -
             )
         ).scalars().all():
             await db.delete(alias)
+    # The change log and people's cards hold copies of the text too: they go with it.
+    from app.models import MemoryChange
+
+    targets = [f"entity:{i}" for i in entity_ids] + [r for r in removed if r.startswith("fact:")]
+    conds = [func.lower(MemoryChange.before).like(like), func.lower(MemoryChange.after).like(like)]
+    if targets:
+        conds.append(MemoryChange.target.in_(targets))
+    await db.execute(delete(MemoryChange).where(MemoryChange.user_id == user.id, or_(*conds)))
+    for entity in (await db.execute(select(MemoryEntity).where(
+            MemoryEntity.user_id == user.id, func.lower(MemoryEntity.summary).like(like)))).scalars().all():
+        entity.summary, entity.card_built_at = "", None
+        removed.append(f"card:{entity.id}")
     return removed
 
 
