@@ -203,3 +203,27 @@ async def test_drafts_are_signed_by_the_user_and_own_mail_is_recognised(factory)
     assert f"drafting for the user, Gaurav Ranjan <{user.email}>" in block and "sign off as them (Gaurav)" in block
     assert "never as anyone else on the thread" in block and not ctx[other.id].from_self
     assert ctx[own.id].from_self and "sent by the user from another of their own addresses" in prompt_block(ctx[own.id])
+
+
+async def test_no_reply_is_drafted_to_the_users_own_address(factory, monkeypatch):
+    from app.inbox import service
+    from app.inbox.memory_context import contexts_for
+    from app.memory_engine.entities import set_self
+
+    user, _ = await _setup(factory)
+    async with factory() as db:
+        await set_self(db, user.id, "gaurav.home@gmail.com", True, by_user=True)
+        await db.commit()
+        item = _item("gaurav grv <gaurav.home@gmail.com>")
+        ctx = (await contexts_for(db, user, [item]))[item.id]
+
+    async def fake_llm(prompt, max_tokens, json_mode=False):
+        return json.dumps({"classification": "reply", "summary": "Wants to connect.", "key_points": [], "draft": "Hi Gaurav, sure. Gaurav"})
+
+    class Box:
+        async def call(self, tool, args):
+            return {"subject": "Discussion", "messages": [{"from": "gaurav.home@gmail.com", "body": "Need to connect"}]}
+
+    monkeypatch.setattr(service, "_llm", fake_llm)
+    await service._classify_one(item, Box(), ctx)
+    assert item.classification == "respond" and "own addresses" in item.draft and item.summary == "Wants to connect."
