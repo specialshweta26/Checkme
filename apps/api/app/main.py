@@ -20,6 +20,7 @@ from app.desktop.routes import router as desktop_router
 from app.files import router as files_router
 from app.db import init_db
 from app.inbox.routes import router as inbox_router
+from app.memory_engine.routes import router as memory_router
 from app.storage import ensure_bucket
 from app.skills.routes import router as skills_router
 from app.browser_runs.routes import login_router as browser_logins_router
@@ -181,6 +182,7 @@ app.include_router(auth_router, prefix="/api")
 app.include_router(me_router, prefix="/api")
 app.include_router(chat_router, prefix="/api")
 app.include_router(agents_router, prefix="/api")
+app.include_router(memory_router, prefix="/api")
 app.include_router(github_router, prefix="/api")
 app.include_router(deploy_router, prefix="/api")
 app.include_router(connectors_router, prefix="/api")
