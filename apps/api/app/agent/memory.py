@@ -21,7 +21,7 @@ _LETTA_TIMEOUT = httpx.Timeout(2.5, connect=0.8)
 _letta_skip_until = 0.0
 _LABEL = re.compile(r"^[A-Za-z0-9_-]{1,50}$")
 CORE_LABELS = ("prefs", "people", "voice", "work", "coding")
-PERSONA_LABELS = ("voice", "prefs")
+PERSONA_LABELS = ("voice", "prefs", "voice_colleagues", "voice_external")
 STANDING_LABELS = ("people", "work", "learned")
 SCOPE_AGENT = "agent"  # a note about how one agent works: read by that agent only
 SCOPE_USER = "user"  # a fact about the user's world: read by all of the user's agents
@@ -29,7 +29,7 @@ SCOPE_SHARED = "user_shared"  # old name for SCOPE_USER, still read as user-leve
 USER_SCOPES = (SCOPE_USER, SCOPE_SHARED)
 # Core blocks about the user (how they like to be answered, what was learned about them, their people and work) are
 # one copy per user, kept on the user's default agent and read by every agent. Other labels ("coding") stay per agent.
-USER_LABELS = ("voice", "prefs", "learned", "people", "work")
+USER_LABELS = ("voice", "prefs", "learned", "people", "work", "voice_colleagues", "voice_external")
 STATUS_ACTIVE = "active"
 STATUS_SUPERSEDED = "superseded"
 STATUS_DELETED = "deleted"
@@ -747,6 +747,15 @@ async def load_memory(db: AsyncSession, user: User, query: str, agent=None, task
                 assembled = (assembled + ("\n" if assembled else "") + "\n".join(extra)).strip()
             elif not assembled:
                 assembled = letta_text
+    try:
+        from app.memory_engine.entities import people_context
+
+        people = await people_context(db, user.id, query)
+        if people:
+            # Learned from the user's own mail and calendar (memory_engine/learn.py).
+            assembled = (assembled + "\n\nPeople (from your mail and calendar)\n" + "\n".join(f"- {p}" for p in people)).strip()
+    except Exception:  # noqa: BLE001 - the rest of memory still loads
+        log.info("people context skipped", exc_info=True)
     try:
         from app.memory_engine.recall import recall_block
 

@@ -120,6 +120,8 @@ def _event(e: dict) -> dict:
         "location": (e.get("location") or {}).get("displayName"),
         "organizer": _addr(e.get("organizer")),
         "attendee_count": len(e.get("attendees") or []),
+        # Who was invited (capped): lets memory learn who the user meets with.
+        "attendees": [_addr(a) for a in (e.get("attendees") or [])[:15] if (a.get("emailAddress") or {}).get("address")],
         "meeting_link": (e.get("onlineMeeting") or {}).get("joinUrl"),
         "show_as": e.get("showAs"),
     }

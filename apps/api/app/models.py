@@ -609,7 +609,49 @@ class MemoryEntity(Base):
     salience: Mapped[float] = mapped_column(Float, default=0.0)
     status: Mapped[str] = mapped_column(String(20), default="active")  # active | merged | deleted
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Learned from the user's mail and calendar (memory_engine/learn.py): how often and how recently they interact.
+    mail_in: Mapped[int] = mapped_column(Integer, default=0)  # emails from this person to the user
+    mail_out: Mapped[int] = mapped_column(Integer, default=0)  # emails the user sent them (to or cc)
+    meetings: Mapped[int] = mapped_column(Integer, default=0)
+    last_interaction_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class MemoryRelation(Base):
+    """Two of one user's entities seen together (e.g. in the same meetings). Never shared between users."""
+
+    __tablename__ = "memory_relations"
+    __table_args__ = (UniqueConstraint("user_id", "a_id", "b_id", "kind", name="uq_memory_relation"),)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    a_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("memory_entities.id", ondelete="CASCADE"), index=True)
+    b_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("memory_entities.id", ondelete="CASCADE"), index=True)
+    kind: Mapped[str] = mapped_column(String(20), default="met_with")
+    count: Mapped[int] = mapped_column(Integer, default=0)
+    last_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class MemorySeen(Base):
+    """A mail message or calendar event already learned from, so it is counted once per user."""
+
+    __tablename__ = "memory_seen"
+    __table_args__ = (UniqueConstraint("user_id", "kind", "ref", name="uq_memory_seen"),)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    kind: Mapped[str] = mapped_column(String(20))  # mail_in | mail_out | event
+    ref: Mapped[str] = mapped_column(String(300))
+    seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class MemoryLearnerState(Base):
+    """When each learning job last ran for a user, and a lease so only one API instance runs it at a time."""
+
+    __tablename__ = "memory_learner_state"
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    job: Mapped[str] = mapped_column(String(40), primary_key=True)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str] = mapped_column(Text, default="")
 
 
 class MemoryEntityAlias(Base):
