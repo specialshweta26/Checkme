@@ -106,6 +106,8 @@ async def test_export_has_my_data_only_and_no_credentials(factory, outside):
     assert f"Fact for {a.email}".encode() in blob and f"Fact for {b.email}".encode() not in blob
     assert b"SECRET-REFRESH" not in blob and b"refresh_token_enc" not in blob  # no credentials
     assert json.loads(zf.read("data/user.json"))[0]["email"] == a.email
+    fact = json.loads(zf.read("data/memory_passages.json"))[0]
+    assert "embedding" not in fact and "search_tsv" not in fact  # internal, large columns are left out
 
 
 async def test_delete_needs_my_email_and_removes_everything_of_mine_only(factory, outside):
