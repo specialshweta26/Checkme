@@ -28,11 +28,11 @@ HOOK = "https://app.test/api/webhooks/microsoft-mail"
 @pytest.fixture
 def client(monkeypatch):
     woken = []
-    monkeypatch.setattr(worker, "wake_inbox", lambda: woken.append(1))
+    monkeypatch.setattr(worker, "wake_inbox", lambda users=None: woken.append(users))
     valid = {"count": 0}
 
     async def accept(db, payload):
-        return valid["count"]
+        return ["u1"] * valid["count"]
 
     monkeypatch.setattr(push, "accept_notifications", accept)
     app = FastAPI()
@@ -55,7 +55,7 @@ def test_graph_validation_echoes_the_token_as_plain_text(client):
 def test_a_valid_notification_wakes_the_inbox(client):
     client.valid["count"] = 1
     assert client.http.post("/api/webhooks/microsoft-mail", json={"value": []}).status_code == 202
-    assert client.woken == [1]
+    assert client.woken == [{"u1"}]  # only the mailbox that reported new mail
 
 
 def test_a_bad_notification_gets_the_same_answer_and_no_wake(client):
@@ -92,7 +92,7 @@ async def test_malformed_payloads_count_for_nothing(payload):
         async def execute(self, q):
             raise AssertionError("must not query")
 
-    assert await push.accept_notifications(Db(), payload) == 0
+    assert await push.accept_notifications(Db(), payload) == []
 
 
 async def test_sync_does_nothing_without_https(monkeypatch):
@@ -210,10 +210,10 @@ async def test_only_the_right_secret_counts(factory, no_tokens):
     sub_id = f"{graph.prefix}-1"
     good = {"subscriptionId": sub_id, "clientState": secret}
     async with factory() as db:
-        assert await push.accept_notifications(db, {"value": [good]}) == 1
-        assert await push.accept_notifications(db, {"value": [{**good, "clientState": "wrong"}]}) == 0
-        assert await push.accept_notifications(db, {"value": [{"subscriptionId": sub_id}]}) == 0
-        assert await push.accept_notifications(db, {"value": [{**good, "subscriptionId": "unknown"}]}) == 0
+        assert len(await push.accept_notifications(db, {"value": [good]})) == 1
+        assert await push.accept_notifications(db, {"value": [{**good, "clientState": "wrong"}]}) == []
+        assert await push.accept_notifications(db, {"value": [{"subscriptionId": sub_id}]}) == []
+        assert await push.accept_notifications(db, {"value": [{**good, "subscriptionId": "unknown"}]}) == []
 
 
 @needs_db
