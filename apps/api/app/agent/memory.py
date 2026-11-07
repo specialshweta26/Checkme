@@ -1058,6 +1058,83 @@ async def recall_memory(ctx, query: str = "", label: str = "") -> dict:
     return {"blocks": block_rows, "passages": passages}
 
 
+async def _forget_everywhere(db: AsyncSession, user: User, owner, needle: str) -> list[str]:
+    """Forget `needle` wherever this user's agents could read it: facts, the user's notes (matching lines),
+    episodes, and a person or organisation with that name or email together with every claim about them.
+    Only this user's rows are touched."""
+    from app.models import MemoryEntity, MemoryEntityAlias, MemoryEpisode
+
+    low = needle.lower()[:120]
+    like = f"%{low}%"
+    removed: list[str] = []
+    entity_ids = set(
+        (
+            await db.execute(
+                select(MemoryEntityAlias.entity_id).where(
+                    MemoryEntityAlias.user_id == user.id, MemoryEntityAlias.value == low
+                )
+            )
+        ).scalars().all()
+    ) | set(
+        (
+            await db.execute(
+                select(MemoryEntity.id).where(
+                    MemoryEntity.user_id == user.id, MemoryEntity.status == "active", func.lower(MemoryEntity.name) == low
+                )
+            )
+        ).scalars().all()
+    )
+    facts = (
+        await db.execute(
+            select(MemoryPassage).where(
+                MemoryPassage.user_id == user.id,
+                MemoryPassage.status != STATUS_DELETED,
+                or_(MemoryPassage.scope.in_(USER_SCOPES), MemoryPassage.agent_id == owner.id),
+                or_(
+                    func.lower(MemoryPassage.text).like(like),
+                    MemoryPassage.subject_entity_id.in_(entity_ids) if entity_ids else False,
+                ),
+            )
+        )
+    ).scalars().all()
+    for row in facts:
+        row.status = STATUS_DELETED
+        removed.append(f"fact:{row.id}")
+        await _forget_letta_text(owner, row.text or "")
+    for block in await _visible_blocks(db, user, owner):
+        lines = (block.value or "").splitlines()
+        kept = [line for line in lines if low not in line.lower()]
+        if len(kept) != len(lines):
+            block.value = "\n".join(kept)
+            removed.append(f"note:{block.label}")
+    episodes = (
+        await db.execute(
+            select(MemoryEpisode).where(
+                MemoryEpisode.user_id == user.id,
+                MemoryEpisode.status == "active",
+                or_(*[func.lower(getattr(MemoryEpisode, col)).like(like) for col in ("observation", "thoughts", "action", "result", "feedback")]),
+            )
+        )
+    ).scalars().all()
+    for ep in episodes:
+        ep.status = "deleted"
+        removed.append(f"episode:{ep.id}")
+    if entity_ids:
+        for entity in (
+            await db.execute(select(MemoryEntity).where(MemoryEntity.user_id == user.id, MemoryEntity.id.in_(entity_ids)))
+        ).scalars().all():
+            entity.status = "deleted"
+            removed.append(f"entity:{entity.id}")
+        # Drop the aliases so a later mention starts a fresh record instead of reviving this one.
+        for alias in (
+            await db.execute(
+                select(MemoryEntityAlias).where(MemoryEntityAlias.user_id == user.id, MemoryEntityAlias.entity_id.in_(entity_ids))
+            )
+        ).scalars().all():
+            await db.delete(alias)
+    return removed
+
+
 async def forget_memory(ctx, memory_id: str = "", label: str = "", text: str = "") -> dict:
     missing = _need_db(ctx)
     if missing:
@@ -1098,23 +1175,7 @@ async def forget_memory(ctx, memory_id: str = "", label: str = "", text: str = "
                 await _forget_letta_text(owner, row.text or "")
     snippet = (text or "").strip()
     if snippet and not memory_id and not tag:
-        rows = (
-            await ctx.db.execute(
-                select(MemoryPassage).where(
-                    MemoryPassage.user_id == ctx.user.id,
-                    or_(MemoryPassage.scope.in_(USER_SCOPES), MemoryPassage.agent_id == owner.id),
-                    MemoryPassage.text.ilike(f"%{snippet[:80]}%"),
-                )
-            )
-        ).scalars().all()
-        for row in rows[:8]:
-            if getattr(row, "status", STATUS_ACTIVE) == STATUS_DELETED:
-                continue
-            if snippet.lower() not in (row.text or "").lower():
-                continue
-            row.status = STATUS_DELETED
-            removed.append(f"passage:{row.id}")
-            await _forget_letta_text(owner, row.text or "")
+        removed += await _forget_everywhere(ctx.db, ctx.user, owner, snippet)
     if not removed:
         return {"error": "Nothing matched to forget. Pass memory_id, label, or text."}
     await ctx.db.commit()
