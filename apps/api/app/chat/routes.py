@@ -471,7 +471,10 @@ async def chat(
     async def _run_turn() -> dict:
         from app.agent import usage as turn_usage
 
+        from app.agent.meter import METER
+
         tally, usage_token = turn_usage.start()
+        meter_token = METER.set((user.id, "chat"))  # the per-user daily meter (app/agent/meter.py)
         try:
             result = await run_deep_agent(
                 db,
@@ -492,6 +495,7 @@ async def chat(
             )
         except Exception as exc:  # noqa: BLE001
             turn_usage.end(usage_token)
+            METER.reset(meter_token)
             if run.cancelled or isinstance(exc, run_cancel.TurnCancelled):
                 raise run_cancel.TurnCancelled("stopped") from exc
             log.exception("chat agent failed")
@@ -504,6 +508,7 @@ async def chat(
                     await progress.finish()
             raise HTTPException(502, str(exc)[:400]) from exc
         turn_usage.end(usage_token)
+        METER.reset(meter_token)
         if isinstance(result, dict):
             result["usage"] = turn_usage.summary(tally)
         if run.cancelled:

@@ -33,6 +33,10 @@ def end(token: Any | None) -> None:
 
 
 def add(model: str, input_tokens: int = 0, output_tokens: int = 0, cached_tokens: int = 0) -> None:
+    if input_tokens or output_tokens:
+        from app.agent.meter import record_tokens
+
+        record_tokens(model, input_tokens, output_tokens, cached_tokens)  # the per-user daily meter
     tally = TURN.get()
     if tally is None or not (input_tokens or output_tokens):
         return

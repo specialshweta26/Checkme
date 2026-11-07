@@ -147,8 +147,11 @@ async def learn_from_edit(session_factory, user_id, sender: str, draft: str, sen
         "One rule per line, no bullets. If there is no general style lesson, reply with exactly NONE.\n\n"
         f"Draft:\n{draft[:2500]}\n\nWhat the user sent:\n{sent[:2500]}"
     )
+    from app.agent.meter import metered
+
     try:
-        rule = " ".join((await _llm(prompt, 120)).split("\n")[0:2]).strip()
+        with metered(user_id, "inbox"):
+            rule = " ".join((await _llm(prompt, 120)).split("\n")[0:2]).strip()
     except Exception:  # noqa: BLE001
         log.info("draft edit learning failed", exc_info=True)
         return ""

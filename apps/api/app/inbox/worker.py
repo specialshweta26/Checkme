@@ -82,12 +82,17 @@ async def check_user(session_factory, user_id, *, urgent: bool = False) -> int |
     async with session_factory() as db:
         if not await claim_job(db, user_id, JOB, timedelta(0) if urgent else INTERVAL - timedelta(seconds=10), LEASE):
             return None
+        from app.agent.meter import metered, over_budget
+
         error, arrived = "", 0
         try:
             user = await db.get(User, user_id)
             if user is not None:
-                arrived = await asyncio.wait_for(refresh_mailboxes(db, user, unread_only=False, classify=False), timeout=45)
-                await asyncio.wait_for(classify_pending(db, user), timeout=90)
+                with metered(user_id, "inbox"):
+                    arrived = await asyncio.wait_for(refresh_mailboxes(db, user, unread_only=False, classify=False), timeout=45)
+                    # Over today's background budget: only the rules tier (no model) until tomorrow.
+                    rules_only = await over_budget(db, user_id)
+                    await asyncio.wait_for(classify_pending(db, user, rules_only=rules_only), timeout=90)
         except Exception as exc:  # noqa: BLE001 - one user's mailbox must not stop the others
             error = f"{type(exc).__name__}: {exc}"
             log.info("inbox check failed for user %s", user_id, exc_info=True)

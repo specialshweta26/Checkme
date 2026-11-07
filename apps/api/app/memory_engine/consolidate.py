@@ -279,7 +279,9 @@ async def consolidate_user(db: AsyncSession, user_id) -> dict:
         "merged": await merge_duplicates(db, user_id),
     }
     await db.commit()
-    done["cards"] = await rewrite_cards(db, user_id)
+    from app.agent.meter import over_budget
+
+    done["cards"] = 0 if await over_budget(db, user_id) else await rewrite_cards(db, user_id)
     await db.commit()
     return done
 
@@ -314,9 +316,15 @@ async def rebuild_cards(session_factory, user_id) -> int | None:
     async with session_factory() as db:
         if not await claim_job(db, user_id, "cards", timedelta(minutes=25)):
             return None
+        from app.agent.meter import metered, over_budget
+
         error, written = "", None
         try:
-            written = await asyncio.wait_for(rewrite_cards(db, user_id), timeout=300)
+            if await over_budget(db, user_id):
+                written = 0
+            else:
+                with metered(user_id, "memory"):
+                    written = await asyncio.wait_for(rewrite_cards(db, user_id), timeout=300)
             await db.commit()
         except Exception as exc:  # noqa: BLE001
             error = f"{type(exc).__name__}: {exc}"
@@ -332,9 +340,12 @@ async def run_user(session_factory, user_id) -> dict | None:
     async with session_factory() as db:
         if not await claim_job(db, user_id, JOB, EVERY):
             return None
+        from app.agent.meter import metered
+
         error, done = "", None
         try:
-            done = await asyncio.wait_for(consolidate_user(db, user_id), timeout=300)
+            with metered(user_id, "memory"):
+                done = await asyncio.wait_for(consolidate_user(db, user_id), timeout=300)
         except Exception as exc:  # noqa: BLE001 - one user's failure must not stop the others
             error = f"{type(exc).__name__}: {exc}"
             log.info("memory consolidate failed for %s", user_id, exc_info=True)

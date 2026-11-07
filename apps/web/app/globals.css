@@ -3106,3 +3106,10 @@ button.provider:disabled { opacity: .6; cursor: default; }
 .inbox-changed { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 10px 0 0; padding: 8px 10px; border-radius: 8px; background: var(--accent-soft); font-size: 13px; }
 .inbox-changed span { flex: 1 1 220px; }
 .inbox-draft.fresh { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.profile-link { display: block; margin: 8px 0; font-size: 13px; color: var(--accent); text-decoration: none; }
+.usage-bar { height: 8px; border-radius: 4px; background: var(--accent-soft); overflow: hidden; margin: 6px 0; }
+.usage-bar > span { display: block; height: 100%; background: var(--accent); }
+.usage-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.usage-table th, .usage-table td { text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--line, rgba(0,0,0,0.08)); }
+.usage-table th:first-child, .usage-table td:first-child { text-align: left; }
