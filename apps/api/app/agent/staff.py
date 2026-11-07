@@ -100,6 +100,17 @@ async def today_briefing(db, user, runtime, agent=None) -> dict:
         task_stmt = task_stmt.where(ScheduledTask.agent_id == owner_id)
     autos = (await db.execute(auto_stmt)).scalars().all()
     scheduled = (await db.execute(task_stmt)).scalars().all()
+    reconnect, prep = [], {}
+    try:
+        from app.memory_engine import routines
+
+        reconnect = await routines.reconnect(db, user.id)
+        for ev in events:
+            lines = await routines.meeting_prep(db, user, ev)
+            if lines:
+                prep[str(ev.get("title") or ev.get("event_id") or "meeting")[:120]] = lines
+    except Exception as exc:  # noqa: BLE001 - the briefing still works without memory
+        log.warning("briefing memory failed: %s", exc)
     payload = {
         "timezone": tz,
         "now": now.isoformat(),
@@ -117,6 +128,9 @@ async def today_briefing(db, user, runtime, agent=None) -> dict:
             for m in unread
         ],
         "commitments": [_commit(c) for c in commits],
+        # From the user's memory (memory_engine/routines.py): who to prepare for, and who has gone quiet.
+        "meeting_prep": prep,
+        "reconnect": [{k: p[k] for k in ("name", "days_quiet", "mail_out", "meetings", "card")} for p in reconnect],
         "admin": [_admin(a) for a in admin],
         "automations": [{"name": a.name, "trigger": a.trigger, "action": a.action} for a in autos],
         "scheduled_tasks": [
@@ -133,7 +147,9 @@ async def today_briefing(db, user, runtime, agent=None) -> dict:
         "You are the user's chief of staff and analyst. Write a detailed daily briefing from this JSON, not a short recap. "
         "Sections: What matters today; Calendar risk; People waiting on a reply (cite subject + message_id); "
         "CC'd to you (recipient_role is cc or bcc — still include these, do not skip them); "
-        "Open commitments; Admin/bills; Insights and risks; Next actions with why they matter. "
+        "Open commitments; Meeting prep (for each meeting in meeting_prep: who is attending, what you know, anything open); "
+        "People to reconnect with (reconnect: worked with a lot, quiet for days_quiet days; suggest a short note); "
+        "Admin/bills; Insights and risks; Next actions with why they matter. Skip a section that has nothing in it. "
         "Mail where the user is on Cc or Bcc is part of their inbox. Cover it. "
         "Show every time in IST (Asia/Kolkata). Do not invent items.\n\n"
         + clip(json.dumps(payload, default=str), 10000)

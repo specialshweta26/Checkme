@@ -185,6 +185,14 @@ async def delete_fact(fact_id: int, user: User = Depends(current_user), db: Asyn
     return {"ok": True}
 
 
+@router.get("/suggestions")
+async def suggestions(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """People worth a quick note: worked with a lot, quiet for three weeks or more."""
+    from app.memory_engine.routines import reconnect
+
+    return {"reconnect": await reconnect(db, user.id)}
+
+
 @router.get("/changes")
 async def changes(days: int = 7, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     """What memory changed in the last `days` days (the weekly digest), newest first, with counts by kind."""

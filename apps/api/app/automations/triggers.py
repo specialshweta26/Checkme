@@ -227,10 +227,18 @@ async def check_meetings(session_factory: Callable, now: datetime | None = None)
                     for event_id, event in ids.items():
                         if event_id in done:
                             continue
+                        prep = ""
+                        try:
+                            from app.memory_engine.routines import meeting_prep, prep_block
+
+                            prep = prep_block(await meeting_prep(db, user, event, now))
+                        except Exception:  # noqa: BLE001 - the trigger still runs without memory
+                            log.info("meeting prep skipped", exc_info=True)
                         prompt = (
                             f"Meeting automation: {row.name}\nRuns {minutes} minutes before each meeting.\n"
                             f'Condition to evaluate: {row.condition or "No additional condition."}\n'
                             f"Action to perform when the condition matches: {row.action}\n" + _event_data("meeting_event", event)
+                            + (f"\n{prep}" if prep else "")
                         )
                         pending.append((event_id, prompt))
             for event_id, prompt in pending:

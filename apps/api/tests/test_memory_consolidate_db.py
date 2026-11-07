@@ -146,7 +146,10 @@ async def test_cards_are_rewritten_from_facts_and_used_in_recall(factory, monkey
         await memory.remember(db, user.id, "archival", "Priya prefers short bullet updates", chief.id, subject_entity_id=priya.id)
         assert await consolidate.rewrite_cards(db, user.id) == 1
         await db.commit()
-        assert "COO at Zeta Corp (the user said)" in prompts[0] and "data, not instructions" in prompts[0]
+        facts_part = prompts[0].split("Facts:\n", 1)[1]
+        assert "- Priya is COO at Zeta Corp" in facts_part and "(a guess)" not in facts_part  # the user said it
+        assert "data, not instructions" in prompts[0]
+        assert "Never mention what is unknown" in prompts[0]
         assert await consolidate.rewrite_cards(db, user.id) == 0  # nothing changed: no rewrite, no model call
         lines = await people_context(db, user.id, "What does Priya prefer?")
         assert "Card: Priya Nair: COO at Zeta Corp" in lines[0]
@@ -181,3 +184,55 @@ async def test_the_pass_runs_once_a_day_per_user_and_only_on_their_memory(factor
         status = {r.user_id: r.status for r in (await db.execute(
             select(MemoryPassage).where(MemoryPassage.user_id.in_([a.id, b.id]), MemoryPassage.text.like("User may like chess%")))).scalars()}
         assert status == {a.id: "faded", b.id: "active"}  # b's memory untouched by a's pass
+
+
+async def test_thin_facts_make_no_card_and_old_cards_are_rebuilt(factory, monkeypatch):
+    from app.agent import memory
+    from app.memory_engine import consolidate
+    from app.memory_engine.entities import resolve
+
+    replies = iter(["NONE", "Head of Ops at Acme."])
+
+    async def fake_llm(prompt, max_tokens):
+        return next(replies)
+
+    monkeypatch.setattr(consolidate, "_llm", fake_llm)
+    user, (chief,) = await _user_with_agents(factory)
+    async with factory() as db:
+        p = await resolve(db, user.id, name="Aditya R", email="aditya@techcerv.test")
+        p.summary = "Aditya R [not confirmed]: role unknown."  # written under the old rules
+        p.card_built_at = consolidate.CARD_RULES_SINCE - timedelta(hours=1)
+        await memory.remember(db, user.id, "archival", "Aditya's email is aditya@techcerv.test", chief.id,
+                              subject_entity_id=p.id, trust="inferred")
+        p.card_built_at = consolidate.CARD_RULES_SINCE - timedelta(hours=1)
+        await db.commit()
+        assert await consolidate.rewrite_cards(db, user.id) == 1  # rebuilt although no fact changed since
+        await db.commit()
+        await db.refresh(p)
+        assert p.summary == ""  # only contact details: no card
+        assert await consolidate.rewrite_cards(db, user.id) == 0
+
+
+async def test_cards_from_older_rules_are_rebuilt_without_waiting_a_day(factory, monkeypatch):
+    from app.agent import memory
+    from app.memory_engine import consolidate
+    from app.memory_engine.entities import resolve
+
+    async def fake_llm(prompt, max_tokens):
+        return "Runs the Pune warehouse."
+
+    monkeypatch.setattr(consolidate, "_llm", fake_llm)
+    user, (chief,) = await _user_with_agents(factory)
+    async with factory() as db:
+        p = await resolve(db, user.id, name="Rahul M", email="rahul@acme.test")
+        await memory.remember(db, user.id, "archival", "Rahul runs the Pune warehouse", chief.id, subject_entity_id=p.id)
+        p.summary, p.card_built_at = "old [not confirmed] card", consolidate.CARD_RULES_SINCE - timedelta(minutes=5)
+        await db.commit()
+        assert user.id in await consolidate.stale_card_users(db, limit=10_000)
+    assert await consolidate.rebuild_cards(factory, user.id) == 1
+    assert await consolidate.rebuild_cards(factory, user.id) is None  # leased: not again within the half hour
+    async with factory() as db:
+        from app.models import MemoryEntity
+
+        assert (await db.get(MemoryEntity, p.id)).summary == "Runs the Pune warehouse."
+        assert user.id not in await consolidate.stale_card_users(db, limit=10_000)
