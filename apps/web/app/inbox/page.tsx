@@ -145,6 +145,9 @@ export default function InboxPage() {
     node.scrollIntoView({ behavior: "smooth", block: "start" });
   }, [focusId, loading, visible]);
 
+  // After Rephrase / Redraft: what happened, and the draft before it, so the change is visible and reversible.
+  const [changed, setChanged] = useState<Record<string, { kind: "rephrase" | "redraft"; prev: string }>>({});
+
   function update(id: string, patch: Partial<InboxMail>) {
     setItems((rows) => rows.map((r) => (r.id === id ? { ...r, ...patch } : r)));
   }
@@ -153,6 +156,8 @@ export default function InboxPage() {
     setBusy(`${id}:${path}`);
     setError("");
     const item = items.find((m) => m.id === id);
+    const rewrite = path === "/redraft" || path === "/rephrase" ? (path === "/redraft" ? "redraft" : "rephrase") : null;
+    if (rewrite) setChanged((cur) => { const next = { ...cur }; delete next[id]; return next; });
     const res = await fetch(`/api/inbox/${id}${path}`, {
       method: "POST",
       credentials: "include",
@@ -181,6 +186,7 @@ export default function InboxPage() {
     } else if (data.item) {
       update(id, data.item);
     }
+    if (rewrite && item) setChanged((cur) => ({ ...cur, [id]: { kind: rewrite, prev: item.draft } }));
     setBusy("");
     setOpenRephrase("");
   }
@@ -386,9 +392,41 @@ export default function InboxPage() {
                       },
                     ]}
                   />
+                  {busy === `${mail.id}:/redraft` ? (
+                    <p className="inbox-working">Reading the whole thread again and writing a new summary and draft… (about 5–10 seconds)</p>
+                  ) : busy === `${mail.id}:/rephrase` ? (
+                    <p className="inbox-working">Rewording your draft…</p>
+                  ) : changed[mail.id] ? (
+                    <div className="inbox-changed">
+                      <span>
+                        {changed[mail.id].kind === "redraft"
+                          ? changed[mail.id].prev === mail.draft
+                            ? "Redrafted: the summary was refreshed; the draft came out the same."
+                            : "Redrafted: new summary, key points and draft below."
+                          : "Reworded: your draft below has the new wording."}
+                      </span>
+                      {changed[mail.id].prev && changed[mail.id].prev !== mail.draft ? (
+                        <button
+                          type="button"
+                          className="chip"
+                          onClick={() => {
+                            const prev = changed[mail.id].prev;
+                            update(mail.id, { draft: prev });
+                            saveDraft(mail.id, prev);
+                            setChanged((cur) => { const next = { ...cur }; delete next[mail.id]; return next; });
+                          }}
+                        >
+                          Use previous draft
+                        </button>
+                      ) : null}
+                      <button type="button" className="chip" onClick={() => setChanged((cur) => { const next = { ...cur }; delete next[mail.id]; return next; })}>
+                        OK
+                      </button>
+                    </div>
+                  ) : null}
                   <label className="inbox-draft-label">Drafted reply</label>
                   <textarea
-                    className="inbox-draft"
+                    className={`inbox-draft${changed[mail.id] ? " fresh" : ""}`}
                     value={mail.draft}
                     placeholder="A drafted reply will appear here after the thread is reviewed."
                     onChange={(e) => update(mail.id, { draft: e.target.value })}
@@ -496,8 +534,14 @@ export default function InboxPage() {
                         }}
                       />
                     </label>
-                    <button className="rephrase-btn" type="button" disabled={working} onClick={() => setOpenRephrase(openRephrase === mail.id ? "" : mail.id)}>
-                      ✦ Rephrase
+                    <button
+                      className="rephrase-btn"
+                      type="button"
+                      title="Keep what the draft says and change how it says it: shorter, more formal, or your own instruction"
+                      disabled={working}
+                      onClick={() => setOpenRephrase(openRephrase === mail.id ? "" : mail.id)}
+                    >
+                      {busy === `${mail.id}:/rephrase` ? "Rephrasing…" : "✦ Rephrase"}
                     </button>
                     <button
                       className="rephrase-btn"
@@ -509,7 +553,7 @@ export default function InboxPage() {
                         act(mail.id, "/redraft", {});
                       }}
                     >
-                      ↻ Redraft
+                      {busy === `${mail.id}:/redraft` ? "Redrafting…" : "↻ Redraft"}
                     </button>
                     <button
                       className="send-btn"

@@ -3100,3 +3100,9 @@ body.lumio-desktop .screen-rail.overlay.fullscreen {
 .desktop-wait { display: grid; gap: 6px; justify-items: start; padding: 12px 14px; margin-bottom: 12px; border-radius: 12px; border: 1px solid var(--line); background: color-mix(in srgb, #2563eb 6%, transparent); }
 button.provider { width: 100%; font: inherit; cursor: pointer; }
 button.provider:disabled { opacity: .6; cursor: default; }
+
+/* Inbox: Rephrase / Redraft progress and result (apps/web/app/inbox/page.tsx). */
+.inbox-working { margin: 10px 0 0; font-size: 13px; color: var(--accent); }
+.inbox-changed { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 10px 0 0; padding: 8px 10px; border-radius: 8px; background: var(--accent-soft); font-size: 13px; }
+.inbox-changed span { flex: 1 1 220px; }
+.inbox-draft.fresh { outline: 2px solid var(--accent); outline-offset: 1px; }
