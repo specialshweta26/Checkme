@@ -149,3 +149,38 @@ async def test_a_rewritten_draft_teaches_the_voice_and_can_be_undone(factory, mo
     async with factory() as db:
         u = await db.get(User, user.id)
         assert await read_core(db, u, "voice_external") == "Opens with 'Hi <first name>,'; signs off 'Best, G'"
+
+
+async def test_redraft_redoes_one_card_with_memory(factory, monkeypatch):
+    import uuid
+
+    from app.inbox import service
+    from app.models import InboxItem
+
+    user, _ = await _setup(factory)
+
+    async def fake_llm(prompt, max_tokens, json_mode=False):
+        assert "Open: send the revised SOW" in prompt
+        return json.dumps({"classification": "reply", "summary": "Chasing the SOW.", "key_points": ["SOW due Friday"], "draft": "Hi Priya, Friday. Best, G"})
+
+    class Box:
+        async def call(self, tool, args):
+            return {"subject": "SOW?", "messages": [{"from": "priya@acme.com", "body": "Where is the SOW?"}]}
+
+    async def connector(db, u, cid):
+        return Box()
+
+    monkeypatch.setattr(service, "_llm", fake_llm)
+    monkeypatch.setattr(service, "connector_for", connector)
+    async with factory() as db:
+        item = InboxItem(user_id=user.id, connector_id=uuid.uuid4(), message_id=f"m-{uuid.uuid4().hex[:6]}", sender="Priya Nair <priya@acme.com>",
+                         subject="SOW?", classification="reply", summary="old", draft="old draft")
+        db.add(item)
+        await db.commit()
+        out = await service.redraft(db, user, item.id)
+    assert out["summary"] == "Chasing the SOW." and out["draft"] == "Hi Priya, Friday. Best, G"
+    assert out["key_person"] is True and out["edited"] is False
+    other, _ = await _setup(factory)
+    async with factory() as db:
+        with pytest.raises(LookupError):
+            await service.redraft(db, other, item.id)  # another user's card

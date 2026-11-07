@@ -124,6 +124,8 @@ def serialize(item: InboxItem, connector_name: str = "", connector_slug: str = "
         "key_points": item.key_points or [],
         "draft": item.draft,
         "key_person": bool(getattr(item, "key_person", False)),
+        # The user changed the assistant's draft (so redrafting would lose their edits).
+        "edited": bool(getattr(item, "ai_draft", "") and item.draft != getattr(item, "ai_draft", "")),
         "sender_note": getattr(item, "sender_note", "") or "",
         "status": item.status,
         "unread": item.unread,
@@ -301,6 +303,20 @@ async def rephrase(db: AsyncSession, user: User, item_id, *, tone: str = "", ins
     if next_draft:
         item.draft = clip(next_draft, 4000)
         await db.commit()
+    return serialize(item)
+
+
+async def redraft(db: AsyncSession, user: User, item_id) -> dict[str, Any]:
+    """Triage one card again with what memory knows now: new summary, key points and draft (nothing is sent)."""
+    from app.inbox.memory_context import contexts_for
+
+    item = await get_item(db, user, item_id)
+    runtime = await connector_for(db, user, item.connector_id)
+    if runtime is None:
+        raise LookupError("Mail connector is not available")
+    ctx = (await contexts_for(db, user, [item])).get(item.id)
+    await _classify_one(item, runtime, ctx)
+    await db.commit()
     return serialize(item)
 
 
