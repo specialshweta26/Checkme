@@ -43,6 +43,7 @@ type Change = {
   undone: boolean;
   can_undo: boolean;
 };
+type Reconnect = { id: number; name: string; days_quiet: number; mail_out: number; meetings: number; card: string };
 type Tab = "week" | "people" | "facts";
 
 function day(iso: string) {
@@ -74,6 +75,7 @@ export default function MemoryPage() {
   const [facts, setFacts] = useState<Fact[]>([]);
   const [changes, setChanges] = useState<Change[]>([]);
   const [counts, setCounts] = useState<Record<string, number>>({});
+  const [quiet, setQuiet] = useState<Reconnect[]>([]);
   const [open, setOpen] = useState<PersonDetail | null>(null);
   const [editing, setEditing] = useState<{ id: number; text: string } | null>(null);
   const [query, setQuery] = useState("");
@@ -93,7 +95,13 @@ export default function MemoryPage() {
 
   const load = useCallback(async () => {
     try {
-      const [p, f, c] = await Promise.all([call("/api/memory/people"), call("/api/memory/facts"), call("/api/memory/changes?days=7")]);
+      const [p, f, c, s] = await Promise.all([
+        call("/api/memory/people"),
+        call("/api/memory/facts"),
+        call("/api/memory/changes?days=7"),
+        call("/api/memory/suggestions").catch(() => ({ reconnect: [] })),
+      ]);
+      setQuiet(s.reconnect || []);
       setPeople(p.people);
       setMine(p.me);
       setFacts(f.facts);
@@ -206,6 +214,19 @@ export default function MemoryPage() {
               <p className="muted">
                 {loaded ? `In the last 7 days: ${learned} learned, ${tidied} tidied up (replaced, faded or merged).` : "Loading…"}
               </p>
+              {quiet.length ? (
+                <div className="task-card">
+                  <div className="task-main">
+                    <strong>Worth a quick note</strong>
+                    <span className="muted">People you work with a lot who have gone quiet.</span>
+                    {quiet.map((r) => (
+                      <span key={r.id} className="muted">
+                        {r.name}: no contact for {r.days_quiet} days ({r.mail_out} sent, {r.meetings} meetings)
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
               {loaded && changes.length === 0 ? (
                 <div className="task-empty">
                   <p className="muted">Nothing changed this week.</p>
