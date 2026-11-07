@@ -45,8 +45,11 @@ def test_langmem_model_sends_reasoning_and_no_temperature(monkeypatch):
     """gpt-6-luna rejects temperature without a reasoning setting (400), which sent every turn to the fallback."""
     import langmem
 
+    from app.config import get_settings
     from app.memory_engine import episodes
 
+    # CI has no OpenAI key; building the client only needs a non-empty one (nothing is sent).
+    monkeypatch.setattr(get_settings(), "openai_api_key", "sk-test-not-a-real-key")
     captured = {}
 
     def fake_manager(model, **kwargs):
