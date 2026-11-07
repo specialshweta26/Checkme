@@ -174,6 +174,7 @@ async def touch(db: AsyncSession, user_id, name: str, email: str, field: str, wh
 
 async def learn_mail(db: AsyncSession, user, runtime) -> dict:
     """Who writes to the user and whom the user writes to, from the newest inbox and sent mail headers."""
+    await ent.unmark_wrong_self(db, user)  # addresses the first Sent-folder rule wrongly took for the user's
     await ent.mark_lookalikes(db, user)  # people learned before this check existed
     own = await own_addresses(db, user)
     counts = {"mail_in": 0, "mail_out": 0}
@@ -186,10 +187,10 @@ async def learn_mail(db: AsyncSession, user, runtime) -> dict:
             continue
         for msg in listed:
             if kind == "mail_out":
-                # Whoever sent mail from the user's Sent folder is the user (an alias or a send-as address): certain,
-                # so recorded as the user's own rather than as a guess.
+                # A From in the user's Sent folder under the user's own name is another address of theirs (an alias or
+                # send-as). Under someone else's name it is mail sent on their behalf or by a delegate: not the user.
                 for name, email in parse_addresses(msg.get("from")):
-                    if email not in own and await ent.set_self(db, user.id, email, True) is not None:
+                    if email not in own and ent.named_like_user(name, user) and await ent.set_self(db, user.id, email, True) is not None:
                         own.add(email)
             ref = f"{getattr(runtime, 'slug', '')}:{msg.get('message_id')}"
             if not msg.get("message_id") or not await first_seen(db, user.id, kind, ref):

@@ -196,6 +196,13 @@ def looks_like_user(name: str, email: str, user) -> bool:
     return bool(tokens) and tokens[0] == first and first in email.split("@")[0]
 
 
+def named_like_user(name: str, user) -> bool:
+    """The display name starts with the user's first name ("Gaurav R" for user Gaurav). Without a name, no."""
+    first = first_name_of(user)
+    tokens = [t for t in _NAME_SPLIT.split((name or "").lower()) if t]
+    return bool(first and tokens and tokens[0] == first)
+
+
 async def self_addresses(db: AsyncSession, user_id) -> set[str]:
     rows = (await db.execute(
         select(MemoryEntityAlias.value)
@@ -219,7 +226,8 @@ async def _entity_for(db: AsyncSession, user_id, who: str) -> MemoryEntity | Non
     )).scalars().first()
 
 
-async def set_self(db: AsyncSession, user_id, who: str, is_me: bool = True, *, guessed: bool = False) -> MemoryEntity | None:
+async def set_self(db: AsyncSession, user_id, who: str, is_me: bool = True, *, guessed: bool = False,
+                   by_user: bool = False) -> MemoryEntity | None:
     """Mark the person behind an address or name as the user (is_me) or as someone else. A guess never overrides the
     user saying "that's not me". An unknown address the user says is theirs is recorded so it is skipped from now on."""
     if db is None or not user_id or not (who or "").strip():
@@ -247,6 +255,11 @@ async def set_self(db: AsyncSession, user_id, who: str, is_me: bool = True, *, g
         await db.execute(delete(MemoryEntityAlias).where(
             MemoryEntityAlias.user_id == user_id, MemoryEntityAlias.entity_id == entity.id, MemoryEntityAlias.kind == unsaid))
         await _claim_alias(db, user_id, entity.id, said, f"entity:{entity.id}")
+    if by_user:
+        from app.memory_engine.consolidate import record
+
+        await record(db, user_id, "self", f"entity:{entity.id}", "", entity.name if is_me else "",
+                     "you said this is you" if is_me else "you said this is someone else")
     await db.flush()
     return entity
 
@@ -262,6 +275,35 @@ async def guessed_self(db: AsyncSession, user_id) -> list[tuple[str, str]]:
         .order_by(MemoryEntity.salience.desc(), MemoryEntity.id)
     )).all()
     return [(r[0], r[1]) for r in rows]
+
+
+async def unmark_wrong_self(db: AsyncSession, user) -> int:
+    """Undo "this is the user" where the user never said so and the name isn't theirs. The first Sent-folder rule took
+    any From in Sent Items as the user, which is wrong for mail sent on someone's behalf or by a delegate."""
+    from app.models import MemoryChange
+
+    said = select(MemoryChange.target).where(MemoryChange.user_id == user.id, MemoryChange.op == "self")
+    rows = (await db.execute(
+        select(MemoryEntity).join(MemoryEntityAlias, MemoryEntityAlias.entity_id == MemoryEntity.id)
+        .where(MemoryEntity.user_id == user.id, MemoryEntity.status == "self", MemoryEntityAlias.user_id == user.id,
+               MemoryEntityAlias.kind == "is_me")
+    )).scalars().all()
+    targets = set((await db.execute(said)).scalars().all())
+    fixed = 0
+    for e in rows:
+        emails = [a for a in (await db.execute(select(MemoryEntityAlias.value).where(
+            MemoryEntityAlias.user_id == user.id, MemoryEntityAlias.entity_id == e.id, MemoryEntityAlias.kind == "email"))).scalars()]
+        if f"entity:{e.id}" in targets or named_like_user(e.name, user) or any(looks_like_user(e.name, m, user) for m in emails):
+            continue
+        e.status = "active"
+        await db.execute(delete(MemoryEntityAlias).where(
+            MemoryEntityAlias.user_id == user.id, MemoryEntityAlias.entity_id == e.id, MemoryEntityAlias.kind == "is_me"))
+        from app.memory_engine.consolidate import record
+
+        await record(db, user.id, "self", f"entity:{e.id}", "", "", f"{e.name} was wrongly taken for your own address")
+        fixed += 1
+    await db.flush()
+    return fixed
 
 
 async def mark_lookalikes(db: AsyncSession, user) -> int:

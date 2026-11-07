@@ -213,3 +213,32 @@ async def test_the_users_other_addresses_are_not_contacts(factory):
         await set_self(db, a.id, "g.home@yahoo.com", True)
         await db.commit()
         assert "g.home@yahoo.com" in await learn.own_addresses(db, a)
+
+
+async def test_a_colleague_in_sent_items_is_not_taken_for_the_user(factory):
+    from app.memory_engine import learn
+    from app.memory_engine.entities import _claim_alias, resolve, set_self, unmark_wrong_self
+    from app.models import MemoryEntity, User
+
+    a, _ = await _email_user(factory, f"gr{os.getpid()}del@agilitas.test")
+    async with factory() as db:
+        row = await db.get(User, a.id)
+        row.display_name = a.display_name = "Gaurav R"
+        await db.commit()
+        # Marked by the first Sent-folder rule (sent on Karthik's behalf), never confirmed by the user.
+        wrong = await resolve(db, a.id, name="Karthik Yermunja", email="karthik@agilitas.test")
+        wrong.status = "self"
+        await _claim_alias(db, a.id, wrong.id, "is_me", f"entity:{wrong.id}")
+        # One the user did confirm stays theirs, whatever its name.
+        mine = await resolve(db, a.id, name="Work Bot", email="bot@agilitas.test")
+        await set_self(db, a.id, "bot@agilitas.test", True, by_user=True)
+        await db.commit()
+        assert await unmark_wrong_self(db, a) == 1
+        await db.commit()
+        assert (await db.get(MemoryEntity, wrong.id)).status == "active"
+        assert (await db.get(MemoryEntity, mine.id)).status == "self"
+        box = FakeMailbox(a.email, sent=[
+            _msg("d1", frm="Karthik Yermunja <karthik@agilitas.test>", to="Priya Nair <priya@acme.com>"),
+        ])
+        await learn.learn_mail(db, a, box)
+        assert "karthik@agilitas.test" not in await learn.own_addresses(db, a)
