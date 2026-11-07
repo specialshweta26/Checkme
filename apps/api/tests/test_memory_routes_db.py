@@ -127,3 +127,45 @@ async def test_this_is_me_and_forget_everywhere(factory):
         assert (await db.get(MemoryPassage, fact)).status == "deleted"
         logged = (await db.execute(select(MemoryChange).where(MemoryChange.user_id == a.id))).scalars().all()
         assert not [c for c in logged if "gaurav" in (c.before + c.after).lower()]  # no copies left in the log
+
+
+async def test_add_a_note_and_a_fact_in_plain_words(factory, monkeypatch):
+    from app.memory_engine import consolidate
+
+    async def fake_llm(prompt, max_tokens):
+        return "Head of Retail Ops; prefers a call over email."
+
+    monkeypatch.setattr(consolidate, "_llm", fake_llm)
+    a, (chief,) = await _user_with_agents(factory)
+    pid, _, _ = await _seed(factory, a, chief, "Deepak Jha", "deepak@agilitas.test")
+    async with _client(factory, a) as http:
+        detail = (await http.post(f"/api/memory/people/{pid}/notes", json={"text": "Head of Retail Ops, prefers a call over email"})).json()
+        note = next(f for f in detail["current"] if "Retail Ops" in f["text"])
+        assert note["text"] == "Deepak Jha: Head of Retail Ops, prefers a call over email" and note["source"] == "You told me"
+        assert detail["card"] == "Head of Retail Ops; prefers a call over email."  # rewritten straight away
+        added = (await http.post("/api/memory/facts", json={"text": "I prefer short bullet-point answers"})).json()
+        assert added["fact"]["source"] == "You told me" and added["fact"]["unsure"] is False
+        week = (await http.get("/api/memory/changes")).json()
+        assert not [c for c in week["changes"] if c["op"] in ("card", "tidy")]  # housekeeping isn't shown as learning
+        learned = next(c for c in week["changes"] if c["op"] == "add")
+        assert learned["undo_label"] == "Remove"
+
+
+async def test_rooms_and_count_facts_are_tidied_away(factory):
+    from app.agent import memory
+    from app.memory_engine import consolidate
+    from app.memory_engine.entities import resolve
+    from app.models import MemoryEntity, MemoryPassage
+
+    a, (chief,) = await _user_with_agents(factory)
+    async with factory() as db:
+        room = await resolve(db, a.id, name="Salarpuria Tower II-Bangalore-First-Floor-1 - 1st Floor (6)", email="room.blr@agilitas.test")
+        deepak = await resolve(db, a.id, name="Deepak Jha", email="deepak@agilitas.test")
+        await db.commit()
+        noise = await memory.remember(db, a.id, "archival", "Deepak Jha has 8 emails exchanged and 7 meetings noted.", chief.id,
+                                      subject_entity_id=deepak.id, trust="inferred")
+        real = await memory.remember(db, a.id, "archival", "Deepak Jha leads retail operations", chief.id, subject_entity_id=deepak.id)
+        assert await consolidate.remove_noise(db, a.id) == 2
+        await db.commit()
+        assert (await db.get(MemoryEntity, room.id)).status == "deleted" and (await db.get(MemoryEntity, deepak.id)).status == "active"
+        assert (await db.get(MemoryPassage, noise.id)).status == "deleted" and (await db.get(MemoryPassage, real.id)).status == "active"

@@ -23,6 +23,10 @@ router = APIRouter(prefix="/memory", tags=["memory"])
 
 USER_SCOPES = ("user", "user_shared")
 UNDOABLE = {"add", "supersede", "fade", "card", "voice"}
+# Card rewrites and tidy-ups are the assistant's own housekeeping: kept in the log, not shown as learning.
+HIDDEN_OPS = {"card", "tidy"}
+UNDO_LABELS = {"add": "Remove", "supersede": "Restore the old one", "fade": "Keep it", "voice": "Undo"}
+SOURCES = {"user_said": "You told me", "inferred": "Worked out from your chats and mail", "third_party": "From someone else's email"}
 OP_LABELS = {
     "add": "Learned", "supersede": "Updated", "fade": "Faded", "merge": "Merged", "card": "Card rewritten",
     "self": "Marked as you", "forget": "Forgotten", "voice": "Writing style updated",
@@ -36,6 +40,8 @@ def _iso(when: datetime | None) -> str:
 def _fact(row: MemoryPassage) -> dict:
     return {
         "id": row.id, "text": row.text, "status": row.status, "trust": row.trust, "predicate": row.predicate,
+        "source": SOURCES.get(row.trust, "Worked out from your chats and mail"),
+        "unsure": row.trust != "user_said" and effective_confidence(row) < 0.45,
         "confidence": effective_confidence(row), "reinforced": row.reinforced,
         "valid_from": _iso(row.valid_from or row.created_at), "valid_to": _iso(row.valid_to),
         "subject_id": row.subject_entity_id,
@@ -106,6 +112,44 @@ async def person(entity_id: int, user: User = Depends(current_user), db: AsyncSe
         "history": [_fact(f) for f in facts if f.status != "active"],
         "meets_with": [{"name": n, "count": c} for n, c in partners],
     }
+
+
+class NoteIn(BaseModel):
+    text: str = Field(min_length=2, max_length=1000)
+
+
+@router.post("/people/{entity_id}/notes")
+async def add_note(entity_id: int, body: NoteIn, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Add something the user knows about this person. Saved as said by the user; their card is rewritten now."""
+    from app.agent.memory import remember
+    from app.memory_engine.consolidate import rewrite_cards
+
+    e = await _owned(db, MemoryEntity, user, entity_id)
+    if e.kind != "person" or e.status != "active":
+        raise HTTPException(404, "Not found")
+    text = " ".join(body.text.split())
+    if e.name.split()[0].lower() not in text.lower():
+        text = f"{e.name}: {text}"  # a note read later on its own still says who it is about
+    row = await remember(db, user.id, "archival", text, subject_entity_id=e.id, trust="user_said")
+    if row is None:
+        raise HTTPException(400, "Could not save")
+    try:
+        await rewrite_cards(db, user.id, only={e.id})
+        await db.commit()
+    except Exception:  # noqa: BLE001 - the note is saved; the card catches up on the next pass
+        await db.rollback()
+    return await person(entity_id, user, db)
+
+
+@router.post("/facts")
+async def add_fact(body: NoteIn, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Tell memory something directly. Saved as said by the user, for all of their agents."""
+    from app.agent.memory import remember
+
+    row = await remember(db, user.id, "archival", " ".join(body.text.split()), trust="user_said")
+    if row is None:
+        raise HTTPException(400, "Could not save")
+    return {"ok": True, "fact": _fact(row)}
 
 
 class SelfIn(BaseModel):
@@ -196,7 +240,8 @@ async def suggestions(user: User = Depends(current_user), db: AsyncSession = Dep
 async def changes(days: int = 7, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     """What memory changed in the last `days` days (the weekly digest), newest first, with counts by kind."""
     since = datetime.now(timezone.utc) - timedelta(days=max(1, min(days, 90)))
-    rows = (await db.execute(select(MemoryChange).where(MemoryChange.user_id == user.id, MemoryChange.created_at >= since)
+    rows = (await db.execute(select(MemoryChange).where(MemoryChange.user_id == user.id, MemoryChange.created_at >= since,
+                                                        MemoryChange.op.not_in(HIDDEN_OPS))
                              .order_by(MemoryChange.id.desc()).limit(300))).scalars().all()
     counts: dict[str, int] = {}
     for c in rows:
@@ -208,7 +253,7 @@ async def changes(days: int = 7, user: User = Depends(current_user), db: AsyncSe
         "changes": [{
             "id": c.id, "op": c.op, "label": OP_LABELS.get(c.op, c.op), "target": c.target, "before": c.before,
             "after": c.after, "reason": c.reason, "at": _iso(c.created_at), "undone": bool(c.undone_at),
-            "can_undo": c.op in UNDOABLE and not c.undone_at,
+            "can_undo": c.op in UNDOABLE and not c.undone_at, "undo_label": UNDO_LABELS.get(c.op, "Undo"),
         } for c in rows],
     }
 

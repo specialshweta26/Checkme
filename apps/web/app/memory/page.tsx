@@ -5,8 +5,8 @@ import { AppShell } from "../components/AppShell";
 import { apiError, getMe, type Me } from "../lib";
 
 // What I know: the user's own memory, shared by all their agents (apps/api/app/memory_engine/routes.py). People
-// learned from mail, calendar and chat, facts about the user's world, and what changed this week, with edit, undo
-// and forget. Nothing here is shared with other users.
+// learned from mail, calendar and chat, facts about the user's world, and what changed this week. The user can add
+// notes, correct or remove anything, and undo changes. Nothing here is shared with other users.
 
 type Person = {
   id: number;
@@ -25,8 +25,8 @@ type Fact = {
   id: number;
   text: string;
   status: string;
-  trust: string;
-  confidence: number;
+  source: string;
+  unsure: boolean;
   valid_from: string;
   valid_to: string;
   about?: string;
@@ -42,9 +42,10 @@ type Change = {
   at: string;
   undone: boolean;
   can_undo: boolean;
+  undo_label: string;
 };
-type Reconnect = { id: number; name: string; days_quiet: number; mail_out: number; meetings: number; card: string };
-type Tab = "week" | "people" | "facts";
+type Reconnect = { id: number; name: string; days_quiet: number; mail_out: number; meetings: number };
+type Tab = "people" | "facts" | "week";
 
 function day(iso: string) {
   return iso ? new Date(iso).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" }) : "";
@@ -56,8 +57,21 @@ function ago(iso: string) {
   return days <= 0 ? "today" : days === 1 ? "yesterday" : `${days} days ago`;
 }
 
-function trustLabel(f: Fact) {
-  return f.trust === "user_said" ? "you said" : f.trust === "third_party" ? "from someone else" : "guessed";
+function plural(n: number, word: string) {
+  return `${n} ${word}${n === 1 ? "" : "s"}`;
+}
+
+function firstName(name: string) {
+  return name.split(/\s+/)[0] || name;
+}
+
+function contactLine(p: Person) {
+  const bits = [];
+  if (p.mail_out) bits.push(`you emailed ${p.mail_out}×`);
+  if (p.mail_in) bits.push(`emailed you ${p.mail_in}×`);
+  if (p.meetings) bits.push(plural(p.meetings, "meeting"));
+  bits.push(`last contact ${ago(p.last_contact)}`);
+  return bits.join(" · ");
 }
 
 async function call(path: string, init?: RequestInit) {
@@ -69,7 +83,7 @@ async function call(path: string, init?: RequestInit) {
 
 export default function MemoryPage() {
   const [me, setMe] = useState<Me | null>(null);
-  const [tab, setTab] = useState<Tab>("week");
+  const [tab, setTab] = useState<Tab>("people");
   const [people, setPeople] = useState<Person[]>([]);
   const [mine, setMine] = useState<Person[]>([]);
   const [facts, setFacts] = useState<Fact[]>([]);
@@ -78,9 +92,12 @@ export default function MemoryPage() {
   const [quiet, setQuiet] = useState<Reconnect[]>([]);
   const [open, setOpen] = useState<PersonDetail | null>(null);
   const [editing, setEditing] = useState<{ id: number; text: string } | null>(null);
+  const [note, setNote] = useState("");
+  const [newFact, setNewFact] = useState("");
   const [query, setQuery] = useState("");
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
@@ -101,12 +118,12 @@ export default function MemoryPage() {
         call("/api/memory/changes?days=7"),
         call("/api/memory/suggestions").catch(() => ({ reconnect: [] })),
       ]);
-      setQuiet(s.reconnect || []);
       setPeople(p.people);
       setMine(p.me);
       setFacts(f.facts);
       setChanges(c.changes);
       setCounts(c.counts);
+      setQuiet(s.reconnect || []);
       setError("");
     } catch (e) {
       setError((e as Error).message);
@@ -119,16 +136,32 @@ export default function MemoryPage() {
     if (me) load();
   }, [me, load]);
 
-  async function act(key: string, fn: () => Promise<unknown>) {
+  async function act(key: string, fn: () => Promise<unknown>, done = "") {
     setBusy(key);
+    setNotice("");
     try {
       await fn();
       await load();
       if (open) setOpen(await call(`/api/memory/people/${open.id}`).catch(() => null));
+      if (done) setNotice(done);
     } catch (e) {
       setError((e as Error).message);
     } finally {
       setBusy("");
+    }
+  }
+
+  async function openPerson(p: Person) {
+    if (open?.id === p.id) {
+      setOpen(null);
+      return;
+    }
+    setNote("");
+    setEditing(null);
+    try {
+      setOpen(await call(`/api/memory/people/${p.id}`));
+    } catch (e) {
+      setError((e as Error).message);
     }
   }
 
@@ -138,7 +171,7 @@ export default function MemoryPage() {
     [people, q],
   );
   const shownFacts = useMemo(() => facts.filter((f) => !q || f.text.toLowerCase().includes(q) || (f.about || "").toLowerCase().includes(q)), [facts, q]);
-  const learned = (counts.add || 0) + (counts.card || 0);
+  const learned = counts.add || 0;
   const tidied = (counts.supersede || 0) + (counts.fade || 0) + (counts.merge || 0);
 
   function factRow(f: Fact, withAbout = true) {
@@ -153,25 +186,39 @@ export default function MemoryPage() {
           )}
           <div className="task-meta">
             {withAbout && f.about ? <span className="app-pill">{f.about}</span> : null}
-            <span className="muted">{trustLabel(f)}</span>
-            <span className="faint">since {day(f.valid_from)}</span>
-            {f.status === "active" ? <span className="faint">confidence {Math.round(f.confidence * 100)}%</span> : <span className="faint">until {day(f.valid_to)}</span>}
+            <span className="muted">{f.source}</span>
+            {f.unsure ? <span className="status-dot paused">Not sure</span> : null}
+            {f.status === "active" ? <span className="faint">since {day(f.valid_from)}</span> : <span className="faint">until {day(f.valid_to)}</span>}
           </div>
         </div>
         {f.status === "active" ? (
           <div className="task-actions">
             {isEditing ? (
               <>
-                <button className="btn" disabled={!!busy || !editing.text.trim()} onClick={() => act(`edit${f.id}`, async () => {
-                  await call(`/api/memory/facts/${f.id}`, { method: "PATCH", body: JSON.stringify({ text: editing.text }) });
-                  setEditing(null);
-                })}>Save</button>
-                <button className="btn secondary" onClick={() => setEditing(null)}>Cancel</button>
+                <button
+                  className="btn"
+                  disabled={!!busy || !editing.text.trim()}
+                  onClick={() =>
+                    act(`edit${f.id}`, async () => {
+                      await call(`/api/memory/facts/${f.id}`, { method: "PATCH", body: JSON.stringify({ text: editing.text }) });
+                      setEditing(null);
+                    }, "Saved. The old version is kept under Earlier.")
+                  }
+                >
+                  Save
+                </button>
+                <button className="btn secondary" onClick={() => setEditing(null)}>
+                  Cancel
+                </button>
               </>
             ) : (
               <>
-                <button className="icon-btn" title="Correct this fact" disabled={!!busy} onClick={() => setEditing({ id: f.id, text: f.text })}>✎</button>
-                <button className="icon-btn" title="Delete this fact" disabled={!!busy} onClick={() => act(`del${f.id}`, () => call(`/api/memory/facts/${f.id}`, { method: "DELETE" }))}>×</button>
+                <button className="btn secondary" disabled={!!busy} onClick={() => setEditing({ id: f.id, text: f.text })}>
+                  Correct
+                </button>
+                <button className="btn secondary" disabled={!!busy} onClick={() => act(`del${f.id}`, () => call(`/api/memory/facts/${f.id}`, { method: "DELETE" }), "Removed.")}>
+                  Remove
+                </button>
               </>
             )}
           </div>
@@ -188,31 +235,186 @@ export default function MemoryPage() {
             <div>
               <h1>What I know</h1>
               <p className="muted">
-                What your assistant has learned from your chats, mail and calendar. Every one of your agents uses it; nobody else can see it.
-                Correct anything that's wrong, undo a change, or forget a person everywhere.
+                What your assistant uses when it drafts replies, summarises mail and prepares you for meetings. Add what it should know, correct
+                what's wrong, or remove anything. Only you can see this.
               </p>
             </div>
           </div>
 
           <div className="tasks-toolbar">
             <div className="tasks-tabs">
-              {(["week", "people", "facts"] as Tab[]).map((id) => (
+              {(["people", "facts", "week"] as Tab[]).map((id) => (
                 <button key={id} className={`pill${tab === id ? " on" : ""}`} onClick={() => setTab(id)}>
-                  {id === "week" ? "This week" : id === "people" ? `People (${people.length})` : `Facts (${facts.length})`}
+                  {id === "people" ? `People (${people.length})` : id === "facts" ? `Facts (${facts.length})` : "This week"}
                 </button>
               ))}
             </div>
             <div className="tasks-filters">
-              <input className="tasks-search" type="search" placeholder="Search memory" value={query} onChange={(e) => setQuery(e.target.value)} />
+              <input className="tasks-search" type="search" placeholder="Search" value={query} onChange={(e) => setQuery(e.target.value)} />
             </div>
           </div>
 
           {error ? <p className="err">{error}</p> : null}
+          {notice ? <p className="att-summary">{notice}</p> : null}
+
+          {tab === "people" ? (
+            <div className="task-list">
+              {loaded && shownPeople.length === 0 ? (
+                <div className="task-empty">
+                  <p className="muted">No people yet. They appear as your assistant reads your mail and calendar, or as you mention them in chat.</p>
+                </div>
+              ) : null}
+              {shownPeople.map((p) => (
+                <div key={p.id} className="task-card">
+                  <button className="task-main ghost" onClick={() => openPerson(p)}>
+                    <strong>{p.name}</strong>
+                    <span className="muted">{p.card || "Nothing noted yet."}</span>
+                    <div className="task-meta">
+                      {p.org ? <span className="app-pill">{p.org}</span> : null}
+                      <span className="faint">{contactLine(p)}</span>
+                    </div>
+                  </button>
+                  {open?.id === p.id ? (
+                    <div className="task-detail stack">
+                      {open.emails.length ? <p className="faint">{open.emails.join(", ")}</p> : null}
+
+                      <div className="stack">
+                        <strong>Add a note about {firstName(p.name)}</strong>
+                        <textarea
+                          className="field"
+                          rows={2}
+                          placeholder={`For example: Head of Retail Ops; prefers a call over email; we're working on the Q1 rollout`}
+                          value={note}
+                          onChange={(e) => setNote(e.target.value)}
+                        />
+                        <div className="row">
+                          <button
+                            className="btn"
+                            disabled={!!busy || note.trim().length < 2}
+                            onClick={() =>
+                              act(`note${p.id}`, async () => {
+                                await call(`/api/memory/people/${p.id}/notes`, { method: "POST", body: JSON.stringify({ text: note }) });
+                                setNote("");
+                              }, `Saved. Your assistant will use this whenever ${firstName(p.name)} comes up.`)
+                            }
+                          >
+                            {busy === `note${p.id}` ? "Saving…" : "Save note"}
+                          </button>
+                          <span className="faint">The summary above is rewritten from your notes and what it has learned.</span>
+                        </div>
+                      </div>
+
+                      <strong>What it knows ({open.current.length})</strong>
+                      {open.current.length ? open.current.map((f) => factRow(f, false)) : <p className="muted">Nothing yet. Add a note above.</p>}
+                      {open.history.length ? (
+                        <details>
+                          <summary className="muted">Earlier, no longer true ({open.history.length})</summary>
+                          {open.history.map((f) => factRow(f, false))}
+                        </details>
+                      ) : null}
+                      {open.meets_with.length ? <p className="muted">Often in meetings with {open.meets_with.slice(0, 5).map((m) => m.name).join(", ")}.</p> : null}
+
+                      <details>
+                        <summary className="muted">Something wrong with this entry?</summary>
+                        <div className="row">
+                          <button
+                            className="btn secondary"
+                            disabled={!!busy}
+                            title="Use this if the address is yours (for example your personal email). It stops being counted as a contact."
+                            onClick={() =>
+                              act(`me${p.id}`, async () => {
+                                await call(`/api/memory/people/${p.id}/me`, { method: "POST", body: JSON.stringify({ is_me: true }) });
+                                setOpen(null);
+                              }, `Got it: ${p.emails[0] || p.name} is one of your own addresses.`)
+                            }
+                          >
+                            This is one of my own addresses
+                          </button>
+                          <button
+                            className="btn secondary"
+                            disabled={!!busy}
+                            onClick={() => {
+                              if (window.confirm(`Remove ${p.name} from memory? Everything your assistant knows about them is deleted.`)) {
+                                act(`forget${p.id}`, async () => {
+                                  await call(`/api/memory/people/${p.id}`, { method: "DELETE" });
+                                  setOpen(null);
+                                }, `${p.name} was removed from memory.`);
+                              }
+                            }}
+                          >
+                            Remove {firstName(p.name)} from memory
+                          </button>
+                        </div>
+                      </details>
+                    </div>
+                  ) : null}
+                </div>
+              ))}
+              {mine.length ? (
+                <details>
+                  <summary className="muted">Your own addresses ({mine.length}): not counted as contacts</summary>
+                  {mine.map((p) => (
+                    <div key={p.id} className="task-card">
+                      <div className="task-main">
+                        <strong>{p.emails.join(", ") || p.name}</strong>
+                      </div>
+                      <div className="task-actions">
+                        <button
+                          className="btn secondary"
+                          disabled={!!busy}
+                          onClick={() => act(`notme${p.id}`, () => call(`/api/memory/people/${p.id}/me`, { method: "POST", body: JSON.stringify({ is_me: false }) }), "Moved back to your contacts.")}
+                        >
+                          Not mine
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </details>
+              ) : null}
+            </div>
+          ) : null}
+
+          {tab === "facts" ? (
+            <div className="task-list">
+              <div className="task-card">
+                <div className="task-main">
+                  <strong>Tell your assistant something to remember</strong>
+                  <textarea
+                    className="field"
+                    rows={2}
+                    placeholder="For example: I'm based in Bangalore; I prefer short bullet-point answers; my manager is Priya Nair"
+                    value={newFact}
+                    onChange={(e) => setNewFact(e.target.value)}
+                  />
+                </div>
+                <div className="task-actions">
+                  <button
+                    className="btn"
+                    disabled={!!busy || newFact.trim().length < 2}
+                    onClick={() =>
+                      act("newfact", async () => {
+                        await call("/api/memory/facts", { method: "POST", body: JSON.stringify({ text: newFact }) });
+                        setNewFact("");
+                      }, "Saved. All your agents will use it.")
+                    }
+                  >
+                    Save
+                  </button>
+                </div>
+              </div>
+              {loaded && shownFacts.length === 0 ? (
+                <div className="task-empty">
+                  <p className="muted">No facts yet.</p>
+                </div>
+              ) : null}
+              {shownFacts.map((f) => factRow(f))}
+            </div>
+          ) : null}
 
           {tab === "week" ? (
             <div className="task-list">
               <p className="muted">
-                {loaded ? `In the last 7 days: ${learned} learned, ${tidied} tidied up (replaced, faded or merged).` : "Loading…"}
+                {loaded ? `In the last 7 days your assistant learned ${plural(learned, "thing")} and tidied up ${tidied} (replaced, faded or merged).` : "Loading…"}
               </p>
               {quiet.length ? (
                 <div className="task-card">
@@ -221,7 +423,7 @@ export default function MemoryPage() {
                     <span className="muted">People you work with a lot who have gone quiet.</span>
                     {quiet.map((r) => (
                       <span key={r.id} className="muted">
-                        {r.name}: no contact for {r.days_quiet} days ({r.mail_out} sent, {r.meetings} meetings)
+                        {r.name}: no contact for {r.days_quiet} days
                       </span>
                     ))}
                   </div>
@@ -243,7 +445,7 @@ export default function MemoryPage() {
                       </strong>
                       {c.op === "supersede" ? (
                         <span className="muted">
-                          “{c.before}” → “{c.after}”
+                          “{c.after}” replaced “{c.before}”
                         </span>
                       ) : (
                         <span className="muted">{c.after || c.before}</span>
@@ -255,96 +457,13 @@ export default function MemoryPage() {
                     </div>
                     {c.can_undo ? (
                       <div className="task-actions">
-                        <button className="btn secondary" disabled={!!busy} onClick={() => act(`undo${c.id}`, () => call(`/api/memory/changes/${c.id}/undo`, { method: "POST" }))}>
-                          Undo
+                        <button className="btn secondary" disabled={!!busy} onClick={() => act(`undo${c.id}`, () => call(`/api/memory/changes/${c.id}/undo`, { method: "POST" }), "Done.")}>
+                          {c.undo_label}
                         </button>
                       </div>
                     ) : null}
                   </div>
                 ))}
-            </div>
-          ) : null}
-
-          {tab === "people" ? (
-            <div className="task-list">
-              {loaded && shownPeople.length === 0 ? (
-                <div className="task-empty">
-                  <p className="muted">No people yet. They appear as your assistant reads your mail and calendar, or as you mention them in chat.</p>
-                </div>
-              ) : null}
-              {shownPeople.map((p) => (
-                <div key={p.id} className="task-card">
-                  <button className="task-main ghost" onClick={() => (open?.id === p.id ? setOpen(null) : call(`/api/memory/people/${p.id}`).then(setOpen).catch((e) => setError(e.message)))}>
-                    <strong>{p.name}</strong>
-                    {p.card ? <span className="muted">{p.card}</span> : null}
-                    <div className="task-meta">
-                      {p.org ? <span className="app-pill">{p.org}</span> : null}
-                      <span className="muted">
-                        {p.mail_out} sent · {p.mail_in} received · {p.meetings} meetings
-                      </span>
-                      <span className="faint">last contact {ago(p.last_contact)}</span>
-                      {p.facts ? <span className="faint">{p.facts} facts</span> : null}
-                    </div>
-                  </button>
-                  {open?.id === p.id ? (
-                    <div className="task-detail stack">
-                      {open.emails.length ? <p className="faint">{open.emails.join(", ")}</p> : null}
-                      {open.meets_with.length ? <p className="muted">Often meets with {open.meets_with.map((m) => m.name).join(", ")}</p> : null}
-                      {open.current.map((f) => factRow(f, false))}
-                      {open.history.length ? (
-                        <details>
-                          <summary className="muted">Earlier ({open.history.length})</summary>
-                          {open.history.map((f) => factRow(f, false))}
-                        </details>
-                      ) : null}
-                      <div className="row">
-                        <button className="btn secondary" disabled={!!busy} onClick={() => act(`me${p.id}`, () => call(`/api/memory/people/${p.id}/me`, { method: "POST", body: JSON.stringify({ is_me: true }) }))}>
-                          This is me
-                        </button>
-                        <button className="btn secondary" disabled={!!busy} onClick={() => {
-                          if (window.confirm(`Forget ${p.name} everywhere? Their record and every fact about them are removed.`)) {
-                            act(`forget${p.id}`, async () => {
-                              await call(`/api/memory/people/${p.id}`, { method: "DELETE" });
-                              setOpen(null);
-                            });
-                          }
-                        }}>
-                          Forget {p.name}
-                        </button>
-                      </div>
-                    </div>
-                  ) : null}
-                </div>
-              ))}
-              {mine.length ? (
-                <details>
-                  <summary className="muted">Your own other addresses ({mine.length}) — not counted as contacts</summary>
-                  {mine.map((p) => (
-                    <div key={p.id} className="task-card">
-                      <div className="task-main">
-                        <strong>{p.name}</strong>
-                        <span className="faint">{p.emails.join(", ")}</span>
-                      </div>
-                      <div className="task-actions">
-                        <button className="btn secondary" disabled={!!busy} onClick={() => act(`notme${p.id}`, () => call(`/api/memory/people/${p.id}/me`, { method: "POST", body: JSON.stringify({ is_me: false }) }))}>
-                          Not me
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </details>
-              ) : null}
-            </div>
-          ) : null}
-
-          {tab === "facts" ? (
-            <div className="task-list">
-              {loaded && shownFacts.length === 0 ? (
-                <div className="task-empty">
-                  <p className="muted">No facts yet. Tell any of your agents something to remember, and it shows up here.</p>
-                </div>
-              ) : null}
-              {shownFacts.map((f) => factRow(f))}
             </div>
           ) : null}
         </div>
