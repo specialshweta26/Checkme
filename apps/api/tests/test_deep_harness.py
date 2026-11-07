@@ -73,10 +73,12 @@ async def test_browser_handoff_pauses_for_user():
     result = await call_user_tool(ctx, "computer", "browser_handoff", {"reason": "Log in to the site."})
     assert result["handoff"] is True
     assert ctx.pending[0]["kind"] == "handoff"
-    ctx.confirmations = [{"slug": "computer", "tool": "browser_handoff"}]
+    # The approval names the exact handoff it was given for (the signed token carries its args).
+    ctx.confirmations = [{"slug": "computer", "tool": "browser_handoff", "args": {"reason": "Log in to the site."}}]
     done = await call_user_tool(ctx, "computer", "browser_handoff", {"reason": "Log in to the site."})
     assert done["status"] == "user_finished"
     assert done["handoff"] is False
+    assert ctx.confirmations == []  # used up: a second handoff asks again
 
 
 async def test_unknown_slug_is_rejected():

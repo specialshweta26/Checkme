@@ -67,6 +67,34 @@ async def _sync_builtins_later() -> None:
                 await asyncio.sleep(0)
     except Exception as vis_exc:  # noqa: BLE001
         log.warning("startup connector sync skipped: %s", vis_exc)
+    await _resync_reset_mcp()
+
+
+async def _resync_reset_mcp() -> None:
+    """Re-read user MCP servers whose tools the policy migration reset to needs-approval (ToolIndex.policy_v 2), so
+    tools the server marks read-only stop asking. Each connector is re-synced once; a failure leaves it asking."""
+    try:
+        from sqlalchemy import select
+
+        from app.connectors.service import sync_connector
+        from app.db import SessionLocal
+        from app.models import Connector, ToolIndex
+
+        async with SessionLocal() as db:
+            keys = set((await db.execute(select(ToolIndex.server_key).where(ToolIndex.policy_v == 2).distinct())).scalars().all())
+            if not keys:
+                return
+            rows = (
+                await db.execute(select(Connector).where(Connector.kind != "builtin", Connector.server_key.in_(keys)))
+            ).scalars().all()
+            for row in rows:
+                try:
+                    await sync_connector(db, row)
+                except Exception as vis_exc:  # noqa: BLE001
+                    log.warning("mcp re-sync after policy reset skipped for %s: %s", row.slug, vis_exc)
+                await asyncio.sleep(0)
+    except Exception as vis_exc:  # noqa: BLE001
+        log.warning("mcp policy re-sync skipped: %s", vis_exc)
 
 
 @asynccontextmanager

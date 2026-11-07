@@ -299,6 +299,7 @@ async def test_run_deep_agent_executes_confirmed_workspace_delete(ws, monkeypatc
     class Graph:
         async def ainvoke(self, payload, config=None, **kw):
             called["messages"] = [m.content for m in payload["messages"]]
+            called["types"] = [m.type for m in payload["messages"]]
             return {"messages": []}
 
     import app.connectors.platform as platform
@@ -324,4 +325,8 @@ async def test_run_deep_agent_executes_confirmed_workspace_delete(ws, monkeypatc
     assert ("agent", target) in ws.deleted
     assert "connector" not in called
     assert out["workspace_changed"] is True
-    assert any("confirmed delete_agent" in m for m in called["messages"])
+    # The approved result reaches the model as a tool result, never as a user message.
+    assert called["types"][-3:] == ["ai", "tool", "human"]
+    tool_result = json.loads(called["messages"][-2])
+    assert tool_result["approved_by_user"] is True and tool_result["status"] == "ran"
+    assert not any("confirmed delete_agent" in str(m) for m in called["messages"])
