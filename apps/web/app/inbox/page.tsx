@@ -20,6 +20,8 @@ type InboxMail = {
   summary: string;
   key_points: string[];
   draft: string;
+  key_person?: boolean;
+  sender_note?: string;
   status: string;
   unread: boolean;
   seen: boolean;
@@ -122,6 +124,9 @@ export default function InboxPage() {
   const visible = useMemo(() => {
     const rows = filter === "all" ? items : items.filter((m) => m.classification === filter);
     return [...rows].sort((a, b) => {
+      // The user's key people first (from memory), then newest first.
+      const key = Number(!!b.key_person && b.status === "pending") - Number(!!a.key_person && a.status === "pending");
+      if (key) return key;
       const left = Date.parse(a.sort_at || "") || 0;
       const right = Date.parse(b.sort_at || "") || 0;
       return right - left;
@@ -344,6 +349,7 @@ export default function InboxPage() {
                       {mail.classification || "reviewing"}
                     </span>
                     <span className="inbox-card-flags">
+                      {mail.key_person ? <span className="role-tag">Key contact</span> : null}
                       {mail.recipient_role === "cc" || mail.recipient_role === "bcc" ? (
                         <span className="role-tag">{mail.recipient_role === "bcc" ? "Bcc’d to you" : "Cc’d to you"}</span>
                       ) : null}
@@ -359,6 +365,7 @@ export default function InboxPage() {
                     {mail.connector ? ` · ${mail.connector}` : ""}
                     {mail.cc ? ` · Cc ${mail.cc}` : ""}
                   </p>
+                  {mail.sender_note ? <p className="faint">{mail.sender_note}</p> : null}
                   {mail.summary ? <p className="inbox-summary">{mail.summary}</p> : <p className="muted">{mail.snippet || "Reading this thread…"}</p>}
                   {mail.key_points?.length ? (
                     <ul className="inbox-points">

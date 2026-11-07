@@ -785,6 +785,11 @@ class InboxItem(Base):
     summary: Mapped[str] = mapped_column(Text, default="")
     key_points: Mapped[list] = mapped_column(JSONB, default=list)
     draft: Mapped[str] = mapped_column(Text, default="")
+    # The assistant's own draft, kept when the user edits it, so the sent reply can teach the voice (inbox/memory_context.py).
+    ai_draft: Mapped[str] = mapped_column(Text, default="")
+    # From the user's memory at triage: one of their key people, and who the sender is.
+    key_person: Mapped[bool] = mapped_column(Boolean, default=False)
+    sender_note: Mapped[str] = mapped_column(String(400), default="")
     status: Mapped[str] = mapped_column(String(20), default="pending")  # pending | sent | discarded
     unread: Mapped[bool] = mapped_column(Boolean, default=True)
     seen: Mapped[bool] = mapped_column(Boolean, default=False)

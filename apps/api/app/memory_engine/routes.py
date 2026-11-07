@@ -22,10 +22,10 @@ from app.models import MemoryChange, MemoryEntity, MemoryEntityAlias, MemoryPass
 router = APIRouter(prefix="/memory", tags=["memory"])
 
 USER_SCOPES = ("user", "user_shared")
-UNDOABLE = {"add", "supersede", "fade", "card"}
+UNDOABLE = {"add", "supersede", "fade", "card", "voice"}
 OP_LABELS = {
     "add": "Learned", "supersede": "Updated", "fade": "Faded", "merge": "Merged", "card": "Card rewritten",
-    "self": "Marked as you", "forget": "Forgotten",
+    "self": "Marked as you", "forget": "Forgotten", "voice": "Writing style updated",
 }
 
 
@@ -220,6 +220,15 @@ async def undo(change_id: int, user: User = Depends(current_user), db: AsyncSess
     if c.undone_at or c.op not in UNDOABLE:
         raise HTTPException(409, "This change can't be undone.")
     kind, _, raw = c.target.partition(":")
+    if kind == "block" and c.op == "voice" and raw.startswith("voice"):
+        from app.agent.memory import upsert_core
+        from app.agents.service import ensure_default_agent
+
+        chief = await ensure_default_agent(db, user)
+        await upsert_core(db, user.id, raw, c.before or "", chief.id)
+        c.undone_at = datetime.now(timezone.utc)
+        await db.commit()
+        return {"ok": True}
     if not raw.isdigit():
         raise HTTPException(409, "This change can't be undone.")
     now = datetime.now(timezone.utc)
