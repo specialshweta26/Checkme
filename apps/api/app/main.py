@@ -125,20 +125,33 @@ async def lifespan(_app: FastAPI):
     from app.jobs.worker import start_job_worker
     from app.tasks.scheduler import start_scheduler
 
+    # PROCESS_ROLE: "all" (one service does everything, the default), "web" (HTTP only) or "worker" (background
+    # loops only; a Render background worker running the same image). Every loop is safe to run in several worker
+    # processes: jobs are claimed with SKIP LOCKED and per-user work runs under leases.
+    role = (get_settings().process_role or "all").strip().lower()
     workers = [
-        asyncio.create_task(_reclaim_redis_later(), name="redis-reclaim"),
-        asyncio.create_task(_sync_builtins_later(), name="startup-sync"),
         asyncio.create_task(watch_loop(), name="loop-watch"),
-        await start_scheduler(),
-        await start_job_worker(),
-        await start_inbox_worker(),
-        await start_mail_push(),
-        await start_meeting_triggers(),
-        await start_memory_worker(),
-        await start_memory_learner(),
-        await start_memory_consolidator(),
         await start_usage_flusher(),
     ]
+    if role in ("all", "web"):
+        workers.append(asyncio.create_task(_sync_builtins_later(), name="startup-sync"))
+    if role in ("all", "worker"):
+        from app.inbox.worker import start_wake_listener
+
+        workers += [
+            asyncio.create_task(_reclaim_redis_later(), name="redis-reclaim"),
+            await start_scheduler(),
+            await start_job_worker(),
+            await start_inbox_worker(),
+            await start_mail_push(),
+            await start_meeting_triggers(),
+            await start_memory_worker(),
+            await start_memory_learner(),
+            await start_memory_consolidator(),
+        ]
+        if role == "worker":
+            workers.append(await start_wake_listener())
+    log.info("process role: %s (%s background tasks)", role, len(workers))
     cfg = get_settings()
     log.info(
         "oauth google=%s microsoft=%s public_web_url=%s db=%s",
