@@ -143,8 +143,19 @@ async def own_addresses(db: AsyncSession, user) -> set[str]:
 
     own = {str(getattr(user, "email", "") or "").lower()}
     own.update(str(e or "").lower() for e in (await db.execute(select(Account.email).where(Account.user_id == user.id))).scalars())
+    own.update(await ent.self_addresses(db, user.id))  # other addresses known to be the user's
     own.discard("")
     return own
+
+
+async def is_me(db: AsyncSession, user, own: set[str], name: str, email: str) -> bool:
+    """The user's own address, known or newly guessed; a new guess is recorded (and shown, and can be undone)."""
+    if email in own:
+        return True
+    if ent.looks_like_user(name, email, user) and await ent.set_self(db, user.id, email, True, guessed=True) is not None:
+        own.add(email)
+        return True
+    return False
 
 
 async def touch(db: AsyncSession, user_id, name: str, email: str, field: str, when: datetime | None) -> MemoryEntity | None:
@@ -163,15 +174,23 @@ async def touch(db: AsyncSession, user_id, name: str, email: str, field: str, wh
 
 async def learn_mail(db: AsyncSession, user, runtime) -> dict:
     """Who writes to the user and whom the user writes to, from the newest inbox and sent mail headers."""
+    await ent.mark_lookalikes(db, user)  # people learned before this check existed
     own = await own_addresses(db, user)
     counts = {"mail_in": 0, "mail_out": 0}
-    for folder, kind in (("inbox", "mail_in"), ("sent", "mail_out")):
+    # Sent first: the From of sent mail reveals the user's own aliases before the inbox is counted.
+    for folder, kind in (("sent", "mail_out"), ("inbox", "mail_in")):
         try:
             listed = (await runtime.call("list_messages", {"folder": folder, "limit": 50})).get("messages") or []
         except Exception:  # noqa: BLE001
             log.info("learn: list %s failed", folder, exc_info=True)
             continue
         for msg in listed:
+            if kind == "mail_out":
+                # Whoever sent mail from the user's Sent folder is the user (an alias or a send-as address): certain,
+                # so recorded as the user's own rather than as a guess.
+                for name, email in parse_addresses(msg.get("from")):
+                    if email not in own and await ent.set_self(db, user.id, email, True) is not None:
+                        own.add(email)
             ref = f"{getattr(runtime, 'slug', '')}:{msg.get('message_id')}"
             if not msg.get("message_id") or not await first_seen(db, user.id, kind, ref):
                 continue
@@ -180,7 +199,7 @@ async def learn_mail(db: AsyncSession, user, runtime) -> dict:
                 parse_addresses(msg.get("to")) + parse_addresses(msg.get("cc"))
             )[:MAX_RECIPIENTS]
             for name, email in people:
-                if email in own or is_automated(email):
+                if is_automated(email) or await is_me(db, user, own, name, email):
                     continue
                 if await touch(db, user.id, name, email, kind, when):
                     counts[kind] += 1
@@ -211,7 +230,7 @@ async def learn_calendar(db: AsyncSession, user, runtime) -> dict:
         people = parse_addresses(ev.get("attendees") or []) + parse_addresses(ev.get("organizer") or "")
         seen, met = set(), []
         for name, email in people:
-            if email in own or email in seen or is_automated(email):
+            if email in seen or is_automated(email) or await is_me(db, user, own, name, email):
                 continue
             seen.add(email)
             entity = await touch(db, user.id, name, email, "meetings", when)

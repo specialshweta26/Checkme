@@ -11,7 +11,7 @@ import logging
 import re
 from datetime import datetime, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -168,6 +168,118 @@ async def names_for(db: AsyncSession, user_id, ids: set[int]) -> dict[int, str]:
     return {row[0]: row[1] for row in rows}
 
 
+# --- the user's own other addresses ----------------------------------------------------------------------------------
+# A person entity with status "self" is the user under another address (a personal Gmail, an alias). Its email aliases
+# count as the user's own, so the learner never counts mail to or from them as a contact. An alias of kind "not_me"
+# records that the user said an address is someone else, so the look-alike guess below never hides it again.
+
+_NAME_SPLIT = re.compile(r"[^a-z]+")
+
+
+def first_name_of(user) -> str:
+    """The user's first name, from their display name or else their email (gaurav.r@… → gaurav); "" if too short."""
+    for source in (getattr(user, "display_name", "") or "", (getattr(user, "email", "") or "").split("@")[0]):
+        tokens = [t for t in _NAME_SPLIT.split(source.lower()) if t]
+        if tokens and len(tokens[0]) >= 3:
+            return tokens[0]
+    return ""
+
+
+def looks_like_user(name: str, email: str, user) -> bool:
+    """A personal-mail address whose name and mailbox both carry the user's first name (Gaurav <gaurav.grv@gmail.com>
+    for user Gaurav): most likely the user's own other address. A guess, so it is shown and can be undone."""
+    first = first_name_of(user)
+    email = clean_email(email)
+    if not first or not email or email.split("@")[1] not in FREE_MAIL:
+        return False
+    tokens = [t for t in _NAME_SPLIT.split((name or "").lower()) if t]
+    return bool(tokens) and tokens[0] == first and first in email.split("@")[0]
+
+
+async def self_addresses(db: AsyncSession, user_id) -> set[str]:
+    rows = (await db.execute(
+        select(MemoryEntityAlias.value)
+        .join(MemoryEntity, MemoryEntity.id == MemoryEntityAlias.entity_id)
+        .where(MemoryEntityAlias.user_id == user_id, MemoryEntityAlias.kind == "email",
+               MemoryEntity.user_id == user_id, MemoryEntity.status == "self")
+    )).scalars().all()
+    return set(rows)
+
+
+async def _entity_for(db: AsyncSession, user_id, who: str) -> MemoryEntity | None:
+    """This user's person entity (any status but merged/deleted) for an email address or a name."""
+    email, name = clean_email(who), clean_name(who)
+    kind, value = ("email", email) if email else ("name", name.lower())
+    if not value:
+        return None
+    return (await db.execute(
+        select(MemoryEntity).join(MemoryEntityAlias, MemoryEntityAlias.entity_id == MemoryEntity.id)
+        .where(MemoryEntityAlias.user_id == user_id, MemoryEntityAlias.kind == kind, MemoryEntityAlias.value == value,
+               MemoryEntity.user_id == user_id, MemoryEntity.status.in_(("active", "self")), MemoryEntity.kind == "person")
+    )).scalars().first()
+
+
+async def set_self(db: AsyncSession, user_id, who: str, is_me: bool = True, *, guessed: bool = False) -> MemoryEntity | None:
+    """Mark the person behind an address or name as the user (is_me) or as someone else. A guess never overrides the
+    user saying "that's not me". An unknown address the user says is theirs is recorded so it is skipped from now on."""
+    if db is None or not user_id or not (who or "").strip():
+        return None
+    entity = await _entity_for(db, user_id, who)
+    if entity is None:
+        email = clean_email(who)
+        if not (is_me and email):
+            return None
+        entity = await _create(db, user_id, "person", email.split("@")[0], [("email", email)])
+    if is_me:
+        if guessed:
+            said_not_me = (await db.execute(
+                select(MemoryEntityAlias.id).where(MemoryEntityAlias.user_id == user_id, MemoryEntityAlias.entity_id == entity.id,
+                                                   MemoryEntityAlias.kind == "not_me")
+            )).first()
+            if said_not_me:
+                return None
+        entity.status = "self"
+    else:
+        entity.status = "active"
+    if not guessed:
+        # Keep only the user's latest word on it: "is_me" or "not_me".
+        said, unsaid = ("is_me", "not_me") if is_me else ("not_me", "is_me")
+        await db.execute(delete(MemoryEntityAlias).where(
+            MemoryEntityAlias.user_id == user_id, MemoryEntityAlias.entity_id == entity.id, MemoryEntityAlias.kind == unsaid))
+        await _claim_alias(db, user_id, entity.id, said, f"entity:{entity.id}")
+    await db.flush()
+    return entity
+
+
+async def guessed_self(db: AsyncSession, user_id) -> list[tuple[str, str]]:
+    """[(name, email)] of addresses hidden as the user's own by the look-alike guess (not by the user saying so)."""
+    confirmed = select(MemoryEntityAlias.entity_id).where(MemoryEntityAlias.user_id == user_id, MemoryEntityAlias.kind == "is_me")
+    rows = (await db.execute(
+        select(MemoryEntity.name, MemoryEntityAlias.value)
+        .join(MemoryEntityAlias, MemoryEntityAlias.entity_id == MemoryEntity.id)
+        .where(MemoryEntity.user_id == user_id, MemoryEntity.status == "self", MemoryEntityAlias.kind == "email",
+               MemoryEntityAlias.user_id == user_id, MemoryEntity.id.not_in(confirmed))
+        .order_by(MemoryEntity.salience.desc(), MemoryEntity.id)
+    )).all()
+    return [(r[0], r[1]) for r in rows]
+
+
+async def mark_lookalikes(db: AsyncSession, user) -> int:
+    """Hide person entities learned before that look like the user's own other address. Returns how many."""
+    rows = (await db.execute(
+        select(MemoryEntity, MemoryEntityAlias.value)
+        .join(MemoryEntityAlias, MemoryEntityAlias.entity_id == MemoryEntity.id)
+        .where(MemoryEntity.user_id == user.id, MemoryEntity.status == "active", MemoryEntity.kind == "person",
+               MemoryEntityAlias.user_id == user.id, MemoryEntityAlias.kind == "email")
+    )).all()
+    marked = 0
+    for entity, email in rows:
+        if entity.status == "active" and looks_like_user(entity.name, email, user):
+            if await set_self(db, user.id, email, True, guessed=True) is not None:
+                marked += 1
+    return marked
+
+
 _TOP_PEOPLE = re.compile(
     r"\bwho\b[^?.!]{0,60}\b(?:most|most often|often|frequently|the most)\b|"
     r"\b(?:my )?(?:top|main|key|closest|most important) (?:\d+ )?(?:contacts|people|colleagues|clients)\b",
@@ -193,7 +305,8 @@ async def people_context(db: AsyncSession, user_id, query: str, limit: int = 5) 
     if db is None or not (query or "").strip():
         return []
     rows: list = []
-    if _TOP_PEOPLE.search(query):
+    top = bool(_TOP_PEOPLE.search(query))
+    if top:
         rows = (await db.execute(
             select(MemoryEntity).where(MemoryEntity.user_id == user_id, MemoryEntity.status == "active", MemoryEntity.kind == "person")
             .order_by(MemoryEntity.salience.desc()).limit(limit)
@@ -218,7 +331,7 @@ async def people_context(db: AsyncSession, user_id, query: str, limit: int = 5) 
             select(MemoryEntity.name)
             .join(MemoryRelation, (MemoryRelation.b_id == MemoryEntity.id) | (MemoryRelation.a_id == MemoryEntity.id))
             .where(MemoryRelation.user_id == user_id, (MemoryRelation.a_id == e.id) | (MemoryRelation.b_id == e.id),
-                   MemoryEntity.id != e.id)
+                   MemoryEntity.id != e.id, MemoryEntity.status == "active")
             .order_by(MemoryRelation.count.desc()).limit(3)
         )).scalars().all()
         org = f" ({org_names[e.org_id]})" if e.org_id in org_names else ""
@@ -230,4 +343,10 @@ async def people_context(db: AsyncSession, user_id, query: str, limit: int = 5) 
         if partners:
             line += "; often meets with " + ", ".join(partners)
         lines.append(line)
+    if top:
+        hidden = await guessed_self(db, user_id)
+        if hidden:
+            shown = ", ".join(f"{n} <{e}>" if n and n != e.split("@")[0] else e for n, e in hidden[:3])
+            lines.append(f"Not counted as contacts, because they look like the user's own other addresses: {shown}. "
+                         "Mention this; if the user says one is someone else, call set_my_address with is_me=false.")
     return lines
