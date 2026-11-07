@@ -14,7 +14,10 @@ from app.agent.memory import (
     SCOPE_AGENT,
     SCOPE_SHARED,
     _SECRET_LANGUAGE,
+    merge_block,
+    reconcile_related,
     remember,
+    retire_fact,
     upsert_core,
     read_core,
 )
@@ -162,15 +165,72 @@ async def _turn_texts(db: AsyncSession, job: MemoryExtractJob) -> tuple[str, str
     return user_text, assistant_text
 
 
-async def _extract_json(user_text: str, assistant_text: str) -> dict:
+KNOWN_FACTS = 12
+
+
+async def known_facts(db: AsyncSession, user: User, agent, about: str) -> list[tuple[int, str]]:
+    """The stored facts closest to this turn, as (id, text), so the extractor can say which one a new fact replaces."""
+    if db is None:
+        return []
+    from app.agent.memory import _memory_agent, _ranked_facts
+
+    try:
+        owner = await _memory_agent(db, user, agent=agent)
+        rows = await _ranked_facts(db, user.id, owner.id, about, limit=KNOWN_FACTS)
+    except Exception:  # noqa: BLE001 - extraction still runs, it just can't replace anything
+        log.info("memory extract: known facts unavailable", exc_info=True)
+        return []
+    return [(int(row.id), " ".join((row.text or "").split())) for row in rows if row.id is not None and row.text]
+
+
+def _norm(text: str) -> str:
+    return " ".join(re.findall(r"[a-z0-9]+", (text or "").lower()))
+
+
+def _resolve_supersede(value, known: list[tuple[int, str]]) -> int | None:
+    """Map the extractor's ``supersede`` (a known fact's id, or its text) to that fact's id. Anything else is ignored,
+    so a fact the extractor wasn't shown can never be retired."""
+    if value in (None, "", False) or not known:
+        return None
+    ids = {fid for fid, _ in known}
+    raw = str(value).strip().lstrip("#")
+    if raw.isdigit():
+        return int(raw) if int(raw) in ids else None
+    want = _norm(raw)
+    if len(want) < 4:
+        return None
+    for fid, body in known:
+        if _norm(body) == want:
+            return fid
+    for fid, body in known:
+        have = _norm(body)
+        if len(want) >= 8 and (want in have or have in want):
+            return fid
+    return None
+
+
+async def _extract_json(
+    user_text: str,
+    assistant_text: str,
+    known: list[tuple[int, str]] | None = None,
+    saved_notes: list[str] | None = None,
+) -> dict:
+    listed = "\n".join(f"{fid}: {body}" for fid, body in (known or [])) or "(none)"
+    notes = "\n".join(f"- {line}" for line in (saved_notes or [])) or "(none)"
     prompt = (
         "Extract durable memory for a personal assistant. Return JSON only with keys: "
         "discard (bool), voice (string, how the user wants this agent to talk; empty if none), "
         "prefs (string, standing preference for this agent; empty if none), "
-        "facts (array of {text, scope, supersede}). scope is agent or user_shared. "
+        "facts (array of {text, scope, supersede}), retire (array of ids). scope is agent or user_shared. "
         "user_shared only for identity facts every agent should know (name, city, timezone). "
-        "Ignore acknowledgements, tool dumps, secrets, one-off tasks. "
-        "supersede is optional existing fact text being replaced.\n"
+        "Ignore acknowledgements, tool dumps, secrets, one-off tasks, facts already in the known list, and anything "
+        "the agent's saved notes already say: do not repeat those as facts, voice or prefs. "
+        "supersede is the id of the known fact that a new fact replaces because it changed or is no longer true "
+        "(for example a new city, role, or preference); leave it out otherwise. "
+        "retire lists the ids of known facts this turn shows are no longer true when no new fact here replaces "
+        "them (for example because the saved notes already hold the new value).\n"
+        f"Known facts (id: text):\n{listed}\n\n"
+        f"Agent's saved notes (already kept; do not repeat):\n{notes}\n\n"
         f"User: {user_text}\nAssistant: {assistant_text}"
     )
     try:
@@ -198,30 +258,35 @@ def _clean_fact(text: str) -> str:
     return body
 
 
-async def apply_extract(db: AsyncSession, user: User, agent, payload: dict, session_id=None) -> dict:
+async def apply_extract(
+    db: AsyncSession, user: User, agent, payload: dict, session_id=None, known: list[tuple[int, str]] | None = None
+) -> dict:
     if payload.get("discard") is True:
         return {"applied": False, "reason": "discard"}
     voice = _clean_fact(str(payload.get("voice") or ""))
     prefs = _clean_fact(str(payload.get("prefs") or ""))
-    applied = {"voice": False, "prefs": False, "facts": 0}
-    if voice:
-        prior = await read_core(db, user, "voice", agent)
-        if voice.lower() not in (prior or "").lower():
-            merged = (prior.rstrip() + "\n" + voice).strip() if prior else voice
-            await upsert_core(db, user.id, "voice", merged, agent.id)
-            applied["voice"] = True
-    if prefs:
-        prior = await read_core(db, user, "prefs", agent)
-        if prefs.lower() not in (prior or "").lower():
-            merged = (prior.rstrip() + "\n" + prefs).strip() if prior else prefs
-            await upsert_core(db, user.id, "prefs", merged, agent.id)
-            applied["prefs"] = True
+    applied = {"voice": False, "prefs": False, "facts": 0, "superseded": 0}
+    for label, note in (("voice", voice), ("prefs", prefs)):
+        if not note:
+            continue
+        prior = await read_core(db, user, label, agent)
+        merged, changed = await merge_block(label, prior or "", note)
+        if changed:
+            await upsert_core(db, user.id, label, merged, agent.id)
+            await reconcile_related(db, user, agent, label, note)
+            applied[label] = True
+    known = list(known or [])
+    already = {_norm(body) for _fid, body in known}
+    retired: set[int] = set()
     for item in payload.get("facts") or []:
         if not isinstance(item, dict):
             continue
         body = _clean_fact(str(item.get("text") or ""))
-        if not body:
+        if not body or _norm(body) in already:
             continue
+        sid = _resolve_supersede(item.get("supersede"), known)
+        if sid in retired:
+            sid = None
         scope = SCOPE_SHARED if str(item.get("scope") or "") == SCOPE_SHARED else SCOPE_AGENT
         await remember(
             db,
@@ -231,9 +296,21 @@ async def apply_extract(db: AsyncSession, user: User, agent, payload: dict, sess
             agent.id,
             scope=scope,
             source_session_id=session_id,
+            supersedes_id=sid,
         )
+        already.add(_norm(body))
         applied["facts"] += 1
-    return {"applied": bool(applied["voice"] or applied["prefs"] or applied["facts"]), **applied}
+        if sid is not None:
+            retired.add(sid)
+            applied["superseded"] += 1
+    for value in payload.get("retire") or []:
+        rid = _resolve_supersede(value, known)
+        if rid is None or rid in retired:
+            continue
+        if await retire_fact(db, user, agent, rid):
+            retired.add(rid)
+            applied["superseded"] += 1
+    return {"applied": bool(applied["voice"] or applied["prefs"] or applied["facts"] or retired), **applied}
 
 
 async def process_job(db: AsyncSession, job: MemoryExtractJob) -> str:
@@ -248,9 +325,17 @@ async def process_job(db: AsyncSession, job: MemoryExtractJob) -> str:
         job.status = "done"
         job.last_error = ""
         return job.status
-    payload = await _extract_json(user_text, assistant_text)
+    known = await known_facts(db, user, agent, f"{user_text}\n{assistant_text}"[:2000])
+    try:
+        # What remember_for_me already saved this turn: the extractor must not store it a second time.
+        from app.agent.memory import _block_note_lines
+
+        saved_notes = _block_note_lines(await read_core(db, user, "learned", agent) or "")
+    except Exception:  # noqa: BLE001
+        saved_notes = []
+    payload = await _extract_json(user_text, assistant_text, known, saved_notes)
     if payload and payload.get("discard") is not True:
-        await apply_extract(db, user, agent, payload, job.session_id)
+        await apply_extract(db, user, agent, payload, job.session_id, known=known)
     try:
         from app.memory_engine.episodes import record_turn
 
