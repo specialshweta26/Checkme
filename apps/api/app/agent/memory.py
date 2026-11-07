@@ -355,23 +355,15 @@ def _keyword_score(body: str, query: str) -> float:
     return len(tokens & words) / len(tokens)
 
 
-def _rank_passages(rows: list, query: str) -> list:
-    scored = []
-    for row in rows:
-        if not _is_active(row):
-            continue
-        recency = 0.3
-        created = getattr(row, "created_at", None)
-        if created is not None:
-            try:
-                age_days = max(0.0, (_now_utc() - created).total_seconds() / 86400)
-                recency = max(0.05, 1.0 / (1.0 + age_days / 30.0))
-            except Exception:  # noqa: BLE001
-                recency = 0.3
-        score = 0.55 * _keyword_score(getattr(row, "text", "") or "", query) + 0.45 * recency
-        scored.append((score, row))
-    scored.sort(key=lambda item: (-item[0], -(getattr(item[1], "id", 0) or 0)))
-    return [row for _score, row in scored]
+def _recency(row) -> float:
+    created = getattr(row, "created_at", None)
+    if created is None:
+        return 0.3
+    try:
+        age_days = max(0.0, (_now_utc() - created).total_seconds() / 86400)
+        return max(0.05, 1.0 / (1.0 + age_days / 30.0))
+    except Exception:  # noqa: BLE001
+        return 0.3
 
 
 def _now_utc():
@@ -380,16 +372,241 @@ def _now_utc():
     return datetime.now(timezone.utc)
 
 
-async def _agent_passages(db: AsyncSession, user_id, agent_id):
+# Each candidate pool (nearest by embedding, best full-text match, newest) is capped, so recall reads a bounded
+# number of rows however large an agent's memory grows.
+FACT_POOL = 16
+_TS_STOP = {"the", "and", "for", "you", "what", "with", "this", "that", "are", "was", "is", "my", "me", "to", "of", "in", "on", "it", "an", "do", "can"}
+_FACT_SCOPE_SQL = "user_id = :uid AND status = 'active' AND (agent_id = :aid OR scope = 'user_shared')"
+
+
+def _tsquery(query: str) -> str:
+    """An OR query of the distinct words in ``query``. Words are [a-z0-9] only, so it is always valid tsquery."""
+    tokens: list[str] = []
+    for tok in re.findall(r"[a-z0-9]{2,}", (query or "").lower()):
+        if tok not in _TS_STOP and tok not in tokens:
+            tokens.append(tok)
+    return " | ".join(tokens[:8])
+
+
+def _visible_fact(row, user_id, agent_id) -> bool:
+    return (
+        _is_active(row)
+        and row.user_id == user_id
+        and (row.agent_id == agent_id or getattr(row, "scope", SCOPE_AGENT) == SCOPE_SHARED)
+    )
+
+
+async def _newest_facts(db: AsyncSession, user_id, agent_id, limit: int) -> list:
     rows = (
         await db.execute(
-            select(MemoryPassage).where(
+            select(MemoryPassage)
+            .where(
                 MemoryPassage.user_id == user_id,
+                MemoryPassage.status == STATUS_ACTIVE,
                 or_(MemoryPassage.agent_id == agent_id, MemoryPassage.scope == SCOPE_SHARED),
             )
+            .order_by(MemoryPassage.id.desc())
+            .limit(limit)
         )
     ).scalars().all()
-    return [row for row in rows if _is_active(row)]
+    return [row for row in rows if _visible_fact(row, user_id, agent_id)]
+
+
+async def _ranked_facts(db: AsyncSession, user_id, agent_id, query: str, limit: int = 8) -> list:
+    """The active facts (this agent's and user-shared ones) most relevant to ``query``, best first.
+
+    Postgres picks three bounded candidate pools: nearest by embedding, best full-text match on ``search_tsv``, and
+    newest. Only those rows are loaded and blended: embedding rank first, then word overlap and recency."""
+    params = {"uid": user_id, "aid": agent_id, "lim": FACT_POOL}
+    q = (query or "").strip()
+    vec_rank: dict[int, int] = {}
+    try:
+        vec = await embed_one(q or "preferences")
+        vec_lit = "[" + ",".join(f"{x:.7f}" for x in vec) + "]"
+        hits = (
+            await db.execute(
+                text(
+                    f"SELECT id FROM memory_passages WHERE {_FACT_SCOPE_SQL} AND embedding IS NOT NULL "
+                    "ORDER BY embedding <=> CAST(:vec AS vector) LIMIT :lim"
+                ),
+                {**params, "vec": vec_lit},
+            )
+        ).all()
+        vec_rank = {row[0]: i for i, row in enumerate(hits)}
+    except Exception:  # noqa: BLE001 - keyword and recency still rank
+        log.info("memory vector recall skipped", exc_info=True)
+    keyword_ids: list[int] = []
+    tsq = _tsquery(q)
+    if tsq:
+        try:
+            hits = (
+                await db.execute(
+                    text(
+                        f"SELECT id FROM memory_passages WHERE {_FACT_SCOPE_SQL} "
+                        "AND search_tsv @@ to_tsquery('simple', :tsq) "
+                        "ORDER BY ts_rank(search_tsv, to_tsquery('simple', :tsq)) DESC, id DESC LIMIT :lim"
+                    ),
+                    {**params, "tsq": tsq},
+                )
+            ).all()
+            keyword_ids = [row[0] for row in hits]
+        except Exception:  # noqa: BLE001
+            log.info("memory keyword recall skipped", exc_info=True)
+    newest = await _newest_facts(db, user_id, agent_id, max(limit, 4))
+    wanted = [i for i in dict.fromkeys([*vec_rank, *keyword_ids]) if i not in {r.id for r in newest}]
+    rows = list(newest)
+    if wanted:
+        loaded = (await db.execute(select(MemoryPassage).where(MemoryPassage.id.in_(wanted)))).scalars().all()
+        rows.extend(row for row in loaded if _visible_fact(row, user_id, agent_id))
+
+    def score(row) -> float:
+        rank = vec_rank.get(row.id)
+        vector = 1.0 / (1.0 + rank) if rank is not None else 0.0  # reciprocal rank: the nearest match leads
+        return 0.5 * vector + 0.3 * _keyword_score(row.text or "", q) + 0.2 * _recency(row)
+
+    rows.sort(key=lambda row: (-score(row), -(row.id or 0)))
+    return rows[:limit]
+
+
+# Core blocks are rewritten, never appended to: the newest note wins a conflict. (max_chars, max_lines) caps the
+# block's size; None means no cap. "learned" (what remember_for_me saves) is deliberately uncapped.
+BLOCK_LIMITS: dict[str, tuple[int | None, int | None]] = {"voice": (900, 10), "prefs": (900, 10), "learned": (None, None)}
+DEFAULT_BLOCK_LIMIT = (1500, 16)
+_BULLET = re.compile(r"^\s*(?:[-•*]|\d{1,2}[.)])\s*")
+
+
+def _block_note_lines(value: str) -> list[str]:
+    return [_BULLET.sub("", line).strip() for line in (value or "").splitlines() if _BULLET.sub("", line).strip()]
+
+
+def _fit_block(lines: list[str], max_chars: int | None, max_lines: int | None) -> str:
+    """Drop repeats (keeping the later copy), then keep the newest lines that fit, in their original order."""
+    max_chars = max_chars if max_chars is not None else float("inf")
+    max_lines = max_lines if max_lines is not None else float("inf")
+    seen: set[str] = set()
+    newest_first: list[str] = []
+    for line in reversed(lines):
+        key = line.lower()
+        if line and key not in seen:
+            seen.add(key)
+            newest_first.append(line)
+    kept: list[str] = []
+    size = 0
+    for line in newest_first:
+        if len(kept) >= max_lines or size + len(line) + 1 > max_chars:
+            break
+        kept.append(line)
+        size += len(line) + 1
+    return "\n".join(reversed(kept))
+
+
+async def _rewrite_block(label: str, lines: list[str], max_chars: int | None, max_lines: int | None) -> str:
+    from app.llm import chat_complete, small_model
+
+    notes = "\n".join(f"{i + 1}. {line}" for i, line in enumerate(lines))
+    size = (
+        f"at most {max_lines} short lines and {max_chars} characters in total"
+        if max_chars is not None and max_lines is not None
+        else "short lines, as many as are needed"
+    )
+    prompt = (
+        f"These notes are an assistant's '{label}' memory about one user, oldest first. Rewrite them as {size}. "
+        "When notes conflict, the later one wins, but only on the point they disagree about: if a note is partly "
+        "out of date, keep every part of it that still holds (for example, a new city replaces the old city but "
+        "not the job mentioned in the same note). "
+        "Merge notes that say the same thing. Keep every other note that still holds. Do not add anything new. "
+        "Return only the lines, one per line, with no numbers or bullets.\n\n" + notes
+    )
+    # An uncapped block can be long: leave the model room to return all of it.
+    budget = max(400, len(notes) // 2 + 200)
+    try:
+        resp = await chat_complete(
+            [{"role": "user", "content": prompt}], max_tokens=budget, temperature=0, model=small_model()
+        )
+        raw = resp.choices[0].message.content or ""
+    except Exception:  # noqa: BLE001 - the trimmed block is the fallback
+        log.info("memory block rewrite failed", exc_info=True)
+        return ""
+    out = _block_note_lines(raw)
+    if not out or any(_SECRET_LANGUAGE.search(line) for line in out):
+        return ""
+    return _fit_block(out, max_chars, max_lines)
+
+
+async def merge_block(label: str, prior: str, addition: str) -> tuple[str, bool]:
+    """Fold ``addition`` into a core block. Returns the new value and whether it changed."""
+    new = " ".join((addition or "").split())
+    old = (prior or "").strip()
+    max_chars, max_lines = BLOCK_LIMITS.get(label, DEFAULT_BLOCK_LIMIT)
+    if not new or new.lower() in old.lower():
+        return old, False
+    if not old:
+        return (new[:max_chars] if max_chars is not None else new), True
+    lines = [*_block_note_lines(old), new]
+    value = await _rewrite_block(label, lines, max_chars, max_lines) or _fit_block(lines, max_chars, max_lines)
+    return value, value != old
+
+
+# How the user wants to be answered can land in any of these (the extractor files it as voice or prefs,
+# remember_for_me as learned), so a newer note in one must clear what it contradicts in the others.
+RELATED_BLOCKS = ("voice", "prefs", "learned")
+
+
+async def _drop_contradicted(label: str, value: str, newer: str) -> str:
+    """``value`` without the lines that ``newer`` contradicts. The model may only remove lines: anything it returns
+    that is not an existing line is ignored, and an unclear answer leaves the block as it was."""
+    from app.llm import chat_complete, small_model
+
+    lines = _block_note_lines(value)
+    if not lines:
+        return (value or "").strip()
+    notes = "\n".join(f"{i + 1}. {line}" for i, line in enumerate(lines))
+    prompt = (
+        f"These notes are an assistant's '{label}' memory about one user. A newer note, which wins any conflict, "
+        f'says: "{newer}". Return the notes below with every note that the newer note fully contradicts or '
+        "replaces removed. Keep a note that is only partly out of date. Copy every note you keep exactly as "
+        "written. Do not add the newer note or anything else. "
+        "Return only the remaining notes, one per line, with no numbers or bullets, or the single word NONE if no "
+        "note remains.\n\n" + notes
+    )
+    try:
+        resp = await chat_complete(
+            [{"role": "user", "content": prompt}],
+            max_tokens=max(300, len(notes) // 2 + 100),
+            temperature=0,
+            model=small_model(),
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+    except Exception:  # noqa: BLE001 - leave the block alone
+        log.info("memory block reconcile failed", exc_info=True)
+        return (value or "").strip()
+    if raw.upper().strip(" .") == "NONE":
+        return ""
+    keep = {line.casefold() for line in _block_note_lines(raw)}
+    if not keep:
+        return (value or "").strip()
+    return "\n".join(line for line in lines if line.casefold() in keep)
+
+
+async def reconcile_related(db: AsyncSession, user: User, agent, changed: str, newer: str) -> list[str]:
+    """After ``newer`` was written to block ``changed``, drop what it contradicts in the related blocks."""
+    if changed not in RELATED_BLOCKS or not (newer or "").strip():
+        return []
+    updated = []
+    for label in RELATED_BLOCKS:
+        if label == changed:
+            continue
+        try:
+            prior = (await read_core(db, user, label, agent) or "").strip()
+            if not prior:
+                continue
+            kept = await _drop_contradicted(label, prior, newer)
+            if kept != prior:
+                await upsert_core(db, user.id, label, kept, getattr(agent, "id", None))
+                updated.append(label)
+        except Exception:  # noqa: BLE001 - the new note is saved; a stale line elsewhere is the worst case
+            log.info("memory: reconciling %s failed", label, exc_info=True)
+    return updated
 
 
 async def _search_agent_history(db: AsyncSession, user_id, agent_id, query: str, limit: int = 3) -> list[str]:
@@ -482,31 +699,7 @@ async def load_memory(db: AsyncSession, user: User, query: str, agent=None, task
     if light:
         return _assemble_memory(list(blocks), [], [])
     try:
-        passages = await _agent_passages(db, user.id, owner.id)
-        ranked = _rank_passages(passages, query)
-        try:
-            vec = await embed_one(query or "preferences")
-            vec_lit = "[" + ",".join(f"{x:.7f}" for x in vec) + "]"
-            hits = (
-                await db.execute(
-                    text(
-                        """
-                        SELECT id FROM memory_passages
-                        WHERE user_id = :uid AND status = 'active'
-                          AND (agent_id = :aid OR scope = 'user_shared')
-                          AND embedding IS NOT NULL
-                        ORDER BY embedding <=> CAST(:vec AS vector)
-                        LIMIT 8
-                        """
-                    ),
-                    {"uid": user.id, "aid": owner.id, "vec": vec_lit},
-                )
-            ).all()
-            order = {row[0]: i for i, row in enumerate(hits)}
-            ranked.sort(key=lambda row: (order.get(row.id, 99), -_keyword_score(row.text or "", query)))
-        except Exception:  # noqa: BLE001
-            pass
-        facts = ranked[:8]
+        facts = await _ranked_facts(db, user.id, owner.id, query, limit=8)
     except Exception as vis_exc:  # noqa: BLE001
         log.warning("memory passage load failed: %s", vis_exc)
         facts = []
@@ -571,6 +764,7 @@ async def remember(
     if user is None:
         return None
     owner = await _memory_agent(db, user, agent_id=agent_id)
+    requester = owner
     if (scope or SCOPE_AGENT) == SCOPE_SHARED:
         from app.agents.service import ensure_default_agent
 
@@ -584,10 +778,15 @@ async def remember(
         vec = await embed_one(text)
     except Exception:  # noqa: BLE001
         pass
+    retired = None
     if supersedes_id:
         prior = await db.get(MemoryPassage, supersedes_id)
-        if prior is not None and prior.user_id == user_id:
+        # Only a fact this agent can see may be replaced: its own, or a user-shared one.
+        if prior is not None and _visible_fact(prior, user_id, requester.id):
             prior.status = STATUS_SUPERSEDED
+            retired = prior
+        else:
+            supersedes_id = None
     row = MemoryPassage(
         user_id=user_id,
         agent_id=owner.id,
@@ -602,14 +801,25 @@ async def remember(
     )
     db.add(row)
     await db.commit()
+    if retired is not None:
+        await _forget_letta_text(owner if retired.agent_id == owner.id else requester, retired.text or "")
     await _write_letta_passage(owner, text)
-    try:
-        from app.memory_engine.semantic import remember_fact_text
-
-        await remember_fact_text(db, user_id, text, agent_id=owner.id, scope=scope)
-    except Exception:  # noqa: BLE001
-        log.info("semantic memory skipped", exc_info=True)
+    # Facts live only in memory_passages. They used to be copied into semantic_documents too, which recalled every
+    # fact a second time under "Knowledge" and left a copy behind on forget.
     return row
+
+
+async def retire_fact(db: AsyncSession, user: User, agent, fact_id: int) -> bool:
+    """Mark one fact no longer true (superseded, kept as history). Only a fact this agent can see: its own or a
+    user-shared one."""
+    owner = await _memory_agent(db, user, agent=agent)
+    row = await db.get(MemoryPassage, fact_id)
+    if row is None or not _visible_fact(row, user.id, owner.id):
+        return False
+    row.status = STATUS_SUPERSEDED
+    await db.commit()
+    await _forget_letta_text(owner, row.text or "")
+    return True
 
 
 async def upsert_core(db: AsyncSession, user_id: uuid.UUID, label: str, value: str, agent_id) -> None:
@@ -658,8 +868,10 @@ async def remember_fact(ctx, text: str, label: str = "", shared: bool = False) -
         owner = await ensure_default_agent(ctx.db, ctx.user)
     if tag in CORE_LABELS:
         existing = await read_core(ctx.db, ctx.user, tag, agent=owner)
-        merged = (existing.rstrip() + "\n" + body).strip() if existing else body
-        await upsert_core(ctx.db, ctx.user.id, tag, merged, getattr(owner, "id", None))
+        merged, changed = await merge_block(tag, existing, body)
+        if changed:
+            await upsert_core(ctx.db, ctx.user.id, tag, merged, getattr(owner, "id", None))
+            await reconcile_related(ctx.db, ctx.user, owner, tag, body)
         return {"ok": True, "kind": "block", "label": tag, "shared": bool(shared), "value": merged}
     await remember(
         ctx.db,
@@ -688,17 +900,11 @@ async def recall_memory(ctx, query: str = "", label: str = "") -> dict:
     block_rows = [{"kind": "block", "label": b.label, "text": b.value} for b in blocks if b.value]
     q = (query or "").strip()
     try:
-        candidates = await _agent_passages(ctx.db, ctx.user.id, owner.id)
+        rows = await _ranked_facts(ctx.db, ctx.user.id, owner.id, q, limit=6) if q else await _newest_facts(
+            ctx.db, ctx.user.id, owner.id, 6
+        )
     except Exception:  # noqa: BLE001
-        candidates = []
-    if q:
-        ranked = _rank_passages(candidates, q)
-        if not ranked:
-            needle = q[:80].lower()
-            ranked = [row for row in candidates if needle in (row.text or "").lower()][:6]
-        rows = ranked[:6]
-    else:
-        rows = sorted(candidates, key=lambda row: getattr(row, "id", 0) or 0, reverse=True)[:6]
+        rows = []
     passages = [
         {
             "kind": r.kind,
@@ -830,12 +1036,11 @@ async def learn_for_agent(db: AsyncSession, user: User, agent, category: str, fa
     if _SECRET_LANGUAGE.search(clean_fact):
         return {"saved": False, "error": "I can’t store passwords, keys, tokens, or recovery codes in memory."}
     prior = await read_core(db, user, "learned", agent)
-    line = f"- {clean_category}: {clean_fact}"
-    lines = [part for part in (prior or "").splitlines() if part.strip()]
-    if line.casefold() not in {part.casefold() for part in lines}:
-        lines.append(line)
-    value = "\n".join(lines[-12:])[:780]
-    await upsert_core(db, user.id, "learned", value, agent.id)
+    # Rewritten like the other core blocks: "moved to Pune" replaces "lives in Bangalore" instead of sitting next to it.
+    value, changed = await merge_block("learned", prior or "", f"{clean_category}: {clean_fact}")
+    if changed:
+        await upsert_core(db, user.id, "learned", value, agent.id)
+        await reconcile_related(db, user, agent, "learned", clean_fact)
     return {"saved": True, "agent": agent.name, "memory": value}
 
 

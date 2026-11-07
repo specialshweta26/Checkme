@@ -56,21 +56,6 @@ async def _embed(text: str):
         return None
 
 
-async def remember_fact_text(db, user_id, text: str, *, agent_id=None, scope: str = "agent") -> None:
-    """Store one standing fact as a semantic document and, when configured, a graph episode."""
-    if db is None or not (text or "").strip():
-        return
-    await store_document(
-        db,
-        user_id,
-        body=text,
-        title=text.strip().splitlines()[0][:200],
-        source="fact",
-        scope=scope,
-        agent_id=agent_id,
-    )
-
-
 async def store_document(
     db,
     user_id,
@@ -176,7 +161,7 @@ async def _push_graph(text: str, name: str, group: str) -> None:
 
 
 async def search_documents(db, user_id, agent_id, query: str, *, limit: int = 4) -> list[dict]:
-    """Return the full body of the documents whose index pages match the query."""
+    """Return the full body of the documents whose index pages match the query (never "fact" copies)."""
     from sqlalchemy import select, text
 
     from app.models import SemanticDocument
@@ -197,7 +182,7 @@ async def search_documents(db, user_id, agent_id, query: str, *, limit: int = 4)
                         WHERE user_id = :uid AND embedding IS NOT NULL
                           AND document_id IN (
                             SELECT id FROM semantic_documents
-                            WHERE user_id = :uid AND status = 'active'
+                            WHERE user_id = :uid AND status = 'active' AND source <> 'fact'
                               AND (
                                 agent_id = :aid
                                 OR scope = 'user_shared'
@@ -222,6 +207,9 @@ async def search_documents(db, user_id, agent_id, query: str, *, limit: int = 4)
     stmt = select(SemanticDocument).where(
         SemanticDocument.user_id == user_id,
         SemanticDocument.status == "active",
+        # Standing facts are recalled from memory_passages. Older builds also copied each one here as a "fact"
+        # document; skip those so a fact is not recalled twice.
+        SemanticDocument.source != "fact",
     )
     if ids:
         stmt = stmt.where(SemanticDocument.id.in_(ids))
