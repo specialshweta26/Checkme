@@ -177,6 +177,16 @@ async def rephrase_draft(
         raise HTTPException(502, str(exc)[:300]) from exc
 
 
+@router.post("/{item_id}/redraft")
+async def redraft_mail(item_id: uuid.UUID, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    try:
+        return await service.redraft(db, user, item_id)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, str(exc)[:300]) from exc
+
+
 @router.post("/{item_id}/send")
 async def send_draft(
     item_id: uuid.UUID,

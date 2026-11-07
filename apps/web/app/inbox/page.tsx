@@ -21,6 +21,7 @@ type InboxMail = {
   key_points: string[];
   draft: string;
   key_person?: boolean;
+  edited?: boolean;
   sender_note?: string;
   status: string;
   unread: boolean;
@@ -497,6 +498,18 @@ export default function InboxPage() {
                     </label>
                     <button className="rephrase-btn" type="button" disabled={working} onClick={() => setOpenRephrase(openRephrase === mail.id ? "" : mail.id)}>
                       ✦ Rephrase
+                    </button>
+                    <button
+                      className="rephrase-btn"
+                      type="button"
+                      title="Read the thread again and redo the summary and draft with what your assistant knows now"
+                      disabled={working}
+                      onClick={() => {
+                        if (mail.edited && !window.confirm("Replace your edited draft with a new one?")) return;
+                        act(mail.id, "/redraft", {});
+                      }}
+                    >
+                      ↻ Redraft
                     </button>
                     <button
                       className="send-btn"
