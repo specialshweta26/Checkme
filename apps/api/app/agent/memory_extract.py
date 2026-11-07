@@ -133,17 +133,21 @@ def _skip_turn(user_text: str, assistant_text: str) -> bool:
     return False
 
 
+FORGET_TOOLS = {"forget_memory"}
+
+
 async def _turn_texts(db: AsyncSession, job: MemoryExtractJob) -> tuple[str, str]:
-    user_text, assistant_text, _pending = await _turn_parts(db, job)
+    user_text, assistant_text, _pending, _forgot = await _turn_parts(db, job)
     return user_text, assistant_text
 
 
-async def _turn_parts(db: AsyncSession, job: MemoryExtractJob) -> tuple[str, str, bool]:
-    """(user text, assistant text, whether the reply left an action waiting for the user's approval)."""
+async def _turn_parts(db: AsyncSession, job: MemoryExtractJob) -> tuple[str, str, bool, bool]:
+    """(user text, assistant text, whether the reply left an action waiting for approval, whether it forgot something)."""
     payload = job.payload or {}
     user_text = str(payload.get("user_text") or "")
     assistant_text = str(payload.get("assistant_text") or "")
     pending = bool(payload.get("pending_confirms"))
+    forgot = bool(FORGET_TOOLS & set(payload.get("used_tools") or []))
     if job.request_id:
         rows = (
             await db.execute(
@@ -167,11 +171,12 @@ async def _turn_parts(db: AsyncSession, job: MemoryExtractJob) -> tuple[str, str
             elif row.role == "assistant":
                 assistants.append(row.content or "")
                 pending = bool(meta.get("pending_confirms"))
+                forgot = bool(FORGET_TOOLS & set(meta.get("used_tools") or []))
         if users:
             user_text = users[-1]
         if assistants:
             assistant_text = assistants[-1]
-    return user_text, assistant_text, pending
+    return user_text, assistant_text, pending, forgot
 
 
 KNOWN_FACTS = 12
@@ -361,7 +366,13 @@ async def process_job(db: AsyncSession, job: MemoryExtractJob) -> str:
         job.status = "failed"
         job.last_error = "missing user or agent"
         return job.status
-    user_text, assistant_text, pending = await _turn_parts(db, job)
+    user_text, assistant_text, pending, forgot = await _turn_parts(db, job)
+    if forgot:
+        # "Forget everything about Priya" mentions Priya: extracting from that turn saved "Priya Nair is a person"
+        # right after she was forgotten. A turn that forgot something adds nothing to memory.
+        job.status = "done"
+        job.last_error = ""
+        return job.status
     if _skip_turn(user_text, assistant_text):
         job.status = "done"
         job.last_error = ""
