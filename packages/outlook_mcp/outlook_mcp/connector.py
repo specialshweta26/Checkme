@@ -31,6 +31,16 @@ _LIST_SELECT = "id,conversationId,subject,from,receivedDateTime,bodyPreview,isRe
 _TEXT = {"Prefer": 'outlook.body-content-type="text"'}
 _LOCAL_TZ = {"Prefer": f'outlook.timezone="{graph_timezone(DEFAULT_TZ)}"'}
 _WELL_KNOWN = {"inbox", "sentitems", "drafts", "deleteditems", "junkemail", "archive"}
+# The names people (and Gmail) use for Outlook's well-known folders. "sent" used to be sent to Graph as a custom
+# folder name and failed, so nothing in Sent Items was ever read by folder.
+_FOLDER_ALIASES = {"sent": "sentitems", "sent items": "sentitems", "draft": "drafts", "trash": "deleteditems",
+                   "deleted": "deleteditems", "bin": "deleteditems", "junk": "junkemail", "spam": "junkemail"}
+
+
+def well_known_folder(folder: str) -> str | None:
+    name = (folder or "inbox").strip().lower()
+    name = _FOLDER_ALIASES.get(name, name)
+    return name if name in _WELL_KNOWN else None
 
 
 def _q(value: str) -> str:
@@ -336,7 +346,7 @@ class OutlookConnector(BaseConnector):
         try:
             fid = self._well_known_folder(folder)
         except ToolError:
-            fid = folder.lower() if folder.lower() in _WELL_KNOWN else _q(folder)
+            fid = well_known_folder(folder) or _q(folder)
         ids: list[str] = []
         params = {"$select": "id", "$top": min(100, max(limit, 1))}
         rows, nxt = await self._page(f"{ME}/mailFolders/{fid}/messages", params, None)
@@ -349,7 +359,7 @@ class OutlookConnector(BaseConnector):
     # ---- mail read -------------------------------------------------------
 
     async def tool_list_messages(self, folder: str = "inbox", unread_only: bool = False, limit: int = 15, page_token: str | None = None):
-        fid = folder.lower() if folder.lower() in _WELL_KNOWN else _q(folder)
+        fid = well_known_folder(folder) or _q(folder)
         params: dict[str, Any] = {"$top": min(limit, 50), "$select": _LIST_SELECT, "$orderby": "receivedDateTime desc"}
         if unread_only:
             params["$filter"] = "isRead eq false"
