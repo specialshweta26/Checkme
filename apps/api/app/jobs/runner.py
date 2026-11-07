@@ -202,6 +202,8 @@ async def run_job(job_id, session_factory: Callable | None = None, agent_impl: C
                 workspace_agent=agent,
                 progress=progress,
                 job=job,
+                # A webhook payload is third-party content: the run asks before destructive actions from the start.
+                **({"untrusted_input": True} if job.kind == "event" else {}),
             )
         except asyncio.CancelledError:
             from app.agent import cancel as run_cancel

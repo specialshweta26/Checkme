@@ -213,6 +213,10 @@ class ToolIndex(Base):
     input_schema: Mapped[dict] = mapped_column(JSONB)
     read_only: Mapped[bool] = mapped_column(Boolean, default=True)
     destructive: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Which approval policy wrote read_only/destructive. 1: current (MCP read-only only when the server says so).
+    # 2: an MCP row written under the old "safe unless named delete/send" default, reset to needs-approval at
+    # startup and waiting for its connector to re-sync. See app/db.py _migrate_tool_policy.
+    policy_v: Mapped[int] = mapped_column(Integer, default=1)
     requires: Mapped[list[str]] = mapped_column(ARRAY(String), default=list)
     produces: Mapped[list[str]] = mapped_column(ARRAY(String), default=list)
     tags: Mapped[list[str]] = mapped_column(ARRAY(String), default=list)

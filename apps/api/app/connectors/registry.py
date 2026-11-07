@@ -17,6 +17,8 @@ from connector_core import MAIL_CALENDAR_TOOLS, ToolSpec
 
 log = logging.getLogger(__name__)
 
+TOOL_POLICY_VERSION = 1  # see ToolIndex.policy_v
+
 MAIL_CORE_TOOLS = tuple(
     dict.fromkeys([s.name for s in MAIL_CALENDAR_TOOLS] + [s.name for s in VIRTUAL_MAIL_TOOLS])
 )
@@ -29,12 +31,24 @@ def server_key_for(kind: str, provider: str, url: str | None) -> str:
     return "mcp:" + hashlib.sha256(host.encode()).hexdigest()[:32]
 
 
+def _hint(ann, camel: str, snake: str):
+    """An MCP tool annotation by its wire name (readOnlyHint) or the SDK's attribute (read_only_hint, mcp 2.x)."""
+    if ann is None:
+        return None
+    if isinstance(ann, dict):
+        return ann.get(camel, ann.get(snake))
+    value = getattr(ann, snake, None)
+    return value if value is not None else getattr(ann, camel, None)
+
+
 def spec_from_mcp(tool) -> ToolSpec:
     schema = getattr(tool, "inputSchema", None) or getattr(tool, "input_schema", None) or {"type": "object", "properties": {}}
     desc = clean_description(getattr(tool, "description", "") or "")
     ann = getattr(tool, "annotations", None)
-    read_only = bool(getattr(ann, "readOnlyHint", True) if ann is not None else True)
-    destructive = bool(getattr(ann, "destructiveHint", False) if ann is not None else False) or destructive_name(tool.name)
+    # Read-only only when the server says so. A tool with no annotations is treated the way the MCP spec defaults
+    # it (not read-only, destructive), so it needs the user's approval like any other write.
+    read_only = _hint(ann, "readOnlyHint", "read_only_hint") is True
+    destructive = (not read_only) or _hint(ann, "destructiveHint", "destructive_hint") is True or destructive_name(tool.name)
     requires, produces = infer_ids(tool.name, schema)
     group = infer_group(tool.name)
     tags = [group]
@@ -105,6 +119,7 @@ async def upsert_tool_index(db: AsyncSession, server_key: str, title: str, specs
         row.input_schema = spec.input_schema
         row.read_only = spec.read_only
         row.destructive = spec.destructive
+        row.policy_v = TOOL_POLICY_VERSION
         row.requires = list(spec.requires)
         row.produces = list(spec.produces)
         row.tags = list(spec.tags)

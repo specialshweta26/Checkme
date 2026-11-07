@@ -665,9 +665,10 @@ export default function ChatPage() {
   }
 
   function sendComposerMessage() {
-    const reply = text.trim().toLowerCase().replace(/[.!?]+$/g, "").replace(/\s+/g, " ");
-    const yes = /^(yes|yeah|yep|sure|absolutely|of course|ok|okay|go ahead|please go ahead|go for it|do it|please do it|please do|proceed|please proceed|continue|sounds good|approved|i approve|i want you to)(\b|,)/.test(reply);
-    send(text, pending.length > 0 && yes && !/\b(but|unless|not|except)\b/.test(reply) ? pending : []);
+    // Only a plain yes on its own approves the prepared action. "ok, what would this change?" is a question, so it
+    // is sent as a message and the card stays. The API applies the same rule (app/agent/approval.py).
+    const reply = text.trim().toLowerCase().replace(/’/g, "'").replace(/\s+/g, " ").replace(/[.!]+$/g, "").trim();
+    send(text, pending.length > 0 && APPROVE_REPLIES.has(reply) ? pending : []);
   }
 
   function onSubmit(e: FormEvent) {
@@ -1244,6 +1245,16 @@ export default function ChatPage() {
     </AppShell>
   );
 }
+
+// Replies that approve a prepared action. Keep in step with APPROVE_REPLIES in apps/api/app/agent/approval.py.
+const APPROVE_REPLIES = new Set([
+  "yes", "y", "yeah", "yep", "yup", "sure", "ok", "okay", "approve", "approved", "i approve", "confirm",
+  "confirmed", "go ahead", "go for it", "do it", "proceed", "please proceed", "please go ahead", "please do",
+  "please do it", "yes please", "yes, please", "yes go ahead", "yes, go ahead", "yes do it", "yes, do it",
+  "sounds good", "that's fine", "that is fine", "send it", "ship it", "merge it", "deploy it", "lgtm",
+  "absolutely", "of course", "continue", "yes, proceed", "yes proceed", "ok go ahead", "ok, go ahead",
+  "okay go ahead", "okay, go ahead",
+]);
 
 function firstName(me: Me | null) {
   const raw = (me?.name || me?.email || "there").trim().split(/[\s@]+/)[0];

@@ -103,6 +103,7 @@ async def _migrate() -> None:
         await _migrate_jobs(conn)
         await _migrate_agent_scope(conn)
         await _migrate_memory(conn)
+        await _migrate_tool_policy(conn)
         await conn.execute(text("ALTER TABLE agent_skills ADD COLUMN IF NOT EXISTS revision INTEGER DEFAULT 1"))
 
 
@@ -257,6 +258,19 @@ async def _migrate_agent_scope(conn) -> None:
     await _add_agent_fk(conn, "memory_passages", "memory_passages_agent_id_fkey")
     await _add_agent_fk(conn, "scheduled_tasks", "scheduled_tasks_agent_id_fkey")
     await _add_agent_fk(conn, "automations", "automations_agent_id_fkey")
+
+
+async def _migrate_tool_policy(conn) -> None:
+    """MCP tool rows written before policy 1 were "safe unless named delete/send". Mark them needs-approval
+    (policy_v 2) once; the startup re-sync rewrites them from each server's own read-only annotations."""
+    await conn.execute(text("ALTER TABLE tool_index ADD COLUMN IF NOT EXISTS policy_v INTEGER DEFAULT 0"))
+    await conn.execute(
+        text(
+            "UPDATE tool_index SET read_only = false, destructive = true, policy_v = 2 "
+            "WHERE server_key LIKE 'mcp:%' AND (policy_v IS NULL OR policy_v = 0)"
+        )
+    )
+    await conn.execute(text("UPDATE tool_index SET policy_v = 1 WHERE policy_v IS NULL OR policy_v = 0"))
 
 
 async def _migrate_memory(conn) -> None:

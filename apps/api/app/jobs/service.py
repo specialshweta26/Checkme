@@ -461,19 +461,16 @@ def respond_to_approval(job: AgentJob, text: str, action_title: str | None = Non
         pending = [p for p in pending if str(p.get("title") or "") == action_title]
     if len(pending) != 1:
         raise JobError("There are several actions to decide. Please respond to each action separately.")
-    import re
+    from app.agent.approval import reply_intent
 
-    normalized = " ".join((text or "").lower().strip().replace("’", "'").split())
-    normalized = re.sub(r"[.!?]+$", "", normalized)
-    negative = ("no", "don't", "do not", "i don't", "i do not", "please don't", "please do not", "leave it", "leave that", "cancel", "stop", "skip", "not now", "i decline")
-    affirmative = ("yes", "yeah", "yep", "sure", "absolutely", "of course", "ok", "okay", "go ahead", "please go ahead", "go for it", "do it", "please do it", "please do", "proceed", "please proceed", "continue", "that's fine", "that is fine", "sounds good", "approved", "i approve", "i want you to")
-    if any(normalized == phrase or normalized.startswith(phrase + ",") or normalized.startswith(phrase + " ") for phrase in negative):
+    # Only a plain yes on its own approves ("ok, what would this change?" used to merge the PR). A no declines.
+    # Anything else (a question, a condition, a yes with more after it) is asked again.
+    intent = reply_intent(text)
+    if intent == "decline":
         return decline(job, str(pending[0].get("token") or ""))
-    if re.search(r"\b(but|unless|not|except)\b", normalized):
-        raise JobError("I didn’t catch that. Please say clearly whether you want me to go ahead or leave it.")
-    if any(normalized == phrase or normalized.startswith(phrase + ",") or normalized.startswith(phrase + " ") for phrase in affirmative):
+    if intent == "approve":
         return approve(job, str(pending[0].get("token") or ""))
-    raise JobError("I didn’t catch that. Please say something clear like “go ahead” or “leave it”.")
+    raise JobError("I didn’t catch that. To run it, reply just “yes” or “go ahead”; to leave it, reply “no”.")
 
 
 def cancel(job: AgentJob) -> list[JobEvent]:

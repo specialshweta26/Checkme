@@ -485,7 +485,6 @@ async def shell(ctx, command: str, cwd: str | None = None, timeout: int = 60) ->
 async def user_computer_shell(ctx, command: str, cwd: str | None = None, timeout: int = 60) -> Any:
     from app.agent.confirm import sign_confirm
     from app.agent.deep import call_user_tool
-    from app.agent.invoke import confirmed
     from app.config import get_settings
 
     if not (command or "").strip():
@@ -512,7 +511,14 @@ async def user_computer_shell(ctx, command: str, cwd: str | None = None, timeout
     args: dict[str, Any] = {"command": command, "timeout": max(10, min(int(timeout or 60), 900))}
     if cwd:
         args["cwd"] = cwd
-    if not ctx.auto_confirm and not confirmed(ctx.confirmations, slug, "exec"):
+    from app.agent import approval
+    from app.agent.deep import may_self_approve
+
+    # This command, once: approving `ls` never lets a different command through, nor the same one twice.
+    approved = approval.find_approval(ctx.confirmations, slug, "exec", args)
+    if approved is not None:
+        approval.consume(ctx.confirmations, approved)
+    elif not await may_self_approve(ctx, "exec", args):
         token = sign_confirm("tool", {"slug": slug, "tool": "exec", "args": args})
         pending = {
             "needs_confirm": True,

@@ -361,13 +361,23 @@ async def chat(
             content = f"{content}\n\nTool evidence (cite source_tool if asked): {json.dumps(src, default=str)[:2000]}"
         history.append({"role": m.role, "content": content})
 
+    from app.agent.approval import claim_token, reply_intent
+
     confirms = []
+    # A typed reply approves only when it is a plain yes ("ok, what would this change?" is a question, not a yes).
+    # A handoff token comes from the "I finished on the computer" button, so it needs no typed yes.
+    plain_yes = reply_intent(text) == "approve"
     for item in body.confirmations:
         token = item.get("token")
         if not token:
             continue
         data = read_confirm(token)
         if data and data.get("kind") == "tool":
+            handoff = (data.get("payload") or {}).get("kind") == "handoff"
+            if not (plain_yes or handoff):
+                continue  # not approved: the card stays, and the model answers the message instead
+            if not await claim_token(token, data.get("exp")):
+                continue  # already used: the same approval never runs the action twice
             confirms.append(data["payload"])
 
     working = dict(sess.state or {})

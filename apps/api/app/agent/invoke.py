@@ -54,7 +54,16 @@ async def preview(user, conn, tool: str, args: dict) -> dict:
             if args.get(key) not in (None, "", []):
                 out[key] = args.get(key)
         return {k: v for k, v in out.items() if v not in (None, "", [])}
-    return {k: args.get(k) for k in ("to", "cc", "bcc", "subject", "body", "message_id", "query", "reply_all") if args.get(k)}
+    mail = {k: args.get(k) for k in ("to", "cc", "bcc", "subject", "body", "message_id", "query", "reply_all") if args.get(k)}
+    if mail:
+        return mail
+    # Any other tool (MCP, marketplace actions): show exactly what would run, so the approval is informed.
+    from app.agent.approval import nested_actions
+
+    action = nested_actions(tool, args)[0]
+    inner = args.get("arguments") if action != tool and isinstance(args.get("arguments"), dict) else args
+    shown = {k: (clip(str(v), 300) if isinstance(v, str) else v) for k, v in list((inner or {}).items())[:12]}
+    return {"kind": "action", "action": action, "args": shown}
 
 
 def _load_mail_files(args: dict) -> dict:
