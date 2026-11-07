@@ -133,9 +133,16 @@ def _skip_turn(user_text: str, assistant_text: str) -> bool:
 
 
 async def _turn_texts(db: AsyncSession, job: MemoryExtractJob) -> tuple[str, str]:
+    user_text, assistant_text, _pending = await _turn_parts(db, job)
+    return user_text, assistant_text
+
+
+async def _turn_parts(db: AsyncSession, job: MemoryExtractJob) -> tuple[str, str, bool]:
+    """(user text, assistant text, whether the reply left an action waiting for the user's approval)."""
     payload = job.payload or {}
     user_text = str(payload.get("user_text") or "")
     assistant_text = str(payload.get("assistant_text") or "")
+    pending = bool(payload.get("pending_confirms"))
     if job.request_id:
         rows = (
             await db.execute(
@@ -158,11 +165,12 @@ async def _turn_texts(db: AsyncSession, job: MemoryExtractJob) -> tuple[str, str
                 users.append(row.content or "")
             elif row.role == "assistant":
                 assistants.append(row.content or "")
+                pending = bool(meta.get("pending_confirms"))
         if users:
             user_text = users[-1]
         if assistants:
             assistant_text = assistants[-1]
-    return user_text, assistant_text
+    return user_text, assistant_text, pending
 
 
 KNOWN_FACTS = 12
@@ -320,7 +328,7 @@ async def process_job(db: AsyncSession, job: MemoryExtractJob) -> str:
         job.status = "failed"
         job.last_error = "missing user or agent"
         return job.status
-    user_text, assistant_text = await _turn_texts(db, job)
+    user_text, assistant_text, pending = await _turn_parts(db, job)
     if _skip_turn(user_text, assistant_text):
         job.status = "done"
         job.last_error = ""
@@ -339,7 +347,10 @@ async def process_job(db: AsyncSession, job: MemoryExtractJob) -> str:
     try:
         from app.memory_engine.episodes import record_turn
 
-        await record_turn(db, user, agent, user_text, assistant_text, session_id=job.session_id)
+        # A reply that left an action waiting for approval is half a story ("prepared it, not posted"). Saved as an
+        # episode it outlives the approval and later contradicts what happened, so only finished turns are episodes.
+        if not pending:
+            await record_turn(db, user, agent, user_text, assistant_text, session_id=job.session_id)
     except Exception:  # noqa: BLE001 - a failed episode write must not fail the extract job
         log.info("episode memory skipped", exc_info=True)
     job.status = "done"

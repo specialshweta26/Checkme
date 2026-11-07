@@ -347,8 +347,13 @@ async def chat(
             .limit(get_settings().history_messages)
         )
     ).scalars().all()
+    from app.agent import tool_digest
+
     history = []
-    for m in reversed(history_rows):
+    ordered = list(reversed(history_rows))
+    # The last few replies carry their full tool record; older ones keep only tools, ids and outcomes.
+    recent_replies = {id(r) for r in [r for r in ordered if r.role == "assistant"][-4:]}
+    for m in ordered:
         content = m.content
         uploaded = (m.meta or {}).get("uploads") if isinstance(m.meta, dict) and m.role == "user" else None
         if uploaded:
@@ -357,7 +362,12 @@ async def chat(
             if names:
                 content = f"{content}\n\n[Attached: {names}]"
         src = (m.meta or {}).get("source") if isinstance(m.meta, dict) else None
-        if m.role == "assistant" and src:
+        digest = (m.meta or {}).get("tool_digest") if isinstance(m.meta, dict) else None
+        if m.role == "assistant" and digest:
+            record = tool_digest.render(digest, brief=id(m) not in recent_replies)
+            if record:
+                content = f"{content}\n\n{record}"
+        elif m.role == "assistant" and src:
             content = f"{content}\n\nTool evidence (cite source_tool if asked): {json.dumps(src, default=str)[:2000]}"
         history.append({"role": m.role, "content": content})
 
@@ -521,6 +531,7 @@ async def chat(
                 "jobs": result.get("jobs_started") or [],
                 "job": (result.get("jobs_started") or [None])[0],
                 "usage": result.get("usage"),
+                "tool_digest": result.get("tool_digest") or [],
             }
             if isinstance(result.get("question"), dict) and result["question"].get("options"):
                 # ask_user in a chat turn: the web shows the options as buttons that send the option text.
