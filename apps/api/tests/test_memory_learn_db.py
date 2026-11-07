@@ -174,3 +174,42 @@ async def test_run_user_runs_due_jobs_and_survives_a_failing_mailbox(factory, mo
         states = {s.job: s for s in (await db.execute(select(MemoryLearnerState).where(MemoryLearnerState.user_id == a.id))).scalars()}
         assert set(states) == set(learn.JOBS)
         assert all(s.last_run_at is not None and s.lease_until is None for s in states.values())  # leases released
+
+
+async def test_the_users_other_addresses_are_not_contacts(factory):
+    from app.memory_engine import learn
+    from app.memory_engine.entities import mark_lookalikes, people_context, resolve, set_self
+    from app.models import MemoryEntity, User
+
+    a, _ = await _email_user(factory, f"gaurav{os.getpid()}self@agilitas.test")
+    async with factory() as db:
+        row = await db.get(User, a.id)
+        row.display_name = "Gaurav R"
+        await db.commit()
+        a.display_name = "Gaurav R"
+        # Learned before this check existed: the user's personal Gmail, counted as a contact.
+        old = await resolve(db, a.id, name="gaurav grv", email="gaurav.grv@gmail.com")
+        old.mail_out, old.salience = 23, 9.0
+        await db.commit()
+        assert await mark_lookalikes(db, a) == 1
+        box = FakeMailbox(a.email, sent=[
+            _msg("s1", frm=f"Gaurav R <{a.email}>", to="gaurav grv <gaurav.grv@gmail.com>, Gaurav Sharma <gaurav.sharma@acme.com>"),
+            _msg("s2", frm="Gaurav R <g.r@agilitas-alias.test>", to="Priya Nair <priya@acme.com>"),  # a send-as alias
+        ], inbox=[_msg("m1", frm="Gaurav R <g.r@agilitas-alias.test>", to=a.email)])
+        assert await learn.learn_mail(db, a, box) == {"mail_in": 0, "mail_out": 2}  # Sharma and Priya only
+        people = {e.name: e for e in (await db.execute(select(MemoryEntity).where(MemoryEntity.user_id == a.id, MemoryEntity.kind == "person"))).scalars()}
+        assert people["gaurav grv"].status == "self" and people["Gaurav Sharma"].status == "active"
+        top = await people_context(db, a.id, "Who do I email the most?")
+        assert not any(l.startswith("gaurav grv") for l in top)
+        assert "look like the user's own other addresses: gaurav grv <gaurav.grv@gmail.com>" in top[-1]
+        # The user says it's someone else: it comes back and the guess never hides it again.
+        assert (await set_self(db, a.id, "gaurav.grv@gmail.com", False)).status == "active"
+        assert await mark_lookalikes(db, a) == 0
+        assert any(l.startswith("gaurav grv") for l in await people_context(db, a.id, "Who do I email the most?"))
+        # The user says it's theirs after all: hidden, and not reported as a guess.
+        await set_self(db, a.id, "gaurav.grv@gmail.com", True)
+        assert not any("gaurav.grv" in l for l in await people_context(db, a.id, "Who do I email the most?"))
+        # An address never seen before that the user says is theirs is skipped from then on.
+        await set_self(db, a.id, "g.home@yahoo.com", True)
+        await db.commit()
+        assert "g.home@yahoo.com" in await learn.own_addresses(db, a)

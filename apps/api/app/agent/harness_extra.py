@@ -274,6 +274,11 @@ class ForgetInput(BaseModel):
     text: str = Field(default="", description="Snippet to match if you do not have an id.")
 
 
+class MyAddressInput(BaseModel):
+    who: str = Field(description="The email address (or the name as it appears in memory).")
+    is_me: bool = Field(default=True, description="True: it is the user's own address. False: it is someone else.")
+
+
 class HistorySearchInput(BaseModel):
     query: str = Field(description="Words to find in this chat.")
     limit: int = Field(default=12)
@@ -677,6 +682,19 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         ctx.used_tools.append("forget_memory")
         return _dumps(await forget_memory(ctx, memory_id, label, text))
 
+    async def set_my_address(who: str, is_me: bool = True) -> str:
+        """Say whether an email address is the user's own (e.g. their personal Gmail). The user's own addresses are not counted as contacts. Call when the user says an address or person "is me" / "is my other email" (is_me=true), or "is not me" / "is someone else" (is_me=false)."""
+        ctx.used_tools.append("set_my_address")
+        if ctx.db is None:
+            return _dumps({"error": "Cannot change memory without a workspace."})
+        from app.memory_engine import entities as ent
+
+        row = await ent.set_self(ctx.db, ctx.user.id, who, is_me)
+        await ctx.db.commit()
+        if row is None:
+            return _dumps({"ok": False, "error": f"No one called {who!r} in memory. Ask for the email address."})
+        return _dumps({"ok": True, "name": row.name, "is_me": is_me})
+
     async def search_hist(query: str, limit: int = 12) -> str:
         """Search this chat's messages for a phrase."""
         ctx.used_tools.append("search_history")
@@ -849,6 +867,7 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         StructuredTool.from_function(coroutine=save_shared_memory, name="save_shared_memory", description=save_shared_memory.__doc__, args_schema=RememberInput),
         StructuredTool.from_function(coroutine=recall, name="recall_memory", description=recall.__doc__, args_schema=RecallInput),
         StructuredTool.from_function(coroutine=forget, name="forget_memory", description=forget.__doc__, args_schema=ForgetInput),
+        StructuredTool.from_function(coroutine=set_my_address, name="set_my_address", description=set_my_address.__doc__, args_schema=MyAddressInput),
         StructuredTool.from_function(coroutine=search_hist, name="search_history", description=search_hist.__doc__, args_schema=HistorySearchInput),
         StructuredTool.from_function(coroutine=read_hist, name="read_history", description=read_hist.__doc__, args_schema=HistoryReadInput),
         StructuredTool.from_function(coroutine=skill_read, name="skill_read", description=skill_read.__doc__, args_schema=SkillReadInput),
