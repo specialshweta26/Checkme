@@ -2805,6 +2805,34 @@ def _is_recursion_limit(exc: BaseException) -> bool:
     return "recursion limit" in msg or "recursed" in msg
 
 
+_TRANSIENT_NAMES = {
+    "apiconnectionerror",
+    "apitimeouterror",
+    "openaiconnectionerror",
+    "connecterror",
+    "connecttimeout",
+    "readtimeout",
+    "remoteprotocolerror",
+}
+NETWORK_RETRY_DELAYS = (2.0, 5.0)  # seconds before the 1st and 2nd retry of a turn the network dropped
+
+
+def _is_transient_network(exc: BaseException) -> bool:
+    """A dropped connection, DNS blip or timeout reaching the model, anywhere in the exception chain."""
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        name = type(cur).__name__.lower()
+        if name in _TRANSIENT_NAMES:
+            return True
+        msg = str(cur).lower()
+        if "name or service not known" in msg or "temporary failure in name resolution" in msg:
+            return True
+        cur = cur.__cause__ or cur.__context__
+    return False
+
+
 async def _can_resume(graph: Any, config: dict) -> bool:
     """Whether the turn's checkpoint holds progress to continue from."""
     try:
@@ -3488,6 +3516,7 @@ async def _run_deep_agent(
         log.info("job turn starts as %s", how)
         if how == "restart" and progress is not None:
             await progress.emit("Continuing where it stopped before the restart", kind="retry")
+    tools_before = len(ctx.used_tools)
     for attempt in range(3):
         try:
             result = await graph.ainvoke(
@@ -3514,6 +3543,16 @@ async def _run_deep_agent(
                     await progress.emit("That took many steps; continuing where it stopped", kind="retry")
                 log.warning("recursion limit reached; retry %s/2 with limit=%s resumed=%s", attempt + 1, limit, resumed)
                 continue
+            if _is_transient_network(exc) and attempt < 2:
+                resumed = await _can_resume(graph, thread)
+                # Start over only if nothing ran yet: re-running tools that already ran could repeat their effects.
+                if resumed or len(ctx.used_tools) == tools_before:
+                    next_input = None if resumed else payload
+                    if progress is not None:
+                        await progress.emit("Lost the connection for a moment; trying again", kind="retry")
+                    log.warning("network error (%s); retry %s/2 resumed=%s", type(exc).__name__, attempt + 1, resumed)
+                    await asyncio.sleep(NETWORK_RETRY_DELAYS[attempt])
+                    continue
             log.exception("deep agent failed")
             text = f"I could not finish that request: {str(exc)[:240]}"
             break

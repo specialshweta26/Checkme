@@ -79,9 +79,20 @@ def _manager():
     from langmem import create_memory_manager
 
     from app.config import get_settings
+    from app.llm import reasoning_payload, small_model
 
     settings = get_settings()
-    model = ChatOpenAI(model=settings.openai_model, api_key=settings.openai_api_key, temperature=0)
+    # Same request shape as app.llm: the Responses API with the configured reasoning effort. Without a reasoning
+    # setting the model runs at its default effort, where "temperature" is rejected (400), so every turn fell back
+    # to the local extractor. No temperature is sent.
+    model = ChatOpenAI(
+        model=small_model(),
+        api_key=settings.openai_api_key,
+        use_responses_api=True,
+        reasoning=reasoning_payload(),
+        timeout=60,
+        max_retries=1,
+    )
     return create_memory_manager(
         model,
         schemas=[Episode],
