@@ -87,6 +87,13 @@ _DIRECT = re.compile(
     r"explain (?:the concept|like)|write (?:a )?(?:poem|joke|haiku|story|caption|tweet)|calculate|convert \d)\b",
     re.I,
 )
+# Questions about the user themselves ("what is my name", "who am I", "do you know my email") are answered from what
+# the assistant already knows about them, never from the web.
+_ABOUT_USER = re.compile(
+    r"\b(what(?:'s| is| are) my|who am i|do you (?:know|remember) (?:my|me|who i am)|tell me my|"
+    r"remind me (?:of )?my|what do you know about me)\b",
+    re.I,
+)
 _DAY = re.compile(r"\b(today|tonight|right now|live|breaking|just (?:happened|announced)|this (?:morning|evening))\b", re.I)
 _MONTH = re.compile(r"\b(this month|recently|recent)\b", re.I)
 _YEAR = re.compile(r"\b(this year)\b", re.I)
@@ -165,6 +172,8 @@ def classify_turn(query: str, *, has_uploads: bool = False, confirmations: bool 
         return TurnPlan(COMPUTER, "needs the cloud shell")
     if _DEEP.search(first) or len(first) > 600:
         return TurnPlan(DEEP, "long or multi-source work")
+    if _ABOUT_USER.search(first) and not _NEWS.search(first):
+        return TurnPlan(DIRECT, "about the user")
     recency, news = recency_for(first)
     if recency or news or _WEB.search(first):
         return TurnPlan(QUICK_WEB, "current facts", recency or ("week" if news else ""), news)

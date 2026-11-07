@@ -101,11 +101,13 @@ type TurnUsage = {
   models?: { model: string; input: number; output: number; cached?: number; calls?: number; cost_usd?: number }[];
 };
 
-/** "12,340 in · 820 out · $0.0213" under a finished turn (docs/LLD.md "Turn usage"). */
+/** "12,340 in · 11,900 cached · 820 out · $0.0213" under a finished turn (docs/LLD.md "Turn usage"). */
 function usageLabel(u?: TurnUsage | null) {
   if (!u || !(u.input || u.output)) return "";
   const n = (x: number) => x.toLocaleString("en-US");
-  const parts = [`${n(u.input)} in`, `${n(u.output)} out`];
+  // "16,828 in · 16,554 cached · 12 out". Cached is the part of the input served from the provider's prompt cache,
+  // billed at a fraction of the price. Output is always generated fresh, so it has no cached part.
+  const parts = [`${n(u.input)} in`, `${n(u.cached || 0)} cached`, `${n(u.output)} out`];
   if (u.cost_usd !== null && u.cost_usd !== undefined) {
     parts.push(`$${u.cost_usd < 0.01 ? u.cost_usd.toFixed(4) : u.cost_usd.toFixed(3)}${u.unpriced?.length ? "+" : ""}`);
   }

@@ -2558,6 +2558,15 @@ def system_prompt(
     title = (getattr(agent, "title", None) or "chief of staff").strip() or "chief of staff"
     extra = (getattr(agent, "instructions", None) or "").strip()
     identity = f"You are {name}, this user's {title}. You have mail, calendar, and connected MCP servers.\n"
+    # Who the user is, so "what's my name / email" is answered without a tool call. Same every turn for this user,
+    # so it stays in the cached part of the prompt.
+    who = (getattr(user, "display_name", None) or "").strip()
+    email = (getattr(user, "email", None) or "").strip()
+    if who or email:
+        identity += (
+            "The user you work for: " + (who or "name not given") + (f" <{email}>" if email else "")
+            + ". This is already known: answer questions about their name or email from it without a tool call.\n"
+        )
     identity += "Format chat replies in readable Markdown. Bold only the most useful keywords, names, dates, decisions, and action labels; keep ordinary prose unbolded.\n"
     if extra:
         identity += extra + "\n"
