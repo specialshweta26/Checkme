@@ -183,16 +183,6 @@ async def search_documents(db, user_id, agent_id, query: str, *, limit: int = 4)
                           AND document_id IN (
                             SELECT id FROM semantic_documents
                             WHERE user_id = :uid AND status = 'active' AND source <> 'fact'
-                              AND (
-                                agent_id = :aid
-                                OR scope = 'user_shared'
-                                OR (
-                                  scope = 'group'
-                                  AND group_id IN (
-                                    SELECT group_id FROM agent_group_members WHERE agent_id = :aid
-                                  )
-                                )
-                              )
                           )
                         ORDER BY embedding <=> CAST(:vec AS vector)
                         LIMIT :lim
@@ -223,21 +213,6 @@ async def search_documents(db, user_id, agent_id, query: str, *, limit: int = 4)
         return []
     order = {doc_id: index for index, doc_id in enumerate(ids)}
     docs.sort(key=lambda doc: order.get(doc.id, 99))
-    groups: set = set()
-    try:
-        from app.models import AgentGroupMember
-
-        groups = set(
-            (
-                await db.execute(select(AgentGroupMember.group_id).where(AgentGroupMember.agent_id == agent_id))
-            ).scalars().all()
-        )
-    except Exception:  # noqa: BLE001
-        groups = set()
-    visible = []
-    for doc in docs:
-        shared = doc.scope == "user_shared"
-        in_group = doc.scope == "group" and doc.group_id in groups
-        if doc.agent_id == agent_id or shared or in_group:
-            visible.append({"source": doc.source, "title": doc.title or "", "body": doc.body or ""})
+    # Documents belong to the user: any of their agents can use them. Never another user's (user_id above).
+    visible = [{"source": doc.source, "title": doc.title or "", "body": doc.body or ""} for doc in docs if doc.user_id == user_id]
     return visible[:limit]

@@ -6,7 +6,8 @@ import time
 import uuid
 
 import httpx
-from sqlalchemy import desc, or_, select, text
+from sqlalchemy import desc, func, or_, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -22,8 +23,13 @@ _LABEL = re.compile(r"^[A-Za-z0-9_-]{1,50}$")
 CORE_LABELS = ("prefs", "people", "voice", "work", "coding")
 PERSONA_LABELS = ("voice", "prefs")
 STANDING_LABELS = ("people", "work", "learned")
-SCOPE_AGENT = "agent"
-SCOPE_SHARED = "user_shared"
+SCOPE_AGENT = "agent"  # a note about how one agent works: read by that agent only
+SCOPE_USER = "user"  # a fact about the user's world: read by all of the user's agents
+SCOPE_SHARED = "user_shared"  # old name for SCOPE_USER, still read as user-level
+USER_SCOPES = (SCOPE_USER, SCOPE_SHARED)
+# Core blocks about the user (how they like to be answered, what was learned about them, their people and work) are
+# one copy per user, kept on the user's default agent and read by every agent. Other labels ("coding") stay per agent.
+USER_LABELS = ("voice", "prefs", "learned", "people", "work")
 STATUS_ACTIVE = "active"
 STATUS_SUPERSEDED = "superseded"
 STATUS_DELETED = "deleted"
@@ -376,7 +382,7 @@ def _now_utc():
 # number of rows however large an agent's memory grows.
 FACT_POOL = 16
 _TS_STOP = {"the", "and", "for", "you", "what", "with", "this", "that", "are", "was", "is", "my", "me", "to", "of", "in", "on", "it", "an", "do", "can"}
-_FACT_SCOPE_SQL = "user_id = :uid AND status = 'active' AND (agent_id = :aid OR scope = 'user_shared')"
+_FACT_SCOPE_SQL = "user_id = :uid AND status = 'active' AND (scope IN ('user', 'user_shared') OR agent_id = :aid)"
 
 
 def _tsquery(query: str) -> str:
@@ -392,8 +398,27 @@ def _visible_fact(row, user_id, agent_id) -> bool:
     return (
         _is_active(row)
         and row.user_id == user_id
-        and (row.agent_id == agent_id or getattr(row, "scope", SCOPE_AGENT) == SCOPE_SHARED)
+        and (getattr(row, "scope", SCOPE_AGENT) in USER_SCOPES or row.agent_id == agent_id)
     )
+
+
+async def _attach_subject_names(db: AsyncSession, user_id, rows: list) -> None:
+    """Name the person or organisation each fact is about (rows about the user themselves have none)."""
+    ids = {getattr(r, "subject_entity_id", None) for r in rows}
+    ids.discard(None)
+    if not ids:
+        return
+    try:
+        from app.memory_engine.entities import names_for
+
+        names = await names_for(db, user_id, ids)
+    except Exception:  # noqa: BLE001
+        log.info("entity names skipped", exc_info=True)
+        return
+    for row in rows:
+        sid = getattr(row, "subject_entity_id", None)
+        if sid in names:
+            row.subject_name = names[sid]
 
 
 async def _newest_facts(db: AsyncSession, user_id, agent_id, limit: int) -> list:
@@ -403,7 +428,7 @@ async def _newest_facts(db: AsyncSession, user_id, agent_id, limit: int) -> list
             .where(
                 MemoryPassage.user_id == user_id,
                 MemoryPassage.status == STATUS_ACTIVE,
-                or_(MemoryPassage.agent_id == agent_id, MemoryPassage.scope == SCOPE_SHARED),
+                or_(MemoryPassage.scope.in_(USER_SCOPES), MemoryPassage.agent_id == agent_id),
             )
             .order_by(MemoryPassage.id.desc())
             .limit(limit)
@@ -462,7 +487,8 @@ async def _ranked_facts(db: AsyncSession, user_id, agent_id, query: str, limit: 
     def score(row) -> float:
         rank = vec_rank.get(row.id)
         vector = 1.0 / (1.0 + rank) if rank is not None else 0.0  # reciprocal rank: the nearest match leads
-        return 0.5 * vector + 0.3 * _keyword_score(row.text or "", q) + 0.2 * _recency(row)
+        confidence = float(getattr(row, "confidence", None) or 0.8)
+        return 0.45 * vector + 0.25 * _keyword_score(row.text or "", q) + 0.15 * _recency(row) + 0.15 * confidence
 
     rows.sort(key=lambda row: (-score(row), -(row.id or 0)))
     return rows[:limit]
@@ -670,7 +696,8 @@ def _assemble_memory(blocks: list, facts: list, history: list[str] | None = None
         parts.append("Standing facts")
         parts.extend(f"{b.label}: {b.value.strip()}" for b in standing_blocks)
         for row in facts:
-            tag = "shared" if getattr(row, "scope", SCOPE_AGENT) == SCOPE_SHARED else "fact"
+            about = getattr(row, "subject_name", "")
+            tag = f"about {about}" if about else ("agent note" if getattr(row, "scope", SCOPE_USER) == SCOPE_AGENT else "fact")
             parts.append(f"- [{tag}] {row.text.strip()}")
     parts.extend(f"{b.label}: {b.value.strip()}" for b in other)
     if history:
@@ -688,11 +715,7 @@ async def load_memory(db: AsyncSession, user: User, query: str, agent=None, task
         log.warning("memory owner lookup failed: %s", exc)
         return ""
     try:
-        blocks = (
-            await db.execute(
-                select(MemoryBlock).where(MemoryBlock.user_id == user.id, MemoryBlock.agent_id == owner.id)
-            )
-        ).scalars().all()
+        blocks = await _visible_blocks(db, user, owner)
     except Exception as exc:  # noqa: BLE001
         log.warning("memory block load failed: %s", exc)
         blocks = []
@@ -700,6 +723,7 @@ async def load_memory(db: AsyncSession, user: User, query: str, agent=None, task
         return _assemble_memory(list(blocks), [], [])
     try:
         facts = await _ranked_facts(db, user.id, owner.id, query, limit=8)
+        await _attach_subject_names(db, user.id, facts)
     except Exception as vis_exc:  # noqa: BLE001
         log.warning("memory passage load failed: %s", vis_exc)
         facts = []
@@ -734,9 +758,39 @@ async def load_memory(db: AsyncSession, user: User, query: str, agent=None, task
     return assembled
 
 
+async def _block_owner(db: AsyncSession, user: User, label: str, agent=None, agent_id=None):
+    """Whose row holds this block: the user's default agent for user-level labels, else the agent itself."""
+    if label in USER_LABELS:
+        from app.agents.service import ensure_default_agent
+
+        return await ensure_default_agent(db, user)
+    return await _memory_agent(db, user, agent_id=agent_id, agent=agent)
+
+
+async def _visible_blocks(db: AsyncSession, user: User, owner) -> list:
+    """The user's own blocks (on their default agent) plus this agent's per-agent blocks."""
+    from app.agents.service import ensure_default_agent
+
+    default = await ensure_default_agent(db, user)
+    rows = (
+        await db.execute(
+            select(MemoryBlock).where(
+                MemoryBlock.user_id == user.id,
+                MemoryBlock.agent_id.in_({default.id, owner.id}),
+            )
+        )
+    ).scalars().all()
+    return [
+        row
+        for row in rows
+        if (row.label in USER_LABELS and row.agent_id == default.id)
+        or (row.label not in USER_LABELS and row.agent_id == owner.id)
+    ]
+
+
 async def read_core(db: AsyncSession, user: User, label: str, agent=None) -> str:
-    """One core block. With no agent, this is Chief's block (inbox voice)."""
-    owner = await _memory_agent(db, user, agent=agent)
+    """One core block. User-level labels (voice, prefs, learned, people, work) are the same for all the user's agents."""
+    owner = await _block_owner(db, user, label, agent=agent)
     row = (
         await db.execute(
             select(MemoryBlock).where(
@@ -749,41 +803,127 @@ async def read_core(db: AsyncSession, user: User, label: str, agent=None) -> str
     return (row.value if row else "") or ""
 
 
+TRUST_CONFIDENCE = {"user_said": 0.9, "inferred": 0.6, "third_party": 0.5}
+
+
+def _user_scope(scope: str | None) -> str:
+    """Facts are about the user's world (shared by all their agents) unless explicitly an agent's own note."""
+    return SCOPE_AGENT if (scope or "") == SCOPE_AGENT else SCOPE_USER
+
+
+async def _active_twin(db: AsyncSession, user_id, agent_id, text: str, scope: str):
+    """An active fact this agent can see with the same text (case-insensitive), if any."""
+    try:
+        cond = MemoryPassage.scope.in_(USER_SCOPES) if scope == SCOPE_USER else (
+            (MemoryPassage.scope == SCOPE_AGENT) & (MemoryPassage.agent_id == agent_id)
+        )
+        return (
+            await db.execute(
+                select(MemoryPassage).where(
+                    MemoryPassage.user_id == user_id,
+                    MemoryPassage.status == STATUS_ACTIVE,
+                    cond,
+                    func.lower(MemoryPassage.text) == (text or "").strip().lower(),
+                )
+            )
+        ).scalars().first()
+    except Exception:  # noqa: BLE001 - saving still works without the duplicate check
+        log.info("memory twin lookup skipped", exc_info=True)
+        return None
+
+
+async def _same_claim(db: AsyncSession, user_id, agent_id, subject_entity_id, predicate: str):
+    """The active fact this new one replaces: same subject (None = the user) and same predicate."""
+    if not predicate:
+        return None
+    try:
+        subject = (
+            MemoryPassage.subject_entity_id.is_(None)
+            if subject_entity_id is None
+            else MemoryPassage.subject_entity_id == subject_entity_id
+        )
+        return (
+            await db.execute(
+                select(MemoryPassage)
+                .where(
+                    MemoryPassage.user_id == user_id,
+                    MemoryPassage.status == STATUS_ACTIVE,
+                    or_(MemoryPassage.scope.in_(USER_SCOPES), MemoryPassage.agent_id == agent_id),
+                    MemoryPassage.predicate == predicate,
+                    subject,
+                )
+                .order_by(MemoryPassage.id.desc())
+            )
+        ).scalars().first()
+    except Exception:  # noqa: BLE001
+        log.info("memory claim lookup skipped", exc_info=True)
+        return None
+
+
+async def _reinforce(db: AsyncSession, row, confidence: float) -> None:
+    row.reinforced = int(getattr(row, "reinforced", None) or 1) + 1
+    row.confidence = min(0.99, max(float(getattr(row, "confidence", None) or 0.0), confidence) + 0.05)
+    row.last_confirmed_at = _now_utc()
+    await db.commit()
+
+
 async def remember(
     db: AsyncSession,
     user_id: uuid.UUID,
     kind: str,
     text: str,
     agent_id=None,
-    scope: str = SCOPE_AGENT,
+    scope: str = SCOPE_USER,
     source_session_id=None,
     source_message_id=None,
     supersedes_id=None,
+    *,
+    subject_entity_id: int | None = None,
+    predicate: str = "",
+    trust: str = "user_said",
+    confidence: float | None = None,
 ) -> MemoryPassage | None:
+    """Save one fact for this user. It is shared by all of the user's agents unless scope is "agent".
+
+    Saying a known fact again reinforces it instead of storing a copy. A fact with the same subject and predicate as
+    an active one replaces it (the old one is kept as history with valid_to set)."""
     user = await db.get(User, user_id)
     if user is None:
         return None
-    owner = await _memory_agent(db, user, agent_id=agent_id)
-    requester = owner
-    if (scope or SCOPE_AGENT) == SCOPE_SHARED:
+    writer = await _memory_agent(db, user, agent_id=agent_id)
+    scope = _user_scope(scope)
+    if scope == SCOPE_USER:
+        # A user-level fact is kept on the user's default agent, so deleting the agent that learned it (rows cascade
+        # with their agent) never deletes the user's memory.
         from app.agents.service import ensure_default_agent
 
         owner = await ensure_default_agent(db, user)
-        scope = SCOPE_SHARED
     else:
-        scope = SCOPE_AGENT
+        owner = writer
+    trust = trust if trust in TRUST_CONFIDENCE else "inferred"
+    confidence = float(confidence) if confidence is not None else TRUST_CONFIDENCE[trust]
+    predicate = re.sub(r"[^a-z0-9_]", "", (predicate or "").lower().replace(" ", "_"))[:80]
+    twin = await _active_twin(db, user_id, owner.id, text, scope)
+    if twin is not None:
+        await _reinforce(db, twin, confidence)
+        return twin
+    if not supersedes_id:
+        same = await _same_claim(db, user_id, owner.id, subject_entity_id, predicate)
+        supersedes_id = same.id if same is not None else None
     await _ensure_saved_letta(db, user, owner)
     vec = None
     try:
         vec = await embed_one(text)
     except Exception:  # noqa: BLE001
         pass
+    now = _now_utc()
     retired = None
     if supersedes_id:
         prior = await db.get(MemoryPassage, supersedes_id)
-        # Only a fact this agent can see may be replaced: its own, or a user-shared one.
-        if prior is not None and _visible_fact(prior, user_id, requester.id):
+        # Only a fact this agent can see may be replaced: a user-level fact, or this agent's own note.
+        if prior is not None and _visible_fact(prior, user_id, owner.id):
             prior.status = STATUS_SUPERSEDED
+            prior.valid_to = now
             retired = prior
         else:
             supersedes_id = None
@@ -798,11 +938,25 @@ async def remember(
         source_session_id=source_session_id,
         source_message_id=source_message_id,
         supersedes_id=supersedes_id,
+        subject_entity_id=subject_entity_id,
+        predicate=predicate,
+        trust=trust,
+        confidence=confidence,
+        reinforced=1,
+        valid_from=now,
     )
     db.add(row)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        # Another turn saved the same fact a moment ago (unique per user): count it as a confirmation instead.
+        await db.rollback()
+        twin = await _active_twin(db, user_id, owner.id, text, scope)
+        if twin is not None:
+            await _reinforce(db, twin, confidence)
+        return twin
     if retired is not None:
-        await _forget_letta_text(owner if retired.agent_id == owner.id else requester, retired.text or "")
+        await _forget_letta_text(owner, retired.text or "")
     await _write_letta_passage(owner, text)
     # Facts live only in memory_passages. They used to be copied into semantic_documents too, which recalled every
     # fact a second time under "Knowledge" and left a copy behind on forget.
@@ -826,7 +980,7 @@ async def upsert_core(db: AsyncSession, user_id: uuid.UUID, label: str, value: s
     user = await db.get(User, user_id)
     if user is None:
         return
-    owner = await _memory_agent(db, user, agent_id=agent_id)
+    owner = await _block_owner(db, user, label, agent_id=agent_id)
     row = (
         await db.execute(
             select(MemoryBlock).where(
@@ -861,27 +1015,18 @@ async def remember_fact(ctx, text: str, label: str = "", shared: bool = False) -
     if _SECRET_LANGUAGE.search(body):
         return {"error": "I can’t store passwords, keys, tokens, or recovery codes in memory."}
     tag = (label or "").strip().lower()
+    # Memory belongs to the user: every one of their agents reads what any of them saves. `shared` is kept for old
+    # callers; only the per-agent "coding" notes stay with this agent.
     owner = ctx.agent
-    if shared:
-        from app.agents.service import ensure_default_agent
-
-        owner = await ensure_default_agent(ctx.db, ctx.user)
     if tag in CORE_LABELS:
         existing = await read_core(ctx.db, ctx.user, tag, agent=owner)
         merged, changed = await merge_block(tag, existing, body)
         if changed:
             await upsert_core(ctx.db, ctx.user.id, tag, merged, getattr(owner, "id", None))
             await reconcile_related(ctx.db, ctx.user, owner, tag, body)
-        return {"ok": True, "kind": "block", "label": tag, "shared": bool(shared), "value": merged}
-    await remember(
-        ctx.db,
-        ctx.user.id,
-        "archival",
-        body,
-        getattr(owner, "id", None),
-        scope=SCOPE_SHARED if shared else SCOPE_AGENT,
-    )
-    return {"ok": True, "kind": "passage", "shared": bool(shared), "text": body}
+        return {"ok": True, "kind": "block", "label": tag, "shared": tag in USER_LABELS, "value": merged}
+    await remember(ctx.db, ctx.user.id, "archival", body, getattr(owner, "id", None), scope=SCOPE_USER, trust="user_said")
+    return {"ok": True, "kind": "passage", "shared": True, "text": body}
 
 
 async def recall_memory(ctx, query: str = "", label: str = "") -> dict:
@@ -890,11 +1035,7 @@ async def recall_memory(ctx, query: str = "", label: str = "") -> dict:
         return missing
     owner = await _memory_agent(ctx.db, ctx.user, agent=ctx.agent)
     tag = (label or "").strip().lower()
-    blocks = (
-        await ctx.db.execute(
-            select(MemoryBlock).where(MemoryBlock.user_id == ctx.user.id, MemoryBlock.agent_id == owner.id)
-        )
-    ).scalars().all()
+    blocks = await _visible_blocks(ctx.db, ctx.user, owner)
     if tag:
         blocks = [b for b in blocks if b.label == tag]
     block_rows = [{"kind": "block", "label": b.label, "text": b.value} for b in blocks if b.value]
@@ -925,11 +1066,12 @@ async def forget_memory(ctx, memory_id: str = "", label: str = "", text: str = "
     removed: list[str] = []
     tag = (label or "").strip().lower()
     if tag:
+        block_owner = await _block_owner(ctx.db, ctx.user, tag, agent=ctx.agent)
         row = (
             await ctx.db.execute(
                 select(MemoryBlock).where(
                     MemoryBlock.user_id == ctx.user.id,
-                    MemoryBlock.agent_id == owner.id,
+                    MemoryBlock.agent_id == block_owner.id,
                     MemoryBlock.label == tag,
                 )
             )
@@ -950,9 +1092,7 @@ async def forget_memory(ctx, memory_id: str = "", label: str = "", text: str = "
             pid = None
         if pid is not None:
             row = await ctx.db.get(MemoryPassage, pid)
-            if row is not None and row.user_id == ctx.user.id and (
-                row.agent_id == owner.id or getattr(row, "scope", "") == SCOPE_SHARED
-            ):
+            if row is not None and _visible_fact(row, ctx.user.id, owner.id):
                 row.status = STATUS_DELETED
                 removed.append(f"passage:{pid}")
                 await _forget_letta_text(owner, row.text or "")
@@ -962,7 +1102,7 @@ async def forget_memory(ctx, memory_id: str = "", label: str = "", text: str = "
             await ctx.db.execute(
                 select(MemoryPassage).where(
                     MemoryPassage.user_id == ctx.user.id,
-                    or_(MemoryPassage.agent_id == owner.id, MemoryPassage.scope == SCOPE_SHARED),
+                    or_(MemoryPassage.scope.in_(USER_SCOPES), MemoryPassage.agent_id == owner.id),
                     MemoryPassage.text.ilike(f"%{snippet[:80]}%"),
                 )
             )
@@ -1026,7 +1166,7 @@ async def read_history(ctx, limit: int = 8) -> dict:
 
 
 async def learn_for_agent(db: AsyncSession, user: User, agent, category: str, fact: str) -> dict:
-    """Store a short, durable preference in this agent's own memory block."""
+    """Store a short, durable preference or fact in the user's memory (the "learned" block, read by all their agents)."""
     if db is None or agent is None or getattr(agent, "user_id", None) != user.id:
         return {"saved": False, "error": "Choose one of your agents first."}
     clean_fact = " ".join((fact or "").split())[:400]
@@ -1049,28 +1189,23 @@ async def list_agent_memory(db: AsyncSession, user: User, agent_id: uuid.UUID) -
     from app.agents.service import get_agent
 
     agent = await get_agent(db, user, agent_id)
-    blocks = (
-        await db.execute(
-            select(MemoryBlock).where(
-                MemoryBlock.user_id == user.id,
-                MemoryBlock.agent_id == agent.id,
-            ).order_by(MemoryBlock.label)
-        )
-    ).scalars().all()
+    blocks = sorted(await _visible_blocks(db, user, agent), key=lambda b: b.label)
     passages = (
         await db.execute(
             select(MemoryPassage)
             .where(
                 MemoryPassage.user_id == user.id,
-                or_(MemoryPassage.agent_id == agent.id, MemoryPassage.scope == SCOPE_SHARED),
+                MemoryPassage.status == STATUS_ACTIVE,
+                or_(MemoryPassage.scope.in_(USER_SCOPES), MemoryPassage.agent_id == agent.id),
             )
             .order_by(desc(MemoryPassage.id))
             .limit(80)
         )
     ).scalars().all()
     active = [row for row in passages if _is_active(row)]
-    private = [row for row in active if getattr(row, "scope", SCOPE_AGENT) != SCOPE_SHARED]
-    shared = [row for row in active if getattr(row, "scope", SCOPE_AGENT) == SCOPE_SHARED]
+    # "shared" is what every one of the user's agents knows; "private" is this agent's own working notes.
+    private = [row for row in active if getattr(row, "scope", SCOPE_AGENT) == SCOPE_AGENT]
+    shared = [row for row in active if getattr(row, "scope", SCOPE_AGENT) in USER_SCOPES]
     persona = [{"label": row.label, "value": row.value} for row in blocks if row.label in PERSONA_LABELS and row.value]
     def _row(item):
         created = getattr(item, "created_at", None)
@@ -1079,6 +1214,8 @@ async def list_agent_memory(db: AsyncSession, user: User, agent_id: uuid.UUID) -
             "kind": item.kind,
             "text": item.text,
             "scope": getattr(item, "scope", SCOPE_AGENT),
+            "confidence": getattr(item, "confidence", None),
+            "trust": getattr(item, "trust", None),
             "created_at": created.isoformat() if created is not None else "",
         }
 

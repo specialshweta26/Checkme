@@ -553,11 +553,18 @@ class JobEvent(Base):
 
 
 class MemoryPassage(Base):
-    """Standing facts and episodic notes. Postgres is canonical; Letta is optional write-through."""
+    """A standing fact (a claim) about the user's world. Postgres is canonical; Letta is optional write-through.
+
+    Memory belongs to the user: a fact with scope "user" is read by all of that user's agents (agent_id only records
+    which agent wrote it). Scope "agent" is a note about how one agent works, read by that agent only. "user_shared"
+    is the old name for "user". Every query filters on user_id; users never see each other's rows.
+    """
 
     __tablename__ = "memory_passages"
     __table_args__ = (
         Index("ix_memory_passages_user_agent_status", "user_id", "agent_id", "status"),
+        Index("ix_memory_passages_user_status_scope", "user_id", "status", "scope"),
+        Index("ix_memory_passages_user_subject_predicate", "user_id", "subject_entity_id", "predicate"),
         Index("ix_memory_passages_tsv", "search_tsv", postgresql_using="gin"),
     )
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
@@ -573,8 +580,51 @@ class MemoryPassage(Base):
     source_session_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     source_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     supersedes_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # Claim fields: who the fact is about (None = the user), what kind of fact it is ("lives_in", "works_at"; a new
+    # fact with the same subject and predicate replaces the old one), how far to trust it, and when it held.
+    subject_entity_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("memory_entities.id", ondelete="SET NULL"), nullable=True
+    )
+    predicate: Mapped[str] = mapped_column(String(80), default="")
+    trust: Mapped[str] = mapped_column(String(20), default="user_said")  # user_said | inferred | third_party
+    confidence: Mapped[float] = mapped_column(Float, default=0.8)
+    reinforced: Mapped[int] = mapped_column(Integer, default=1)
+    valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    valid_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     search_tsv = mapped_column(TSVECTOR, Computed("to_tsvector('simple', coalesce(text, ''))", persisted=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class MemoryEntity(Base):
+    """A person, organisation, project, place or topic in one user's world. Never shared between users."""
+
+    __tablename__ = "memory_entities"
+    __table_args__ = (Index("ix_memory_entities_user_kind", "user_id", "kind"),)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    kind: Mapped[str] = mapped_column(String(20), default="person")  # person | org | project | place | topic
+    name: Mapped[str] = mapped_column(String(200), default="")
+    org_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("memory_entities.id", ondelete="SET NULL"), nullable=True)
+    salience: Mapped[float] = mapped_column(Float, default=0.0)
+    status: Mapped[str] = mapped_column(String(20), default="active")  # active | merged | deleted
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class MemoryEntityAlias(Base):
+    """How an entity is recognised: an email address, a name, or (for an organisation) an email domain.
+
+    Unique per user, so two writes at the same time can't create the same person twice; different users can each
+    have their own entity for the same address."""
+
+    __tablename__ = "memory_entity_aliases"
+    __table_args__ = (UniqueConstraint("user_id", "kind", "value", name="uq_memory_alias_user_kind_value"),)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    entity_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("memory_entities.id", ondelete="CASCADE"), index=True)
+    kind: Mapped[str] = mapped_column(String(20))  # email | name | domain
+    value: Mapped[str] = mapped_column(String(320))  # lower-cased
 
 
 class MemoryExtractJob(Base):

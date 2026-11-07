@@ -40,17 +40,13 @@ def _episode_line(row) -> str:
 async def _episodes(db, user_id, agent_id, query: str) -> list[str]:
     from sqlalchemy import or_, select
 
-    from app.models import AgentGroupMember, MemoryEpisode
+    from app.models import MemoryEpisode
 
-    member_groups = select(AgentGroupMember.group_id).where(AgentGroupMember.agent_id == agent_id)
+    # Episodes are what happened in this user's conversations: every one of the user's agents can recall them.
+    # Only this user's rows (user_id) are ever read.
     visible = select(MemoryEpisode).where(
         MemoryEpisode.user_id == user_id,
         MemoryEpisode.status == "active",
-        or_(
-            MemoryEpisode.agent_id == agent_id,
-            MemoryEpisode.scope == "user_shared",
-            (MemoryEpisode.scope == "group") & MemoryEpisode.group_id.in_(member_groups),
-        ),
     )
     tokens = [tok for tok in (query or "").lower().split() if len(tok) > 2][:8]
     if not tokens:

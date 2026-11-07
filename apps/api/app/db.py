@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import AsyncIterator
 
 from sqlalchemy import text
@@ -56,10 +57,56 @@ async def init_db() -> None:
     ) from last
 
 
+class _GuardedConn:
+    """Runs migration statements without locking tables that need no change.
+
+    `ALTER TABLE … ADD COLUMN IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS` take a table lock in Postgres even when
+    the column or index is already there. During a deploy the old instance is still serving, and one of its open
+    transactions makes that lock wait, and every other query on the table then queues behind the waiting ALTER: the
+    live app stalls. So statements whose column/index already exists are skipped, and the rest run under a short
+    lock_timeout (init_db retries) instead of waiting indefinitely."""
+
+    _ADD_COLUMN = re.compile(r"^\s*ALTER TABLE (\w+) ADD COLUMN IF NOT EXISTS (\w+)", re.I)
+    _CREATE_INDEX = re.compile(r"^\s*CREATE (?:UNIQUE )?INDEX IF NOT EXISTS (\w+)", re.I)
+
+    def __init__(self, conn, columns: set[tuple[str, str]], indexes: set[str]):
+        self._conn = conn
+        self._columns = columns
+        self._indexes = indexes
+        self.skipped = 0
+
+    async def execute(self, statement, *args, **kwargs):
+        sql = str(statement)
+        m = self._ADD_COLUMN.match(sql)
+        if m and (m.group(1).lower(), m.group(2).lower()) in self._columns:
+            self.skipped += 1
+            return None
+        m = self._CREATE_INDEX.match(sql)
+        if m and m.group(1).lower() in self._indexes:
+            self.skipped += 1
+            return None
+        return await self._conn.execute(statement, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
+async def _existing_schema(conn) -> tuple[set[tuple[str, str]], set[str]]:
+    cols = await conn.execute(text("SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = 'public'"))
+    idx = await conn.execute(text("SELECT indexname FROM pg_indexes WHERE schemaname = 'public'"))
+    return {(t.lower(), c.lower()) for t, c in cols.all()}, {i.lower() for (i,) in idx.all()}
+
+
 async def _migrate() -> None:
-    async with engine.begin() as conn:
-        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-        await conn.run_sync(Base.metadata.create_all)
+    async with engine.begin() as raw:
+        # Several API instances can start at once: one migrates at a time (released when this transaction ends).
+        await raw.execute(text("SELECT pg_advisory_xact_lock(7316402)"))
+        # Never wait long for a table lock behind live traffic: fail, and init_db tries again shortly.
+        await raw.execute(text("SET LOCAL lock_timeout = '5s'"))
+        await raw.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+        await raw.run_sync(Base.metadata.create_all)
+        columns, indexes = await _existing_schema(raw)
+        conn = _GuardedConn(raw, columns, indexes)
         await conn.execute(text("ALTER TABLE connectors ADD COLUMN IF NOT EXISTS description TEXT DEFAULT ''"))
         await conn.execute(text("ALTER TABLE inbox_items ADD COLUMN IF NOT EXISTS to_header VARCHAR(1000) DEFAULT ''"))
         await conn.execute(text("ALTER TABLE inbox_items ADD COLUMN IF NOT EXISTS cc_header VARCHAR(1000) DEFAULT ''"))
@@ -104,6 +151,7 @@ async def _migrate() -> None:
         await _migrate_agent_scope(conn)
         await _migrate_memory(conn)
         await _migrate_tool_policy(conn)
+        await _migrate_user_memory(conn)
         await conn.execute(text("ALTER TABLE agent_skills ADD COLUMN IF NOT EXISTS revision INTEGER DEFAULT 1"))
 
 
@@ -258,6 +306,108 @@ async def _migrate_agent_scope(conn) -> None:
     await _add_agent_fk(conn, "memory_passages", "memory_passages_agent_id_fkey")
     await _add_agent_fk(conn, "scheduled_tasks", "scheduled_tasks_agent_id_fkey")
     await _add_agent_fk(conn, "automations", "automations_agent_id_fkey")
+
+
+USER_MEMORY_LABELS = ("voice", "prefs", "learned", "people", "work")
+
+
+async def _once(conn, name: str) -> bool:
+    """True the first time `name` is seen (across all instances and restarts); used for one-time data changes."""
+    await conn.execute(text("CREATE TABLE IF NOT EXISTS app_migrations (name VARCHAR(120) PRIMARY KEY, applied_at TIMESTAMPTZ DEFAULT now())"))
+    got = await conn.execute(
+        text("INSERT INTO app_migrations (name) VALUES (:n) ON CONFLICT (name) DO NOTHING RETURNING name"), {"n": name}
+    )
+    return got.first() is not None
+
+
+async def _migrate_user_memory(conn) -> None:
+    """Memory belongs to the user, shared by all of their agents (docs/LLD.md "Memory").
+
+    Columns: claim fields on memory_passages. Once: per-agent facts become user-level, and each agent's voice/prefs/
+    learned/people/work notes merge into the user's single copy on their default agent. Always: one active copy of
+    each fact per user, enforced by unique indexes so concurrent turns can't store it twice."""
+    for ddl in (
+        "subject_entity_id BIGINT REFERENCES memory_entities(id) ON DELETE SET NULL",
+        "predicate VARCHAR(80) DEFAULT ''",
+        "trust VARCHAR(20) DEFAULT 'user_said'",
+        "confidence DOUBLE PRECISION DEFAULT 0.8",
+        "reinforced INTEGER DEFAULT 1",
+        "valid_from TIMESTAMPTZ",
+        "valid_to TIMESTAMPTZ",
+        "last_confirmed_at TIMESTAMPTZ",
+    ):
+        await conn.execute(text(f"ALTER TABLE memory_passages ADD COLUMN IF NOT EXISTS {ddl}"))
+    await conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_memory_passages_user_status_scope ON memory_passages (user_id, status, scope)"
+    ))
+    await conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_memory_passages_user_subject_predicate "
+        "ON memory_passages (user_id, subject_entity_id, predicate)"
+    ))
+    if await _once(conn, "user_level_memory_v1"):
+        await conn.execute(text(
+            "UPDATE memory_passages SET scope = 'user' WHERE kind = 'archival' AND scope IN ('agent', 'user_shared')"
+        ))
+        await conn.execute(text("UPDATE memory_passages SET valid_from = created_at WHERE valid_from IS NULL"))
+        # User-level facts live on the user's default agent, so deleting another agent (rows cascade) keeps them.
+        await conn.execute(text(
+            """
+            UPDATE memory_passages p SET agent_id = d.id
+            FROM workspace_agents d
+            WHERE d.user_id = p.user_id AND d.kind = 'default' AND p.scope IN ('user', 'user_shared') AND p.agent_id <> d.id
+            """
+        ))
+        rows = (await conn.execute(text(
+            """
+            SELECT b.user_id, b.label, b.value, d.id AS default_id
+            FROM memory_blocks b
+            JOIN workspace_agents a ON a.id = b.agent_id
+            JOIN workspace_agents d ON d.user_id = b.user_id AND d.kind = 'default'
+            WHERE b.label = ANY(:labels) AND a.kind <> 'default' AND coalesce(b.value, '') <> ''
+            ORDER BY b.user_id, b.label, b.updated_at
+            """
+        ), {"labels": list(USER_MEMORY_LABELS)})).all()
+        for user_id, label, value, default_id in rows:
+            current = (await conn.execute(text(
+                "SELECT value FROM memory_blocks WHERE user_id = :u AND agent_id = :a AND label = :l"
+            ), {"u": user_id, "a": default_id, "l": label})).scalar()
+            lines = [ln for ln in (current or "").splitlines() if ln.strip()]
+            seen = {ln.strip().lower() for ln in lines}
+            lines += [ln for ln in value.splitlines() if ln.strip() and ln.strip().lower() not in seen]
+            await conn.execute(text(
+                "INSERT INTO memory_blocks (user_id, agent_id, label, value, updated_at) VALUES (:u, :a, :l, :v, now()) "
+                "ON CONFLICT (user_id, agent_id, label) DO UPDATE SET value = EXCLUDED.value, updated_at = now()"
+            ), {"u": user_id, "a": default_id, "l": label, "v": "\n".join(lines)})
+        await conn.execute(text(
+            """
+            DELETE FROM memory_blocks b USING workspace_agents a
+            WHERE a.id = b.agent_id AND a.kind <> 'default' AND b.label = ANY(:labels)
+            """
+        ), {"labels": list(USER_MEMORY_LABELS)})
+    # One active copy of each fact: keep the newest, mark older duplicates superseded, then enforce it.
+    await conn.execute(text(
+        """
+        UPDATE memory_passages p SET status = 'superseded'
+        FROM (
+          SELECT id, row_number() OVER (
+            PARTITION BY user_id,
+                         CASE WHEN scope = 'agent' THEN 'agent' ELSE 'user' END,
+                         CASE WHEN scope = 'agent' THEN agent_id END,
+                         md5(lower(text))
+            ORDER BY id DESC) AS rn
+          FROM memory_passages WHERE status = 'active'
+        ) d
+        WHERE p.id = d.id AND d.rn > 1
+        """
+    ))
+    await conn.execute(text(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_memory_passages_user_fact ON memory_passages (user_id, md5(lower(text))) "
+        "WHERE status = 'active' AND scope IN ('user', 'user_shared')"
+    ))
+    await conn.execute(text(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_memory_passages_agent_note ON memory_passages (user_id, agent_id, md5(lower(text))) "
+        "WHERE status = 'active' AND scope = 'agent'"
+    ))
 
 
 async def _migrate_tool_policy(conn) -> None:

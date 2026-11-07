@@ -124,6 +124,7 @@ def _quiet_remember(monkeypatch, owner, forgotten):
         forgotten.append(snippet)
 
     monkeypatch.setattr(memory, "_memory_agent", owner_for)
+    monkeypatch.setattr("app.agents.service.ensure_default_agent", owner_for)
     monkeypatch.setattr(memory, "_ensure_saved_letta", nothing)
     monkeypatch.setattr(memory, "_write_letta_passage", nothing)
     monkeypatch.setattr(memory, "_forget_letta_text", forget)

@@ -260,7 +260,7 @@ class VideoInput(BaseModel):
 class RememberInput(BaseModel):
     text: str = Field(description="The fact or preference to keep.")
     label: str = Field(default="", description="Optional core label: prefs, people, voice, work, coding.")
-    shared: bool = Field(default=False, description="True to save on Chief for every agent to read.")
+    shared: bool = Field(default=True, description="Ignored: memory is shared by all of the user's agents.")
 
 
 class RecallInput(BaseModel):
@@ -653,17 +653,17 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         return _dumps(web_tools.generate_video(prompt))
 
     async def remember(text: str, label: str = "", shared: bool = False) -> str:
-        """Save a lasting fact or preference. Use label prefs|people|voice|work|coding for standing notes. Set shared=true so every agent can read it. Only call when the user asked to remember, or the fact is clearly a preference."""
+        """Save a lasting fact or preference about the user. All of the user's agents read it. Use label prefs|people|voice|work for standing notes, coding for this agent's own coding notes. Only call when the user asked to remember, or the fact is clearly a preference."""
         ctx.used_tools.append("remember")
         return _dumps(await remember_fact(ctx, text, label, shared))
 
     async def save_memory(text: str, label: str = "", shared: bool = False) -> str:
-        """Same as remember: save a fact on this agent (or shared=true for every agent)."""
+        """Same as remember: save a fact about the user for all their agents."""
         ctx.used_tools.append("save_memory")
         return _dumps(await remember_fact(ctx, text, label, shared))
 
     async def save_shared_memory(text: str, label: str = "", shared: bool = True) -> str:
-        """Save a fact on Chief so every agent can read it."""
+        """Same as remember (memory is already shared by all the user's agents)."""
         ctx.used_tools.append("save_shared_memory")
         return _dumps(await remember_fact(ctx, text, label, True))
 
