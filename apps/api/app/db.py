@@ -337,6 +337,13 @@ async def _migrate_user_memory(conn) -> None:
         "last_confirmed_at TIMESTAMPTZ",
     ):
         await conn.execute(text(f"ALTER TABLE memory_passages ADD COLUMN IF NOT EXISTS {ddl}"))
+    for ddl in (
+        "mail_in INTEGER DEFAULT 0",
+        "mail_out INTEGER DEFAULT 0",
+        "meetings INTEGER DEFAULT 0",
+        "last_interaction_at TIMESTAMPTZ",
+    ):
+        await conn.execute(text(f"ALTER TABLE memory_entities ADD COLUMN IF NOT EXISTS {ddl}"))
     await conn.execute(text(
         "CREATE INDEX IF NOT EXISTS ix_memory_passages_user_status_scope ON memory_passages (user_id, status, scope)"
     ))

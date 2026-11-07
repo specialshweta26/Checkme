@@ -11,7 +11,7 @@ import logging
 import re
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -166,3 +166,64 @@ async def names_for(db: AsyncSession, user_id, ids: set[int]) -> dict[int, str]:
         await db.execute(select(MemoryEntity.id, MemoryEntity.name).where(MemoryEntity.user_id == user_id, MemoryEntity.id.in_(ids)))
     ).all()
     return {row[0]: row[1] for row in rows}
+
+
+_TOP_PEOPLE = re.compile(r"\bwho (?:do|did) i (?:\w+ ){0,3}(?:most|often|the most)\b|\bmy (?:top|main|key|closest) (?:contacts|people)\b", re.I)
+_STOP = frozenset({"the", "and", "for", "with", "from", "about", "what", "who", "when", "where", "which", "this", "that",
+                   "have", "has", "had", "you", "your", "our", "their", "them", "they", "email", "emails", "mail",
+                   "meeting", "meetings", "calendar", "today", "tomorrow", "week", "please", "tell", "show", "send"})
+
+
+def _ago(when: datetime | None) -> str:
+    if when is None:
+        return "no contact recorded"
+    days = (datetime.now(timezone.utc) - when).days
+    return "today" if days <= 0 else ("yesterday" if days == 1 else f"{days} days ago")
+
+
+async def people_context(db: AsyncSession, user_id, query: str, limit: int = 5) -> list[str]:
+    """One line per person the question is about (named in it), or the user's most important people when asked for
+    them: how much they interact, when last, and who they meet with. Only this user's entities."""
+    from app.models import MemoryRelation
+
+    if db is None or not (query or "").strip():
+        return []
+    rows: list = []
+    if _TOP_PEOPLE.search(query):
+        rows = (await db.execute(
+            select(MemoryEntity).where(MemoryEntity.user_id == user_id, MemoryEntity.status == "active", MemoryEntity.kind == "person")
+            .order_by(MemoryEntity.salience.desc()).limit(limit)
+        )).scalars().all()
+    else:
+        # Plain letters only, so nothing in the question needs escaping inside the Postgres regex below.
+        words = [w.lower() for w in re.findall(r"[A-Za-z]{3,}", query) if w.lower() not in _STOP]
+        if not words:
+            return []
+        rows = (await db.execute(
+            select(MemoryEntity).where(
+                MemoryEntity.user_id == user_id, MemoryEntity.status == "active",
+                func.lower(MemoryEntity.name).op("~")(r"\m(" + "|".join(words[:12]) + r")\M"),
+            ).order_by(MemoryEntity.salience.desc()).limit(limit)
+        )).scalars().all()
+    if not rows:
+        return []
+    org_names = await names_for(db, user_id, {r.org_id for r in rows if r.org_id})
+    lines = []
+    for e in rows:
+        partners = (await db.execute(
+            select(MemoryEntity.name)
+            .join(MemoryRelation, (MemoryRelation.b_id == MemoryEntity.id) | (MemoryRelation.a_id == MemoryEntity.id))
+            .where(MemoryRelation.user_id == user_id, (MemoryRelation.a_id == e.id) | (MemoryRelation.b_id == e.id),
+                   MemoryEntity.id != e.id)
+            .order_by(MemoryRelation.count.desc()).limit(3)
+        )).scalars().all()
+        org = f" ({org_names[e.org_id]})" if e.org_id in org_names else ""
+        if e.kind != "person":
+            lines.append(f"{e.name}: {e.kind}")
+            continue
+        bits = [f"you emailed them {e.mail_out or 0}×", f"they emailed you {e.mail_in or 0}×", f"{e.meetings or 0} meetings"]
+        line = f"{e.name}{org}: " + ", ".join(bits) + f"; last contact {_ago(e.last_interaction_at)}"
+        if partners:
+            line += "; often meets with " + ", ".join(partners)
+        lines.append(line)
+    return lines
