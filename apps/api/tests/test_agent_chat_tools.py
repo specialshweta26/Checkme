@@ -326,7 +326,8 @@ async def test_run_deep_agent_executes_confirmed_workspace_delete(ws, monkeypatc
     assert "connector" not in called
     assert out["workspace_changed"] is True
     # The approved result reaches the model as a tool result, never as a user message.
-    assert called["types"][-3:] == ["ai", "tool", "human"]
-    tool_result = json.loads(called["messages"][-2])
+    # After the user's message: they approved, it ran, the model reports it (not a new request to run it again).
+    assert called["types"][-3:] == ["human", "ai", "tool"]
+    tool_result = json.loads(called["messages"][-1])
     assert tool_result["approved_by_user"] is True and tool_result["status"] == "ran"
     assert not any("confirmed delete_agent" in str(m) for m in called["messages"])
