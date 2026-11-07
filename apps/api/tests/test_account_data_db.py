@@ -46,11 +46,31 @@ def outside(monkeypatch):
     from app import storage
     from app.connectors import e2b_box
 
+    from app.account import routes as account
+
     files = {}
     deleted, killed = [], []
+    status = {}
     monkeypatch.setattr(storage, "list_keys", lambda prefix: [k for k in files if k.startswith(prefix)])
     monkeypatch.setattr(storage, "get_bytes", lambda key: (files[key], "text/plain"))
-    monkeypatch.setattr(storage, "delete_keys", lambda keys: deleted.extend(keys))
+    monkeypatch.setattr(storage, "delete_keys", lambda keys: deleted.extend(keys) or [files.pop(k, None) for k in keys])
+    monkeypatch.setattr(storage, "put_fileobj", lambda key, f, ctype: files.__setitem__(key, f.read()))
+    monkeypatch.setattr(storage, "iter_chunks", lambda key: iter([files[key]]))
+
+    async def get_status(uid):
+        return dict(status.get(uid, {}))
+
+    async def set_status(uid, data):
+        status[uid] = data
+
+    monkeypatch.setattr(account, "_status", get_status)
+    monkeypatch.setattr(account, "_set_status", set_status)
+
+    class NoRedis:
+        async def delete(self, key):
+            return 0
+
+    monkeypatch.setattr("app.cache.get_redis", lambda: NoRedis())
     monkeypatch.setattr(e2b_box, "kill_user_sandboxes", lambda uid: killed.append(uid) or 1)
 
     async def no_letta(agent, user=None):
@@ -96,12 +116,21 @@ async def test_export_has_my_data_only_and_no_credentials(factory, outside):
     await _seed(factory, b, chief_b)
     outside.files[f"{a.id}/x1/notes.txt"] = b"my notes"
     outside.files[f"{b.id}/x2/theirs.txt"] = b"not mine"
+    from app.account import routes as account
+
     async with _client(factory, a) as http:
-        resp = await http.get("/api/me/export")
+        assert (await http.get("/api/me/export/download")).status_code == 404  # nothing prepared yet
+        assert (await http.get("/api/me/export")).json()["state"] == "none"
+        done = await account.build_export(factory, a.id)  # what POST /api/me/export starts in the background
+        assert done["state"] == "ready" and done["key"].startswith(f"{a.id}/exports/")
+        status = (await http.get("/api/me/export")).json()
+        assert status["state"] == "ready" and "key" not in status and status["bytes"] > 0
+        resp = await http.get("/api/me/export/download")
     assert resp.status_code == 200 and resp.headers["content-type"] == "application/zip"
     zf = zipfile.ZipFile(io.BytesIO(resp.content))
     names = set(zf.namelist())
     assert "data/memory_passages.json" in names and "files/x1/notes.txt" in names and "files/x2/theirs.txt" not in names
+    assert not [n for n in names if "/exports/" in n]  # an export doesn't contain earlier exports
     blob = b"".join(zf.read(n) for n in names)
     assert f"Fact for {a.email}".encode() in blob and f"Fact for {b.email}".encode() not in blob
     assert b"SECRET-REFRESH" not in blob and b"refresh_token_enc" not in blob  # no credentials

@@ -6,8 +6,11 @@ import { apiError, getMe, type Me } from "../lib";
 
 // Your data (apps/api/app/account/routes.py): download everything the app holds about you, or delete your account.
 
+type Export = { state: "none" | "preparing" | "ready" | "failed"; bytes?: number; ready_at?: number; error?: string };
+
 export default function AccountPage() {
   const [me, setMe] = useState<Me | null>(null);
+  const [exp, setExp] = useState<Export>({ state: "none" });
   const [confirm, setConfirm] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -19,8 +22,29 @@ export default function AccountPage() {
         return;
       }
       setMe(u);
+      fetch("/api/me/export", { credentials: "include" })
+        .then((r) => (r.ok ? r.json() : { state: "none" }))
+        .then(setExp)
+        .catch(() => undefined);
     });
   }, []);
+
+  // While an export is being prepared, check every few seconds.
+  useEffect(() => {
+    if (exp.state !== "preparing") return;
+    const id = window.setInterval(() => {
+      fetch("/api/me/export", { credentials: "include" })
+        .then((r) => (r.ok ? r.json() : exp))
+        .then(setExp)
+        .catch(() => undefined);
+    }, 3000);
+    return () => window.clearInterval(id);
+  }, [exp]);
+
+  async function prepare() {
+    const res = await fetch("/api/me/export", { method: "POST", credentials: "include" });
+    setExp(res.ok ? await res.json() : { state: "failed", error: "The export could not be started. Please try again." });
+  }
 
   const matches = !!me?.email && confirm.trim().toLowerCase() === me.email.toLowerCase();
 
@@ -61,10 +85,27 @@ export default function AccountPage() {
                   sign-in passwords and keys are never included.
                 </span>
               </div>
-              <div className="task-actions">
-                <a className="btn" href="/api/me/export">
-                  Download
-                </a>
+              <div className="task-actions stack">
+                {exp.state === "ready" ? (
+                  <>
+                    <a className="btn" href="/api/me/export/download">
+                      Download ({((exp.bytes || 0) / 1e6).toFixed(1)} MB)
+                    </a>
+                    <span className="faint">Prepared {exp.ready_at ? new Date(exp.ready_at * 1000).toLocaleString() : ""}</span>
+                    <button className="btn secondary" onClick={prepare}>
+                      Prepare a new one
+                    </button>
+                  </>
+                ) : exp.state === "preparing" ? (
+                  <span className="muted">Preparing your export… This can take a few minutes; you can leave this page and come back.</span>
+                ) : (
+                  <>
+                    <button className="btn" onClick={prepare}>
+                      Prepare download
+                    </button>
+                    {exp.state === "failed" ? <span className="err">{exp.error || "The export failed. Please try again."}</span> : null}
+                  </>
+                )}
               </div>
             </div>
 
