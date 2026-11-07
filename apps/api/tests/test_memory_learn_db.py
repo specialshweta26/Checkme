@@ -105,6 +105,8 @@ async def test_meetings_and_who_meets_together_come_from_the_calendar(factory):
         assert len(lines) == 1 and "Priya Nair (Acme)" in lines[0] and "2 meetings" in lines[0] and "often meets with Rahul Mehta" in lines[0]
         top = await people_context(db, a.id, "Who do I meet with the most?")
         assert top[0].startswith("Priya Nair")
+        top = await people_context(db, a.id, "Who do I email and meet with the most? Top 5")
+        assert top[0].startswith("Priya Nair") and any(l.startswith("Rahul Mehta") for l in top)
 
 
 async def test_a_job_runs_once_at_a_time_and_only_when_due(factory):

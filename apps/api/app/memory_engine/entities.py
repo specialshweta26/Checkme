@@ -168,7 +168,11 @@ async def names_for(db: AsyncSession, user_id, ids: set[int]) -> dict[int, str]:
     return {row[0]: row[1] for row in rows}
 
 
-_TOP_PEOPLE = re.compile(r"\bwho (?:do|did) i (?:\w+ ){0,3}(?:most|often|the most)\b|\bmy (?:top|main|key|closest) (?:contacts|people)\b", re.I)
+_TOP_PEOPLE = re.compile(
+    r"\bwho\b[^?.!]{0,60}\b(?:most|most often|often|frequently|the most)\b|"
+    r"\b(?:my )?(?:top|main|key|closest|most important) (?:\d+ )?(?:contacts|people|colleagues|clients)\b",
+    re.I,
+)
 _STOP = frozenset({"the", "and", "for", "with", "from", "about", "what", "who", "when", "where", "which", "this", "that",
                    "have", "has", "had", "you", "your", "our", "their", "them", "they", "email", "emails", "mail",
                    "meeting", "meetings", "calendar", "today", "tomorrow", "week", "please", "tell", "show", "send"})
