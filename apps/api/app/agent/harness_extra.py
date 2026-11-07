@@ -673,7 +673,7 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         return _dumps(await recall_memory(ctx, query, label))
 
     async def forget(memory_id: str = "", label: str = "", text: str = "") -> str:
-        """Delete a saved memory. Pass memory_id from recall_memory, a core label, or a snippet of the text."""
+        """Delete saved memory. To forget a person or topic everywhere (facts, notes, past conversations, and everything about that person), pass text with just the name or key words, e.g. text="Priya Nair" or text="bullet-point". Or pass memory_id from recall_memory, or a core label to clear that whole note."""
         ctx.used_tools.append("forget_memory")
         return _dumps(await forget_memory(ctx, memory_id, label, text))
 

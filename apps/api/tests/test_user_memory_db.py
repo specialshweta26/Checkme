@@ -302,3 +302,44 @@ async def test_existing_per_agent_memory_becomes_the_users(factory):
         assert blocks[(chief.id, "prefs")].splitlines() == ["Use tables", "Short answers"]
         assert (home.id, "prefs") not in blocks
         assert blocks[(home.id, "coding")] == "repo acme/api"  # per-agent notes stay put
+
+
+# --- forgetting ------------------------------------------------------------------------------------------------------
+
+
+async def test_forget_removes_a_person_everywhere_for_that_user_only(factory):
+    from app.agent import memory
+    from app.agent.deep import RunContext
+    from app.memory_engine import entities
+    from app.memory_engine.episodes import save_episode
+    from app.models import MemoryEntity
+
+    a, (a_chief, a_home) = await _user_with_agents(factory, "Home")
+    b, (b_chief,) = await _user_with_agents(factory)
+    async with factory() as db:
+        for user, agent in ((a, a_home), (b, b_chief)):
+            priya = await entities.resolve(db, user.id, name="Priya Nair", email="priya@example.com")
+            await memory.remember(db, user.id, "archival", "COO at Zeta Corp", agent.id, subject_entity_id=priya.id, predicate="role")
+            await memory.learn_for_agent(db, user, agent, "work", "My manager is Priya Nair")
+            await memory.learn_for_agent(db, user, agent, "preference", "Prefers short bullet-point answers")
+            await save_episode(db, user.id, agent.id, {"observation": "Talked about Priya Nair's promotion", "outcome": "completed"})
+        await db.commit()
+
+        ctx = RunContext(db=db, user=a, connectors={}, agent=a_home)
+        out = await memory.forget_memory(ctx, text="Priya Nair")
+        assert out["ok"] and any(r.startswith("entity:") for r in out["removed"])
+        out = await memory.forget_memory(ctx, text="bullet-point")
+        assert out["ok"]
+
+        for agent in (a_chief, a_home):
+            seen = await memory.load_memory(db, a, "Priya Nair role manager promotion bullet answers", agent)
+            assert "Priya" not in seen and "Zeta" not in seen and "bullet" not in seen, seen
+        people = (await db.execute(select(MemoryEntity).where(
+            MemoryEntity.user_id == a.id, MemoryEntity.status == "active", MemoryEntity.kind == "person"))).scalars().all()
+        assert people == []  # the person is gone; the organisation from her email domain stays
+        # Another user's identical memory is untouched.
+        b_seen = await memory.load_memory(db, b, "Priya Nair role manager bullet answers", b_chief)
+        assert "Priya" in b_seen and "bullet" in b_seen
+        # A new mention after forgetting starts a fresh record.
+        again = await entities.resolve(db, a.id, name="Priya Nair", email="priya@example.com")
+        assert again is not None and again.status == "active"
