@@ -742,6 +742,11 @@ async def _classify_one(item: InboxItem, runtime: RuntimeConnector, ctx=None) ->
     if ctx is not None:
         item.key_person = bool(ctx.key_person)
         item.sender_note = clip(ctx.sender_note or "", 400)
+        if ctx.from_self:
+            # Mail from one of the user's own addresses: never draft a reply to themselves (the model doesn't
+            # always follow the prompt on this, so it is enforced here).
+            item.classification = "respond"
+            item.draft = item.ai_draft = "This came from one of your own addresses, so no reply is needed."
 
 
 async def _voice(db: AsyncSession, user: User) -> str:
