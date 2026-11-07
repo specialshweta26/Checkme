@@ -203,6 +203,8 @@ class Settings(BaseSettings):
     browser_fast_max_steps: int = 12  # model rounds per browser_task
     browser_replay: bool = True  # save successful browser_task runs and replay them without model calls
     trim_old_pages: bool = True  # send only the latest page result in full to the model (long browser runs stay fast)
+    # all | web | worker: which part of the app this process runs (see app/main.py lifespan).
+    process_role: str = "all"
     # Per-user daily budget for background work (inbox triage, memory learning); 0 = no limit. USD needs MODEL_PRICES.
     daily_background_budget_usd: float = 0.0
     daily_background_token_budget: int = 0

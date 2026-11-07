@@ -30,11 +30,66 @@ _wake = asyncio.Event()
 _urgent: set = set()  # users whose mailbox reported new mail since the last tick
 
 
+WAKE_CHANNEL = "inbox:wake"
+
+
 def wake_inbox(user_ids=None) -> None:
-    """A mailbox reported new mail: check those users now rather than at their next turn."""
+    """A mailbox reported new mail: check those users now rather than at their next turn. When this process only
+    serves the web (PROCESS_ROLE=web), the worker process is told over Redis."""
+    from app.config import get_settings
+
+    if (get_settings().process_role or "all").strip().lower() == "web":
+        try:
+            asyncio.get_running_loop().create_task(_publish_wake(list(user_ids or [])))
+        except RuntimeError:
+            log.info("inbox wake not sent: no running loop")
+        return
     if user_ids:
         _urgent.update(user_ids)
     _wake.set()
+
+
+async def _publish_wake(user_ids: list) -> None:
+    import json
+
+    from app.cache import get_redis
+
+    try:
+        await get_redis().publish(WAKE_CHANNEL, json.dumps([str(u) for u in user_ids]))
+    except Exception:  # noqa: BLE001 - the worker's own timer still checks within INTERVAL
+        log.warning("inbox wake publish failed", exc_info=True)
+
+
+async def wake_listener() -> None:
+    """Worker side of wake_inbox: Redis messages from the web process become immediate checks."""
+    import json
+    import uuid
+
+    from app.cache import get_redis
+
+    while True:
+        try:
+            pubsub = get_redis().pubsub()
+            await pubsub.subscribe(WAKE_CHANNEL)
+            async for message in pubsub.listen():
+                if message.get("type") != "message":
+                    continue
+                try:
+                    ids = [uuid.UUID(str(u)) for u in json.loads(message.get("data") or "[]")]
+                except (ValueError, TypeError):
+                    ids = []
+                if ids:
+                    _urgent.update(ids)
+                _wake.set()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - reconnect after a Redis blip
+            log.warning("inbox wake listener reconnecting", exc_info=True)
+            await asyncio.sleep(5)
+
+
+async def start_wake_listener() -> asyncio.Task:
+    return asyncio.create_task(wake_listener(), name="inbox-wake-listener")
 
 
 async def _wait_for_next_check() -> None:
