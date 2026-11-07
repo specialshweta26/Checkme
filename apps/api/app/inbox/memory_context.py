@@ -29,6 +29,9 @@ class MailContext:
     people: list[str] = field(default_factory=list)
     key_person: bool = False
     sender_note: str = ""
+    me_name: str = ""
+    me_email: str = ""
+    from_self: bool = False
 
 
 def audience_for(user, sender: str) -> str:
@@ -66,16 +69,21 @@ async def contexts_for(db: AsyncSession, user, items: list) -> dict:
     from app.memory_engine.entities import clean_email
     from app.memory_engine.routines import _known, meeting_prep
 
+    from app.memory_engine.learn import own_addresses
+
     try:
         voices = await _voices(db, user)
         key_ids = await _key_ids(db, user.id)
+        own = await own_addresses(db, user)
     except Exception:  # noqa: BLE001 - triage still works without memory
         log.info("inbox memory unavailable", exc_info=True)
         return {}
     out: dict = {}
     for item in items:
         audience = audience_for(user, item.sender)
-        ctx = MailContext(audience=audience, voice=voices[audience], prefs=voices["prefs"])
+        ctx = MailContext(audience=audience, voice=voices[audience], prefs=voices["prefs"],
+                          me_name=getattr(user, "display_name", "") or "", me_email=getattr(user, "email", "") or "",
+                          from_self=clean_email(item.sender or "") in own)
         try:
             cc = [a.strip() for a in (getattr(item, "cc_header", "") or "").split(",") if a.strip()][:3]
             ctx.people = await meeting_prep(db, user, {"attendees": [item.sender, *cc]})
@@ -93,7 +101,14 @@ def prompt_block(ctx: MailContext | None) -> str:
     """The memory part of the triage prompt. From the user's own memory, so reference only."""
     if ctx is None:
         return f"User writing voice: {VOICE_FALLBACK}\n"
-    lines = [f"Reader: {'a colleague in the user’s own organisation' if ctx.audience == 'colleagues' else 'someone outside the user’s organisation'}."]
+    me = " ".join(filter(None, [ctx.me_name, f"<{ctx.me_email}>" if ctx.me_email else ""]))
+    first = (ctx.me_name or "").split()[0] if (ctx.me_name or "").split() else ""
+    lines = [f"You are drafting for the user{f', {me}' if me else ''}. The reply is from them: sign off as them"
+             f"{f' ({first})' if first else ''}, never as anyone else on the thread."]
+    if ctx.from_self:
+        lines.append("This email was sent by the user from another of their own addresses: summarise it as their own "
+                     "note, classify it respond, and make the draft a one-line note that no reply is needed.")
+    lines += [f"Reader: {'a colleague in the user’s own organisation' if ctx.audience == 'colleagues' else 'someone outside the user’s organisation'}."]
     lines.append(f"User writing voice for this reader: {(ctx.voice or VOICE_FALLBACK)[:800]}")
     if ctx.prefs.strip():
         lines.append(f"How the user likes summaries and answers: {ctx.prefs.strip()[:400]}")

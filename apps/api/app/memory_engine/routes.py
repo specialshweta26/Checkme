@@ -116,10 +116,9 @@ class SelfIn(BaseModel):
 async def mark_me(entity_id: int, body: SelfIn, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     e = await _owned(db, MemoryEntity, user, entity_id)
     emails = (await _emails(db, user.id, [e.id])).get(e.id) or []
-    row = await ent.set_self(db, user.id, emails[0] if emails else e.name, body.is_me)
+    row = await ent.set_self(db, user.id, emails[0] if emails else e.name, body.is_me, by_user=True)
     if row is None:
         raise HTTPException(404, "Not found")
-    await record(db, user.id, "self", f"entity:{e.id}", "", e.name if body.is_me else "", "you said this is you" if body.is_me else "you said this is someone else")
     await db.commit()
     return {"ok": True, "is_me": body.is_me}
 

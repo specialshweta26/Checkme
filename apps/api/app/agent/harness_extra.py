@@ -689,7 +689,7 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
             return _dumps({"error": "Cannot change memory without a workspace."})
         from app.memory_engine import entities as ent
 
-        row = await ent.set_self(ctx.db, ctx.user.id, who, is_me)
+        row = await ent.set_self(ctx.db, ctx.user.id, who, is_me, by_user=True)
         await ctx.db.commit()
         if row is None:
             return _dumps({"ok": False, "error": f"No one called {who!r} in memory. Ask for the email address."})

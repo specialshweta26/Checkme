@@ -184,3 +184,22 @@ async def test_redraft_redoes_one_card_with_memory(factory, monkeypatch):
     async with factory() as db:
         with pytest.raises(LookupError):
             await service.redraft(db, other, item.id)  # another user's card
+
+
+async def test_drafts_are_signed_by_the_user_and_own_mail_is_recognised(factory):
+    from app.inbox.memory_context import contexts_for, prompt_block
+    from app.memory_engine.entities import set_self
+    from app.models import User
+
+    user, _ = await _setup(factory)
+    async with factory() as db:
+        row = await db.get(User, user.id)
+        row.display_name = user.display_name = "Gaurav Ranjan"
+        await set_self(db, user.id, "gaurav.home@gmail.com", True, by_user=True)
+        await db.commit()
+        other, own = _item("Romit <romit@sapient.test>", cc="Karthik <karthik@agilitas.test>"), _item("gaurav grv <gaurav.home@gmail.com>")
+        ctx = await contexts_for(db, user, [other, own])
+    block = prompt_block(ctx[other.id])
+    assert f"drafting for the user, Gaurav Ranjan <{user.email}>" in block and "sign off as them (Gaurav)" in block
+    assert "never as anyone else on the thread" in block and not ctx[other.id].from_self
+    assert ctx[own.id].from_self and "sent by the user from another of their own addresses" in prompt_block(ctx[own.id])
