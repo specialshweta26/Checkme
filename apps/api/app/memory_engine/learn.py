@@ -107,7 +107,7 @@ def parse_when(value: str) -> datetime | None:
 # --- bookkeeping ----------------------------------------------------------------------------------------------------
 
 
-async def claim_job(db: AsyncSession, user_id, job: str, every: timedelta) -> bool:
+async def claim_job(db: AsyncSession, user_id, job: str, every: timedelta, lease: timedelta = LEASE) -> bool:
     """Take this user's job if it is due and nobody else holds it."""
     await db.execute(
         text("INSERT INTO memory_learner_state (user_id, job, last_error) VALUES (:u, :j, '') ON CONFLICT DO NOTHING"),
@@ -119,7 +119,7 @@ async def claim_job(db: AsyncSession, user_id, job: str, every: timedelta) -> bo
             "WHERE user_id = :u AND job = :j AND (lease_until IS NULL OR lease_until < :now) "
             "AND (last_run_at IS NULL OR last_run_at < :due) RETURNING job"
         ),
-        {"u": user_id, "j": job, "now": _now(), "lease": _now() + LEASE, "due": _now() - every},
+        {"u": user_id, "j": job, "now": _now(), "lease": _now() + lease, "due": _now() - every},
     )
     claimed = got.first() is not None
     await db.commit()

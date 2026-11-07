@@ -41,12 +41,12 @@ def _expiry(now: datetime) -> str:
     return (now + LIFETIME).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-async def accept_notifications(db: AsyncSession, payload: Any) -> int:
-    """How many notifications carried the right secret for a known subscription."""
+async def accept_notifications(db: AsyncSession, payload: Any) -> list:
+    """The users whose notifications carried the right secret for a known subscription (one entry per notification)."""
     items = payload.get("value") if isinstance(payload, dict) else None
     if not isinstance(items, list):
-        return 0
-    valid = 0
+        return []
+    valid: list = []
     for item in items[:100]:
         if not isinstance(item, dict):
             continue
@@ -56,7 +56,7 @@ async def accept_notifications(db: AsyncSession, payload: Any) -> int:
             )
         ).scalar_one_or_none()
         if row is not None and hmac.compare_digest(_hash(str(item.get("clientState") or "")), row.client_state_hash):
-            valid += 1
+            valid.append(row.user_id)
     return valid
 
 

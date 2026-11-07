@@ -103,8 +103,9 @@ async def microsoft_mail_notification(request: Request, db: AsyncSession = Depen
         payload = json.loads(raw or b"{}")
     except (json.JSONDecodeError, UnicodeDecodeError):
         payload = None
-    if await push.accept_notifications(db, payload):
-        wake_inbox()
+    users = await push.accept_notifications(db, payload)
+    if users:
+        wake_inbox(set(users))  # only the mailboxes that reported new mail
     return Response(status_code=202)  # the same for a bad secret, so a caller learns nothing
 
 

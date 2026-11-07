@@ -78,7 +78,7 @@ async def test_triage_prompt_has_memory_and_marks_the_email_untrusted(factory, m
     item = _item("Priya Nair <priya@acme.com>")
     seen = {}
 
-    async def fake_llm(prompt, max_tokens, json_mode=False):
+    async def fake_llm(prompt, max_tokens, json_mode=False, model=None):
         seen["prompt"] = prompt
         return json.dumps({"classification": "reply", "summary": "Priya is chasing the revised SOW you promised by Friday.",
                            "key_points": ["Chasing your SOW"], "draft": "Hi Priya, it's coming Friday. Best, G"})
@@ -159,7 +159,7 @@ async def test_redraft_redoes_one_card_with_memory(factory, monkeypatch):
 
     user, _ = await _setup(factory)
 
-    async def fake_llm(prompt, max_tokens, json_mode=False):
+    async def fake_llm(prompt, max_tokens, json_mode=False, model=None):
         assert "Open: send the revised SOW" in prompt
         return json.dumps({"classification": "reply", "summary": "Chasing the SOW.", "key_points": ["SOW due Friday"], "draft": "Hi Priya, Friday. Best, G"})
 
@@ -217,7 +217,7 @@ async def test_no_reply_is_drafted_to_the_users_own_address(factory, monkeypatch
         item = _item("gaurav grv <gaurav.home@gmail.com>")
         ctx = (await contexts_for(db, user, [item]))[item.id]
 
-    async def fake_llm(prompt, max_tokens, json_mode=False):
+    async def fake_llm(prompt, max_tokens, json_mode=False, model=None):
         return json.dumps({"classification": "reply", "summary": "Wants to connect.", "key_points": [], "draft": "Hi Gaurav, sure. Gaurav"})
 
     class Box:
