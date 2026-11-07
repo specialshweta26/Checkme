@@ -274,3 +274,30 @@ def list_keys(prefix: str) -> list[str]:
         if not page.get("IsTruncated"):
             return keys
         token = page.get("NextContinuationToken")
+
+
+def put_fileobj(key: str, fileobj, content_type: str) -> None:
+    """Store a large file from an open file object (multipart upload; never read into memory at once)."""
+    if get_settings().use_disk_storage:
+        import shutil
+
+        dest = _disk_file(key)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with open(dest, "wb") as out:
+            shutil.copyfileobj(fileobj, out)
+        dest.with_name(dest.name + ".ctype").write_text(content_type or "", encoding="utf-8")
+        return
+    _client().upload_fileobj(fileobj, get_settings().s3_bucket, key, ExtraArgs={"ContentType": content_type})
+
+
+def iter_chunks(key: str, size: int = 1024 * 1024):
+    """A stored file, read 1 MB at a time."""
+    if get_settings().use_disk_storage:
+        with open(_disk_file(key), "rb") as f:
+            while True:
+                part = f.read(size)
+                if not part:
+                    return
+                yield part
+    body = _client().get_object(Bucket=get_settings().s3_bucket, Key=key)["Body"]
+    yield from body.iter_chunks(size)
