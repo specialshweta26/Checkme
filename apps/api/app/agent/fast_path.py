@@ -94,6 +94,15 @@ _ABOUT_USER = re.compile(
     r"remind me (?:of )?my|what do you know about me)\b",
     re.I,
 )
+# The user's own mailbox and calendar ("my latest emails", "my calendar today") are connector reads, never web lookups,
+# even when they say "latest" or "today".
+_OWN_DATA = re.compile(
+    r"\b(my|our)\s+(?:\w+\s+){0,3}?(e-?mails?|mails?|inbox|messages|calendar|meetings?|events?|schedule|agenda|"
+    r"appointments?|threads?|drafts?|sent (?:items|folder))\b|\bon my calendar\b|\bin my inbox\b|"
+    r"\b(?:e-?mails?|mails?|messages?|threads?|invites?)\s+(?:from|to|about|with)\b",
+    re.I,
+)
+_IN_BROWSER = re.compile(r"\b(browser|website|web site|web page|log ?in|sign ?in|on the computer|live screen)\b", re.I)
 _DAY = re.compile(r"\b(today|tonight|right now|live|breaking|just (?:happened|announced)|this (?:morning|evening))\b", re.I)
 _MONTH = re.compile(r"\b(this month|recently|recent)\b", re.I)
 _YEAR = re.compile(r"\b(this year)\b", re.I)
@@ -164,6 +173,9 @@ def classify_turn(query: str, *, has_uploads: bool = False, confirmations: bool 
     if not q:
         return TurnPlan(DIRECT, "empty")
     first = q.split("\n\n", 1)[0]
+    if _OWN_DATA.search(first) and not _IN_BROWSER.search(first):
+        # Before the browser rule: "open the email from Aditya about the dashboard" is a mailbox read, not a website.
+        return TurnPlan(DIRECT, "the user's own mail or calendar")
     if is_computer_file_query(first):
         return TurnPlan(COMPUTER, "files or folders on the computer")
     if _COMPUTER.search(first):
