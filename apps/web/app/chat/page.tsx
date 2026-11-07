@@ -105,7 +105,9 @@ type TurnUsage = {
 function usageLabel(u?: TurnUsage | null) {
   if (!u || !(u.input || u.output)) return "";
   const n = (x: number) => x.toLocaleString("en-US");
-  const parts = [`${n(u.input)} in`, `${n(u.output)} out`];
+  // Cached input is billed at a fraction of the price, so say how much of it there was.
+  const inLabel = u.cached ? `${n(u.input)} in (${n(u.cached)} cached)` : `${n(u.input)} in`;
+  const parts = [inLabel, `${n(u.output)} out`];
   if (u.cost_usd !== null && u.cost_usd !== undefined) {
     parts.push(`$${u.cost_usd < 0.01 ? u.cost_usd.toFixed(4) : u.cost_usd.toFixed(3)}${u.unpriced?.length ? "+" : ""}`);
   }

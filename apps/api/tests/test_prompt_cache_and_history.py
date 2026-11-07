@@ -171,3 +171,19 @@ def _async(value):
         return value
 
     return coro()
+
+
+def test_the_prompt_knows_who_the_user_is_in_its_fixed_part():
+    user = SimpleNamespace(id="u1", timezone="Asia/Kolkata", email="gaurav@example.test", display_name="Gaurav R")
+    agent = SimpleNamespace(id="a1", name="Chief", title="chief of staff", instructions="", focus="", kind="default")
+    fixed, _turn = split_prompt(system_prompt(user, [], "", agent=agent, skills=[], matched_skills=[], query="what is my name"))
+    assert "The user you work for: Gaurav R <gaurav@example.test>" in fixed  # cached with the rest of the fixed part
+
+
+def test_questions_about_the_user_are_not_web_lookups():
+    from app.agent import fast_path
+
+    for q in ("What is my name?", "what is my email", "Who am I?", "Do you know my name?", "What do you know about me?"):
+        assert fast_path.classify_turn(q).kind == fast_path.DIRECT, q
+    for q in ("What is the weather today?", "What is the price of gold?", "Any news update on my flight?"):
+        assert fast_path.classify_turn(q).kind == fast_path.QUICK_WEB, q
