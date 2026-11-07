@@ -666,3 +666,27 @@ async def send_input(row, text: str | None = None, key: str | None = None) -> di
         raise ToolError(reason) from exc
     _keepalive(box._live)
     return {"ok": True, "typed": len(text), "key": "+".join(keys)}
+
+
+def kill_user_sandboxes(user_id) -> int:
+    """Delete (not pause) every E2B computer that belongs to this user: account deletion. Returns how many."""
+    if not enabled():
+        return 0
+    sdk = _sdk()
+    user_key = str(user_id)
+    killed = 0
+    try:
+        pager = sdk.Sandbox.list(query=sdk.SandboxQuery(metadata={"checkme_user": user_key}), api_key=_api_key())
+        items = pager.next_items() if pager is not None else []
+    except Exception as exc:  # noqa: BLE001
+        log.warning("e2b: listing sandboxes for deletion failed: %s", type(exc).__name__)
+        items = []
+    for info in items or []:
+        sid = str(getattr(info, "sandbox_id", "") or "")
+        try:
+            if sid and sdk.Sandbox.kill(sid, api_key=_api_key()):
+                killed += 1
+        except Exception as exc:  # noqa: BLE001
+            log.warning("e2b: deleting sandbox %s failed: %s", sid, type(exc).__name__)
+    _LIVE.pop(user_key, None)
+    return killed

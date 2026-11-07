@@ -251,3 +251,26 @@ def _pptx_text(data: bytes) -> str:
             lines = [node.text for node in root.iter("{http://schemas.openxmlformats.org/drawingml/2006/main}t") if node.text]
             out.append(f"Slide {number(name)}: " + " ".join(lines))
     return "\n".join(out)
+
+
+def list_keys(prefix: str) -> list[str]:
+    """Every stored file key under ``prefix`` (a user's files live under "<user id>/")."""
+    if not prefix or "/" not in prefix:
+        raise ValueError("a prefix like '<user id>/' is required")
+    if get_settings().use_disk_storage:
+        root = _disk_file(prefix)
+        if not root.exists():
+            return []
+        base = _disk_file("")
+        return [str(p.relative_to(base)) for p in root.rglob("*") if p.is_file() and not p.name.endswith(".ctype")]
+    keys: list[str] = []
+    token = None
+    while True:
+        kwargs = {"Bucket": get_settings().s3_bucket, "Prefix": prefix}
+        if token:
+            kwargs["ContinuationToken"] = token
+        page = _client().list_objects_v2(**kwargs)
+        keys.extend(obj["Key"] for obj in page.get("Contents") or [])
+        if not page.get("IsTruncated"):
+            return keys
+        token = page.get("NextContinuationToken")

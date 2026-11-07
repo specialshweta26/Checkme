@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.account.routes import router as account_router
 from app.agents.routes import router as agents_router
 from app.automations.routes import router as automations_router, webhook_router
 from app.auth.routes import me_router, router as auth_router
@@ -182,6 +183,7 @@ async def lumio_client_kind(request: Request, call_next):
 
 app.include_router(auth_router, prefix="/api")
 app.include_router(me_router, prefix="/api")
+app.include_router(account_router, prefix="/api")
 app.include_router(chat_router, prefix="/api")
 app.include_router(agents_router, prefix="/api")
 app.include_router(memory_router, prefix="/api")
