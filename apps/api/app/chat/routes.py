@@ -390,6 +390,17 @@ async def chat(
                 continue  # already used: the same approval never runs the action twice
             confirms.append(data["payload"])
 
+    if reply_intent(text) == "decline" and not confirms:
+        # "no" to the action(s) the last reply prepared: say so, so the agent doesn't prepare the same send again
+        # (it did, leaving a fresh approval card behind after the user had declined).
+        last_reply = next((m for m in history_rows if m.role == "assistant"), None)
+        declined = [str(p.get("title") or "an action") for p in ((last_reply.meta or {}).get("pending_confirms") or [])] if last_reply else []
+        if declined:
+            agent_text = (
+                f"{agent_text}\n\n[Checkme: the user declined what the last reply prepared ({', '.join(declined[:4])}). "
+                "It was not run. Do not prepare or run it again in this reply; acknowledge briefly.]"
+            )
+
     working = dict(sess.state or {})
     if confirms:
         working["confirm_tools"] = confirms

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -451,28 +452,24 @@ async def _expand_gateway_catalog(ctx: RunContext, conn, query: str) -> list[dic
     return rows
 
 
-_MAIL_OPEN_HINTS = (
-    "open",
-    "summarize",
-    "summary",
-    "attachment",
-    "pdf",
-    "display",
-    "show",
-    "preview",
-    "thread",
-    "conversation",
-    "email",
-    "mail",
-    "inbox",
-    "briefing",
-    "read",
+# Opening one email's whole conversation is for reading or summarising a specific email. Listing mail ("my 5
+# latest emails", "what's in my inbox") must not pull a full thread into the reply: that tripled the tokens.
+_MAIL_OPEN = re.compile(
+    r"\b(open|summari[sz]e|summary of|read (?:me |out )?(?:the|this|that|my last|my latest)|what does (?:it|the|this|that)|"
+    r"full (?:email|mail|thread|conversation)|thread|conversation|attachments?|pdf|preview)\b",
+    re.I,
+)
+_MAIL_LIST = re.compile(
+    r"\b(list|latest|recent|newest|unread|\d+\s+(?:\w+\s+)?(?:emails?|mails?|messages?)|emails|mails|messages|inbox)\b", re.I
 )
 
 
 def _wants_mail_open(query: str) -> bool:
-    q = (query or "").lower()
-    return any(hint in q for hint in _MAIL_OPEN_HINTS)
+    q = (query or "").strip()
+    if not _MAIL_OPEN.search(q):
+        return False
+    # "summarise my latest emails" is a list job; "summarise the latest email from Priya" opens one.
+    return not (_MAIL_LIST.search(q) and not re.search(r"\b(email|mail|message) from\b|\bthat (email|mail)\b|\bthis (email|mail)\b", q, re.I))
 
 
 def _first_mail_ref(result: Any) -> tuple[str, str]:
@@ -2536,6 +2533,37 @@ def shell_routing_hint(connectors: list | None, agent=None) -> str:
     return text.strip()
 
 
+MAIL_QUICK_TOOLS = (
+    ("list_messages", "limit, folder, unread_only", "newest first; folder inbox|sent|drafts|archive|junk"),
+    ("search_messages", "query, limit", "sender, subject words, dates"),
+    ("get_thread", "thread_id or message_id", "the whole conversation; use to read or summarise one email"),
+    ("list_attachments", "message_id", ""),
+    ("list_events", "start, end, limit", "ISO 8601 times in the user's timezone"),
+    ("search_events", "query, start, end", ""),
+    ("find_free_slots", "start, end, duration_minutes", ""),
+)
+MAIL_QUICK_WRITES = "send_message(to, subject, body, cc, bcc), reply(message_id, body, reply_all), forward(message_id, to), create_event(title, start, end, attendees)"
+
+
+def mail_quick_ref(connectors: list) -> str:
+    """The user's mailbox tools by name, so mail and calendar requests skip discovery. Same every turn for a user."""
+    slugs = [getattr(c, "slug", "") for c in connectors or [] if getattr(c, "provider", "") in {"gmail", "outlook"}]
+    if not slugs:
+        return ""
+    meet = {"gmail": "create_google_meet", "outlook": "create_teams_meeting"}
+    lines = [
+        "Mail and calendar: call these directly with call_tool(connector_slug, tool_name, args) on "
+        + " or ".join(f"'{s}'" for s in slugs)
+        + ". No list_connectors, search_tools or get_tool_schema is needed for them:"
+    ]
+    for name, args, note in MAIL_QUICK_TOOLS:
+        lines.append(f"- {name}({args})" + (f": {note}" if note else ""))
+    extra = ", ".join(meet[c.provider] + "(title, start, attendees)" for c in connectors if getattr(c, "provider", "") in meet)
+    lines.append(f"- Need the user's approval: {MAIL_QUICK_WRITES}" + (f", {extra}" if extra else "") + ".")
+    lines.append("For anything else in the mailbox (labels, filters, drafts, settings), discover it with search_tools.")
+    return "\n".join(lines) + "\n"
+
+
 def system_prompt(
     user,
     connectors: list,
@@ -2623,6 +2651,7 @@ def system_prompt(
     return (
         identity
         + workspace_bit
+        + mail_quick_ref(connectors)
         + "Only use the connectors listed in the Checkme context for this turn. Other users have different connectors.\n"
         "Discover first when the user wants a connected app (mail, calendar, a marketplace app): list_connectors, then search_tools with a short capability phrase (what the tool must return), not the full user sentence. "
         "A file, folder, or this-computer request is not a connector or skill lookup. Use search_files, list_files, list_dir, read_file, or write_file. Every agent has them. "
