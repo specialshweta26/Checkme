@@ -43,6 +43,12 @@ def _secret(column: str) -> bool:
     return column.endswith("_enc") or column.endswith("_hash")
 
 
+def _skipped(column) -> bool:
+    """Credentials, and internal columns that are large and mean nothing to a person (embeddings, search index)."""
+    kind = type(column.type).__name__.lower()
+    return _secret(column.name) or column.name in ("embedding", "search_tsv") or "vector" in kind or "tsvector" in kind
+
+
 def _plain(value: Any) -> Any:
     if isinstance(value, (datetime, date)):
         return value.isoformat()
@@ -58,7 +64,7 @@ def _plain(value: Any) -> Any:
 async def export_rows(db: AsyncSession, user_id) -> dict[str, list[dict]]:
     out: dict[str, list[dict]] = {}
     for table in _user_tables():
-        cols = [c for c in table.c if not _secret(c.name)]
+        cols = [c for c in table.c if not _skipped(c)]
         rows = (await db.execute(select(*cols).where(table.c.user_id == user_id))).mappings().all()
         if rows:
             out[table.name] = [{k: _plain(v) for k, v in row.items()} for row in rows]
@@ -68,10 +74,14 @@ async def export_rows(db: AsyncSession, user_id) -> dict[str, list[dict]]:
     return out
 
 
-def _zip(rows: dict[str, list[dict]], user_id) -> io.BytesIO:
+def _zip(rows: dict[str, list[dict]], user_id):
+    """The export as a temporary file (on disk past a few MB), files added one at a time, so a large account never
+    has to fit in the server's memory."""
+    import tempfile
+
     from app import storage
 
-    buf = io.BytesIO()
+    buf = tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024)
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for name, items in rows.items():
             zf.writestr(f"data/{name}.json", json.dumps(items, ensure_ascii=False, indent=1, default=str))
@@ -92,6 +102,9 @@ def _zip(rows: dict[str, list[dict]], user_id) -> io.BytesIO:
                 continue
             total += len(data)
             zf.writestr(f"files/{key.split('/', 1)[1]}", data)
+            del data
+        log.info("export for %s: %s tables, %s files (%.1f MB), %s skipped", user_id, len(rows), len(keys) - len(skipped),
+                 total / 1e6, len(skipped))
         zf.writestr("README.txt", (
             "Your Lumio data export.\n\ndata/: one JSON file per kind of data (chats, memory, inbox cards, tasks, usage...).\n"
             "Encrypted sign-in credentials are not included.\nfiles/: files you uploaded or the assistant saved for you.\n"
@@ -105,8 +118,20 @@ def _zip(rows: dict[str, list[dict]], user_id) -> io.BytesIO:
 async def export_my_data(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     rows = await export_rows(db, user.id)
     buf = await asyncio.to_thread(_zip, rows, user.id)
+    del rows
     name = f"lumio-export-{date.today().isoformat()}.zip"
-    return StreamingResponse(buf, media_type="application/zip", headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+    def chunks():
+        try:
+            while True:
+                part = buf.read(1024 * 1024)
+                if not part:
+                    return
+                yield part
+        finally:
+            buf.close()
+
+    return StreamingResponse(chunks(), media_type="application/zip", headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
 
 class DeleteIn(BaseModel):
