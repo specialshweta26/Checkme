@@ -524,6 +524,9 @@ async def web_search(query: str, count: int = 8, ctx=None, recency: str | None =
     q = (query or "").strip()
     if not q:
         return {"error": "query is required", "results": []}
+    from app.agent.meter import count as meter_count
+
+    meter_count("search")
     limit = max(1, min(int(count or 8), 12))
     opts = _recency_opts(q, recency)
     n_pages = int(pages if pages is not None else _cfg("search_inline_pages", 3))

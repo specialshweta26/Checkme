@@ -84,8 +84,11 @@ async def _run_one(job_id) -> None:
         job = await db.get(MemoryExtractJob, job_id)
         if job is None or job.status != "running":
             return
+        from app.agent.meter import metered
+
         try:
-            await process_job(db, job)
+            with metered(job.user_id, "chat"):  # remembering what was said in chat is part of chat's cost
+                await process_job(db, job)
         except Exception as vis_exc:  # noqa: BLE001
             log.warning("memory extract failed: %s", vis_exc)
             if (job.attempts or 0) >= MAX_ATTEMPTS:

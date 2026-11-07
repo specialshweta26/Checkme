@@ -116,6 +116,7 @@ async def lifespan(_app: FastAPI):
     from app.agent.memory_worker import start_memory_worker
     from app.memory_engine.learn import start_memory_learner
     from app.memory_engine.consolidate import start_memory_consolidator
+    from app.agent.meter import start_usage_flusher
     from app.loop_watch import watch_loop
     from app.inbox.worker import start_inbox_worker
     from app.inbox.push import start_mail_push
@@ -135,6 +136,7 @@ async def lifespan(_app: FastAPI):
         await start_memory_worker(),
         await start_memory_learner(),
         await start_memory_consolidator(),
+        await start_usage_flusher(),
     ]
     cfg = get_settings()
     log.info(

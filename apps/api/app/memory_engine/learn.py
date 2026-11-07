@@ -39,6 +39,7 @@ JOBS = {  # job -> how often it may run for one user
     "commitments": timedelta(hours=24),
 }
 LEASE = timedelta(minutes=10)
+MODEL_JOBS = {"voice", "commitments"}  # the jobs that call a model (skipped over the daily background budget)
 LOOP_EVERY_S = 300
 PARALLEL_USERS = 3
 MAX_RECIPIENTS = 10
@@ -389,10 +390,16 @@ async def run_user(session_factory, user_id) -> dict:
                 continue
             user = await db.get(User, user_id)
             error = ""
+            from app.agent.meter import metered, over_budget
+
             try:
-                for runtime in await mail_connectors(db, user):
-                    result = await asyncio.wait_for(RUNNERS[job](db, user, runtime), timeout=120)
-                    done[job] = result
+                if job in MODEL_JOBS and await over_budget(db, user_id):
+                    done[job] = {"skipped": "daily background budget reached"}
+                else:
+                    with metered(user_id, "memory"):
+                        for runtime in await mail_connectors(db, user):
+                            result = await asyncio.wait_for(RUNNERS[job](db, user, runtime), timeout=120)
+                            done[job] = result
             except Exception as exc:  # noqa: BLE001 - one user's failure must not stop the others
                 error = f"{type(exc).__name__}: {exc}"
                 log.info("memory learn %s failed for %s", job, user_id, exc_info=True)

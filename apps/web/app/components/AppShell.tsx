@@ -21,7 +21,7 @@ import { AgentsNav } from "./AgentsNav";
 import { BrandMark } from "./BrandMark";
 import { AgentAvatar } from "./AgentAvatar";
 
-type Nav = "chat" | "inbox" | "tasks" | "connectors" | "runs" | "memory";
+type Nav = "chat" | "inbox" | "tasks" | "connectors" | "runs" | "memory" | "usage";
 
 function IconInbox() {
   return (
@@ -298,7 +298,7 @@ export function AppShell({
   }
 
   const rows = conversations || own;
-  const titles: Record<Nav, string> = { chat: "Chat", inbox: "Inbox", tasks: "Tasks", connectors: "Connectors", runs: "Saved runs", memory: "What I know" };
+  const titles: Record<Nav, string> = { chat: "Chat", inbox: "Inbox", tasks: "Tasks", connectors: "Connectors", runs: "Saved runs", memory: "What I know", usage: "Usage" };
   const agentId = activeAgentId || scope.agent || null;
   const groupId = activeGroupId || scope.group || null;
 
@@ -430,6 +430,9 @@ export function AppShell({
               <div className="profile-menu">
                 <strong>{me?.name || "Workspace"}</strong>
                 <span>{me?.email || "Loading…"}</span>
+                <a className="profile-link" href="/usage" onClick={(e) => { e.preventDefault(); visit("/usage"); }}>
+                  Usage and cost
+                </a>
                 <form action="/api/auth/logout" method="post">
                   <button className="logout" type="submit">Sign out</button>
                 </form>

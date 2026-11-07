@@ -169,10 +169,15 @@ async def _run_one(session_factory: Callable, job_id, user_id=None) -> None:
     computer = computer_lock.JobComputer(user_id, report_wait)
     token = run_cancel.current.set(run)
     computer_token = computer_lock.current.set(computer)
+    from app.agent.meter import METER
+
+    meter_token = METER.set((user_id, "jobs")) if user_id else None
     try:
         inner = asyncio.create_task(run_job(job_id, session_factory), name=f"job-run-{job_id}")
     finally:
         computer_lock.current.reset(computer_token)
+        if meter_token is not None:
+            METER.reset(meter_token)
         run_cancel.current.reset(token)
     run.task = inner
     watch = asyncio.create_task(_watch_cancel(session_factory, job_id, run))

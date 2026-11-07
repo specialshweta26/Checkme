@@ -483,6 +483,11 @@ async def ensure_sandbox(row) -> E2BComputer:
         creds = decrypt_json(row.credentials_enc) if getattr(row, "credentials_enc", None) else {}
         fresh = user_key not in _LIVE
         if fresh:
+            from app.agent.meter import count as meter_count
+
+            # A start or resume of the user's computer. E2B bills while it runs and pauses idle ones on its own, so
+            # starts are what we can count reliably; minutes come from E2B's own usage report.
+            meter_count("computer:starts", 1, user_id=getattr(row, "user_id", None))
             _BOOTING[user_key] = time.monotonic()
             _STATUS.pop(user_key, None)
             log.info("e2b: boot requested user=%s stored_sandbox=%s", user_key, creds.get(CREDS_ID) or "-")

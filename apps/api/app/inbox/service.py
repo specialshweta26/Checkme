@@ -298,7 +298,10 @@ async def rephrase(db: AsyncSession, user: User, item_id, *, tone: str = "", ins
         f"Thread summary: {clip(item.summary, 1200)}\n"
         f"Current draft: {clip(item.draft, 3000)}\n"
     )
-    data = parse_json_object(await _llm(prompt, 700, json_mode=True))
+    from app.agent.meter import metered
+
+    with metered(user.id, "inbox"):
+        data = parse_json_object(await _llm(prompt, 700, json_mode=True))
     next_draft = str(data.get("draft") or "").strip()
     if next_draft:
         item.draft = clip(next_draft, 4000)
@@ -314,13 +317,16 @@ async def redraft(db: AsyncSession, user: User, item_id) -> dict[str, Any]:
     runtime = await connector_for(db, user, item.connector_id)
     if runtime is None:
         raise LookupError("Mail connector is not available")
+    from app.agent.meter import metered
+
     ctx = (await contexts_for(db, user, [item])).get(item.id)
-    await _classify_one(item, runtime, ctx, full=True)
+    with metered(user.id, "inbox"):
+        await _classify_one(item, runtime, ctx, full=True)
     await db.commit()
     return serialize(item)
 
 
-async def classify_pending(db: AsyncSession, user: User) -> int:
+async def classify_pending(db: AsyncSession, user: User, rules_only: bool = False) -> int:
     runtimes = await mail_connectors(db, user)
     if not runtimes:
         return 0
@@ -339,7 +345,7 @@ async def classify_pending(db: AsyncSession, user: User) -> int:
     )
     if not items:
         return 0
-    await _classify_many(db, user, runtimes, list(items))
+    await _classify_many(db, user, runtimes, list(items), rules_only=rules_only)
     return len(items)
 
 
@@ -635,7 +641,8 @@ async def _ingest_locked(
     return arrived
 
 
-async def _classify_many(db: AsyncSession, user: User, runtimes: list[RuntimeConnector], items: list[InboxItem]) -> None:
+async def _classify_many(db: AsyncSession, user: User, runtimes: list[RuntimeConnector], items: list[InboxItem],
+                         rules_only: bool = False) -> None:
     from app.inbox.memory_context import contexts_for
 
     # Memory is read first, one item at a time on this session; the model calls below then run in parallel.
@@ -649,6 +656,11 @@ async def _classify_many(db: AsyncSession, user: User, runtimes: list[RuntimeCon
             return
         async with sem:
             try:
+                if rules_only:  # over the daily budget: automated mail only; the rest waits for tomorrow
+                    if is_automated_sender(item, contexts.get(item.id)):
+                        _rule_triage(item)
+                        TIER_COUNTS["rule"] += 1
+                    return
                 await _classify_one(item, runtime, contexts.get(item.id))
             except Exception:  # noqa: BLE001
                 log.warning("triage failed for %s", item.message_id, exc_info=True)

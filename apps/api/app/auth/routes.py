@@ -273,3 +273,32 @@ async def update_me(body: dict, user: User = Depends(current_user), db: AsyncSes
         user.timezone = tz
     await db.commit()
     return {"ok": True}
+
+
+@me_router.get("/me/usage")
+async def my_usage(days: int = 7, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """What this user used: per day and feature, model tokens, searches and computer starts, with cost where models
+    are priced (MODEL_PRICES), and today's background budget."""
+    from datetime import timedelta
+
+    from app.agent import meter
+
+    since = meter._today() - timedelta(days=max(1, min(days, 90)) - 1)
+    rows = await meter.usage_rows(db, user.id, since)
+    totals: dict = {}
+    for r in rows:
+        t = totals.setdefault(r["feature"], {"calls": 0, "input": 0, "cached": 0, "output": 0, "cost_usd": 0.0, "searches": 0, "computer_starts": 0})
+        if r["model"] == "search":
+            t["searches"] += int(r["units"])
+        elif r["model"] == "computer:starts":
+            t["computer_starts"] += int(r["units"])
+        else:
+            for k in ("calls", "input", "cached", "output"):
+                t[k] += r[k]
+            t["cost_usd"] += r["cost_usd"] or 0
+    priced = any(r["cost_usd"] is not None for r in rows)
+    return {
+        "since": since.isoformat(), "rows": rows, "by_feature": totals, "priced": priced,
+        "background_today": await meter.background_spend(db, user.id),
+        "over_budget": await meter.over_budget(db, user.id),
+    }
