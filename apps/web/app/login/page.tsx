@@ -8,9 +8,11 @@ import { errorFromQuery, getMe } from "../lib";
 
 export default function Login() {
   const [error, setError] = useState("");
+  const [deleted, setDeleted] = useState(false);
 
   useEffect(() => {
     setError(errorFromQuery(window.location.search));
+    setDeleted(new URLSearchParams(window.location.search).get("deleted") === "1");
     getMe().then((me) => {
       if (me) window.location.replace("/chat");
     });
@@ -46,6 +48,7 @@ export default function Login() {
             <div className="auth-eyebrow">Welcome back</div>
             <h2>Sign in to Lumio</h2>
             <p className="auth-intro">Your personal assistant is just a sign-in away.</p>
+            {deleted ? <p className="att-summary">Your account and all its data were deleted.</p> : null}
             <AuthProviders error={error} />
             <p className="auth-alt">
               Prefer the browser first? <Link href="/chat">Open the web app</Link>
