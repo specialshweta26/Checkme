@@ -968,3 +968,34 @@ async def test_a_page_that_stays_blank_is_not_reopened_again_and_again(monkeypat
     assert out.get("blank_page"), out
     assert out["fallback"] and len(ctx.calls["act"]) == 2  # two tries, not five
     assert "Don't open it again" in out["note"]
+
+
+def test_blank_page_diagnostics_never_hold_page_content():
+    ctx = SimpleNamespace(_browser_on_desktop=True, _browser_switch_reason="Indian site")
+    state = {"ok": True, "url": "https://www.makemytrip.com/flight?pax=priya@acme.test", "title": "My bookings", "text": "PNR ABC123 Priya Nair",
+             "tree": "- e1 textbox priya@acme.test", "elements": [{"ref": "e1"}], "ran_on": "local_computer", "screenshot": True,
+             "error": "failed at https://x.test/a?token=SECRET123 now"}
+    shape = fb.page_shape(state, ctx)
+    blob = json.dumps(shape)
+    for private in ("priya", "ABC123", "My bookings", "SECRET123", "/flight"):
+        assert private not in blob
+    assert shape["host"] == "makemytrip.com" and shape["ran_on"] == "local_computer" and shape["text_len"] == 21
+    assert shape["elements"] == 1 and shape["has_screenshot"] and shape["switched_to_desktop"] and shape["switch_reason"] == "Indian site"
+    assert fb.page_shape("not a dict")["type"] == "str"  # a non-dict result is itself a clue
+
+
+async def test_blank_pages_are_logged_with_their_shape(monkeypatch, ctx, caplog):
+    caplog.set_level(logging.WARNING)
+    blank = {"ok": True, "url": "", "title": "", "text": "", "tree": "", "elements": [], "ran_on": "cloud_computer"}
+
+    async def page(c, *a):
+        return dict(blank)
+
+    monkeypatch.setattr(fb, "_snapshot", page)
+    monkeypatch.setattr(fb, "_navigate", page)
+    monkeypatch.setattr(fb, "_act", page)
+    _plans(monkeypatch, ctx, [{"actions": [{"kind": "navigate", "url": "https://a.test/"}], "done": False, "result": "", "need_user": ""}] * 3)
+    await fb.browser_task(ctx, "Search", "", {})
+    lines = [r.getMessage() for r in caplog.records if "blank page where=" in r.getMessage()]
+    assert any("where=start" in l for l in lines) and any("where=after_step_1" in l for l in lines)
+    assert all('"ran_on": "cloud_computer"' in l for l in lines)
