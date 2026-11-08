@@ -16,6 +16,8 @@ type Usage = {
   priced: boolean;
   background_today: { cost_usd: number; tokens: number; limit_usd: number | null; limit_tokens: number | null };
   over_budget: boolean;
+  triage: { rule: number; small: number; full: number };
+  drafts: { week: string; unchanged: number; light: number; rewritten: number }[];
 };
 
 const FEATURES: Record<string, string> = {
@@ -90,6 +92,60 @@ export default function UsagePage() {
                         ? `${n(bg.tokens)} of ${n(bg.limit_tokens)} tokens`
                         : `${n(bg?.tokens || 0)} tokens${data.priced ? `, ${usd(bg?.cost_usd || 0)}` : ""}`}
                   </span>
+                </div>
+              </div>
+
+              <div className="task-card">
+                <div className="task-main">
+                  <strong>How your inbox was sorted (last 7 days)</strong>
+                  {data.triage && data.triage.rule + data.triage.small + data.triage.full > 0 ? (
+                    <>
+                      <span className="muted">
+                        {n(data.triage.rule)} by simple rules (no AI) · {n(data.triage.small)} by the small, cheap model ·{" "}
+                        {n(data.triage.full)} by the full model (these got a drafted reply)
+                      </span>
+                      <span className="faint">
+                        {Math.round(((data.triage.rule + data.triage.small) / (data.triage.rule + data.triage.small + data.triage.full)) * 100)}% of
+                        emails never needed the full model.
+                      </span>
+                    </>
+                  ) : (
+                    <span className="muted">No new mail sorted yet this week.</span>
+                  )}
+                </div>
+              </div>
+
+              <div className="task-card">
+                <div className="task-main">
+                  <strong>How much you change the drafted replies</strong>
+                  <span className="muted">
+                    Each reply you send from the inbox, compared with the assistant's draft. More "as drafted" over the weeks means it's learning how you
+                    write.
+                  </span>
+                  {data.drafts && data.drafts.length ? (
+                    <table className="usage-table">
+                      <thead>
+                        <tr>
+                          <th>Week of</th>
+                          <th>Sent as drafted</th>
+                          <th>Lightly edited</th>
+                          <th>Rewritten</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {data.drafts.map((w) => (
+                          <tr key={w.week}>
+                            <td>{new Date(w.week).toLocaleDateString(undefined, { day: "numeric", month: "short" })}</td>
+                            <td>{w.unchanged}</td>
+                            <td>{w.light}</td>
+                            <td>{w.rewritten}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  ) : (
+                    <span className="faint">No replies sent from the inbox yet. This fills in as you send.</span>
+                  )}
                 </div>
               </div>
 
