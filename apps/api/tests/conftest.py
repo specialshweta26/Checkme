@@ -144,3 +144,11 @@ def _no_browser_run_log(monkeypatch):
     from app.config import get_settings
 
     monkeypatch.setattr(get_settings(), "browser_run_log", False)
+
+
+@pytest.fixture(autouse=True)
+def _instant_page_settle(monkeypatch):
+    """The browser loop re-reads empty pages after real waits; tests don't need to wait."""
+    from app.agent import fast_browser
+
+    monkeypatch.setattr(fast_browser, "SETTLE_WAITS_S", (0, 0, 0))

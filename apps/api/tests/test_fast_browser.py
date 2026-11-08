@@ -836,3 +836,108 @@ async def test_fast_loop_find_relists_the_page(monkeypatch, ctx):
     monkeypatch.setattr(fb, "_snapshot", snap)
     out = await fb.browser_task(ctx, "find the report", "https://acme.test/login", {})
     assert out["done"] and "Order Status" in finds
+
+
+# --- reliability: empty pages, "needs you" that isn't, bot checks (from real MakeMyTrip runs) ----------------------
+
+@pytest.mark.parametrize(
+    "text, kind",
+    [
+        ("Please provide the current page URL/title/visible text and the Elements list.", "page"),
+        ("Once the flights page loads, I'll need the visible form elements.", "page"),
+        ("I need you to confirm the date picker interaction: please select 21 Nov in the calendar.", "page"),
+        ("Please confirm you're okay with using Google Flights (or tell me another airline/website you prefer).", "site_choice"),
+        ("The site shows a CAPTCHA.", "real"),
+        ("Enter the one-time code sent to your phone.", "real"),
+        ("Sign in to continue.", "real"),
+        ("Two flights at 9:05 and 9:40 are the same price: which one?", "real"),
+        ("Something unexpected happened.", "real"),  # unknown: stay safe and stop
+    ],
+)
+def test_need_user_kinds(text, kind):
+    assert fb.need_user_kind(text) == kind
+
+
+EMPTY = {"ok": True, "url": "https://www.makemytrip.com/flights/", "title": "", "text": "", "tree": "", "elements": []}
+
+
+async def test_an_empty_page_is_read_again_before_planning(monkeypatch, ctx):
+    monkeypatch.setattr(fb, "SETTLE_WAITS_S", (0, 0, 0))
+    pages = [dict(EMPTY), dict(EMPTY), dict(LOGIN)]
+
+    async def snap(c, find=""):
+        return pages.pop(0) if pages else dict(LOGIN)
+
+    monkeypatch.setattr(fb, "_snapshot", snap)
+    _plans(monkeypatch, ctx, [{"actions": [], "done": True, "result": "Sign-in form is ready", "need_user": ""}])
+    out = await fb.browser_task(ctx, "Find the sign-in form", "", {})
+    assert out["done"] and "e1 textbox Email" in ctx.calls["plan"][0]["brief"]  # planned on the loaded page, not the empty one
+
+
+async def test_asking_the_user_for_page_details_does_not_end_the_run(monkeypatch, ctx):
+    monkeypatch.setattr(fb, "SETTLE_WAITS_S", (0,))
+    _plans(monkeypatch, ctx, [
+        {"actions": [], "done": False, "result": "", "need_user": "Please share the Elements list after the page loads."},
+        {"actions": [], "done": False, "result": "", "need_user": "Please confirm you're okay with using Google Flights."},
+        {"actions": [], "done": True, "result": "Found 3 flights", "need_user": ""},
+    ])
+    out = await fb.browser_task(ctx, "Search flights", "", {})
+    assert out.get("done"), out
+    assert out["result"] == "Found 3 flights" and len(ctx.calls["plan"]) == 3
+
+
+async def test_a_real_human_step_still_stops(monkeypatch, ctx):
+    _plans(monkeypatch, ctx, [{"actions": [], "done": False, "result": "", "need_user": "The site shows a CAPTCHA."}])
+    out = await fb.browser_task(ctx, "Search flights", "", {})
+    assert out["need_user"] == "The site shows a CAPTCHA." and not out["done"]
+
+
+async def test_a_bot_check_in_the_cloud_retries_on_the_users_desktop(monkeypatch, ctx):
+    from app.desktop import client
+
+    seen_kinds = []
+    calls = {"n": 0}
+
+    async def task(c, goal, url, values, max_steps, allow_final, use_saved, save):
+        calls["n"] += 1
+        seen_kinds.append(client.client_kind())
+        if calls["n"] == 1:
+            return {"ok": False, "done": False, "need_user": fb.BOT_WALL_NEED, "page": {}}
+        return {"ok": True, "done": True, "result": "3 flights", "page": {}}
+
+    async def online(c):
+        return True
+
+    monkeypatch.setattr(fb, "_browser_task", task)
+    monkeypatch.setattr(fb, "desktop_available", online)
+    monkeypatch.setattr(get_settings(), "browser_run_log", False)  # the wrapper's retry needs the run-log path
+    monkeypatch.setattr(get_settings(), "browser_run_log", True)
+    from app.browser_runs import runlog
+
+    class Run:
+        def __init__(self, *a):
+            self.host, self._saved, self.id = "", False, uuid.uuid4()
+
+        async def step(self, *a, **k):
+            pass
+
+        async def finish(self, *a, **k):
+            pass
+
+    monkeypatch.setattr(runlog, "RunLog", Run)
+    out = await fb.browser_task(ctx, "Search flights on MakeMyTrip", "https://www.makemytrip.com/", {})
+    assert out["done"] and out["ran_on"] == "desktop" and "desktop app" in out["note"]
+    assert seen_kinds[0] != client.CLIENT_DESKTOP and seen_kinds[1] == client.CLIENT_DESKTOP
+
+
+async def test_no_desktop_retry_when_offline_or_cloud_only(monkeypatch, ctx):
+    async def task(c, *a):
+        return {"ok": False, "done": False, "need_user": fb.BOT_WALL_NEED, "page": {}}
+
+    async def offline(c):
+        return False
+
+    monkeypatch.setattr(fb, "_browser_task", task)
+    monkeypatch.setattr(fb, "desktop_available", offline)
+    out = await fb.browser_task(ctx, "Search flights", "https://www.makemytrip.com/", {})
+    assert out["need_user"] == fb.BOT_WALL_NEED and "ran_on" not in out
