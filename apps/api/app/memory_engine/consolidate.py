@@ -282,6 +282,13 @@ async def consolidate_user(db: AsyncSession, user_id) -> dict:
     from app.agent.meter import over_budget
 
     done["cards"] = 0 if await over_budget(db, user_id) else await rewrite_cards(db, user_id)
+    try:
+        from app.browser_runs.runlog import tidy_screenshots
+        from app.db import SessionLocal
+
+        done["screenshots"] = await tidy_screenshots(SessionLocal, user_id)
+    except Exception:  # noqa: BLE001 - storage tidying never fails the memory pass
+        log.info("screenshot tidy skipped", exc_info=True)
     await db.commit()
     return done
 

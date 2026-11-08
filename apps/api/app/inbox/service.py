@@ -406,9 +406,21 @@ async def send_reply(
     item.seen = True
     if getattr(item, "alert_state", "") == "new":
         item.alert_state = "sent"
+    item.sent_at = datetime.now(timezone.utc)
+    item.sent_similarity = draft_similarity(getattr(item, "ai_draft", "") or "", body)
     await db.commit()
     _learn_from_edit_later(user.id, item.sender, getattr(item, "ai_draft", "") or "", body)
     return {"ok": True, "item": serialize(item), "result": result}
+
+
+def draft_similarity(draft: str, sent: str) -> float | None:
+    """1.0 when the reply went out as drafted, lower the more the user rewrote it; None without a draft."""
+    import difflib
+
+    a, b = " ".join((draft or "").split()), " ".join((sent or "").split())
+    if not a or a.startswith("No reply is needed") or a.startswith("This came from one of your own"):
+        return None
+    return round(difflib.SequenceMatcher(None, a, b).ratio(), 3)
 
 
 _edit_tasks: set = set()
@@ -662,7 +674,7 @@ async def _classify_many(db: AsyncSession, user: User, runtimes: list[RuntimeCon
                 if rules_only:  # over the daily budget: automated mail only; the rest waits for tomorrow
                     if is_automated_sender(item, contexts.get(item.id)):
                         _rule_triage(item)
-                        TIER_COUNTS["rule"] += 1
+                        _count_tier("rule")
                     return
                 await _classify_one(item, runtime, contexts.get(item.id))
             except Exception:  # noqa: BLE001
@@ -677,6 +689,14 @@ async def _classify_many(db: AsyncSession, user: User, runtimes: list[RuntimeCon
 TIER_COUNTS: dict[str, int] = defaultdict(int)
 LITE_MESSAGES = 6  # the small model reads only the newest messages of a thread
 LITE_BODY_CHARS = 1200
+
+
+def _count_tier(tier: str) -> None:
+    """One email triaged at this tier: in the process log counts and in the user's daily usage (Usage page)."""
+    from app.agent.meter import count
+
+    TIER_COUNTS[tier] += 1
+    count(f"triage:{tier}")
 
 
 def _sender_parts(sender: str) -> tuple[str, str]:
@@ -716,7 +736,7 @@ async def _classify_one(item: InboxItem, runtime: RuntimeConnector, ctx=None, *,
        drafts, as before. ``full`` (Redraft) goes straight to 2."""
     if not full and is_automated_sender(item, ctx):
         _rule_triage(item)
-        TIER_COUNTS["rule"] += 1
+        _count_tier("rule")
         return
     await _triage_thread(item, runtime, ctx, full=full)
 
@@ -785,10 +805,10 @@ async def _triage_thread(item: InboxItem, runtime: RuntimeConnector, ctx=None, *
         lite = await _lite_triage(payload, ctx)
         if lite is not None and lite.get("classification") == "discard":
             apply_triage(item, {**lite, "draft": "No reply is needed to this message."})
-            TIER_COUNTS["small"] += 1
+            _count_tier("small")
             _apply_ctx(item, ctx)
             return
-    TIER_COUNTS["full"] += 1
+    _count_tier("full")
     prompt = (
         "You triage inbound email for a busy professional. Use the full thread and follow-ups. "
         "Return JSON only with keys classification, summary, key_points, draft.\n"

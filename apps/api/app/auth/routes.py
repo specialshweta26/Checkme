@@ -292,13 +292,39 @@ async def my_usage(days: int = 7, user: User = Depends(current_user), db: AsyncS
             t["searches"] += int(r["units"])
         elif r["model"] == "computer:starts":
             t["computer_starts"] += int(r["units"])
+        elif r["model"].startswith("triage:"):
+            continue  # counted below, not model usage
         else:
             for k in ("calls", "input", "cached", "output"):
                 t[k] += r[k]
             t["cost_usd"] += r["cost_usd"] or 0
     priced = any(r["cost_usd"] is not None for r in rows)
+    triage = {"rule": 0, "small": 0, "full": 0}
+    for r in rows:
+        if r["model"].startswith("triage:"):
+            triage[r["model"].split(":", 1)[1]] = triage.get(r["model"].split(":", 1)[1], 0) + int(r["units"])
     return {
+        "triage": triage,
+        "drafts": await draft_edits(db, user.id),
         "since": since.isoformat(), "rows": rows, "by_feature": totals, "priced": priced,
         "background_today": await meter.background_spend(db, user.id),
         "over_budget": await meter.over_budget(db, user.id),
     }
+
+
+async def draft_edits(db: AsyncSession, user_id, weeks: int = 8) -> list[dict]:
+    """Per week, the replies sent from the inbox: as drafted, lightly edited, or rewritten (how much the user changed
+    the assistant's draft). Fewer rewrites over time means the drafts are learning the user's style."""
+    from datetime import datetime, timedelta, timezone
+
+    from app.models import InboxItem
+
+    since = datetime.now(timezone.utc) - timedelta(weeks=weeks)
+    rows = (await db.execute(select(InboxItem.sent_at, InboxItem.sent_similarity).where(
+        InboxItem.user_id == user_id, InboxItem.sent_at >= since, InboxItem.sent_similarity.is_not(None)))).all()
+    weeks_out: dict[str, dict] = {}
+    for sent_at, sim in rows:
+        monday = (sent_at - timedelta(days=sent_at.weekday())).date().isoformat()
+        w = weeks_out.setdefault(monday, {"week": monday, "unchanged": 0, "light": 0, "rewritten": 0})
+        w["unchanged" if sim >= 0.97 else "light" if sim >= 0.7 else "rewritten"] += 1
+    return [weeks_out[k] for k in sorted(weeks_out)]

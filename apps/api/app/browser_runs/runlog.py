@@ -205,3 +205,55 @@ async def get_run(user_id, run_id: str) -> dict | None:
     if row is None or str(row.user_id) != str(user_id):
         return None
     return describe(row, with_steps=True)
+
+
+SHOTS_KEEP_DAYS = 30
+
+
+async def tidy_screenshots(session_factory, user_id, days: int = SHOTS_KEEP_DAYS) -> dict:
+    """Delete screenshots of this user's runs older than ``days`` (the steps, reasons and result stay; the run just has
+    no pictures), except the newest run of each saved run, and screenshot files whose run no longer exists."""
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import func, select
+
+    from app.models import BrowserRun, BrowserTrace
+    from app.storage import delete_keys, list_keys
+
+    uid = uuid.UUID(str(user_id))
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    async with session_factory() as db:
+        saved = select(BrowserTrace.id.cast(BrowserRun.trace_id.type)).where(BrowserTrace.user_id == uid)
+        newest_per_saved = (
+            select(BrowserRun.trace_id, func.max(BrowserRun.started_at).label("at"))
+            .where(BrowserRun.user_id == uid, BrowserRun.trace_id.in_(saved)).group_by(BrowserRun.trace_id).subquery()
+        )
+        keep_ids = set((await db.execute(
+            select(BrowserRun.id).join(newest_per_saved, (newest_per_saved.c.trace_id == BrowserRun.trace_id)
+                                       & (newest_per_saved.c.at == BrowserRun.started_at))
+        )).scalars().all())
+        old = (await db.execute(select(BrowserRun).where(BrowserRun.user_id == uid, BrowserRun.started_at < cutoff))).scalars().all()
+        keys: list[str] = []
+        for run in old:
+            if run.id in keep_ids:
+                continue
+            steps = [dict(s) for s in (run.steps or []) if isinstance(s, dict)]
+            shots = [s.pop("shot") for s in steps if s.get("shot")]
+            if shots:
+                keys += shots
+                run.steps = steps
+        live = {str(r) for r in (await db.execute(select(BrowserRun.id).where(BrowserRun.user_id == uid))).scalars()}
+        await db.commit()
+    try:
+        stored = await asyncio.to_thread(list_keys, f"{uid}/browser-runs/")
+    except Exception as exc:  # noqa: BLE001
+        log.info("screenshot listing skipped: %s", type(exc).__name__)
+        stored = []
+    orphans = [k for k in stored if k.split("/")[2] not in live]
+    if keys or orphans:
+        try:
+            await asyncio.to_thread(delete_keys, keys + orphans)
+        except Exception as exc:  # noqa: BLE001
+            log.info("old screenshots not deleted: %s", type(exc).__name__)
+            return {"old": 0, "orphans": 0}
+    return {"old": len(keys), "orphans": len(orphans)}

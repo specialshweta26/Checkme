@@ -812,6 +812,9 @@ class InboxItem(Base):
     alert_reason: Mapped[str] = mapped_column(String(20), default="")  # key_contact | urgent | promise
     alert_state: Mapped[str] = mapped_column(String(12), default="")  # new | dismissed | sent
     alerted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # How close the sent reply was to the assistant's draft (1.0 = sent unchanged), and when it was sent.
+    sent_similarity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="pending")  # pending | sent | discarded
     unread: Mapped[bool] = mapped_column(Boolean, default=True)
     seen: Mapped[bool] = mapped_column(Boolean, default=False)
