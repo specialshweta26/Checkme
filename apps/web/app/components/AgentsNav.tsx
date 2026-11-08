@@ -31,28 +31,15 @@ import {
 } from "../lib";
 import { SkillDetail, SkillStatusChip } from "./SkillDetail";
 import { AgentAvatar } from "./AgentAvatar";
+import { MASCOTS, mascotFilter, mascotFor, randomMascot } from "./mascots";
 
 type Ctx = { kind: "agent" | "group"; id: string; x: number; y: number };
 
 const HOLD_MS = 500;
 const HOLD_MOVE_PX = 12;
-const AVATAR_ICONS = ["✦", "●", "◆", "✿", "⬟", "☼", "♥", "✧", "✳", "◈", "☻", "✺"];
+// Agents can only use the twelve Lumio mascots; the color tints them (components/mascots.ts).
 const AGENT_COLORS = ["#111111", "#8b5e3c", "#f43f5e", "#f97316", "#eab308", "#10b981", "#14b8a6", "#2f6bff", "#8b5cf6", "#ec4899", "#737373"];
 
-async function avatarFromFile(file: File): Promise<string> {
-  const bitmap = await createImageBitmap(file);
-  const scale = Math.min(1, 256 / Math.max(bitmap.width, bitmap.height));
-  const canvas = document.createElement("canvas");
-  canvas.width = Math.max(1, Math.round(bitmap.width * scale));
-  canvas.height = Math.max(1, Math.round(bitmap.height * scale));
-  const context = canvas.getContext("2d");
-  if (!context) throw new Error("Could not prepare that image.");
-  context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-  bitmap.close();
-  const image = canvas.toDataURL("image/webp", 0.82);
-  if (image.length > 600_000) throw new Error("Choose a smaller image.");
-  return image;
-}
 
 function menuPoint(x: number, y: number) {
   const width = Math.min(260, window.innerWidth - 16);
@@ -173,7 +160,7 @@ export function AgentsNav({
   const [name, setName] = useState("");
   const [title, setTitle] = useState("");
   const [instructions, setInstructions] = useState("");
-  const [avatar, setAvatar] = useState(AVATAR_ICONS[0]);
+  const [avatar, setAvatar] = useState(MASCOTS[0].id);
   const [color, setColor] = useState("#10b981");
   const [picked, setPicked] = useState<string[]>([]);
   const [outcome, setOutcome] = useState("");
@@ -258,7 +245,7 @@ export function AgentsNav({
     setName("");
     setTitle("");
     setInstructions("");
-    setAvatar(AVATAR_ICONS[0]);
+    setAvatar(randomMascot().id);
     setColor("#10b981");
     setPicked([]);
     setOutcome("");
@@ -281,7 +268,8 @@ export function AgentsNav({
     setName(agent.name);
     setTitle(agent.title || "");
     setInstructions(agent.instructions || "");
-    setAvatar(agent.avatar || "");
+    // Agents made before the mascots get one now (saving the edit keeps it).
+    setAvatar(mascotFor(agent.avatar)?.id ?? MASCOTS[0].id);
     setColor(agent.color || "#10b981");
     setForm("edit");
     setCtx(null);
@@ -661,13 +649,15 @@ export function AgentsNav({
                     <div className="agent-avatar-preview">
                       <AgentAvatar name={name} color={color} avatar={avatar} className="agent-avatar large" />
                       <span>{form === "edit" ? "Avatar" : "Choose an icon and color"}</span>
+                      {mascotFor(avatar) ? <span className="faint">{mascotFor(avatar)?.label}</span> : null}
                     </div>
                     <fieldset>
                       <legend>Icon</legend>
-                      <div className="avatar-icon-grid">
-                        {AVATAR_ICONS.map((icon) => (
-                          <button key={icon} type="button" className={avatar === icon ? "selected" : ""} aria-pressed={avatar === icon} onClick={() => setAvatar(icon)}>
-                            {icon}
+                      <div className="avatar-icon-grid mascots">
+                        {MASCOTS.map((m) => (
+                          <button key={m.id} type="button" title={m.label} aria-label={m.label} className={avatar === m.id ? "selected" : ""} aria-pressed={avatar === m.id} onClick={() => setAvatar(m.id)}>
+                            {/* Each choice shows in the selected color, so the color changes every icon at once. */}
+                            <img src={m.src} alt="" draggable={false} style={{ filter: mascotFilter(color) }} />
                           </button>
                         ))}
                       </div>
@@ -679,22 +669,9 @@ export function AgentsNav({
                       </div>
                       <div className="avatar-editor-actions">
                         <button type="button" className="btn secondary" onClick={() => {
-                          setAvatar(AVATAR_ICONS[Math.floor(Math.random() * AVATAR_ICONS.length)]);
+                          setAvatar(randomMascot().id);
                           setColor(AGENT_COLORS[Math.floor(Math.random() * AGENT_COLORS.length)]);
-                        }}>Generate avatar</button>
-                        <label className="btn secondary avatar-upload">
-                          Upload from device
-                          <input type="file" accept="image/png,image/jpeg,image/webp" onChange={async (event) => {
-                            const file = event.currentTarget.files?.[0];
-                            event.currentTarget.value = "";
-                            if (!file) return;
-                            try {
-                              setAvatar(await avatarFromFile(file));
-                            } catch (err: any) {
-                              setError(err.message || "Could not use that image");
-                            }
-                          }} />
-                        </label>
+                        }}>Surprise me</button>
                       </div>
                     </fieldset>
                   </div>

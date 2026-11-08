@@ -3125,3 +3125,11 @@ button.provider:disabled { opacity: .6; cursor: default; }
 .chief-alert-tag.promise { background: #fef3c7; color: #92400e; }
 .chief-alert-draft { margin: 8px 0; padding: 8px 10px; border-left: 3px solid var(--accent); white-space: pre-wrap; font-size: 13px; }
 .chief-alert-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+
+/* Agent mascots (components/mascots.ts): the picture fills the avatar; the agent's color tints it. */
+.agent-avatar.mascot { background: transparent !important; padding: 0; overflow: hidden; }
+.agent-avatar.mascot img { width: 100%; height: 100%; display: block; object-fit: cover; }
+.avatar-icon-grid.mascots { grid-template-columns: repeat(6, minmax(36px, 1fr)); gap: 6px; }
+.avatar-icon-grid.mascots button { width: 100%; height: auto; aspect-ratio: 1; padding: 2px; background: transparent; border-width: 2px; border-radius: 12px; }
+.avatar-icon-grid.mascots button img { width: 100%; height: 100%; border-radius: 9px; display: block; transition: filter 0.15s ease; }
+.avatar-icon-grid.mascots button:hover { border-color: var(--line); }
