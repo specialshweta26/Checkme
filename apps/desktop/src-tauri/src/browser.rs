@@ -370,6 +370,17 @@ impl Chrome {
                 wait,
             )
             .await?;
+        if let Some(ex) = result.get("exceptionDetails") {
+            // A script that threw used to come back as an empty page, so the agent re-opened a page that was fine.
+            // Report what failed instead.
+            let detail = ex
+                .pointer("/exception/description")
+                .and_then(Value::as_str)
+                .or_else(|| ex.get("text").and_then(Value::as_str))
+                .unwrap_or("the page script failed");
+            let first_line: String = detail.lines().next().unwrap_or("").chars().take(300).collect();
+            return Err(format!("page script failed: {first_line}"));
+        }
         Ok(result.pointer("/result/value").cloned().unwrap_or(Value::Null))
     }
 
@@ -435,7 +446,8 @@ impl Chrome {
         let find: String = find.chars().filter(|c| !c.is_control()).take(120).collect();
         let mut data = self.eval(&format!("({SNAPSHOT_JS})(0, {MAX_ELEMENTS}, {find:?})")).await?;
         if !data.is_object() {
-            data = json!({ "url": "", "title": "", "text": "", "tree": "", "elements": [] });
+            // Nothing came back (the page is between documents): say so rather than pass it off as an empty page.
+            data = json!({ "url": "", "title": "", "text": "", "tree": "", "elements": [], "unread": true });
         }
         let mut total = data.get("total").and_then(Value::as_u64).unwrap_or(0) as usize;
         for ws_url in self.frame_targets().await {

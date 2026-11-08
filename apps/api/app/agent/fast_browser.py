@@ -1262,6 +1262,12 @@ async def browser_task(ctx, goal: str, url: str = "", values: dict | None = None
 BOT_WALL_NEED = "The page needs a person (bot check or hand-off)."
 
 
+def _on_desktop(ctx) -> bool:
+    from app.agent.computer_harness import browser_local
+
+    return browser_local(ctx)
+
+
 def vision_possible(ctx) -> bool:
     """Browsing by sight is on, and this turn's browser is the cloud one (the desktop app's own screen needs its next
     version to report screen scale)."""
@@ -1383,7 +1389,7 @@ async def _browser_task(ctx, goal: str, url: str = "", values: dict | None = Non
         if long_goal:
             model = strong  # a long flow needs the planner that keeps the whole plan in mind
         escalated = model == strong
-        failures, last, redirects = 0, "", 0
+        failures, last, redirects, blank_rounds = 0, "", 0, 0
         for i in range(limit):
             t0 = time.monotonic()
             try:
@@ -1442,6 +1448,22 @@ async def _browser_task(ctx, goal: str, url: str = "", values: dict | None = Non
                 before = state
                 state, ok, err, kept = await _run_batch(ctx, actions, vals)
                 state = await settle(ctx, state)
+                blank_rounds = blank_rounds + 1 if page_empty(state) else 0
+                if blank_rounds >= 2:
+                    # The page still reads as blank after waiting, twice in a row. Opening it again won't help (seen
+                    # live: MakeMyTrip re-opened five times, ~17 s each, while it was showing fine on screen).
+                    reason = str(state.get("error") or "")[:300]
+                    log.warning("browser.task: page reads blank twice (%s) url=%s error=%s", "desktop" if _on_desktop(ctx) else "cloud",
+                                str(state.get("url") or "")[:120], reason or "-")
+                    await _log("Page can't be read", reason or "The page showed nothing readable twice after loading.", False, state)
+                    if vision_possible(ctx):
+                        seen = await by_sight(ctx, goal, vals, allow_final_action, log_steps)
+                        if not seen.get("fallback"):
+                            return seen
+                    return _result(state, vals, ok=False, done=False, fallback=True, blank_page=True,
+                                   note=("The page loaded but couldn't be read" + (f" ({reason})" if reason else "") +
+                                         ". Don't open it again; try browser_snapshot once, then tell the user plainly."),
+                                   log=log_steps, took_ms=int((time.monotonic() - started) * 1000))  # fmt: skip
                 await _log(summarize_actions(actions, before, vals), plan.get("why", ""), bool(ok), state,
                            "" if ok or isinstance(err, list) else scrub(str(err or ""), vals))  # fmt: skip
                 recorded.extend(kept)
