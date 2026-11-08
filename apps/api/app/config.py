@@ -206,6 +206,8 @@ class Settings(BaseSettings):
     # Operator-style browsing by sight (app/agent/vision_browser.py): on by default; the model defaults to OPENAI_MODEL.
     browser_vision: bool = True
     computer_use_model: str = ""
+    # One-time: copy the old attached disk's files to R2 at startup, then the disk can be removed (app/ops/disk_backup.py).
+    disk_backup: bool = False
     # On shutdown (a deploy), how long chat turns in flight may run on; keep below Render's max shutdown delay (300 s).
     shutdown_grace_s: float = 240.0
     # all | web | worker: which part of the app this process runs (see app/main.py lifespan).

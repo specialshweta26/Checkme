@@ -135,6 +135,10 @@ async def lifespan(_app: FastAPI):
     ]
     if role in ("all", "web"):
         workers.append(asyncio.create_task(_sync_builtins_later(), name="startup-sync"))
+        if get_settings().disk_backup:
+            from app.ops.disk_backup import run_once
+
+            workers.append(asyncio.create_task(run_once(), name="disk-backup"))
     if role in ("all", "worker"):
         from app.inbox.worker import start_wake_listener
 
