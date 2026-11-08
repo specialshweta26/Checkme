@@ -697,6 +697,58 @@ async def _snapshot(ctx, find: str = "") -> dict:
     return out if isinstance(out, dict) else {"ok": False, "error": str(out)[:300]}
 
 
+# A page that comes back with no elements and almost no text is usually still loading (heavy single-page sites
+# render late). Look again before letting the planner decide anything about it.
+SETTLE_WAITS_S = (1.5, 3.0, 5.0)
+
+
+def page_empty(state: dict | None) -> bool:
+    """Nothing to act on yet: no element tree, no elements and (almost) no text."""
+    st = state or {}
+    return (not str(st.get("tree") or "").strip() and not st.get("elements")
+            and len(str(st.get("text") or "").strip()) < 20)
+
+
+async def settle(ctx, state: dict) -> dict:
+    """Re-read an empty page a few times (about 10 s in all) while it finishes loading."""
+    for delay in SETTLE_WAITS_S:
+        if not page_empty(state) or _blocked(state):
+            return state
+        await asyncio.sleep(delay)
+        try:
+            fresh = await _snapshot(ctx)
+        except Exception:  # noqa: BLE001 - keep the page we have; the planner can still wait or navigate
+            return state
+        if isinstance(fresh, dict) and fresh.get("ok") is not False:
+            state = fresh
+    return state
+
+
+# "Needs you" ends a run, so it must mean a step only a person can take. Planners also use it to ask for things they
+# can do or decide themselves; those are turned back into instructions and the run continues.
+_SITE_CHOICE = re.compile(r"\b(ok(ay)?|fine|happy) with (using|me using)\b|\bwhich (site|website|airline|app|service|ota)\b|"
+                          r"\b(another|a different|preferred?) (site|website|airline|ota)\b", re.I)
+_REAL_HUMAN = re.compile(r"captcha|robot|are you (a )?human|verify (that )?you|bot check|sign ?in|log ?in|password|"
+                         r"\botp\b|one[- ]time|verification code|2fa|two[- ]factor|payment|card (details|number)|"
+                         r"\bpay\b|purchase|confirm (the )?(booking|order|payment|purchase)|which (one|of (these|the))|"
+                         r"choose between|your (preference|choice) (of|between)", re.I)
+_PAGE_ASK = re.compile(r"element|\burl\b|title|visible text|page (text|content|details)|screenshot|snapshot|"
+                       r"(page|site|form|results?) (to )?(load|loads|loading|appear)|still loading|not loaded|"
+                       r"date picker|calendar|dropdown|click|select .* (in|from) the|interact", re.I)
+
+
+def need_user_kind(text: str) -> str:
+    """real (only a person can continue), site_choice (the planner can pick a site) or page (it can look again)."""
+    t = text or ""
+    if _SITE_CHOICE.search(t):
+        return "site_choice"
+    if _REAL_HUMAN.search(t):
+        return "real"
+    if _PAGE_ASK.search(t):
+        return "page"
+    return "real"
+
+
 def _blocked(state: dict) -> bool:
     return bool(state.get("bot_wall") or state.get("handoff") or state.get("computer_unavailable") or state.get("status") == "awaiting_user")
 
@@ -986,7 +1038,8 @@ Reply with a JSON object only: {"why": "", "actions": [...], "done": false, "res
 - Menus: if clicking a menu does not open it, hover it, then click the item in the next batch. When "Last turn" says a step may not have done anything, do not repeat the same step: try its label, its parent, hover, or another way.
 - Values the user provided are placeholders: write {{name}} exactly; never type a real value yourself and never invent personal data. Available placeholders: %s
 - done=true when the goal is met (or the information asked for is on the page): put the proof or the requested data in result, briefly.
-- need_user: a short reason when only the user can continue (CAPTCHA, a one-time code or value you do not have, an ambiguous choice).
+- need_user: a short reason when only the user can continue (CAPTCHA, a sign-in, a one-time code or value you do not have, a payment, or a choice the goal leaves open between options you found). Never use it to ask for the page, its elements or URL (you have them; if the list is empty, wait_for or navigate again), how to use a control, or which site to use (pick a well-known one yourself).
+- Fill each field by its label: places and airports go into From / To (Where from? / Where to?) and you pick the matching suggestion; dates go into date fields with pick_date only. After a batch, check the fields show what you meant before Search.
 - %s
 - Dismiss cookie banners and popups that block the page. Never navigate away from the site unless the goal needs it."""
 
@@ -1185,6 +1238,16 @@ async def browser_task(ctx, goal: str, url: str = "", values: dict | None = None
     token = runlog.CURRENT.set(run)
     try:
         out = await _browser_task(ctx, goal, url, values, max_steps, allow_final_action, use_saved, save)
+        if bot_walled(out) and await desktop_available(ctx):
+            # The site blocked the cloud browser. The user's own browser (the Lumio desktop app, online now) has their
+            # normal IP and sign-ins, so try once more there.
+            await _log("Switched to your computer's browser",
+                       "The site showed a bot check to the cloud browser, so this runs in your Lumio desktop app instead.",
+                       True, None, shot=False)
+            out = await on_desktop(ctx, _browser_task(ctx, goal, url, values, max_steps, allow_final_action, use_saved, save))
+            if isinstance(out, dict):
+                out["ran_on"] = "desktop"
+                out.setdefault("note", "The site blocked the cloud browser, so this ran in your Lumio desktop app's browser.")
     finally:
         runlog.CURRENT.reset(token)
     if isinstance(out, dict):
@@ -1194,6 +1257,44 @@ async def browser_task(ctx, goal: str, url: str = "", values: dict | None = None
         if run._saved:
             out["run_id"] = str(run.id)
     return out
+
+
+BOT_WALL_NEED = "The page needs a person (bot check or hand-off)."
+
+
+def bot_walled(out: Any) -> bool:
+    return isinstance(out, dict) and not out.get("done") and out.get("need_user") == BOT_WALL_NEED
+
+
+async def desktop_available(ctx) -> bool:
+    """The chat runs in the cloud browser, and the user's desktop app is online and not set to "cloud only"."""
+    from app.agent.computer_harness import local_slug
+    from app.desktop.client import prefer_local
+
+    if prefer_local():
+        return False  # already on the desktop
+    try:
+        from app.desktop.agent import is_online, stored_prefer
+
+        slug = local_slug(ctx)
+        conn = ctx.connectors.get(slug) if slug and hasattr(ctx.connectors, "get") else None
+        if conn is None or stored_prefer(conn) == "cloud":
+            return False
+        user_id = getattr(getattr(ctx, "user", None), "id", None)
+        return bool(user_id) and await is_online(user_id)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def on_desktop(ctx, work):
+    """Run ``work`` with the computer tools routed to the user's desktop app."""
+    from app.desktop.client import CLIENT_DESKTOP, reset_client_kind, set_client_kind
+
+    token = set_client_kind(CLIENT_DESKTOP)
+    try:
+        return await work
+    finally:
+        reset_client_kind(token)
 
 
 async def _log(action: str, why: str = "", ok: bool = True, state: dict | None = None, error: str = "", shot: bool = True) -> None:
@@ -1263,15 +1364,16 @@ async def _browser_task(ctx, goal: str, url: str = "", values: dict | None = Non
             recorded.append({"kind": "navigate", "url": url})
         if not state:
             state = await _snapshot(ctx)
+        state = await settle(ctx, state)
         if not start_url:
             start_url = str(state.get("url") or "")
         if _blocked(state):
-            return _result(state, vals, ok=False, done=False, need_user="The page needs a person (bot check or hand-off).", log=log_steps)
+            return _result(state, vals, ok=False, done=False, need_user=BOT_WALL_NEED, log=log_steps)
         model, strong = fast_model(), escalate_model()
         if long_goal:
             model = strong  # a long flow needs the planner that keeps the whole plan in mind
         escalated = model == strong
-        failures, last = 0, ""
+        failures, last, redirects = 0, "", 0
         for i in range(limit):
             t0 = time.monotonic()
             try:
@@ -1284,6 +1386,21 @@ async def _browser_task(ctx, goal: str, url: str = "", values: dict | None = Non
                 failures += 1
                 last = "Your last reply was not a usable JSON plan. Reply with the JSON object only."
                 log_steps.append({"step": i + 1, "model": model, "plan_ms": plan_ms, "ok": False, "why": "no plan"})
+            elif plan["need_user"] and need_user_kind(plan["need_user"]) != "real":
+                # Not a step only a person can take: answer it here and keep going. The first two are free; after
+                # that they count toward escalation and the fallback, so a planner that keeps asking can't loop.
+                redirects += 1
+                if redirects > 2:
+                    failures += 1
+                if need_user_kind(plan["need_user"]) == "site_choice":
+                    last = ("The user did not name a site, so choose a well-known one yourself (for flights, for example, "
+                            "the airline's own site, MakeMyTrip or Google Flights) and continue. Do not ask the user.")
+                else:
+                    state = await settle(ctx, await _snapshot(ctx))
+                    last = ("Do not ask the user for page details, elements or how to use the page: you have the page "
+                            "below (looked at again just now). Use the elements listed; for dates use pick_date; if the "
+                            "list is empty, wait_for a visible word or navigate to the page again.")
+                log_steps.append({"step": i + 1, "model": model, "plan_ms": plan_ms, "ok": False, "why": "asked the user for something it can do"})
             elif plan["need_user"]:
                 await _log("Stopped: needs you", plan["need_user"], False, state)
                 return _result(state, vals, ok=False, done=False, need_user=plan["need_user"], log=log_steps,
@@ -1314,6 +1431,7 @@ async def _browser_task(ctx, goal: str, url: str = "", values: dict | None = Non
                 t1 = time.monotonic()
                 before = state
                 state, ok, err, kept = await _run_batch(ctx, actions, vals)
+                state = await settle(ctx, state)
                 await _log(summarize_actions(actions, before, vals), plan.get("why", ""), bool(ok), state,
                            "" if ok or isinstance(err, list) else scrub(str(err or ""), vals))  # fmt: skip
                 recorded.extend(kept)
@@ -1324,7 +1442,7 @@ async def _browser_task(ctx, goal: str, url: str = "", values: dict | None = Non
                     i + 1, model, plan_ms, act_ms, ",".join(str(a.get("kind")) for a in actions), ok,
                 )  # fmt: skip
                 if _blocked(state):
-                    return _result(state, vals, ok=False, done=False, need_user="The page needs a person (bot check or hand-off).", log=log_steps)
+                    return _result(state, vals, ok=False, done=False, need_user=BOT_WALL_NEED, log=log_steps)
                 if isinstance(err, list):
                     return _result(state, vals, ok=False, done=False, need_user="Missing values: " + ", ".join(err), log=log_steps)
                 warned = [str(w) for w in (state.get("warnings") or [])][:3] if ok else []
