@@ -123,3 +123,29 @@ async def test_the_fast_loop_hands_over_to_sight_when_it_cannot_finish(monkeypat
     ctx = SimpleNamespace(user=SimpleNamespace(id=None), connectors={})
     out = await fb._browser_task(ctx, "Draw a square", "", {}, 0, False, False, False)
     assert out["done"] and out["via"] == "vision"
+
+
+async def test_on_the_desktop_an_empty_page_keeps_the_element_loop(monkeypatch):
+    """Regression: on the desktop app (no vision yet) a slow page ended the run with 'needs the next desktop app
+    version' instead of carrying on."""
+    from app.agent import fast_browser as fb
+
+    monkeypatch.setattr(get_settings(), "browser_vision", True)
+    pages = [{"ok": True, "url": "https://www.makemytrip.com/", "title": "", "text": "", "tree": "", "elements": []}] * 4
+    loaded = {"ok": True, "url": "https://www.makemytrip.com/", "title": "MakeMyTrip", "text": "Flights", "tree": "- e1 textbox From"}
+
+    async def snap(c, find=""):
+        return pages.pop(0) if pages else dict(loaded)
+
+    async def plan(model, goal, state, values, last, allow_final):
+        return {"actions": [], "done": True, "result": "form ready", "need_user": ""}
+
+    async def sight(*a, **k):
+        raise AssertionError("no vision on the desktop")
+
+    monkeypatch.setattr(fb, "_snapshot", snap)
+    monkeypatch.setattr(fb, "plan_step", plan)
+    monkeypatch.setattr("app.agent.vision_browser.computer_task", sight)
+    ctx = SimpleNamespace(user=SimpleNamespace(id=None), connectors={}, _browser_on_desktop=True)
+    out = await fb._browser_task(ctx, "Search flights", "", {}, 0, False, False, False)
+    assert out["done"] and out["result"] == "form ready"
