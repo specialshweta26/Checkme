@@ -163,6 +163,15 @@ async def lifespan(_app: FastAPI):
     try:
         yield
     finally:
+        # A deploy stops this process: let chat turns in flight finish first (Render waits up to its shutdown delay).
+        from app.chat.routes import finish_running_turns
+
+        try:
+            left = await finish_running_turns(get_settings().shutdown_grace_s)
+            if left:
+                log.warning("shutdown: %s chat turn(s) still running were cut off", left)
+        except Exception:  # noqa: BLE001
+            log.warning("shutdown: waiting for turns failed", exc_info=True)
         for worker in workers:
             worker.cancel()
         for worker in workers:
