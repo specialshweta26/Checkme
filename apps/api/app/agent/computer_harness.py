@@ -149,11 +149,62 @@ async def _publish_downloads(ctx, result: dict) -> dict:
     return result
 
 
+# Indian sites (and others that refuse foreign data centres) work far better from the user's own browser: their home
+# IP and sign-ins. A web chat switches its browser work to the Lumio desktop app for the rest of the turn when the app
+# is online, before opening such a site or after the cloud browser is blocked.
+INDIA_SITES = (
+    "makemytrip.com", "goibibo.com", "cleartrip.com", "ixigo.com", "yatra.com", "easemytrip.com", "redbus.in",
+    "irctc.co.in", "goindigo.in", "airindia.com", "akasaair.com", "spicejet.com", "bookmyshow.com", "swiggy.com",
+    "zomato.com", "flipkart.com", "myntra.com", "ajio.com", "nykaa.com", "bigbasket.com", "blinkit.com", "zeptonow.com",
+    "paytm.com", "phonepe.com", "practo.com", "1mg.com", "pharmeasy.in", "naukri.com", "magicbricks.com", "99acres.com",
+)
+
+
+def indian_site(url: str) -> bool:
+    from urllib.parse import urlparse
+
+    try:
+        host = (urlparse(url if "://" in (url or "") else f"https://{url}").hostname or "").lower()
+    except ValueError:
+        return False
+    return bool(host) and (host.endswith(".in") or any(host == s or host.endswith("." + s) for s in INDIA_SITES))
+
+
+def browser_local(ctx) -> bool:
+    """Browser and screen tools go to the user's own computer: a desktop-app chat, or a turn switched there."""
+    from app.desktop.client import prefer_local
+
+    return prefer_local() or bool(getattr(ctx, "_browser_on_desktop", False))
+
+
+async def desktop_online(ctx) -> bool:
+    """The user's Lumio desktop app is connected and not set to "cloud only"."""
+    try:
+        from app.desktop.agent import is_online, stored_prefer
+
+        slug = local_slug(ctx)
+        conn = ctx.connectors.get(slug) if slug and hasattr(ctx.connectors, "get") else None
+        if conn is None or stored_prefer(conn) == "cloud":
+            return False
+        user_id = getattr(getattr(ctx, "user", None), "id", None) or getattr(conn, "user_id", None)
+        return bool(user_id) and await is_online(user_id)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def switch_to_desktop(ctx, why: str) -> None:
+    try:
+        ctx._browser_on_desktop = True
+        ctx._browser_switch_reason = why
+    except AttributeError:
+        log.info("browser: could not switch this turn to the desktop app")
+
+
 async def _use_local(ctx, tool_name: str) -> bool:
     from app.desktop.agent import is_online, stored_prefer
     from app.desktop.client import prefer_local
 
-    if not prefer_local() or tool_name not in LOCAL_TOOLS:
+    if not browser_local(ctx) or tool_name not in LOCAL_TOOLS:
         return False
     slug = local_slug(ctx)
     if not slug:
@@ -175,7 +226,7 @@ def desktop_tool_slug(ctx, slug: str, tool_name: str) -> str:
     from app.desktop.agent import LOCAL_SLUG
     from app.desktop.client import prefer_local
 
-    if _FORCE_CLOUD.get() or slug != COMPUTER_SLUG or not prefer_local() or tool_name not in LOCAL_TOOLS:
+    if _FORCE_CLOUD.get() or slug != COMPUTER_SLUG or not browser_local(ctx) or tool_name not in LOCAL_TOOLS:
         return slug
     connectors = getattr(ctx, "connectors", None) or {}
     if LOCAL_SLUG in connectors:
@@ -226,7 +277,7 @@ async def _try_local(ctx, tool_name: str, args: dict | None = None) -> Any | Non
     from app.desktop.client import prefer_local
     from connector_core import ToolError
 
-    if not prefer_local() or tool_name not in LOCAL_TOOLS:
+    if not browser_local(ctx) or tool_name not in LOCAL_TOOLS:
         return None
     slug = local_slug(ctx)
     conn = ctx.connectors.get(slug) if slug and hasattr(ctx.connectors, "get") else None
@@ -313,13 +364,20 @@ async def run_computer(ctx, tool_name: str, args: dict | None = None, *, force_c
     from app.agent.deep import call_user_tool
     from app.connectors.computer_daemon import annotate_page
 
+    switched_now = False
+    if not force_cloud and not browser_local(ctx) and tool_name in LOCAL_TOOLS and tool_name in ("browser_navigate", "browse_navigate", "browser_task") \
+            and indian_site(str((args or {}).get("url") or "")) and await desktop_online(ctx):
+        switch_to_desktop(ctx, "Indian site: using your own browser")
+        switched_now = True
     if not force_cloud:
         local = await _try_local(ctx, tool_name, args or {})
+        if local is not None and switched_now and isinstance(local, dict):
+            local.setdefault("note", "Opened in your Lumio desktop app's browser (Indian sites often refuse the cloud browser's foreign address).")
         if local is not None:
             return deep_link_fallback(tool_name, args, local)
         from app.desktop.client import prefer_local
 
-        if prefer_local() and tool_name in LOCAL_TOOLS:
+        if browser_local(ctx) and tool_name in LOCAL_TOOLS:
             return _local_unavailable(tool_name, "The Lumio desktop app is not connected. This chat stays on this computer.")
 
     slug = computer_slug(ctx)
@@ -333,6 +391,14 @@ async def run_computer(ctx, tool_name: str, args: dict | None = None, *, force_c
             _FORCE_CLOUD.reset(token)
     if isinstance(result, dict) and result.get("ran_on") is None:
         result["ran_on"] = "cloud_computer"
+    if (isinstance(result, dict) and result.get("bot_wall") and not force_cloud and tool_name in LOCAL_TOOLS
+            and not browser_local(ctx) and await desktop_online(ctx)):
+        # The site refused the cloud browser: do the same on the user's own browser, and stay there this turn.
+        switch_to_desktop(ctx, "the site blocked the cloud browser")
+        local = await _try_local(ctx, tool_name, args or {})
+        if isinstance(local, dict):
+            local.setdefault("note", "The site blocked the cloud browser, so this continues in your Lumio desktop app's browser.")
+            return local
     if not isinstance(result, dict):
         return result
     annotate_page(result)

@@ -900,7 +900,9 @@ async def test_a_bot_check_in_the_cloud_retries_on_the_users_desktop(monkeypatch
 
     async def task(c, goal, url, values, max_steps, allow_final, use_saved, save):
         calls["n"] += 1
-        seen_kinds.append(client.client_kind())
+        from app.agent.computer_harness import browser_local
+
+        seen_kinds.append(browser_local(c))
         if calls["n"] == 1:
             return {"ok": False, "done": False, "need_user": fb.BOT_WALL_NEED, "page": {}}
         return {"ok": True, "done": True, "result": "3 flights", "page": {}}
@@ -927,7 +929,7 @@ async def test_a_bot_check_in_the_cloud_retries_on_the_users_desktop(monkeypatch
     monkeypatch.setattr(runlog, "RunLog", Run)
     out = await fb.browser_task(ctx, "Search flights on MakeMyTrip", "https://www.makemytrip.com/", {})
     assert out["done"] and out["ran_on"] == "desktop" and "desktop app" in out["note"]
-    assert seen_kinds[0] != client.CLIENT_DESKTOP and seen_kinds[1] == client.CLIENT_DESKTOP
+    assert seen_kinds == [False, True]  # the retry, and the rest of the turn, use the desktop app's browser
 
 
 async def test_no_desktop_retry_when_offline_or_cloud_only(monkeypatch, ctx):

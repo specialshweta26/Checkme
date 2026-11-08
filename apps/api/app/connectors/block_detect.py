@@ -76,6 +76,8 @@ _TEXT_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "sorry, you have been blocked", "you have been blocked", "this request was blocked", "forbidden",
         "unusual traffic", "unusual activity", "automated queries", "our systems have detected",
         "not available in your region", "is not available in your country",
+        # Indian travel and booking sites often answer a foreign data-centre address with a fake "offline" page.
+        "you are offline", "please check your connection", "check your internet connection and try again",
     )),
     ("rate_limited", ("too many requests", "rate limit exceeded", "429 too many")),
 )

@@ -1262,6 +1262,14 @@ async def browser_task(ctx, goal: str, url: str = "", values: dict | None = None
 BOT_WALL_NEED = "The page needs a person (bot check or hand-off)."
 
 
+def vision_possible(ctx) -> bool:
+    """Browsing by sight is on, and this turn's browser is the cloud one (the desktop app's own screen needs its next
+    version to report screen scale)."""
+    from app.agent.computer_harness import browser_local
+
+    return bool(setting("browser_vision", True)) and not browser_local(ctx)
+
+
 async def by_sight(ctx, goal: str, vals: dict[str, str], allow_final: bool, log_steps: list) -> dict:
     """Hand the task to the screenshot loop (vision_browser.computer_task)."""
     from app.agent.vision_browser import computer_task
@@ -1280,33 +1288,17 @@ def bot_walled(out: Any) -> bool:
 
 async def desktop_available(ctx) -> bool:
     """The chat runs in the cloud browser, and the user's desktop app is online and not set to "cloud only"."""
-    from app.agent.computer_harness import local_slug
-    from app.desktop.client import prefer_local
+    from app.agent.computer_harness import browser_local, desktop_online
 
-    if prefer_local():
-        return False  # already on the desktop
-    try:
-        from app.desktop.agent import is_online, stored_prefer
-
-        slug = local_slug(ctx)
-        conn = ctx.connectors.get(slug) if slug and hasattr(ctx.connectors, "get") else None
-        if conn is None or stored_prefer(conn) == "cloud":
-            return False
-        user_id = getattr(getattr(ctx, "user", None), "id", None)
-        return bool(user_id) and await is_online(user_id)
-    except Exception:  # noqa: BLE001
-        return False
+    return not browser_local(ctx) and await desktop_online(ctx)
 
 
 async def on_desktop(ctx, work):
-    """Run ``work`` with the computer tools routed to the user's desktop app."""
-    from app.desktop.client import CLIENT_DESKTOP, reset_client_kind, set_client_kind
+    """Run ``work`` with the browser tools on the user's desktop app, and keep them there for the rest of the turn."""
+    from app.agent.computer_harness import switch_to_desktop
 
-    token = set_client_kind(CLIENT_DESKTOP)
-    try:
-        return await work
-    finally:
-        reset_client_kind(token)
+    switch_to_desktop(ctx, "the site blocked the cloud browser")
+    return await work
 
 
 async def _log(action: str, why: str = "", ok: bool = True, state: dict | None = None, error: str = "", shot: bool = True) -> None:
@@ -1379,9 +1371,12 @@ async def _browser_task(ctx, goal: str, url: str = "", values: dict | None = Non
         state = await settle(ctx, state)
         if not start_url:
             start_url = str(state.get("url") or "")
-        if page_empty(state) and not _blocked(state) and setting("browser_vision", True):
-            # The page shows nothing the element tree can read (canvas, late rendering): work from the screen.
-            return await by_sight(ctx, goal, vals, allow_final_action, log_steps)
+        if page_empty(state) and not _blocked(state) and vision_possible(ctx):
+            # The page shows nothing the element tree can read (canvas, late rendering): work from the screen. If that
+            # isn't possible here, carry on with the element-tree loop below as before.
+            seen = await by_sight(ctx, goal, vals, allow_final_action, log_steps)
+            if not seen.get("fallback"):
+                return seen
         if _blocked(state):
             return _result(state, vals, ok=False, done=False, need_user=BOT_WALL_NEED, log=log_steps)
         model, strong = fast_model(), escalate_model()
@@ -1483,7 +1478,7 @@ async def _browser_task(ctx, goal: str, url: str = "", values: dict | None = Non
                     log.info("browser.task escalating to model=%s", model)
                     continue
                 break
-        if setting("browser_vision", True):
+        if vision_possible(ctx):
             # The element tree didn't get there: try again by looking at the screen, like a person would.
             seen = await by_sight(ctx, goal, vals, allow_final_action, log_steps)
             if not seen.get("fallback"):
