@@ -1262,6 +1262,41 @@ async def browser_task(ctx, goal: str, url: str = "", values: dict | None = None
 BOT_WALL_NEED = "The page needs a person (bot check or hand-off)."
 
 
+def page_shape(state: Any, ctx: Any = None) -> dict:
+    """What a page result contained, for diagnosing blank pages: its fields and sizes and which browser it came from.
+    Never the page's text, elements or full address (they can hold personal data)."""
+    from app.desktop.client import client_kind
+
+    st = state if isinstance(state, dict) else {}
+    error = re.sub(r"\?\S*", "?…", str(st.get("error") or ""))[:200]  # no query strings: they can hold values
+    return {
+        "type": type(state).__name__,
+        "keys": sorted(str(k) for k in st)[:40],
+        "ok": st.get("ok"),
+        "ran_on": st.get("ran_on"),
+        "host": host_of(str(st.get("url") or "")),
+        "has_url": bool(st.get("url")),
+        "title_len": len(str(st.get("title") or "")),
+        "text_len": len(str(st.get("text") or "")),
+        "tree_len": len(str(st.get("tree") or "")),
+        "elements": len(st.get("elements") or []) if isinstance(st.get("elements"), list) else None,
+        "unread": st.get("unread"),
+        "bot_wall": bool(st.get("bot_wall")),
+        "has_screenshot": bool(st.get("screenshot") or st.get("screenshot_path") or st.get("screenshot_b64")),
+        "error": error,
+        "client": client_kind(),
+        "switched_to_desktop": bool(getattr(ctx, "_browser_on_desktop", False)),
+        "switch_reason": str(getattr(ctx, "_browser_switch_reason", "") or ""),
+    }
+
+
+def _log_blank(where: str, state: Any, ctx: Any) -> None:
+    try:
+        log.warning("browser.task blank page where=%s shape=%s", where, json.dumps(page_shape(state, ctx), default=str))
+    except Exception:  # noqa: BLE001 - diagnostics must never break a run
+        log.info("blank page shape not logged", exc_info=True)
+
+
 def _on_desktop(ctx) -> bool:
     from app.agent.computer_harness import browser_local
 
@@ -1285,6 +1320,8 @@ async def by_sight(ctx, goal: str, vals: dict[str, str], allow_final: bool, log_
     out = await computer_task(ctx, goal, vals, allow_final_action=allow_final)
     if isinstance(out, dict):
         out.setdefault("log", log_steps)
+        log.info("browser.task by sight: done=%s fallback=%s unsupported=%s error=%s via=%s", out.get("done"), out.get("fallback"),
+                 out.get("unsupported"), out.get("error"), out.get("via"))
     return out
 
 
@@ -1377,6 +1414,8 @@ async def _browser_task(ctx, goal: str, url: str = "", values: dict | None = Non
         state = await settle(ctx, state)
         if not start_url:
             start_url = str(state.get("url") or "")
+        if page_empty(state) and not _blocked(state):
+            _log_blank("start", state, ctx)
         if page_empty(state) and not _blocked(state) and vision_possible(ctx):
             # The page shows nothing the element tree can read (canvas, late rendering): work from the screen. If that
             # isn't possible here, carry on with the element-tree loop below as before.
@@ -1449,6 +1488,8 @@ async def _browser_task(ctx, goal: str, url: str = "", values: dict | None = Non
                 state, ok, err, kept = await _run_batch(ctx, actions, vals)
                 state = await settle(ctx, state)
                 blank_rounds = blank_rounds + 1 if page_empty(state) else 0
+                if blank_rounds:
+                    _log_blank(f"after_step_{i + 1}", state, ctx)
                 if blank_rounds >= 2:
                     # The page still reads as blank after waiting, twice in a row. Opening it again won't help (seen
                     # live: MakeMyTrip re-opened five times, ~17 s each, while it was showing fine on screen).
