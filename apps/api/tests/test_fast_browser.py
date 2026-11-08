@@ -943,3 +943,28 @@ async def test_no_desktop_retry_when_offline_or_cloud_only(monkeypatch, ctx):
     monkeypatch.setattr(fb, "desktop_available", offline)
     out = await fb.browser_task(ctx, "Search flights", "https://www.makemytrip.com/", {})
     assert out["need_user"] == fb.BOT_WALL_NEED and "ran_on" not in out
+
+
+async def test_a_page_that_stays_blank_is_not_reopened_again_and_again(monkeypatch, ctx):
+    """Seen live: MakeMyTrip on the desktop app read as blank, and the loop re-opened it 5 times (~17 s each)."""
+    blank = {"ok": True, "url": "", "title": "", "text": "", "tree": "", "elements": [], "error": ""}
+
+    async def snap(c, find=""):
+        return dict(blank)
+
+    async def act(c, actions):
+        ctx.calls["act"].append(actions)
+        return dict(blank)
+
+    async def nav(c, url):
+        ctx.calls["act"].append([{"kind": "navigate", "url": url}])
+        return dict(blank)
+
+    monkeypatch.setattr(fb, "_snapshot", snap)
+    monkeypatch.setattr(fb, "_act", act)
+    monkeypatch.setattr(fb, "_navigate", nav)
+    _plans(monkeypatch, ctx, [{"actions": [{"kind": "navigate", "url": "https://www.makemytrip.com/flights/"}], "done": False, "result": "", "need_user": ""}] * 6)
+    out = await fb.browser_task(ctx, "Search flights", "", {})
+    assert out.get("blank_page"), out
+    assert out["fallback"] and len(ctx.calls["act"]) == 2  # two tries, not five
+    assert "Don't open it again" in out["note"]
