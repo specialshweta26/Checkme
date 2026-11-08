@@ -24,6 +24,17 @@ class RuntimeConnector:
         self.slug = row.slug
 
     async def call(self, name: str, args: dict[str, Any]) -> Any:
+        """Call a tool. Actions that leave the app (send, reply, create an event…) happen once per exact content
+        within a few minutes, even if a request is retried (app/connectors/idempotency.py)."""
+        from app.connectors import idempotency
+
+        computer = self.kind == "builtin" and self.provider in ("daytona", "trusted_local", "local", "computer_local")
+        builtin_mail = self.kind == "builtin" and self.provider in _BUILTIN
+        if not computer and idempotency.is_side_effect(name, builtin_mail):
+            return await idempotency.once(self.row.user_id, self.slug, name, args, lambda: self._call(name, args))
+        return await self._call(name, args)
+
+    async def _call(self, name: str, args: dict[str, Any]) -> Any:
         if self.kind == "builtin":
             if self.provider == "daytona":
                 from app.connectors.daytona_box import call_daytona
