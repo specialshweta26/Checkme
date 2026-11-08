@@ -14,6 +14,7 @@ import secrets
 from contextvars import ContextVar
 from typing import Any
 
+from app.agent import browser_guard
 from app.agent.coding import COMPUTER_SLUG
 from app.desktop.agent import LOCAL_TOOLS
 
@@ -361,6 +362,14 @@ def deep_link_fallback(tool_name: str, args: dict | None, result: Any) -> Any:
 
 
 async def run_computer(ctx, tool_name: str, args: dict | None = None, *, force_cloud: bool = False) -> Any:
+    refused = browser_guard.before(ctx, tool_name, args)
+    if refused is not None:
+        return refused
+    result = await _run_computer(ctx, tool_name, args, force_cloud=force_cloud)
+    return browser_guard.after(ctx, tool_name, args, result)
+
+
+async def _run_computer(ctx, tool_name: str, args: dict | None = None, *, force_cloud: bool = False) -> Any:
     from app.agent.deep import call_user_tool
     from app.connectors.computer_daemon import annotate_page
 

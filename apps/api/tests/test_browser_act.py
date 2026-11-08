@@ -219,3 +219,30 @@ def test_dblclick_and_upload_actions():
         assert loc.files == str(dest.resolve())
     finally:
         dest.unlink(missing_ok=True)
+
+
+class _SortLoc(_Loc):
+    OPTIONS = [{"value": "az", "label": "Name (A to Z)"}, {"value": "lohi", "label": "Price (low to high)"}]
+
+    def evaluate(self, js):
+        return self.OPTIONS if "el.options" in js else super().evaluate(js)
+
+
+def test_native_select_takes_a_label_or_part_of_one():
+    for text in ("Price (low to high)", "price (LOW to high)", "low to high", "lohi"):
+        loc = _SortLoc(tag="select", role="")
+        assert pick_suggestion(_Page(), loc, {"tag": "select"}, text) == "native"
+        assert loc.selected == "lohi"
+
+
+def test_native_select_names_the_choices_when_nothing_matches():
+    loc = _SortLoc(tag="select", role="")
+    with pytest.raises(RuntimeError, match=r'no option "Cheapest".*Name \(A to Z\) \| Price \(low to high\)'):
+        pick_suggestion(_Page(), loc, {"tag": "select"}, "Cheapest")
+
+
+def test_a_link_is_never_treated_as_a_dropdown():
+    page = _Page()
+    with pytest.raises(RuntimeError, match="link, not a dropdown"):
+        pick_suggestion(page, _Loc(tag="a", role="link"), {"tag": "a", "role": "link", "href": "https://x.example/"}, "Price")
+    assert page.keyboard.typed == [] and page.mouse.clicks == []

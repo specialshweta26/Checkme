@@ -23,7 +23,11 @@
     const r = el.getBoundingClientRect();
     if (r.width < 1 || r.height < 1) return false;
     const st = window.getComputedStyle(el);
-    return st.visibility !== 'hidden' && st.display !== 'none' && Number(st.opacity || 1) > 0.05;
+    if (st.visibility === 'hidden' || st.display === 'none') return false;
+    if (Number(st.opacity || 1) > 0.05) return true;
+    // Styled dropdowns, tick boxes and file pickers keep the real control see-through on top of their artwork.
+    const type = (el.getAttribute('type') || '').toLowerCase();
+    return el.tagName === 'SELECT' || (el.tagName === 'INPUT' && ['checkbox', 'radio', 'file'].includes(type));
   };
   const inView = (item) => { const r = item.el.getBoundingClientRect(); return r.bottom + item.oy > 0 && r.top + item.oy < window.innerHeight; };
   // Values of these fields never leave the page.
@@ -60,9 +64,11 @@
     const name = (el.getAttribute('aria-label') || el.innerText || el.getAttribute('placeholder') || (isSecret(el) ? '' : el.value) || el.getAttribute('title') || '').replace(/\s+/g, ' ').trim().slice(0, 80);
     const r = el.getBoundingClientRect();
     const role = (el.getAttribute('role') || (el.tagName === 'INPUT' && inputRole[(el.getAttribute('type') || '').toLowerCase()]) || tags[el.tagName] || el.tagName.toLowerCase());
-    return { ref, role, name, tag: el.tagName.toLowerCase(), href: el.href || '', in_view: inView(item), x: Math.round(r.x + r.width / 2 + item.ox), y: Math.round(r.y + r.height / 2 + item.oy) };
+    const choices = el.tagName === 'SELECT' ? Array.from(el.options || []).slice(0, 25).map((o) => (o.text || '').replace(/\s+/g, ' ').trim().slice(0, 40)) : null;
+    const chosen = el.tagName === 'SELECT' && el.selectedOptions && el.selectedOptions[0] ? (el.selectedOptions[0].text || '').trim().slice(0, 40) : '';
+    return { ref, role, name: el.tagName === 'SELECT' ? (el.getAttribute('aria-label') || (el.labels && el.labels[0] && el.labels[0].innerText) || el.getAttribute('name') || '').replace(/\s+/g, ' ').trim().slice(0, 80) : name, tag: el.tagName.toLowerCase(), href: el.href || '', in_view: inView(item), x: Math.round(r.x + r.width / 2 + item.ox), y: Math.round(r.y + r.height / 2 + item.oy), ...(choices ? { options: choices, selected: chosen } : {}) };
   });
-  const tree = elements.map((n) => ('- ' + n.ref + ' ' + n.role + ' ' + (n.name || '') + (n.href ? ' ' + n.href : '')).trim()).join('\n');
+  const tree = elements.map((n) => ('- ' + n.ref + ' ' + n.role + ' ' + (n.name || '') + (n.href ? ' ' + n.href : '') + (n.options ? ' [dropdown, now: ' + n.selected + '; options: ' + n.options.join(' | ') + ']' : '')).trim()).join('\n');
   const parts = [];
   for (const { root } of roots) {
     const body = root.body;

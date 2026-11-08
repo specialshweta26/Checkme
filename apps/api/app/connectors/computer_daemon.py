@@ -15,7 +15,7 @@ from pathlib import Path
 
 HOST = "127.0.0.1"
 PORT = 18765
-VERSION = "25"
+VERSION = "26"
 _HOME = Path(os.environ.get("CHECKME_BROWSER_HOME") or "/tmp")
 SHOT = "/tmp/checkme-browser.png"
 PROFILE = str(_HOME / "profile")
@@ -492,7 +492,11 @@ _SNAPSHOT_JS = """(arg) => {
     const r = el.getBoundingClientRect();
     if (r.width < 1 || r.height < 1) return false;
     const st = window.getComputedStyle(el);
-    return st.visibility !== 'hidden' && st.display !== 'none' && Number(st.opacity || 1) > 0.05;
+    if (st.visibility === 'hidden' || st.display === 'none') return false;
+    if (Number(st.opacity || 1) > 0.05) return true;
+    // Styled dropdowns, tick boxes and file pickers keep the real control see-through on top of their artwork.
+    const type = (el.getAttribute('type') || '').toLowerCase();
+    return el.tagName === 'SELECT' || (el.tagName === 'INPUT' && ['checkbox', 'radio', 'file'].includes(type));
   };
   const inView = (el) => { const r = el.getBoundingClientRect(); return r.bottom > 0 && r.top < window.innerHeight; };
   const overlayRoot = (el) => {
@@ -562,6 +566,11 @@ _SNAPSHOT_JS = """(arg) => {
       label,
       autocomplete: attr('autocomplete'),
       download: el.hasAttribute('download') ? (attr('download') || '1') : '',
+      ...(el.tagName === 'SELECT' ? {
+        name: (el.getAttribute('aria-label') || label || el.getAttribute('name') || '').slice(0, 80),
+        options: Array.from(el.options || []).slice(0, 25).map((o) => (o.text || '').replace(/\\s+/g, ' ').trim().slice(0, 40)),
+        selected: el.selectedOptions && el.selectedOptions[0] ? (el.selectedOptions[0].text || '').trim().slice(0, 40) : '',
+      } : {}),
       x: Math.round(r.x + r.width / 2),
       y: Math.round(r.y + r.height / 2),
     };
@@ -927,6 +936,8 @@ def tree_line(node: dict) -> str:
         parts.append(f"[{kind}]")
     if node.get("download") or (node.get("role") == "link" and looks_like_file_url(str(node.get("href") or ""))):
         parts.append("[file]")
+    if node.get("options"):
+        parts.append(f"[dropdown, now: {node.get('selected') or ''}; options: {' | '.join(str(o) for o in node['options'])}]")
     return " ".join(parts)
 
 
@@ -1803,6 +1814,25 @@ def _type_into(page, loc, node, text: str, replace: bool) -> None:
         page.wait_for_timeout(120)
 
 
+def _native_option(loc, value: str) -> str:
+    """The option of a native <select> matching a value or label, whole or in part; names the choices when none does."""
+    try:
+        options = loc.evaluate("el => Array.from(el.options).map((o) => ({value: o.value, label: (o.text || '').trim()}))")
+    except Exception:
+        return value
+    if not isinstance(options, list) or not options:
+        return value
+    want = " ".join(value.split()).lower()
+    for row in options:
+        if str(row.get("value") or "").lower() == want or " ".join(str(row.get("label") or "").split()).lower() == want:
+            return str(row.get("value"))
+    for row in options:
+        if want in " ".join(str(row.get("label") or "").split()).lower():
+            return str(row.get("value"))
+    choices = " | ".join(str(row.get("label") or "") for row in options)
+    raise RuntimeError(f'this dropdown has no option "{value}". Its options are: {choices}')
+
+
 def pick_suggestion(page, loc, node, text: str) -> str:
     """Choose a value on a native <select> or a custom type-ahead list. Returns how it was picked."""
     value = str(text or "").strip()
@@ -1813,8 +1843,10 @@ def pick_suggestion(page, loc, node, text: str) -> str:
     if not tag:
         tag = str(info.get("tag") or "")
     if loc is not None and tag == "select":
-        loc.select_option(value, timeout=12000)
+        loc.select_option(_native_option(loc, value), timeout=12000)
         return "native"
+    if tag == "a" and str((node or {}).get("href") or "") and str((node or {}).get("role") or "") != "combobox":
+        raise RuntimeError("this is a link, not a dropdown: click it to follow it, or take a snapshot and use the dropdown's own ref")
     if loc is not None:
         try:
             loc.select_option(value, timeout=2500)
