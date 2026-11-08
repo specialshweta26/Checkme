@@ -206,6 +206,8 @@ class Settings(BaseSettings):
     # Operator-style browsing by sight (app/agent/vision_browser.py): on by default; the model defaults to OPENAI_MODEL.
     browser_vision: bool = True
     computer_use_model: str = ""
+    # On shutdown (a deploy), how long chat turns in flight may run on; keep below Render's max shutdown delay (300 s).
+    shutdown_grace_s: float = 240.0
     # all | web | worker: which part of the app this process runs (see app/main.py lifespan).
     process_role: str = "all"
     # Per-user daily budget for background work (inbox triage, memory learning); 0 = no limit. USD needs MODEL_PRICES.

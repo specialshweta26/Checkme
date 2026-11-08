@@ -648,3 +648,42 @@ class ProgressCallback(AsyncCallbackHandler):
 
     async def on_tool_error(self, error, **kwargs) -> None:  # noqa: ANN001
         await self.reporter.emit(f"{self.last_tool or 'A tool'} hit an error, trying another way", kind="error")
+
+
+
+# A running turn says it is alive every ALIVE_EVERY_S; if its process goes away (a deploy, a crash) the mark expires
+# after ALIVE_TTL_S and clients learn within a minute that the turn was interrupted, instead of waiting on it.
+ALIVE_EVERY_S = 10
+ALIVE_TTL_S = 35
+
+
+def _alive_key(user_id: Any, progress_id: str) -> str:
+    return _key(user_id, progress_id) + ":alive"
+
+
+async def keep_alive(user_id: Any, progress_id: str, redis_client: Any = None) -> None:
+    """Run alongside a turn (cancel when the turn ends)."""
+    import asyncio
+
+    if redis_client is None:
+        from app.cache import get_redis
+
+        redis_client = get_redis()
+    while True:
+        try:
+            await redis_client.set(_alive_key(user_id, progress_id), "1", ex=ALIVE_TTL_S)
+        except Exception:  # noqa: BLE001 - the turn itself must not fail over this
+            pass
+        await asyncio.sleep(ALIVE_EVERY_S)
+
+
+async def turn_alive(user_id: Any, progress_id: str, redis_client: Any = None) -> bool | None:
+    """True / False, or None when it can't be told (Redis unreachable)."""
+    if redis_client is None:
+        from app.cache import get_redis
+
+        redis_client = get_redis()
+    try:
+        return bool(await redis_client.exists(_alive_key(user_id, progress_id)))
+    except Exception:  # noqa: BLE001
+        return None

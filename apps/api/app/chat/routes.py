@@ -74,12 +74,15 @@ async def chat_progress(progress_id: str, user: User = Depends(current_user), db
         stored, created, msg = await _stored_turn_status(db, user, progress_id)
         if stored == "running" and msg is not None:
             superseded = await _has_later_reply(db, msg)
-            if superseded or (_feed_silent(steps) and _older_than(created, DEAD_TURN_S)):
+            from app.agent.progress import turn_alive
+
+            cut_off = _older_than(created, INTERRUPTED_AFTER_S) and await turn_alive(user.id, progress_id) is False
+            if superseded or cut_off or (_feed_silent(steps) and _older_than(created, DEAD_TURN_S)):
                 # A newer reply in the chat (turns there run one at a time), or no status line for DEAD_TURN_S (the
                 # turn's process is gone; a live turn's own no-progress limit stops it much sooner): mark it stopped
                 # so no client waits on it forever.
                 try:
-                    await _mark_stopped(user, msg)
+                    await _mark_stopped(user, msg, interrupted=cut_off and not superseded)
                     await db.commit()
                     stored = "stopped"
                 except Exception:  # noqa: BLE001
@@ -157,12 +160,16 @@ async def _has_later_reply(db, msg) -> bool:
         return False
 
 
-async def _mark_stopped(user, msg) -> None:
-    """Settle a turn that is no longer running: keep any partial text, mark it stopped, and end its live feed."""
+async def _mark_stopped(user, msg, interrupted: bool = False) -> None:
+    """Settle a turn that is no longer running: keep any partial text, mark it stopped, and end its live feed.
+    ``interrupted``: its server process stopped (an app update) rather than the user stopping it."""
     meta = dict(msg.meta or {})
     placeholder = str(msg.content or "").endswith("is working on this…")
     msg.content = run_cancel.stopped_text("" if placeholder else str(msg.content or ""), list(meta.get("steps") or []))
-    msg.meta = {**meta, "in_progress": False, "stopped": True, "can_continue": True, "pending_confirms": []}
+    if interrupted:
+        msg.content = (msg.content.rstrip() + "\n\nThis was interrupted by an app update. Press Continue to pick up where it left off.").strip()
+    msg.meta = {**meta, "in_progress": False, "stopped": True, "can_continue": True, "pending_confirms": [],
+                **({"interrupted": True} if interrupted else {})}
     pid = str(meta.get("progress_id") or "")
     if pid and valid_progress_id(pid):
         try:
@@ -598,6 +605,13 @@ async def chat(
     # task, so a dropped client never cancels it; the web app then recovers the stored reply.
     task = asyncio.create_task(finish_turn())
     run.task = task
+    RUNNING_TURNS.add(task)
+    task.add_done_callback(RUNNING_TURNS.discard)
+    if progress is not None:
+        from app.agent.progress import keep_alive
+
+        alive = asyncio.create_task(keep_alive(user.id, body.progress_id))
+        task.add_done_callback(lambda _t: alive.cancel())
     try:
         return await asyncio.wait_for(asyncio.shield(task), timeout=HEARTBEAT_AFTER_S)
     except asyncio.TimeoutError:
@@ -607,6 +621,21 @@ async def chat(
         media_type="application/json",
         headers={"Cache-Control": "no-store, no-transform", "X-Accel-Buffering": "no"},
     )
+
+
+# Turns running in this process, so a shutdown (a deploy) can let them finish first (app/main.py lifespan).
+RUNNING_TURNS: set = set()
+INTERRUPTED_AFTER_S = 45  # a turn this old whose alive mark is gone was cut off (its process stopped)
+
+
+async def finish_running_turns(grace_s: float) -> int:
+    """On shutdown: wait up to ``grace_s`` for turns in this process to finish. Returns how many were still running."""
+    pending = [t for t in RUNNING_TURNS if not t.done()]
+    if not pending:
+        return 0
+    log.info("shutdown: letting %s chat turn(s) finish (up to %ss)", len(pending), int(grace_s))
+    _done, still = await asyncio.wait(pending, timeout=grace_s)
+    return len(still)
 
 
 HEARTBEAT_AFTER_S = 8.0
