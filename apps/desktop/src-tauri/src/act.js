@@ -171,16 +171,32 @@
     }
     return { ok: true };
   }
-  if (kind === 'select' || kind === 'pick' || target.tagName === 'SELECT') {
+  if (target.tagName === 'SELECT' && ['select', 'pick', 'fill', 'type'].includes(kind)) {
+    const want = String(text || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    const options = Array.from(target.options || []);
+    const label = (o) => String(o.text || '').replace(/\s+/g, ' ').trim();
+    const opt = !want ? null : options.find((o) => String(o.value || '').toLowerCase() === want || label(o).toLowerCase() === want)
+      || options.find((o) => label(o).toLowerCase().includes(want));
+    if (!opt) return { ok: false, error: 'this dropdown has no option "' + text + '". Its options are: ' + options.map(label).join(' | ') };
     focusField(target);
-    if (target.tagName === 'SELECT') {
-      const want = String(text || '').toLowerCase();
-      const opt = Array.from(target.options || []).find((o) => String(o.value || '').toLowerCase() === want || String(o.text || '').toLowerCase() === want);
-      if (opt) target.value = opt.value;
-      target.dispatchEvent(new Event('input', { bubbles: true }));
-      target.dispatchEvent(new Event('change', { bubbles: true }));
+    target.value = opt.value;
+    target.dispatchEvent(new Event('input', { bubbles: true }));
+    target.dispatchEvent(new Event('change', { bubbles: true }));
+    return { ok: true, selected: label(opt), composer: read(target) };
+  }
+  if (kind === 'select' || kind === 'pick') {
+    // Pressing Enter on a link would follow it, so a link is never treated as a dropdown.
+    if (target.tagName === 'A' && target.getAttribute('href') && target.getAttribute('role') !== 'combobox') {
+      return { ok: false, error: 'this is a link, not a dropdown: click it to follow it, or take a snapshot and use the dropdown\'s own ref' };
     }
-    return { ok: true, submit: kind === 'select' || kind === 'pick', composer: read(target) };
+    // A custom dropdown: open it, type the value and choose the match (picker.js).
+    for (const el of document.querySelectorAll('input, textarea, [contenteditable="true"]')) {
+      const r = el.getBoundingClientRect();
+      if (el !== target && r.width > 4 && r.height > 4) el.setAttribute('data-checkme-seen', '1');
+    }
+    const at = point(target);
+    if (!at) target.click();
+    return { ok: true, picker: !!text, mouse: at || undefined, clicks: 1 };
   }
   if (kind === 'fill' || kind === 'type') {
     focusField(target);

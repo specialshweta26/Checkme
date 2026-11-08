@@ -26,7 +26,7 @@ from app.agents.service import (
     filter_connectors,
     toolkit_assignment_map,
 )
-from app.agent import finish_check
+from app.agent import browser_guard, finish_check
 from app.agent.confirm import sign_confirm
 from app.agent.invoke import bump_usage, invoke_named, preview
 from app.agent.memory import load_memory
@@ -2719,7 +2719,8 @@ def system_prompt(
         "pick a dropdown option. Dates, checkboxes, radios, and page file pickers are your job (upload with path= a computer file; "
         "download saves the file). Dates: fill the date field itself with YYYY-MM-DD (the browser converts it); click through a "
         "calendar only if that fails, and check the fields show the dates before Apply. Menus that open on mouse-over: hover, then "
-        "click the item. When a result lists warnings that a step may not have done anything, do not repeat it: try another way. "
+        "click the item. A dropdown's line in the element tree lists its options and current choice: use select with that ref and the "
+        "option's text, and check the page changed. When a result lists warnings that a step may not have done anything, do not repeat it: try another way. "
         "When the element tree ends with '… N more elements', call browser_snapshot with find= the words you need. When a download (or publish_file) returns extracted_text, analyze it in YOUR role — your title, "
         "standing instructions, focus, and skills — not as a generic summarizer. If a listed skill covers this file or domain, get_skill "
         "and follow it before you write the analysis. Post findings, figures, risks, and recommended actions that fit that domain in the "
@@ -3124,6 +3125,8 @@ async def _finish_what_is_left(ctx, graph, query, text, result, progress, callba
     def todos_of(state: Any) -> Any:
         return state.get("todos") if isinstance(state, dict) else None
 
+    if browser_guard.is_stuck(ctx):
+        return text  # more of the same can't help; the reply already says where it stopped
     items = await finish_check.unfinished_items(query, text, ctx.used_tools, todos_of(result))
     if not items:
         return text
@@ -3708,7 +3711,7 @@ async def _run_deep_agent(
         except Exception as exc:  # noqa: BLE001
             if isinstance(exc, run_cancel.TurnCancelled) or run_cancel.is_cancelled():
                 raise run_cancel.TurnCancelled("stopped") from exc
-            if _is_recursion_limit(exc) and attempt < 2:
+            if _is_recursion_limit(exc) and attempt < 2 and not browser_guard.is_stuck(ctx):
                 cap = 280 if coding else (BACKGROUND_STEP_CAP if limit >= BACKGROUND_STEP_LIMIT else 200)
                 limit = min(limit + 40, cap)
                 resumed = await _can_resume(graph, thread)
