@@ -47,6 +47,22 @@ def _clean_focus(value) -> str:
         raise AgentError(str(exc)) from exc
 
 
+# Agents use the twelve Lumio mascots (apps/web/public/agents, apps/web/app/components/mascots.ts); the agent's
+# color tints the mascot in the app.
+MASCOTS = tuple(f"mascot:{i:02d}" for i in range(1, 13))
+
+
+def mascot_for(index: int) -> str:
+    return MASCOTS[index % len(MASCOTS)]
+
+
+def _clean_mascot(value) -> str:
+    raw = str(value or "").strip()
+    if raw not in MASCOTS:
+        raise AgentError("Choose one of the agent icons.")
+    return raw
+
+
 def _clean_avatar(value) -> str:
     raw = str(value or "").strip()
     if len(raw) > AVATAR_MAX:
@@ -358,7 +374,8 @@ async def create_agent(db: AsyncSession, user: User, body: dict) -> WorkspaceAge
         instructions=_clean_instructions(body.get("instructions") or ""),
         focus=_clean_focus(body.get("focus")),
         color=str(body.get("color") or pick_color(count)),
-        avatar=_clean_avatar(body.get("avatar") or ""),
+        # A new agent always gets a mascot: the one chosen, or the next one in turn (e.g. created from chat).
+        avatar=_clean_mascot(body.get("avatar")) if str(body.get("avatar") or "").strip() in MASCOTS else mascot_for(count),
         kind="custom",
     )
     db.add(row)
@@ -399,7 +416,9 @@ async def update_agent(db: AsyncSession, user: User, agent_id: uuid.UUID, body: 
     if body.get("color"):
         row.color = str(body["color"])[:16]
     if "avatar" in body and body["avatar"] is not None:
-        row.avatar = _clean_avatar(body["avatar"])
+        new = str(body["avatar"]).strip()
+        # Only the mascots can be chosen; an agent from before them may keep its old avatar until it's changed.
+        row.avatar = new if new == (row.avatar or "") else _clean_mascot(new)
     if "pinned" in body and body["pinned"] is not None:
         row.pinned = bool(body["pinned"])
     if "archived" in body and body["archived"] is not None:

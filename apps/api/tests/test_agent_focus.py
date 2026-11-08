@@ -333,3 +333,34 @@ def test_status_lines_for_coding_tools():
         "Running `git clone https://github.com/a/b` on the computer"
     )
     assert describe_tool("set_my_focus", {"focus": "coding"}) == "Setting my focus to Coding and deployments"
+
+
+# --- mascot avatars: agents can only use the twelve Lumio mascots ---------------------------------------------------
+
+async def test_only_mascots_can_be_chosen_and_an_old_avatar_can_stay(monkeypatch):
+    row = _agent()
+    row.avatar = "✦"  # an agent from before the mascots
+
+    async def get_agent(db, user, agent_id):
+        return row
+
+    monkeypatch.setattr(service, "get_agent", get_agent)
+    out = await service.update_agent(FakeDB(), _user(), row.id, {"avatar": "✦"})
+    assert out.avatar == "✦"  # unchanged: allowed to stay
+    out = await service.update_agent(FakeDB(), _user(), row.id, {"avatar": "mascot:07"})
+    assert out.avatar == "mascot:07"
+    for bad in ("✿", "data:image/png;base64,AAAA", "mascot:13", "mascot:7"):
+        with pytest.raises(AgentError, match="agent icons"):
+            await service.update_agent(FakeDB(), _user(), row.id, {"avatar": bad})
+
+
+def test_there_are_twelve_mascots_in_turn():
+    assert service.MASCOTS[0] == "mascot:01" and service.MASCOTS[-1] == "mascot:12" and len(service.MASCOTS) == 12
+    assert service.mascot_for(0) == "mascot:01" and service.mascot_for(12) == "mascot:01" and service.mascot_for(5) == "mascot:06"
+
+
+def test_every_mascot_has_its_picture():
+    from pathlib import Path
+
+    pics = sorted(p.name for p in (Path(__file__).resolve().parents[2] / "web" / "public" / "agents").glob("*.png"))
+    assert len(pics) == 12 and pics[0].startswith("01-") and pics[-1].startswith("12-")
