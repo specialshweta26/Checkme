@@ -1262,6 +1262,18 @@ async def browser_task(ctx, goal: str, url: str = "", values: dict | None = None
 BOT_WALL_NEED = "The page needs a person (bot check or hand-off)."
 
 
+async def by_sight(ctx, goal: str, vals: dict[str, str], allow_final: bool, log_steps: list) -> dict:
+    """Hand the task to the screenshot loop (vision_browser.computer_task)."""
+    from app.agent.vision_browser import computer_task
+
+    await _log("Switched to working by sight", "The page's structure wasn't enough, so this continues from screenshots.",
+               True, None, shot=False)
+    out = await computer_task(ctx, goal, vals, allow_final_action=allow_final)
+    if isinstance(out, dict):
+        out.setdefault("log", log_steps)
+    return out
+
+
 def bot_walled(out: Any) -> bool:
     return isinstance(out, dict) and not out.get("done") and out.get("need_user") == BOT_WALL_NEED
 
@@ -1367,6 +1379,9 @@ async def _browser_task(ctx, goal: str, url: str = "", values: dict | None = Non
         state = await settle(ctx, state)
         if not start_url:
             start_url = str(state.get("url") or "")
+        if page_empty(state) and not _blocked(state) and setting("browser_vision", True):
+            # The page shows nothing the element tree can read (canvas, late rendering): work from the screen.
+            return await by_sight(ctx, goal, vals, allow_final_action, log_steps)
         if _blocked(state):
             return _result(state, vals, ok=False, done=False, need_user=BOT_WALL_NEED, log=log_steps)
         model, strong = fast_model(), escalate_model()
@@ -1468,6 +1483,11 @@ async def _browser_task(ctx, goal: str, url: str = "", values: dict | None = Non
                     log.info("browser.task escalating to model=%s", model)
                     continue
                 break
+        if setting("browser_vision", True):
+            # The element tree didn't get there: try again by looking at the screen, like a person would.
+            seen = await by_sight(ctx, goal, vals, allow_final_action, log_steps)
+            if not seen.get("fallback"):
+                return seen
         return _result(state, vals, ok=False, done=False, fallback=True,
                        note="The fast loop did not finish. Continue yourself with browser_act from this page.",
                        log=log_steps, took_ms=int((time.monotonic() - started) * 1000))  # fmt: skip

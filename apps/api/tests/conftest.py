@@ -152,3 +152,11 @@ def _instant_page_settle(monkeypatch):
     from app.agent import fast_browser
 
     monkeypatch.setattr(fast_browser, "SETTLE_WAITS_S", (0, 0, 0))
+
+
+@pytest.fixture(autouse=True)
+def _no_vision_by_default(monkeypatch):
+    """Browsing by sight is tested on its own (tests/test_vision_browser.py); other tests keep the element-tree path."""
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "browser_vision", False)

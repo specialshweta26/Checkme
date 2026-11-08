@@ -203,6 +203,9 @@ class Settings(BaseSettings):
     browser_fast_max_steps: int = 12  # model rounds per browser_task
     browser_replay: bool = True  # save successful browser_task runs and replay them without model calls
     trim_old_pages: bool = True  # send only the latest page result in full to the model (long browser runs stay fast)
+    # Operator-style browsing by sight (app/agent/vision_browser.py): on by default; the model defaults to OPENAI_MODEL.
+    browser_vision: bool = True
+    computer_use_model: str = ""
     # all | web | worker: which part of the app this process runs (see app/main.py lifespan).
     process_role: str = "all"
     # Per-user daily budget for background work (inbox triage, memory learning); 0 = no limit. USD needs MODEL_PRICES.
