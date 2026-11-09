@@ -730,6 +730,47 @@ async def clipboard_read(ctx) -> Any:
     return await system_tool(ctx, "computer_clipboard", {"action": "read"})
 
 
+# Apps that hold passwords or control the computer's security. The user uses these themselves.
+_OFF_LIMITS_APPS = re.compile(r"system settings|system preferences|keychain|passwords|1password|bitwarden|lastpass|dashlane", re.I)
+
+
+def _user_asked_for(label: str, query: str) -> bool:
+    """A final control (Send, Delete, Pay) may be pressed only if the user's own message uses that word: text inside an
+    app or a document can't change what the user wrote."""
+    words = [w for w in re.findall(r"[^\W\d_]{3,}", label.casefold())]
+    wrote = str(query or "").casefold()
+    return any(re.search(rf"\b{re.escape(w)}", wrote) for w in words)
+
+
+async def computer_ui(ctx, action: str, app: str, title: str = "", id: str = "", text: str = "", menu: str = "", depth: int = 6) -> Any:
+    """Read and operate the controls inside an app, through the operating system's accessibility tools."""
+    from app.agent.fast_browser import _is_final_label
+
+    if _OFF_LIMITS_APPS.search(app or ""):
+        return {"ok": False, "error": f"{app} holds passwords or security settings. Ask the user to do this themselves."}
+    names = getattr(ctx, "_ui_names", None)
+    if names is None:
+        names = {}
+        ctx._ui_names = names
+    label = ""
+    if action == "press":
+        if (app, id) not in names:
+            return {"ok": False, "error": "Read the window first with action=read, and use an id from that result."}
+        label = names[(app, id)]
+    elif action == "menu":
+        label = str(menu or "").split(">")[-1].strip()
+    if label and _is_final_label(label) and not _user_asked_for(label, getattr(ctx, "query", "")):
+        return {"ok": False, "needs_approval": True,
+                "error": f"Not pressed: '{label}' can't be undone. Ask the user to confirm, and press it when they say so."}  # fmt: skip
+    args = {"action": action, "app": app, "title": title, "id": id, "text": text, "menu": menu, "depth": depth}
+    out = await system_tool(ctx, "computer_ui", args)
+    if action == "read" and isinstance(out, dict):
+        for row in out.get("controls") or []:
+            if isinstance(row, dict):
+                names[(app, str(row.get("id")))] = str(row.get("name") or "")
+    return out
+
+
 async def launch_app(ctx, name: str) -> Any:
     key = (name or "").strip().lower()
     if not key:

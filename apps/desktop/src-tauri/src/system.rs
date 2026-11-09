@@ -1,4 +1,4 @@
-//! The rest of the computer: its windows, screens and clipboard. Everything goes through the operating system's own
+//! The rest of the computer: its windows, screens, clipboard and the controls inside apps. Everything goes through the operating system's own
 //! scripting, so macOS asks the user once for Accessibility permission and nothing runs without it.
 
 use std::io::Write;
@@ -78,6 +78,144 @@ on run argv
   error "No window of " & appName & " has that title"
 end run
 "#;
+/// One line per control: id, role, name, value, x, y, width, height. Password fields never give their value.
+const UI_READ_SCRIPT: &str = r#"
+global out, seen, maxNodes, maxDepth
+on clean(raw)
+  try
+    set t to raw as text
+  on error
+    return ""
+  end try
+  set AppleScript's text item delimiters to {tab, linefeed, return}
+  set bits to text items of t
+  set AppleScript's text item delimiters to " "
+  set t to bits as text
+  set AppleScript's text item delimiters to ""
+  if (count of t) > 120 then set t to text 1 thru 120 of t
+  return t
+end clean
+on walk(el, pathText, depth)
+  if seen >= maxNodes then return
+  set seen to seen + 1
+  tell application "System Events"
+    set r to ""
+    set sr to ""
+    set n to ""
+    set v to ""
+    set x to ""
+    set y to ""
+    set wide to ""
+    set high to ""
+    try
+      set r to role of el
+    end try
+    try
+      set sr to subrole of el
+    end try
+    try
+      set n to title of el
+      if n is missing value then set n to ""
+    end try
+    if n is "" then
+      try
+        set n to description of el
+        if n is missing value then set n to ""
+      end try
+    end if
+    if sr is not "AXSecureTextField" then
+      try
+        set v to value of el
+        if v is missing value then set v to ""
+      end try
+    end if
+    try
+      set {x, y} to position of el
+      set {wide, high} to size of el
+    end try
+  end tell
+  set out to out & pathText & tab & r & tab & my clean(n) & tab & my clean(v) & tab & x & tab & y & tab & wide & tab & high & linefeed
+  if depth < maxDepth then
+    tell application "System Events" to set kids to UI elements of el
+    repeat with i from 1 to count of kids
+      my walk(item i of kids, pathText & "." & i, depth + 1)
+    end repeat
+  end if
+end walk
+on run argv
+  set appName to item 1 of argv
+  set wanted to item 2 of argv
+  set maxDepth to (item 3 of argv) as integer
+  set maxNodes to 250
+  set seen to 0
+  set out to ""
+  tell application "System Events" to tell process appName
+    if (count of windows) is 0 then error appName & " has no open window"
+    set found to 1
+    if wanted is not "" then
+      set found to 0
+      repeat with i from 1 to count of windows
+        if (name of window i as text) contains wanted then
+          set found to i
+          exit repeat
+        end if
+      end repeat
+      if found is 0 then error "No window of " & appName & " has that title"
+    end if
+    set w to window found
+  end tell
+  my walk(w, found as text, 0)
+  return out
+end run
+"#;
+const UI_ACT_SCRIPT: &str = r#"
+on run argv
+  set appName to item 1 of argv
+  set pathText to item 2 of argv
+  set verb to item 3 of argv
+  set AppleScript's text item delimiters to "."
+  set parts to text items of pathText
+  set AppleScript's text item delimiters to ""
+  tell application "System Events" to tell process appName
+    set frontmost to true
+    set el to window ((item 1 of parts) as integer)
+    repeat with i from 2 to count of parts
+      set el to UI element ((item i of parts) as integer) of el
+    end repeat
+    if verb is "press" then
+      try
+        perform action "AXPress" of el
+      on error
+        click el
+      end try
+    else if verb is "set_value" then
+      set value of el to (item 4 of argv)
+    else if verb is "focus" then
+      set focused of el to true
+    end if
+    try
+      return value of el as text
+    on error
+      return ""
+    end try
+  end tell
+end run
+"#;
+const UI_MENU_SCRIPT: &str = r#"
+on run argv
+  set appName to item 1 of argv
+  tell application "System Events" to tell process appName
+    set frontmost to true
+    set el to menu bar item (item 2 of argv) of menu bar 1
+    repeat with i from 3 to count of argv
+      set el to menu item (item i of argv) of menu 1 of el
+    end repeat
+    click el
+  end tell
+  return "ok"
+end run
+"#;
+const WIN_UI_COMMON: &str = "Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes; $A=[Windows.Automation.AutomationElement]; $T=[Windows.Automation.TreeWalker]::ControlViewWalker;";
 const SCREENS_JXA: &str = "ObjC.import('AppKit');const s=$.NSScreen.screens;const out=[];for(let i=0;i<s.count;i++){const n=s.objectAtIndex(i);const f=n.frame;out.push({x:f.origin.x,y:f.origin.y,width:f.size.width,height:f.size.height,scale:n.backingScaleFactor,main:i===0});}JSON.stringify(out)";
 const WIN_TYPES: &str = "Add-Type -Namespace L -Name W -MemberDefinition '[DllImport(\"user32.dll\")] public static extern bool GetWindowRect(IntPtr h, out RECT r); [DllImport(\"user32.dll\")] public static extern bool MoveWindow(IntPtr h,int x,int y,int w,int t,bool p); [DllImport(\"user32.dll\")] public static extern bool ShowWindow(IntPtr h,int c); [DllImport(\"user32.dll\")] public static extern bool SetForegroundWindow(IntPtr h); public struct RECT { public int Left, Top, Right, Bottom; }';";
 
@@ -116,10 +254,14 @@ fn friendly(message: &str) -> String {
 }
 
 fn applescript(script: &str, args: &[&str]) -> Result<String, String> {
+    applescript_for(script, args, 15)
+}
+
+fn applescript_for(script: &str, args: &[&str], seconds: u64) -> Result<String, String> {
     let mut cmd = Command::new("osascript");
     cmd.arg("-");
     cmd.args(args);
-    run_with_timeout(cmd, Some(script), 15)
+    run_with_timeout(cmd, Some(script), seconds)
 }
 
 fn powershell(script: &str, input: Option<&str>) -> Result<String, String> {
@@ -217,6 +359,107 @@ fn windows_tool(args: &Value) -> Result<Value, String> {
     }
 }
 
+fn parse_controls(out: &str) -> Vec<Value> {
+    out.lines()
+        .filter_map(|line| {
+            let cols: Vec<&str> = line.split('\t').collect();
+            if cols.len() < 8 {
+                return None;
+            }
+            let num = |i: usize| cols[i].trim().parse::<i64>().ok();
+            Some(json!({
+                "id": cols[0],
+                "role": cols[1],
+                "name": cols[2],
+                "value": cols[3],
+                "x": num(4),
+                "y": num(5),
+                "width": num(6),
+                "height": num(7),
+            }))
+        })
+        .collect()
+}
+
+/// Control ids are dotted numbers, so one can't smuggle anything into a script.
+fn valid_id(id: &str) -> bool {
+    !id.is_empty() && id.split('.').all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
+}
+
+fn win_window(app: &str, title: &str) -> String {
+    let (app, title) = (app.replace('\'', "''"), title.replace('\'', "''"));
+    format!(
+        "{WIN_UI_COMMON} $p = Get-Process | Where-Object {{ $_.MainWindowHandle -ne 0 -and $_.ProcessName -like '*{app}*' -and $_.MainWindowTitle -like '*{title}*' }} | Select-Object -First 1; if (-not $p) {{ throw 'No window with that app and title' }}; $root = $A::FromHandle($p.MainWindowHandle);"
+    )
+}
+
+fn ui_read(app: &str, title: &str, depth: i64) -> Result<Value, String> {
+    let raw = if cfg!(target_os = "macos") {
+        applescript_for(UI_READ_SCRIPT, &[app, title, &depth.to_string()], 40)?
+    } else {
+        let script = format!(
+            "{} $script:n = 0; function Walk($e, $id, $d) {{ if ($script:n -ge 250) {{ return }}; $script:n++; $c = $e.Current; $v = ''; $vp = $null; if (-not $c.IsPassword -and $e.TryGetCurrentPattern([Windows.Automation.ValuePattern]::Pattern, [ref]$vp)) {{ $v = $vp.Current.Value }}; $b = $c.BoundingRectangle; $clean = {{ param($t) ([string]$t -replace '[\t\r\n]', ' ') }}; \"$id`t$($c.ControlType.ProgrammaticName)`t$(& $clean $c.Name)`t$(& $clean $v)`t$([int]$b.X)`t$([int]$b.Y)`t$([int]$b.Width)`t$([int]$b.Height)\"; if ($d -lt {depth}) {{ $k = $T.GetFirstChild($e); $i = 1; while ($k) {{ Walk $k \"$id.$i\" ($d + 1); $i++; $k = $T.GetNextSibling($k) }} }} }}; Walk $root '1' 0",
+            win_window(app, title)
+        );
+        powershell(&script, None)?
+    };
+    Ok(json!({ "ok": true, "controls": parse_controls(&raw) }))
+}
+
+fn ui_act(app: &str, title: &str, id: &str, verb: &str, text: &str) -> Result<Value, String> {
+    if !valid_id(id) {
+        return Err("id must come from action=read".into());
+    }
+    let value = if cfg!(target_os = "macos") {
+        applescript(UI_ACT_SCRIPT, &[app, id, verb, text])?
+    } else {
+        let steps: Vec<&str> = id.split('.').skip(1).collect();
+        let quoted = text.replace('\'', "''");
+        let action = match verb {
+            "press" => "$o = $null; if ($e.TryGetCurrentPattern([Windows.Automation.InvokePattern]::Pattern, [ref]$o)) { $o.Invoke() } elseif ($e.TryGetCurrentPattern([Windows.Automation.TogglePattern]::Pattern, [ref]$o)) { $o.Toggle() } elseif ($e.TryGetCurrentPattern([Windows.Automation.SelectionItemPattern]::Pattern, [ref]$o)) { $o.Select() } else { throw 'This control cannot be pressed' }".to_string(),
+            "set_value" => format!("$o = $null; if ($e.TryGetCurrentPattern([Windows.Automation.ValuePattern]::Pattern, [ref]$o)) {{ $o.SetValue('{quoted}') }} else {{ throw 'This control takes no value' }}"),
+            _ => "$e.SetFocus()".to_string(),
+        };
+        let script = format!(
+            "{} $e = $root; foreach ($s in @({})) {{ $k = $T.GetFirstChild($e); for ($i = 1; $i -lt $s; $i++) {{ $k = $T.GetNextSibling($k) }}; if (-not $k) {{ throw 'That control has gone; read the window again' }}; $e = $k }}; {action}",
+            win_window(app, title),
+            steps.join(","),
+        );
+        powershell(&script, None)?
+    };
+    Ok(json!({ "ok": true, "id": id, "value": value }))
+}
+
+fn ui_menu(app: &str, menu: &str) -> Result<Value, String> {
+    if !cfg!(target_os = "macos") {
+        return Err("On Windows, menus are controls: read the window and press them".into());
+    }
+    let parts: Vec<&str> = menu.split('>').map(str::trim).filter(|p| !p.is_empty()).collect();
+    if parts.len() < 2 {
+        return Err("menu needs a path such as File > Save".into());
+    }
+    let mut args = vec![app];
+    args.extend(parts.iter().copied());
+    applescript(UI_MENU_SCRIPT, &args)?;
+    Ok(json!({ "ok": true, "menu": menu }))
+}
+
+fn ui_tool(args: &Value) -> Result<Value, String> {
+    let app = text_arg(args, "app");
+    if app.is_empty() {
+        return Err("app is required (take it from computer_windows)".into());
+    }
+    let title = text_arg(args, "title");
+    match text_arg(args, "action") {
+        "read" => ui_read(app, title, args.get("depth").and_then(Value::as_i64).unwrap_or(6).clamp(1, 10)),
+        "press" => ui_act(app, title, text_arg(args, "id"), "press", ""),
+        "set_value" => ui_act(app, title, text_arg(args, "id"), "set_value", text_arg(args, "text")),
+        "focus" => ui_act(app, title, text_arg(args, "id"), "focus", ""),
+        "menu" => ui_menu(app, text_arg(args, "menu")),
+        other => Err(format!("unknown action {other}; use read, press, set_value, focus or menu")),
+    }
+}
+
 fn screens_tool() -> Result<Value, String> {
     let raw = if cfg!(target_os = "macos") {
         let mut cmd = Command::new("osascript");
@@ -261,6 +504,7 @@ pub fn run(tool: &str, args: &Value) -> Value {
         "computer_windows" => windows_tool(args),
         "computer_screens" => screens_tool(),
         "computer_clipboard" => clipboard_tool(args),
+        "computer_ui" => ui_tool(args),
         other => Err(format!("{other} is not supported on this computer")),
     };
     let mut result = out.unwrap_or_else(|err| json!({ "ok": false, "error": err }));
@@ -280,6 +524,23 @@ mod tests {
         assert_eq!(rows[0]["width"], 800);
         assert_eq!(rows[0]["front"], true);
         assert_eq!(rows[1]["front"], false);
+    }
+
+    #[test]
+    fn control_lines_become_rows() {
+        let rows = parse_controls("1.2\tAXButton\tSave\t\t10\t20\t60\t24\nbad line");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["id"], "1.2");
+        assert_eq!(rows[0]["name"], "Save");
+        assert_eq!(rows[0]["height"], 24);
+    }
+
+    #[test]
+    fn control_ids_are_only_dotted_numbers() {
+        assert!(valid_id("1.2.10"));
+        for bad in ["", "1..2", "1.a", "1; rm -rf", ".1"] {
+            assert!(!valid_id(bad), "{bad}");
+        }
     }
 
     #[test]
