@@ -91,3 +91,13 @@ async def test_a_stalled_model_call_is_retried_then_gives_up(monkeypatch):
 
     with pytest.raises(TimeoutError):
         await trim.call_with_limit(always_stuck, "req")
+
+
+def test_older_pages_keep_a_text_excerpt():
+    import json
+
+    from app.agent import context_trim as trim
+
+    note = trim._brief(json.dumps({"ok": True, "url": "https://x.example/2", "text": "Quote by Albert Einstein " * 200, "tree": "- e1 " * 500}))
+    assert "Albert Einstein" in note
+    assert len(note) < trim.OLD_PAGE_TEXT_CHARS + 400
