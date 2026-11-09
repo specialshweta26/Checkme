@@ -374,9 +374,10 @@ async def run_computer(ctx, tool_name: str, args: dict | None = None, *, force_c
 
     with_tab = await browser_tabs.tab_for(ctx, tool_name, args, where, plain)
     result = await _run_computer(ctx, tool_name, with_tab if with_tab is not None else args, force_cloud=force_cloud)
-    if with_tab is not None and browser_tabs.tab_gone(result):
-        # The tab was closed: get this chat a new one and try once more.
+    if browser_tabs.tab_gone(result) and tool_name in browser_tabs.PAGE_TOOLS:
+        # The tab was closed, or the browser restarted: use this chat's tab, or a new one, and try once more.
         await browser_tabs.forget(ctx, where)
+        args = {k: v for k, v in (args or {}).items() if k != "tab"}
         with_tab = await browser_tabs.tab_for(ctx, tool_name, args, where, plain)
         result = await _run_computer(ctx, tool_name, with_tab if with_tab is not None else args, force_cloud=force_cloud)
     sent = with_tab if with_tab is not None else args

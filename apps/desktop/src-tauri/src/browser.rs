@@ -44,7 +44,7 @@ const PAGE_SIG_JS: &str = r#"(() => {
   const count = (sel) => document.querySelectorAll(sel).length;
   return [
     location.href, document.title, document.getElementsByTagName('*').length,
-    ((document.body && document.body.innerText) || '').length,
+    (() => { const t = ((document.body && document.body.innerText) || '').slice(0, 50000); let h = t.length; for (let i = 0; i < t.length; i += 1) h = (h * 31 + t.charCodeAt(i)) | 0; return h; })(),
     field ? (a.tagName + '#' + (a.id || a.getAttribute('name') || '')) : '',
     count('[role="dialog"], [role="menu"], [role="listbox"], [aria-expanded="true"], [open]'),
     count('input:checked, option:checked, [aria-selected="true"], [aria-pressed="true"], [aria-checked="true"]'),
