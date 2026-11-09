@@ -97,7 +97,7 @@ What Lumio can do today against the target list, and the order to build the rest
 
 Ten harder tasks run by the real agent on the cloud browser, on public sites with no login. Correct answers were worked out separately first. Every fix is generic: nothing in the code names one of these sites. These are practice sites, so this shows the agent can handle these kinds of problem, not that it will work on every B2B system.
 
-Each result is from a single run, not all on the same build: T1 and T9 on the latest, the rest one or two builds earlier. T4 passed, failed part of the task, then passed, so it isn't reliably stable. T10's figure is from the latest build.
+T1 to T9 are each from a single run, not all on the same build. T4 passed, failed part of the task, then passed, so it isn't reliably stable. T10 was rerun many times after the counting work below.
 
 | Test | Skills | Result | Time |
 |---|---|---|---|
@@ -110,9 +110,47 @@ Each result is from a single run, not all on the same build: T1 and T9 on the la
 | T7 Drag, hover, right-click | Drag and drop, hover content, context menu pop-up | Pass | 62 s |
 | T8 Upload and download | File upload form, file download | Pass | 56 s |
 | T9 Shop flow, stop before paying | Cart edits, native pop-ups, stopping before payment | **Partial:** cart and $1,890 total correct, stopped before payment, but pop-up messages not captured | 144 s |
-| T10 Count across every page | Script-loaded pages, pagination, counting | **Fail:** 10 pages and 100 quotes correct, but counted 6 Einstein quotes, not 10, and reported no failures | 101 s |
+| T10 Count across every page | Script-loaded pages, pagination, counting | Pass: 10 pages, 100 quotes, 10 by Einstein, in the last 5 runs. Earlier it counted 6 Einstein quotes, not 10 | 32–78 s |
 
-**7 pass, 2 partial, 1 fail.**
+**8 pass, 2 partial.**
+
+### Counting across pages
+
+A model adding things up from memory across pages can be confidently wrong. Now code collects the pages (`browser_gather`) and does the counting and adding (`gathered_query`), with a figure for each page. If the agent pages or scrolls by hand towards a count, it's stopped and sent to gather. Three more tests check it, on public sites with known answers:
+
+| Test | Task | Truth |
+|---|---|---|
+| T10 | 10 script-loaded pages via Next: pages, quotes, quotes by Einstein | 10, 100, 10 |
+| C2 | A 57-row table over 6 pages, no search box: people, people in London, their total salary | 57, 12, $3,339,260 |
+| C3 | First 5 pages of a shop catalogue: books and total price | 100, £3,456.07 |
+| C4 | Infinite scroll: load everything, then count quotes and Einstein's | 100, 10 |
+
+Results on the final build (#197), cloud browser:
+
+| Test | Runs | Right | Time |
+|---|---|---|---|
+| T10 | 5 | 5 | 32–78 s |
+| C2 | 5 | 5 | 34–76 s |
+| C3 | 5 | 5 | 26–63 s |
+| C4 | 4 | 4 | 66–75 s |
+
+The T10, C2 and C3 runs include two builds before #197, which changed only scrolling. C4 counts only runs after #197.
+
+What went wrong along the way, all fixed generically:
+
+| Problem | Fix |
+|---|---|
+| Counting from the model's memory gave 6 Einstein quotes for 10 | Code collects and counts |
+| Long growing pages were stitched wrongly (225 quotes for 100) | Pages are joined where several lines overlap, or marked incomplete |
+| Gather started from page 2 after an earlier click | It goes back to the first page |
+| A label without its arrow ("Next" for "Next →") found nothing, so one page passed for all | Names ignore marks, and fall back to the usual ones |
+| A filter like "by" also matched quotes containing the word (106 for 100) | Gather reports how lines start, the query can match the start of a line, and a mixed match warns |
+| Scrolling by hand wasn't stopped, so 30 or 50 of 100 were counted | Scrolling for a count goes to gather. A second fix was needed: scrolling counts as passive, and the guard skipped passive actions |
+| Gather stopped early on a page that pauses between loads | It waits longer, up to about 12 s, and moves up and down between tries |
+| The cloud browser could stay broken after its page or browser closed, for about 10 minutes in one test pass | It checks the page before each command, drops dead or crashed tabs, and starts again if needed |
+| Each browser step re-sent recent downloads, saving another copy in Downloads and costing about 5 s a step | Each download is handled once |
+
+Limits: each line of page text is one record, so a record shown over several lines is counted by one of its lines (gather lists how lines start, to pick one). Up to 200 pages. Not yet run on the desktop browser or on a site that needs a login. Two runs returned an empty reply, with no error in the logs, so that cause is still unknown.
 
 ### Problems found and fixed
 
@@ -130,11 +168,11 @@ Each result is from a single run, not all on the same build: T1 and T9 on the la
 
 ### Still open
 
-- **Counting across many pages:** the agent can be confidently wrong (T10). A long task needs a way to collect and add up data in code rather than from the model's memory.
 - **Shadow DOM:** it can report a hidden default instead of the text on screen (T5).
 - **Pop-up messages:** a pop-up that appears after a delay can be missed (T9).
 - **Speed on frame-heavy pages:** T5 took over 5 minutes.
-- **Restart cost:** the first browser use after an update to the cloud browser takes about 4.6 minutes.
+- **Restart cost:** the first browser use after an update to the cloud browser took about 4.6 minutes earlier in testing. In the latest updates it took seconds, so this may depend on the cloud computer.
+- **Empty replies:** two of about 40 test requests came back with no reply text, and the logs showed no error.
 - **Tabs:** chat tabs aren't closed, so they build up (10 to 16 seen).
 - **Not covered:** logins, the desktop browser for this suite, and real business systems.
 
@@ -148,7 +186,7 @@ Each result is from a single run, not all on the same build: T1 and T9 on the la
 | Navigation tracking | Each result says if the page and address changed |
 | Wait strategy | Waits for loaders and page changes; some fixed waits remain in rarely used paths |
 | Retry | Deliberately limited, because automatic retries caused double actions |
-| Verification after each action | Results carry the evidence, but the model decides what to do with it. T10 shows it can still be wrong |
+| Verification after each action | Results carry the evidence, but the model decides what to do with it. Counts and totals across pages are now done in code |
 | Evidence capture | Screenshots on request, and up to 5 on failed steps per turn |
 
 ## Build order
