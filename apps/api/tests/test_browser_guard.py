@@ -297,3 +297,25 @@ def test_gather_itself_may_page():
     for n in range(4):
         assert guard.before(ctx, "browser_act", click) is None
         guard.after(ctx, "browser_act", click, {**_listing(), "text": f"page {n}"})
+
+
+def test_scrolling_by_hand_for_a_total_is_sent_to_gather():
+    ctx = SimpleNamespace(query="The page loads more as you scroll. Load all of them. Report how many quotes there are in total.")
+    guard.after(ctx, "browser_snapshot", {}, _page())
+    three = {"actions": [{"kind": "scroll", "dy": 3000}, {"kind": "wait", "ms": 1000}] * 3}
+    refused = guard.before(ctx, "browser_act", three)
+    assert refused["use_gather"] is True and "scrolling" in refused["error"]
+
+
+def test_a_little_scrolling_for_a_total_is_allowed():
+    ctx = SimpleNamespace(query="How many quotes are there in total?")
+    guard.after(ctx, "browser_snapshot", {}, _page())
+    assert guard.before(ctx, "browser_act", {"actions": [{"kind": "scroll", "dy": 800}]}) is None
+
+
+def test_scrolling_without_a_figure_stays_passive():
+    ctx = SimpleNamespace(query="Scroll to the footer and open Contact")
+    guard.after(ctx, "browser_snapshot", {}, _page())
+    for _ in range(5):
+        assert guard.before(ctx, "browser_act", {"actions": [{"kind": "scroll", "dy": 3000}]}) is None
+
