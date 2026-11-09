@@ -140,3 +140,29 @@ async def test_a_slow_page_gets_more_chances(monkeypatch):
     out = await gather.gather(SimpleNamespace(), "next")
     assert out["pages"] == 2
     assert calls[1]["actions"][0]["kind"] == "wait"  # waits rather than clicking Next twice
+
+
+async def test_gathering_goes_back_to_the_first_page_first(monkeypatch):
+    def page(n, last):
+        rows = []
+        if n > 1:
+            rows.append({"ref": "p", "role": "link", "name": "Previous"})
+        if not last:
+            rows.append({"ref": "n", "role": "link", "name": "Next"})
+        return {"ok": True, "url": f"u{n}", "text": f"row {n}", "elements": rows}
+
+    state = {"at": 2}
+
+    async def fake(ctx, tool, args=None, **k):
+        if tool == "browser_snapshot":
+            return page(state["at"], state["at"] == 3)
+        ref = args["actions"][0]["ref"]
+        state["at"] += 1 if ref == "n" else -1
+        return page(state["at"], state["at"] == 3)
+
+    monkeypatch.setattr(computer_harness, "run_computer", fake)
+    ctx = SimpleNamespace()
+    out = await gather.gather(ctx, "next")
+    assert out["went_back_pages"] == 1 and out["pages"] == 3
+    assert gather.query(ctx, out["dataset"], "count", ["row"])["per_page"] == [1, 1, 1]
+    assert ctx._gathering is False

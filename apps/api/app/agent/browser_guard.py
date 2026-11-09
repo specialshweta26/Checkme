@@ -23,6 +23,7 @@ NO_CHANGE_STOP = 10  # ... stop
 PAGE_READS = {"browser_navigate", "browser_snapshot", "browse_open"}
 NAV_TOOLS = {"browser_navigate", "browse_open"}
 SAME_PAGE_OPENS = 3
+NEXT_CLICKS_ALLOWED = 2
 MAX_FACT_PAGES = 5
 
 
@@ -129,6 +130,20 @@ def final_step_done(ctx: Any) -> bool:
     return bool(isinstance(state, dict) and state.get("once"))
 
 
+_FIGURE_WORDS = re.compile(r"\b(how many|number of|count|total|sum|average|cheapest|most expensive|highest|lowest)\b", re.I)
+
+
+def _wants_a_figure(ctx: Any) -> bool:
+    return bool(_FIGURE_WORDS.search(str(getattr(ctx, "query", "") or "")))
+
+
+def _next_click(actions: list, elements: list) -> bool:
+    from app.agent.gather import _NEXT_WORDS, _clean_name
+
+    names = {str(e.get("ref")): _clean_name(e.get("name")) for e in elements if isinstance(e, dict)}
+    return any(isinstance(a, dict) and str(a.get("kind") or "").lower() == "click" and names.get(str(a.get("ref") or "")) in _NEXT_WORDS for a in actions)
+
+
 def _once_labels(actions: list, elements: list) -> list[str]:
     """Run-once clicks, each with what it belongs to: Delete on one row isn't a repeat of Delete on another."""
     from app.agent.fast_browser import once_labels
@@ -212,6 +227,18 @@ def before(ctx: Any, tool: str, args: dict | None) -> dict | None:
         return None
     if state["stuck"]:
         return _stop_reply(state)
+    if not getattr(ctx, "_gathering", False) and _wants_a_figure(ctx) and _next_click(_actions(args), state["elements"]):
+        state["next_clicks"] = state.get("next_clicks", 0) + 1
+        if state["next_clicks"] >= NEXT_CLICKS_ALLOWED:
+            log.info("browser.guard sent a counting task to browser_gather")
+            return {
+                "ok": False,
+                "use_gather": True,
+                "error": (
+                    "Not run: this request needs a count or total, and paging by hand gets those wrong. Call browser_gather now (it "
+                    "goes back to the first page by itself), then gathered_query, and report its figures."
+                ),
+            }
     again = next((label for label in _once_labels(_actions(args), state["elements"]) if label.casefold() in state["once"]), "")
     if again:
         log.warning("browser.guard refused a second click on a run-once control")

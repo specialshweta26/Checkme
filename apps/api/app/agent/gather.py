@@ -23,6 +23,7 @@ SAME_PAGE_TRIES = 2
 SCROLL_WAIT_MS = 1500
 MAX_ROUNDS = 300
 _NEXT_WORDS = ("next", "next page", "next »", "next ›", "next →", "next >", "›", "»", ">", "→", "older", "more results")
+_BACK_WORDS = ("previous", "prev", "previous page", "« previous", "‹ previous", "← previous", "← prev", "«", "‹", "←", "newer")
 _MORE_WORDS = ("load more", "show more", "see more", "view more", "more")
 _MONEY = re.compile(r"(?:[$₹€£]|\b(?:rs\.?|inr|usd|eur|gbp)\s?)\s*(-?\d[\d,]*(?:\.\d+)?)", re.I)
 _NUMBER = re.compile(r"-?\d[\d,]*(?:\.\d+)?")
@@ -78,10 +79,34 @@ async def _read(ctx: Any, call: Any) -> dict:
     return page if isinstance(page, dict) else {"ok": False, "error": str(page)[:200]}
 
 
-async def gather(ctx: Any, how: str = "auto", next_label: str = "", max_pages: int = 50) -> dict:
-    """Walk the listing from the current page and keep each page's text. how: next, load_more, scroll or auto."""
+async def _rewind(ctx: Any, call: Any, page: dict) -> tuple[dict, int]:
+    """Back to the first page, so an earlier click can't leave the first pages out of a count."""
+    moved = 0
+    for _ in range(MAX_PAGES):
+        back = find_control(page.get("elements") or [], _BACK_WORDS)
+        if back is None:
+            break
+        after = await call(ctx, "browser_act", {"actions": [{"kind": "click", "ref": back.get("ref")}]})
+        if not isinstance(after, dict) or after.get("ok") is False or str(after.get("text") or "") == str(page.get("text") or ""):
+            break
+        page = after
+        moved += 1
+    return page, moved
+
+
+async def gather(ctx: Any, how: str = "auto", next_label: str = "", max_pages: int = 50, from_start: bool = True) -> dict:
+    """Walk the listing and keep each page's text, from its first page unless from_start is False. how: next, load_more,
+    scroll or auto."""
     from app.agent.computer_harness import run_computer as call
 
+    ctx._gathering = True
+    try:
+        return await _gather(ctx, call, how, next_label, max_pages, from_start)
+    finally:
+        ctx._gathering = False
+
+
+async def _gather(ctx: Any, call: Any, how: str, next_label: str, max_pages: int, from_start: bool) -> dict:
     limit = max(1, min(int(max_pages or 50), MAX_PAGES))
     rounds = 0
     how = str(how or "auto").lower()
@@ -93,6 +118,9 @@ async def gather(ctx: Any, how: str = "auto", next_label: str = "", max_pages: i
     page = await _read(ctx, call)
     if page.get("ok") is False:
         return {"ok": False, "error": str(page.get("error") or "couldn't read the page")[:300]}
+    rewound = 0
+    if from_start and how in {"auto", "next"}:
+        page, rewound = await _rewind(ctx, call, page)
     used = how
     grown: list[str] = []
     while True:
@@ -170,6 +198,8 @@ async def gather(ctx: Any, how: str = "auto", next_label: str = "", max_pages: i
         "stopped": stopped,
         "note": "Use gathered_query on this dataset for every count, sum and list, and report its figures. Don't count by eye.",
     }
+    if rewound:
+        out["went_back_pages"] = rewound
     if cut:
         out["warning"] = f"Pages {cut} were too long to read in full, so figures may be low. Say so in your answer."
     return out
