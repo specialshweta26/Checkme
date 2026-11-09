@@ -122,7 +122,8 @@ async def _new_downloads(ctx, items: list) -> list[dict]:
     seen = getattr(ctx, "_seen_downloads", None)
     if seen is None:
         seen = set()
-        ctx._seen_downloads = seen
+        if ctx is not None:
+            ctx._seen_downloads = seen
     user_id = getattr(getattr(ctx, "user", None), "id", None)
     fresh = []
     for item in items:
