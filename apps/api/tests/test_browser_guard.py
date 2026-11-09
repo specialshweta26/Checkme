@@ -168,3 +168,9 @@ def test_ordinary_buttons_can_repeat():
     assert _act(ctx, add, {**_checkout_page(), "text": "one"})["ok"] is True
     assert _act(ctx, add, {**_checkout_page(), "text": "two"})["ok"] is True
     assert not guard.final_step_done(ctx)
+
+
+def test_step_log_names_controls_but_never_typed_text():
+    elements = [{"ref": "e5", "name": "Add to cart", "near": "Onesie"}, {"ref": "e6", "name": "hunter2-field"}]
+    line = guard._targets([{"kind": "click", "ref": "e5"}, {"kind": "fill", "ref": "e6", "text": "hunter2"}], elements)
+    assert "Add to cart (Onesie)" in line and "hunter2" not in line
