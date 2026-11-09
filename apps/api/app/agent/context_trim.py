@@ -29,6 +29,7 @@ KEEP_KEYS = ("ok", "url", "title", "error", "warnings", "result", "done", "need_
              "via", "completed", "deep_link_failed", "fallback_url", "bot_wall", "status", "took_ms")  # fmt: skip
 OLD_RESULT_CHARS = 4000
 RECENT_MESSAGES = 4
+OLD_PAGE_TEXT_CHARS = 1500
 MODEL_CALL_LIMIT_S = 150
 MODEL_CALL_TRIES = 2
 
@@ -51,6 +52,10 @@ def _brief(content: str) -> str:
         out["downloads"] = [d.get("filename") for d in downloads if isinstance(d, dict)][:5]
     if isinstance(out.get("result"), str):
         out["result"] = out["result"][:600]
+    # A task that adds things up across pages still needs what the earlier pages said.
+    text = data.get("text") or page.get("text")
+    if isinstance(text, str) and text.strip():
+        out["text_excerpt"] = text[:OLD_PAGE_TEXT_CHARS]
     return "[older page result, trimmed to save context; the latest page is below] " + json.dumps(out, ensure_ascii=False, default=str)[:900]
 
 
