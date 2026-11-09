@@ -15,7 +15,7 @@ from pathlib import Path
 
 HOST = "127.0.0.1"
 PORT = 18765
-VERSION = "32"
+VERSION = "33"
 _HOME = Path(os.environ.get("CHECKME_BROWSER_HOME") or "/tmp")
 SHOT = "/tmp/checkme-browser.png"
 PROFILE = str(_HOME / "profile")
@@ -486,7 +486,7 @@ _SNAPSHOT_JS = """(arg) => {
   // Calendar days too ([role=gridcell], dated cells, focusable labelled cells): without them a date can't be clicked by ref.
   const BASE = 'a, button, input, textarea, select, option, label, summary, [role="button"], [role="link"], [role="textbox"], [role="searchbox"], [role="checkbox"], [role="radio"], [role="combobox"], [role="option"], [role="listbox"], [role="tab"], [role="menuitem"], [role="menuitemradio"], [role="treeitem"], [role="row"], [contenteditable="true"], [role="gridcell"], [data-date], td[title], [aria-label][tabindex], [draggable="true"]';
   const SUGGEST = '[role="option"], [role="menuitem"], [role="menuitemradio"], [role="treeitem"], [role="listbox"] li, [role="listbox"] button, [role="menu"] li, [role="menu"] button, [role="dialog"] li, [role="listbox"] [tabindex]';
-  const tags = {A: 'link', BUTTON: 'button', INPUT: 'textbox', TEXTAREA: 'textbox', SELECT: 'combobox', OPTION: 'option', LABEL: 'label', SUMMARY: 'button', LI: 'option'};
+  const tags = {A: 'link', BUTTON: 'button', INPUT: 'textbox', TEXTAREA: 'textbox', SELECT: 'combobox', OPTION: 'option', LABEL: 'label', SUMMARY: 'button', LI: 'option', TH: 'columnheader'};
   const inputRole = {submit: 'button', button: 'button', reset: 'button', image: 'button', checkbox: 'checkbox', radio: 'radio', search: 'searchbox', range: 'slider', file: 'file'};
   const visible = (el) => {
     const r = el.getBoundingClientRect();
@@ -534,7 +534,24 @@ _SNAPSHOT_JS = """(arg) => {
     if (!overlayRoot(el) || !visible(el)) continue;
     for (const child of collect(el, BASE + ', li, button, [tabindex]:not([tabindex="-1"])')) add(child, suggest);
   }
+  const INTERACTIVE = 'a, button, input, textarea, select, option, label, summary, [role="button"], [role="link"], [role="checkbox"], [role="radio"], [role="tab"], [role="menuitem"], [role="option"], [contenteditable="true"]';
+  // Clickable things that aren't links or buttons: table headers that sort, and anything the page styles as clickable.
+  const looksClickable = (root) => {
+    const out = [];
+    const nodes = Array.from(root.querySelectorAll('th, [onclick], div, span, li, td, img, svg')).slice(0, 2500);
+    for (const el of nodes) {
+      if (el.closest(INTERACTIVE)) continue;
+      if (el.tagName === 'TH' || el.hasAttribute('onclick')) { out.push(el); continue; }
+      const st = window.getComputedStyle(el);
+      if (st.cursor !== 'pointer') continue;
+      const up = el.parentElement;
+      if (up && window.getComputedStyle(up).cursor === 'pointer') continue;
+      out.push(el);
+    }
+    return out.slice(0, 80);
+  };
   for (const el of collect(document, BASE)) add(el, rest);
+  for (const el of looksClickable(document)) add(el, rest);
   // Page order keeps refs the same after a scroll; on-screen first only matters when the list has to be cut.
   const ordered = suggest.length + rest.length <= limit ? suggest.concat(rest) : suggest.filter(inView).concat(suggest.filter((el) => !inView(el)))
     .concat(rest.filter(inView)).concat(rest.filter((el) => !inView(el)));
@@ -543,6 +560,19 @@ _SNAPSHOT_JS = """(arg) => {
   const hits = (el) => find.reduce((n, w) => n + (hay(el).includes(w) ? 1 : 0), 0);
   const ranked = find.length ? ordered.map((el, i) => [el, hits(el), i]).sort((a, b) => (b[1] - a[1]) || (a[2] - b[2])).map((row) => row[0]) : ordered;
   try { window.__checkmeSnapTotal = ordered.length; } catch (e) {}
+  // A field with no name of its own: its label through aria, or the short text of the box around it ("Select State").
+  const contextName = (el) => {
+    const by = (el.getAttribute('aria-labelledby') || '').split(/\\s+/).map((id) => { const n = id && el.ownerDocument.getElementById(id); return n ? n.textContent : ''; }).join(' ').trim();
+    if (by) return by.slice(0, 80);
+    let box = el.parentElement;
+    for (let depth = 0; box && depth < 4; depth += 1, box = box.parentElement) {
+      const lines = String(box.innerText || '').split('\\n').map((l) => l.trim()).filter(Boolean);
+      // Text beside another control belongs to that control, not to this field.
+      if (lines.length > 2 || box.querySelector('button, a[href], select, [role="button"]')) return '';
+      if (lines.length) return lines.join(' ').slice(0, 80);
+    }
+    return '';
+  };
   // Identical controls ("Add to cart" on every product) say what they belong to.
   const nearText = (el, name) => {
     let best = '';
@@ -551,7 +581,7 @@ _SNAPSHOT_JS = """(arg) => {
       const lines = String(node.innerText || '').split('\\n').map((l) => l.trim()).filter(Boolean);
       if (lines.filter((l) => l === name).length > 1) break;
       const others = lines.filter((l) => l !== name && l.length > 2);
-      if (others.length) best = others[0].slice(0, 50);
+      if (others.length) best = others[0].replace(/\\s+/g, ' ').slice(0, 50);
       if (others.length >= 2) break;
     }
     return best;
@@ -559,6 +589,7 @@ _SNAPSHOT_JS = """(arg) => {
   const addNear = (rows, elOf) => {
     const counts = {};
     rows.forEach((n) => { if (n.name) counts[n.name] = (counts[n.name] || 0) + 1; });
+    rows.forEach((n, i) => { if (!n.name && !n.options) { n.name = contextName(elOf(i)); } });
     let budget = 60;
     rows.forEach((n, i) => {
       if (counts[n.name] > 1 && budget > 0) {
@@ -887,7 +918,7 @@ _CLICKY = {"click", "dblclick", "double_click", "doubleclick", "press", "key", "
 
 # A visible loading indicator: spinners, progress bars, aria-busy regions. Finished progress bars don't count.
 _BUSY_JS = """() => {
-  const sel = '[aria-busy="true"], [role="progressbar"], .spinner, .loading, .loader, .spinner-border, .MuiCircularProgress-root, .ant-spin-spinning, [class*="spinner"], [data-loading="true"]';
+  const sel = '[aria-busy="true"], [role="progressbar"], .spinner, .loading, .loader, [id*="loading" i], [class*="loading" i], .spinner-border, .MuiCircularProgress-root, .ant-spin-spinning, [class*="spinner"], [data-loading="true"]';
   for (const el of document.querySelectorAll(sel)) {
     const r = el.getBoundingClientRect();
     if (r.width < 4 || r.height < 4 || r.bottom < 0 || r.top > window.innerHeight) continue;

@@ -323,3 +323,13 @@ def test_tree_lines_show_a_controls_state():
     assert "[checked]" in tree_line({"ref": "e2", "role": "checkbox", "name": "b", "checked": True})
     line = tree_line({"ref": "e3", "role": "textbox", "name": "City", "value": "Pune", "disabled": True})
     assert "[disabled]" in line and "[value: Pune]" in line
+
+
+def test_finish_check_spots_a_reply_that_only_promises_work():
+    from app.agent import finish_check as fc
+
+    ctx = SimpleNamespace(teammate_depth=0, pending=[], question=None, used_tools=[])
+    assert fc.only_promised(ctx, "I’ve started checking the three pages. I’ll report the text I can read from each.")
+    assert not fc.only_promised(ctx, "Paris is the capital of France.")
+    assert not fc.only_promised(ctx, "I'll check that. Which account do you mean?")
+    assert not fc.only_promised(SimpleNamespace(teammate_depth=0, pending=[], question=None, used_tools=["browser_act"]), "I'll report back.")

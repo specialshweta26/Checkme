@@ -1,6 +1,6 @@
 (function (start, limit, find) {
   const BASE = 'a, button, input, textarea, select, option, label, summary, [role="button"], [role="link"], [role="textbox"], [role="searchbox"], [role="checkbox"], [role="radio"], [role="combobox"], [role="option"], [role="listbox"], [role="tab"], [role="menuitem"], [contenteditable="true"], [role="gridcell"], [data-date], td[title], [aria-label][tabindex], [draggable="true"]';
-  const tags = {A: 'link', BUTTON: 'button', INPUT: 'textbox', TEXTAREA: 'textbox', SELECT: 'combobox', OPTION: 'option', LABEL: 'label', SUMMARY: 'button', LI: 'option'};
+  const tags = {A: 'link', BUTTON: 'button', INPUT: 'textbox', TEXTAREA: 'textbox', SELECT: 'combobox', OPTION: 'option', LABEL: 'label', SUMMARY: 'button', LI: 'option', TH: 'columnheader'};
   const inputRole = {submit: 'button', button: 'button', reset: 'button', checkbox: 'checkbox', radio: 'radio', search: 'searchbox', file: 'file'};
   // Walks the page, open shadow roots and same-origin iframes. Other-origin frames are read separately (browser.rs).
   const roots = [];
@@ -38,11 +38,27 @@
     const auto = (el.getAttribute('autocomplete') || '').toLowerCase();
     return type === 'password' || auto.startsWith('cc-') || auto === 'one-time-code';
   };
+  const INTERACTIVE = 'a, button, input, textarea, select, option, label, summary, [role="button"], [role="link"], [role="checkbox"], [role="radio"], [role="tab"], [role="menuitem"], [role="option"], [contenteditable="true"]';
+  // Clickable things that aren't links or buttons: table headers that sort, and anything the page styles as clickable.
+  const looksClickable = (root) => {
+    const out = [];
+    const nodes = Array.from(root.querySelectorAll('th, [onclick], div, span, li, td, img, svg')).slice(0, 2500);
+    for (const el of nodes) {
+      if (el.closest(INTERACTIVE)) continue;
+      if (el.tagName === 'TH' || el.hasAttribute('onclick')) { out.push(el); continue; }
+      const st = window.getComputedStyle(el);
+      if (st.cursor !== 'pointer') continue;
+      const up = el.parentElement;
+      if (up && window.getComputedStyle(up).cursor === 'pointer') continue;
+      out.push(el);
+    }
+    return out.slice(0, 80);
+  };
   const seen = new Set();
   const ordered = [];
   for (const { root, ox, oy } of roots) {
     root.querySelectorAll('[data-checkme-ref]').forEach((el) => el.removeAttribute('data-checkme-ref'));
-    for (const el of root.querySelectorAll(BASE)) {
+    for (const el of [...root.querySelectorAll(BASE), ...looksClickable(root)]) {
       if (!el || seen.has(el) || !visible(el)) continue;
       seen.add(el);
       ordered.push({ el, ox, oy });
@@ -82,6 +98,19 @@
     ? byView.map((item, i) => [item, words.reduce((n, w) => n + (hay(item.el).includes(w) ? 1 : 0), 0), i])
         .sort((a, b) => (b[1] - a[1]) || (a[2] - b[2])).map((row) => row[0])
     : byView;
+  // A field with no name of its own: its label through aria, or the short text of the box around it ("Select State").
+  const contextName = (el) => {
+    const by = (el.getAttribute('aria-labelledby') || '').split(/\s+/).map((id) => { const n = id && el.ownerDocument.getElementById(id); return n ? n.textContent : ''; }).join(' ').trim();
+    if (by) return by.slice(0, 80);
+    let box = el.parentElement;
+    for (let depth = 0; box && depth < 4; depth += 1, box = box.parentElement) {
+      const lines = String(box.innerText || '').split('\n').map((l) => l.trim()).filter(Boolean);
+      // Text beside another control belongs to that control, not to this field.
+      if (lines.length > 2 || box.querySelector('button, a[href], select, [role="button"]')) return '';
+      if (lines.length) return lines.join(' ').slice(0, 80);
+    }
+    return '';
+  };
   // Identical controls ("Add to cart" on every product) say what they belong to.
   const nearText = (el, name) => {
     let best = '';
@@ -90,7 +119,7 @@
       const lines = String(node.innerText || '').split('\n').map((l) => l.trim()).filter(Boolean);
       if (lines.filter((l) => l === name).length > 1) break;
       const others = lines.filter((l) => l !== name && l.length > 2);
-      if (others.length) best = others[0].slice(0, 50);
+      if (others.length) best = others[0].replace(/\s+/g, ' ').slice(0, 50);
       if (others.length >= 2) break;
     }
     return best;
@@ -98,6 +127,7 @@
   const addNear = (rows, elOf) => {
     const counts = {};
     rows.forEach((n) => { if (n.name) counts[n.name] = (counts[n.name] || 0) + 1; });
+    rows.forEach((n, i) => { if (!n.name && !n.options) { n.name = contextName(elOf(i)); } });
     let budget = 60;
     rows.forEach((n, i) => {
       if (counts[n.name] > 1 && budget > 0) {
