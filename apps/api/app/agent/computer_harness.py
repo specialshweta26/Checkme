@@ -379,7 +379,7 @@ async def run_computer(ctx, tool_name: str, args: dict | None = None, *, force_c
         await browser_tabs.forget(ctx, where)
         with_tab = await browser_tabs.tab_for(ctx, tool_name, args, where, plain)
         result = await _run_computer(ctx, tool_name, with_tab if with_tab is not None else args, force_cloud=force_cloud)
-    return browser_guard.after(ctx, tool_name, args, result)
+    return browser_guard.after(ctx, tool_name, with_tab if with_tab is not None else args, result)
 
 
 async def _run_computer(ctx, tool_name: str, args: dict | None = None, *, force_cloud: bool = False) -> Any:

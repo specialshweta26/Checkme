@@ -213,9 +213,11 @@ async def take_job(user_id, wait_s: int = 20) -> dict | None:
         return None
     raw = hit[1] if isinstance(hit, (list, tuple)) else hit
     try:
-        return json.loads(raw.decode() if isinstance(raw, (bytes, bytearray)) else raw)
+        job = json.loads(raw.decode() if isinstance(raw, (bytes, bytearray)) else raw)
     except Exception:  # noqa: BLE001
         return None
+    log.info("desktop.job picked tool=%s waited_ms=%d", job.get("tool"), int((time.time() - float(job.get("ts") or time.time())) * 1000))
+    return job
 
 
 async def put_result(job_id: str, result: dict) -> None:
@@ -252,6 +254,7 @@ async def call_local(user_id, tool: str, args: dict | None = None) -> dict:
     except (TypeError, ValueError):
         pass
     timeout = max(10, min(timeout, 300))
+    sent = time.monotonic()
     job_id = await enqueue(user_id, tool, args or {})
     try:
         out = await wait_result(job_id, timeout + 15)
@@ -261,6 +264,8 @@ async def call_local(user_id, tool: str, args: dict | None = None) -> dict:
         raise LocalOffline(str(vis_exc)[:200]) from vis_exc
     if not isinstance(out, dict):
         return {"ok": False, "error": "invalid desktop result"}
+    log.info("desktop.job done tool=%s total_ms=%d screenshot_chars=%s", tool, int((time.monotonic() - sent) * 1000),
+             len(out.get("screenshot_b64") or ""))  # fmt: skip
     out.setdefault("ran_on", "local_computer")
     if tool == "browse_screenshot":
         # Kept apart from the live panel's frame, which can be the whole desktop rather than this page.

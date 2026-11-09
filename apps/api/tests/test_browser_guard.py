@@ -174,3 +174,21 @@ def test_step_log_names_controls_but_never_typed_text():
     elements = [{"ref": "e5", "name": "Add to cart", "near": "Onesie"}, {"ref": "e6", "name": "hunter2-field"}]
     line = guard._targets([{"kind": "click", "ref": "e5"}, {"kind": "fill", "ref": "e6", "text": "hunter2"}], elements)
     assert "Add to cart (Onesie)" in line and "hunter2" not in line
+
+
+def test_each_page_result_carries_what_the_turn_has_done():
+    ctx = _ctx()
+    guard.after(ctx, "browser_snapshot", {}, _checkout_page())
+    add = {"actions": [{"kind": "click", "ref": "e2"}]}
+    out = _act(ctx, add, {**_checkout_page(), "url": "https://shop.example/two", "text": "Item total: $23.98\nThanks"})
+    assert "e2=Add to cart" in out["so_far"]["steps"][0]
+    assert out["so_far"]["seen_on_pages"]["https://shop.example/two"] == ["Item total: $23.98"]
+    later = guard.after(ctx, "browser_snapshot", {}, {**_checkout_page(), "url": "https://shop.example/three", "text": "Bye"})
+    assert later["so_far"]["seen_on_pages"]["https://shop.example/two"] == ["Item total: $23.98"]
+
+
+def test_a_failed_step_is_not_listed_as_done():
+    ctx = _ctx()
+    guard.after(ctx, "browser_snapshot", {}, _checkout_page())
+    out = _act(ctx, {"actions": [{"kind": "click", "ref": "e2"}]}, {**_checkout_page(), "ok": False, "error": "no"})
+    assert not (out.get("so_far") or {}).get("steps")

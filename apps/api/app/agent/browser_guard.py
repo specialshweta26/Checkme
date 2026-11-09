@@ -20,6 +20,8 @@ PASSIVE_KINDS = {"scroll", "wait", "wait_for", "hover"}  # reading a page legiti
 SAME_ACTION_LIMIT = 2  # identical action, same page, no change: this many tries
 NO_CHANGE_WARN = 5  # different actions in a row that changed nothing: warn
 NO_CHANGE_STOP = 10  # ... stop
+PAGE_READS = {"browser_navigate", "browser_snapshot", "browse_open"}
+MAX_FACT_PAGES = 5
 
 
 def _safe_error(result: dict) -> str:
@@ -39,6 +41,21 @@ def _targets(actions: list, elements: list) -> str:
         near = f" ({str(el.get('near'))[:30]})" if el.get("near") else ""
         out.append(f"{row.get('ref') or ''}={name}{near}")
     return "; ".join(out)[:400]
+
+
+def _carry_progress(state: dict, tool: str, args: dict | None, result: dict, acted_on: list) -> None:
+    """Older page results get trimmed from the model's context, so each new one carries what the turn has done and the
+    amounts it has seen. Without this the agent skipped steps and couldn't report totals it had already read."""
+    from app.agent.fast_browser import note_page_facts
+
+    note_page_facts(state, result, {})
+    if tool in ACT_TOOLS and result.get("ok") is not False:
+        line = _targets(_actions(args), acted_on)
+        if line:
+            state.setdefault("log", []).append(line[:200])
+    seen = dict(list((state.get("seen") or {}).items())[-MAX_FACT_PAGES:])
+    if state.get("log") or seen:
+        result["so_far"] = {"steps": state.get("log", [])[-30:], "seen_on_pages": seen}
 
 
 def normalize(args: dict | None) -> dict | None:
@@ -171,6 +188,8 @@ def after(ctx: Any, tool: str, args: dict | None, result: Any) -> Any:
     acted_on = state["elements"]
     if isinstance(result, dict) and isinstance(result.get("elements"), list):
         state["elements"] = result["elements"]
+    if isinstance(result, dict) and tool in ACT_TOOLS | PAGE_READS:
+        _carry_progress(state, tool, args, result, acted_on)
     if tool not in ACT_TOOLS:
         if page:  # a navigation or a fresh read tells us which page we are on
             if page != state["page"]:
