@@ -91,3 +91,25 @@ def test_a_live_page_is_kept(monkeypatch):
     page = Page()
     monkeypatch.setattr(d, "_browser_page", page)
     assert d._ensure_page() is page
+
+
+def test_dead_tabs_leave_the_list_and_a_live_one_becomes_active(monkeypatch):
+    monkeypatch.setattr(d, "_needs_desktop", lambda page: False)
+    monkeypatch.setattr(d, "drain_browser_events", lambda: None)
+    dead, live = Page(closed=True), Page()
+    monkeypatch.setattr(d, "_tabs", {"t1": live, "t2": dead})
+    monkeypatch.setattr(d, "_active_tab", "t2")
+    monkeypatch.setattr(d, "_browser_page", dead)
+    monkeypatch.setattr(d, "_browser_context", Context([live, dead]))
+    monkeypatch.setattr(d, "_pw", object())
+    assert d._ensure_page() is live
+    assert d._tabs == {"t1": live} and d._active_tab == "t1"
+    tid, page = d._page_for({})
+    assert (tid, page) == ("t1", live)
+
+
+def test_a_crashed_tab_counts_as_gone(monkeypatch):
+    page = Page()
+    monkeypatch.setattr(d, "_crashed", {id(page)})
+    assert not d._page_alive(page)
+

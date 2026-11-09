@@ -16,7 +16,7 @@ from pathlib import Path
 
 HOST = "127.0.0.1"
 PORT = 18765
-VERSION = "39"
+VERSION = "40"
 _HOME = Path(os.environ.get("CHECKME_BROWSER_HOME") or "/tmp")
 SHOT = "/tmp/checkme-browser.png"
 PROFILE = str(_HOME / "profile")
@@ -2465,7 +2465,13 @@ def _browser_version(pw, cfg: dict) -> str:
         return ""
 
 
+_crashed: set = set()
+
+
 def _page_alive(page) -> bool:
+    """Open and not crashed. A crashed tab still says it's open, but every command on it fails."""
+    if id(page) in _crashed:
+        return False
     try:
         return not page.is_closed()
     except Exception:
@@ -2485,12 +2491,33 @@ def _drop_browser() -> None:
     _active_tab = ""
 
 
+def _drop_dead_tabs() -> None:
+    """Tabs whose page has gone without a close event: left listed, a command could still be sent to one."""
+    global _active_tab
+    for tid, page in list(_tabs.items()):
+        if not _page_alive(page):
+            _tabs.pop(tid, None)
+            _tab_refs.pop(id(page), None)
+            _page_watch.pop(id(page), None)
+            if id(page) in _crashed:
+                _crashed.discard(id(page))
+                try:
+                    page.close()
+                except Exception:
+                    pass
+    if _active_tab not in _tabs:
+        _active_tab = ""
+
+
 def _ensure_page():
     global _browser_page, _browser_context, _pw
     # A crashed browser or a closed tab doesn't always send a close event, and without this check every later command
     # would fail with "page has been closed" until the computer restarts.
+    _drop_dead_tabs()
     if _browser_page is not None and not _page_alive(_browser_page):
         _browser_page = None
+    if _browser_page is not None and not _active_tab:
+        _register_tab(_browser_page, activate=True)
     if _browser_page is not None:
         if _needs_desktop(_browser_page):
             _paint_desktop(_browser_page)
@@ -2715,6 +2742,8 @@ def _register_tab(page, activate: bool) -> str:
     global _tab_seq, _active_tab
     for tid, pg in _tabs.items():
         if pg is page:
+            if activate or not _active_tab:
+                _active_tab = tid
             return tid
     _tab_seq += 1
     tid = f"t{_tab_seq}"
@@ -2732,6 +2761,7 @@ def _register_tab(page, activate: bool) -> str:
 
     try:
         page.on("close", _closed)
+        page.on("crash", lambda *_: _crashed.add(id(page)))
     except Exception:
         pass
     if activate or not _active_tab:
