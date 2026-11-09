@@ -10,12 +10,13 @@ import random
 import re
 import threading
 import time
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 HOST = "127.0.0.1"
 PORT = 18765
-VERSION = "37"
+VERSION = "38"
 _HOME = Path(os.environ.get("CHECKME_BROWSER_HOME") or "/tmp")
 SHOT = "/tmp/checkme-browser.png"
 PROFILE = str(_HOME / "profile")
@@ -2103,7 +2104,7 @@ def _unique_download(name: str) -> Path:
 
 
 def remember_download(path: str, filename: str, url: str = "") -> dict:
-    row = {"path": path, "filename": filename, "url": url}
+    row = {"path": path, "filename": filename, "url": url, "id": uuid.uuid4().hex}
     _downloads.append(row)
     return row
 

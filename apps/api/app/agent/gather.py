@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import Counter
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -24,6 +25,9 @@ MIN_OVERLAP = 3
 JOIN_LINES = 12
 SCROLL_WAIT_MS = 1500
 MAX_ROUNDS = 300
+LINE_KINDS = 8
+MIN_KIND_LINES = 3
+MIXED_SHARE = 0.6
 _NEXT_WORDS = ("next", "next page", "next »", "next ›", "next →", "next >", "›", "»", ">", "→", "older", "more results")
 _BACK_WORDS = ("previous", "prev", "previous page", "« previous", "‹ previous", "← previous", "← prev", "«", "‹", "←", "newer")
 _MORE_WORDS = ("load more", "show more", "see more", "view more", "more")
@@ -35,16 +39,27 @@ def _clean_name(raw: Any) -> str:
     return " ".join(str(raw or "").split()).casefold()
 
 
+def _bare_name(raw: Any) -> str:
+    """The name without arrows and other marks, so "Next →" and "Next" are the same control."""
+    return " ".join(re.sub(r"[^\w\s]", " ", _clean_name(raw)).split())
+
+
+def names_match(name: Any, words: tuple[str, ...]) -> bool:
+    bare = _bare_name(name)
+    return _clean_name(name) in words or bool(bare and bare in {_bare_name(w) for w in words})
+
+
 def find_control(elements: list, words: tuple[str, ...], wanted: str = "") -> dict | None:
-    """The enabled control with one of these names, or None. Links and buttons only, so it can't land on a text field."""
-    names = (_clean_name(wanted),) if wanted else words
-    for row in elements or []:
-        if not isinstance(row, dict) or row.get("disabled"):
-            continue
-        if str(row.get("role") or "") in {"textbox", "searchbox", "combobox", "checkbox", "radio"}:
-            continue
-        if _clean_name(row.get("name")) in names:
-            return row
+    """The enabled control with one of these names, or None. Links and buttons only, so it can't land on a text field. A
+    wanted name goes first, and the usual names still count if it isn't on the page."""
+    for names in ((wanted,), words) if wanted else (words,):
+        for row in elements or []:
+            if not isinstance(row, dict) or row.get("disabled"):
+                continue
+            if str(row.get("role") or "") in {"textbox", "searchbox", "combobox", "checkbox", "radio"}:
+                continue
+            if names_match(row.get("name"), names):
+                return row
     return None
 
 
@@ -204,8 +219,15 @@ async def _gather(ctx: Any, call: Any, how: str, next_label: str, max_pages: int
         "lines": sum(len(row["lines"]) for row in kept),
         "how": used,
         "stopped": stopped,
-        "note": "Use gathered_query on this dataset for every count, sum and list, and report its figures. Don't count by eye.",
+        "note": (
+            "Use gathered_query on this dataset for every count, sum and list, and report its figures. Don't count by eye. "
+            "To count records, use starts_with with a line_kinds entry that appears once per record: contains also matches "
+            "words inside other text."
+        ),
     }
+    kinds = _line_kinds(kept)
+    if kinds:
+        out["line_kinds"] = kinds
     if rewound:
         out["went_back_pages"] = rewound
     if cut:
@@ -214,9 +236,38 @@ async def _gather(ctx: Any, call: Any, how: str, next_label: str, max_pages: int
     return out
 
 
-def _matches(line: str, wanted: list[str], unwanted: list[str]) -> bool:
+def _first_word(line: str) -> str:
+    return line.split(maxsplit=1)[0] if line.split() else ""
+
+
+def _line_kinds(pages: list[dict]) -> list[dict]:
+    """How lines commonly start, with how many do: a listing's records repeat the same labels, so this shows what to count."""
+    counts = Counter(word for row in pages for word in map(_first_word, row["lines"]) if word[:1].isalpha())
+    return [{"starts_with": word, "lines": n} for word, n in counts.most_common(LINE_KINDS) if n >= MIN_KIND_LINES]
+
+
+def _starts(low: str, start: str) -> bool:
+    """Starts with these whole words: "by" isn't the start of "bystander"."""
+    if not low.startswith(start):
+        return False
+    rest = low[len(start) :]
+    return not rest or not rest[0].isalnum() or not start[-1:].isalnum()
+
+
+def _matches(line: str, wanted: list[str], unwanted: list[str], starts: list[str]) -> bool:
     low = line.casefold()
+    if starts and not any(_starts(low, s) for s in starts):
+        return False
     return all(w in low for w in wanted) and not any(w in low for w in unwanted)
+
+
+def _mixed_note(hits: list[str]) -> str:
+    """Most matches start the same way and a few don't: the few usually just contain the word somewhere."""
+    word, most = (Counter(map(_first_word, hits)).most_common(1) or [("", 0)])[0]
+    if len(hits) < MIN_KIND_LINES or most == len(hits) or most / len(hits) < MIXED_SHARE:
+        return ""
+    return (f"{most} of these {len(hits)} lines start with '{word}'. The other {len(hits) - most} only contain your word somewhere. "
+            f"If you're counting records, count again with starts_with ['{word}'].")  # fmt: skip
 
 
 def _amount(line: str, column: int | None) -> float | None:
@@ -247,21 +298,22 @@ def _as_list(raw: Any) -> list[str]:
 
 
 def query(ctx: Any, dataset: str, action: str = "count", contains: Any = "", exclude: Any = "", column: int | None = None,
-          unique: bool = False, offset: int = 0) -> dict:  # fmt: skip
-    """Count, sum or list the stored lines that contain every word in contains and none in exclude."""
+          unique: bool = False, offset: int = 0, starts_with: Any = "") -> dict:  # fmt: skip
+    """Count, sum or list the stored lines that contain every word in contains and none in exclude. If starts_with is given,
+    a line must also start with one of those."""
     pages = _store(ctx).get(str(dataset))
     if pages is None:
         return {"ok": False, "error": f"No dataset {dataset} in this turn. Run browser_gather first."}
     if action not in {"count", "sum", "list"}:
         return {"ok": False, "error": "action must be count, sum or list"}
-    wanted, unwanted = _as_list(contains), _as_list(exclude)
+    wanted, unwanted, starts = _as_list(contains), _as_list(exclude), _as_list(starts_with)
     seen: set[str] = set()
     per_page: list[int] = []
     hits: list[str] = []
     for row in pages:
         found = 0
         for line in row["lines"]:
-            if not _matches(line, wanted, unwanted):
+            if not _matches(line, wanted, unwanted, starts):
                 continue
             if unique:
                 if line in seen:
@@ -274,6 +326,9 @@ def query(ctx: Any, dataset: str, action: str = "count", contains: Any = "", exc
     if dataset in _store(ctx).get("_incomplete", ()):
         out["incomplete"] = True
         out["warning"] = "This dataset is incomplete, so this figure may be wrong. Tell the user that rather than giving it as the answer."
+    mixed = _mixed_note(hits) if wanted and not starts else ""
+    if mixed:
+        out["warning"] = f"{out['warning']} {mixed}" if out.get("warning") else mixed
     if action == "sum":
         amounts = [_amount(line, column) for line in hits]
         good = [a for a in amounts if a is not None]

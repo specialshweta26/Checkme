@@ -71,3 +71,43 @@ async def test_publish_saves_cloud_downloads_but_not_local_ones(desktop):
 async def test_at_most_five_files_per_result(desktop):
     items = [dict(ITEM, filename=f"f{i}.csv") for i in range(8)]
     assert await ch.save_on_desktop(CTX, items) == ch.DESKTOP_SAVE_MAX
+
+
+async def test_a_download_is_handled_once_however_often_the_browser_lists_it(desktop, monkeypatch):
+    from app import cache
+
+    class Redis:
+        seen: set = set()
+
+        async def sadd(self, key, mark):
+            if mark in self.seen:
+                return 0
+            self.seen.add(mark)
+            return 1
+
+        async def expire(self, key, seconds):
+            return True
+
+    monkeypatch.setattr(cache, "get_redis", lambda: Redis())
+    row = {**ITEM, "id": "file-1"}
+    first = await ch._publish_downloads(SimpleNamespace(user=CTX.user), {"downloads": [dict(row), dict(row)]})
+    assert len(first["downloads"]) == 1 and len(desktop.calls) == 1
+    # A later turn, so nothing but the stored record knows about it.
+    later = await ch._publish_downloads(SimpleNamespace(user=CTX.user), {"downloads": [dict(row)]})
+    assert "downloads" not in later and len(desktop.calls) == 1
+    newer = await ch._publish_downloads(SimpleNamespace(user=CTX.user), {"downloads": [dict(row), {**ITEM, "id": "file-2"}]})
+    assert [i["id"] for i in newer["downloads"]] == ["file-2"] and len(desktop.calls) == 2
+
+
+async def test_repeats_stop_within_a_turn_even_without_redis(desktop, monkeypatch):
+    from app import cache
+
+    def broken():
+        raise RuntimeError("down")
+
+    monkeypatch.setattr(cache, "get_redis", broken)
+    ctx = SimpleNamespace(user=CTX.user)
+    await ch._publish_downloads(ctx, {"downloads": [{**ITEM, "id": "f"}]})
+    assert "downloads" not in await ch._publish_downloads(ctx, {"downloads": [{**ITEM, "id": "f"}]})
+    assert len(desktop.calls) == 1
+
