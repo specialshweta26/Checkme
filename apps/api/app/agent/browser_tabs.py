@@ -44,7 +44,10 @@ async def tab_for(ctx: Any, tool: str, args: dict | None, where: str, call: Any)
     """``args`` with this chat's tab added, or None to leave them alone. ``call`` runs a browser tool: call(tool, args)."""
     chat = _chat(ctx)
     user_id = getattr(getattr(ctx, "user", None), "id", None)
-    if tool not in PAGE_TOOLS or (args or {}).get("tab") or not chat or user_id is None:
+    if tool not in PAGE_TOOLS or (args or {}).get("tab"):
+        return None
+    if not chat or user_id is None:
+        log.info("browser tabs: no chat for this call (chat=%s user=%s)", bool(chat), user_id is not None)
         return None
     try:
         redis = get_redis()
@@ -65,6 +68,7 @@ async def tab_for(ctx: Any, tool: str, args: dict | None, where: str, call: Any)
             listing = await call("browser_tabs", {})
             tabs = listing.get("tabs") if isinstance(listing, dict) else None
             if not tabs:
+                log.info("browser tabs: this browser listed none (keys=%s)", sorted(listing)[:8] if isinstance(listing, dict) else type(listing).__name__)
                 return None
             active = next((row for row in tabs if row.get("active")), None) or next(
                 (row for row in tabs if str(row.get("url") or "").startswith("http")), tabs[0]
@@ -74,6 +78,7 @@ async def tab_for(ctx: Any, tool: str, args: dict | None, where: str, call: Any)
             opened = await call("browser_new_tab", {"background": True})
             tab = str(opened.get("tab") or "") if isinstance(opened, dict) else ""
         if not tab:
+            log.info("browser tabs: no tab to use (how=%s)", how)
             return None
         await redis.hset(key, chat, json.dumps({"tab": tab, "at": now}))
         await redis.expire(key, HOLD_S)
