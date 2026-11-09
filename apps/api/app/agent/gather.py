@@ -20,7 +20,7 @@ log = logging.getLogger(__name__)
 MAX_PAGES = 200
 MAX_CHARS = 2_000_000
 ROWS_RETURNED = 60
-SAME_PAGE_TRIES = 2
+SAME_PAGE_TRIES = 3
 MIN_OVERLAP = 3
 JOIN_LINES = 12
 SCROLL_WAIT_MS = 1500
@@ -184,7 +184,10 @@ async def _gather(ctx: Any, call: Any, how: str, next_label: str, max_pages: int
         tries = 0
         while isinstance(after, dict) and after.get("ok") is not False and str(after.get("text") or "") == text and tries < SAME_PAGE_TRIES:
             tries += 1
-            again = steps if control is None else [{"kind": "wait", "ms": SCROLL_WAIT_MS}]
+            # Each try waits longer: some pages pause between loads. When scrolling, go up a little and back down, so a
+            # page that loads on reaching the bottom notices the bottom again.
+            wait = {"kind": "wait", "ms": SCROLL_WAIT_MS * (tries + 1)}
+            again = [{"kind": "scroll", "dy": -600}, {"kind": "scroll", "dy": 4000}, wait] if control is None else [wait]
             after = await call(ctx, "browser_act", {"actions": again})
         if not isinstance(after, dict) or after.get("ok") is False:
             stopped = f"stopped: {str((after or {}).get('error') if isinstance(after, dict) else after)[:200]}"
