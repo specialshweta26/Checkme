@@ -265,3 +265,13 @@ def test_styled_dropdown_names_what_it_shows_when_nothing_matches():
     page = _Page([{"name": "Admin", "x": 50, "y": 90}])
     with pytest.raises(RuntimeError, match='no option "Manager".*Admin'):
         pick_suggestion(page, _Loc(tag="div", role=""), {"tag": "div", "x": 50, "y": 40}, "Manager")
+
+
+def test_a_dropdown_already_on_that_option_is_not_a_failure():
+    class Loc(_SortLoc):
+        def input_value(self, timeout=0):
+            return "lohi"
+
+    loc = Loc(tag="select", role="")
+    assert pick_suggestion(_Page(), loc, {"tag": "select"}, "Price (low to high)") == "already"
+    assert loc.selected is None

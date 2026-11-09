@@ -725,6 +725,10 @@ impl Chrome {
                 // In a batch, the earlier steps already happened: say so, or they get done twice.
                 return Err(if index > 0 { format!("step {} failed, the {index} before it ran: {reason}", index + 1) } else { reason.to_string() });
             }
+            if result.get("already").and_then(Value::as_bool) == Some(true) {
+                let chosen = result.get("selected").and_then(Value::as_str).unwrap_or("");
+                warnings.push(format!("{chosen} was already chosen in this dropdown, so nothing needed to change. Carry on with the next step."));
+            }
             if let Some(at) = result.get("mouse") {
                 let (x, y) = (at.get("x").and_then(Value::as_i64), at.get("y").and_then(Value::as_i64));
                 if let (Some(x), Some(y)) = (x, y) {

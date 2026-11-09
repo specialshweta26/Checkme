@@ -114,3 +114,12 @@ def test_a_big_page_reaches_the_browser_tools_whole():
     page = {"url": "https://x.example/", "text": "a" * 12000, "tree": "- e1 button Go\n" * 500, "elements": ["e"] * 3000}
     assert compact_payload(page, MAX_TOOL_CHARS).get("too_large") is True
     assert compact_payload(page, BROWSER_PAGE_CHARS)["text"] == page["text"]
+
+
+def test_a_dropdown_already_on_that_option_does_not_count_as_stuck():
+    ctx = _ctx()
+    guard.after(ctx, "browser_snapshot", {}, _page())
+    done = {**_page(), "warnings": ["Price was already chosen in this dropdown, so nothing needed to change."]}
+    for _ in range(4):
+        assert _act(ctx, SORT, dict(done))["ok"] is True
+    assert ctx._browser_guard["idle"] == 0
