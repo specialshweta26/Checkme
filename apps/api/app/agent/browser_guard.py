@@ -43,12 +43,24 @@ def normalize(args: dict | None) -> dict | None:
 def _state(ctx: Any) -> dict | None:
     state = getattr(ctx, "_browser_guard", None)
     if state is None:
-        state = {"page": "", "tries": {}, "idle": 0, "stuck": False}
+        state = {"page": "", "tries": {}, "idle": 0, "stuck": False, "elements": [], "once": set()}
         try:
             ctx._browser_guard = state
         except AttributeError:
             return None  # a context that takes no attributes simply runs unguarded
     return state
+
+
+def final_step_done(ctx: Any) -> bool:
+    """A run-once control (Finish, Place order) was clicked this turn: doing more could repeat it."""
+    state = getattr(ctx, "_browser_guard", None)
+    return bool(isinstance(state, dict) and state.get("once"))
+
+
+def _once_labels(actions: list, elements: list) -> list[str]:
+    from app.agent.fast_browser import once_labels
+
+    return once_labels([a for a in actions if isinstance(a, dict)], {"elements": elements})
 
 
 def is_stuck(ctx: Any) -> bool:
@@ -102,6 +114,17 @@ def before(ctx: Any, tool: str, args: dict | None) -> dict | None:
         return None
     if state["stuck"]:
         return _stop_reply(state)
+    again = next((label for label in _once_labels(_actions(args), state["elements"]) if label.casefold() in state["once"]), "")
+    if again:
+        log.warning("browser.guard refused a second click on a run-once control")
+        return {
+            "ok": False,
+            "already_done": True,
+            "error": (
+                f"Not run: '{again}' was already clicked in this turn, so that step has happened. Clicking it again could "
+                "repeat an order or a send. Do not start the task over: report what was done."
+            ),
+        }
     key = f"{_action_key(tool, args)}:{state['page']}"
     tries = state["tries"].get(key, 0)
     if tries >= SAME_ACTION_LIMIT:
@@ -127,6 +150,12 @@ def after(ctx: Any, tool: str, args: dict | None, result: Any) -> Any:
     if state is None:
         return result
     page = _page_key(result)
+    if tool in ACT_TOOLS and isinstance(result, dict):
+        rows = _actions(args)
+        ran = rows if result.get("ok") is not False else rows[: int(result.get("completed") or 0)]
+        state["once"].update(label.casefold() for label in _once_labels(ran, state["elements"]))
+    if isinstance(result, dict) and isinstance(result.get("elements"), list):
+        state["elements"] = result["elements"]
     if tool not in ACT_TOOLS:
         if page:  # a navigation or a fresh read tells us which page we are on
             if page != state["page"]:

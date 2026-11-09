@@ -3135,8 +3135,9 @@ async def _finish_what_is_left(ctx, graph, query, text, result, progress, callba
     def todos_of(state: Any) -> Any:
         return state.get("todos") if isinstance(state, dict) else None
 
-    if browser_guard.is_stuck(ctx):
-        return text  # more of the same can't help; the reply already says where it stopped
+    if browser_guard.is_stuck(ctx) or browser_guard.final_step_done(ctx):
+        # More of the same can't help, and after a final step (an order, a send) more could repeat it.
+        return text
     items = await finish_check.unfinished_items(query, text, ctx.used_tools, todos_of(result))
     if not items:
         return text

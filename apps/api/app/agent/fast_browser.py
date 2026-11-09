@@ -1031,6 +1031,7 @@ FAST_SYSTEM = """You drive a web browser for an AI assistant, quickly and carefu
 Each turn you get the goal, the current page (URL, title, alerts, a text excerpt and numbered interactive elements such as "- e3 textbox Email [email]") and what happened last turn.
 Reply with a JSON object only: {"why": "", "actions": [...], "done": false, "result": "", "need_user": "", "notes": ""}.
 - "Done so far" lists what this run has already done, in order. Never redo a listed step and never start the goal over: do only what is left. As soon as the last part of the goal is done, reply done=true. A page that looks like the start does not mean the work is undone.
+- Screenshots are saved for you automatically: never send a screenshot action, and don't wait on one before finishing.
 - notes: facts the goal asks you to report that are on this page now and may be gone later (names, prices, totals, confirmation numbers). Everything in notes must also go in result when you finish.
 - why: one short sentence for the user watching the run later: what you see on the page and why these actions.
 - actions: every step you can already predict, in order, in ONE batch, e.g. [{"kind":"fill","ref":"e3","text":"{{email}}"},{"kind":"fill","ref":"e4","text":"{{password}}"},{"kind":"click","ref":"e5"}].
@@ -1425,7 +1426,14 @@ async def _log(action: str, why: str = "", ok: bool = True, state: dict | None =
 
 async def _browser_task(ctx, goal: str, url: str = "", values: dict | None = None, max_steps: int = 0,
                         allow_final_action: bool = False, use_saved: bool = True, save: bool = True) -> dict:  # fmt: skip
-    memory: dict = {"done": [], "notes": [], "once": set()}
+    # One memory per turn: a second browser_task in the same turn must know what the first one did.
+    memory = getattr(ctx, "_browser_memory", None)
+    if memory is None:
+        memory = {"done": [], "notes": [], "once": set()}
+        try:
+            ctx._browser_memory = memory
+        except AttributeError:
+            pass
     out = await _run_task(ctx, goal, url, values, max_steps, allow_final_action, use_saved, save, memory)
     if isinstance(out, dict):
         log.info("browser.task ended done=%s rounds=%s notes=%s pages_with_facts=%s fallback=%s", out.get("done"), len(memory["done"]),
@@ -1440,7 +1448,10 @@ async def _browser_task(ctx, goal: str, url: str = "", values: dict | None = Non
             out["seen_on_pages"] = dict(list(memory["seen"].items())[-8:])
         if not out.get("done"):
             # Whoever carries on must not do these again: a repeated checkout is a second order.
-            out["do_not_repeat"] = "The steps in done_so_far already happened. Continue from there; never start the task over."
+            out["do_not_repeat"] = (
+                "The steps in done_so_far already happened, and notes and seen_on_pages hold what they showed. If they cover the "
+                "request, report the result from them. Otherwise continue from there; never start the task over."
+            )
     return out
 
 
@@ -1545,7 +1556,8 @@ async def _run_task(ctx, goal: str, url: str, values: dict | None, max_steps: in
             elif plan is None or (not plan["actions"] and not plan["done"] and not plan["need_user"]):
                 log.info("browser.task no usable plan step=%s model=%s plan_ms=%s empty=%s", i + 1, model, plan_ms, plan is not None)
                 failures += 1
-                last = "Your last reply was not a usable JSON plan. Reply with the JSON object only."
+                last = ("Your last reply had no action you can take. If everything in the goal is done, reply done=true with the "
+                        "result (use your notes). Otherwise send the next actions, using only the listed kinds.")
                 log_steps.append({"step": i + 1, "model": model, "plan_ms": plan_ms, "ok": False, "why": "no plan"})
             elif plan["need_user"] and need_user_kind(plan["need_user"]) != "real":
                 # Not a step only a person can take: answer it here and keep going. The first two are free; after

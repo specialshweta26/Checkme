@@ -151,3 +151,31 @@ def test_kept_facts_hide_the_users_values():
     memory = {}
     fb.note_page_facts(memory, {"url": "https://x.example/", "text": "Order 123 for hunter2"}, {"secret": "hunter2"})
     assert "hunter2" not in str(memory)
+
+
+async def test_a_second_task_in_the_turn_knows_what_the_first_did(monkeypatch):
+    from types import SimpleNamespace
+
+    seen = []
+
+    async def plan_step(model, goal, state, values, last, allow_final):
+        seen.append(last)
+        if len(seen) == 1:
+            return {"actions": [{"kind": "click", "ref": "e0"}], "done": True, "result": "ok", "need_user": "", "why": "", "notes": ""}
+        return {"actions": [], "done": True, "result": "ok", "need_user": "", "why": "", "notes": ""}
+
+    async def page(*a, **k):
+        return {**_run_memory_page("Add to cart"), "completed": 1}
+
+    async def no_log(*a, **k):
+        return None
+
+    monkeypatch.setattr(fb, "plan_step", plan_step)
+    monkeypatch.setattr(fb, "_navigate", page)
+    monkeypatch.setattr(fb, "_act", page)
+    monkeypatch.setattr(fb, "_snapshot", page)
+    monkeypatch.setattr(fb, "_log", no_log)
+    ctx = SimpleNamespace(connectors={}, user=None, used_tools=[])
+    await fb._browser_task(ctx, "add one", "https://shop.example/items", use_saved=False, save=False)
+    await fb._browser_task(ctx, "add one", "https://shop.example/items", use_saved=False, save=False)
+    assert "Done so far" in seen[-1]

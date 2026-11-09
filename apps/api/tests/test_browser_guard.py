@@ -136,3 +136,35 @@ def test_a_choice_sent_as_value_reaches_the_browser_as_text():
 def test_logged_errors_drop_quoted_text():
     text = guard._safe_error({"error": 'this dropdown has no option "hunter2". Its options are: A | B'})
     assert "hunter2" not in text and "no option" in text
+
+
+def _checkout_page():
+    return {**_page(), "elements": [{"ref": "e1", "role": "button", "name": "Finish"}, {"ref": "e2", "role": "button", "name": "Add to cart"}]}
+
+
+def test_finish_cannot_be_clicked_twice_in_a_turn():
+    ctx = _ctx()
+    guard.after(ctx, "browser_snapshot", {}, _checkout_page())
+    finish = {"actions": [{"kind": "click", "ref": "e1"}]}
+    assert _act(ctx, finish, {**_checkout_page(), "text": "thanks"})["ok"] is True
+    assert guard.final_step_done(ctx)
+    guard.after(ctx, "browser_navigate", {}, _checkout_page())
+    second = _act(ctx, finish, _checkout_page())
+    assert second["already_done"] is True and "Finish" in second["error"]
+
+
+def test_a_finish_that_did_not_run_can_still_be_tried():
+    ctx = _ctx()
+    guard.after(ctx, "browser_snapshot", {}, _checkout_page())
+    batch = {"actions": [{"kind": "click", "ref": "e2"}, {"kind": "click", "ref": "e1"}]}
+    _act(ctx, batch, {"ok": False, "completed": 1, "error": "step 2 failed"})
+    assert not guard.final_step_done(ctx)
+
+
+def test_ordinary_buttons_can_repeat():
+    ctx = _ctx()
+    guard.after(ctx, "browser_snapshot", {}, _checkout_page())
+    add = {"actions": [{"kind": "click", "ref": "e2"}]}
+    assert _act(ctx, add, {**_checkout_page(), "text": "one"})["ok"] is True
+    assert _act(ctx, add, {**_checkout_page(), "text": "two"})["ok"] is True
+    assert not guard.final_step_done(ctx)

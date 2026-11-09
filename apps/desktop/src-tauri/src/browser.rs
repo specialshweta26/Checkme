@@ -676,6 +676,29 @@ impl Chrome {
                 tokio::time::sleep(Duration::from_millis(600)).await;
                 continue;
             }
+            if kind == "forward" {
+                self.eval("history.forward()").await.ok();
+                tokio::time::sleep(Duration::from_millis(600)).await;
+                continue;
+            }
+            if kind == "wait_for" || kind == "waitfor" {
+                let want = step.get("text").or_else(|| step.get("value")).and_then(Value::as_str).unwrap_or("");
+                let probe = format!("((document.body && document.body.innerText) || '').toLowerCase().includes({:?})", want.to_lowercase());
+                let mut found = want.is_empty();
+                for _ in 0..40 {
+                    if found {
+                        break;
+                    }
+                    found = self.eval(&probe).await.ok().and_then(|v| v.as_bool()) == Some(true);
+                    if !found {
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                    }
+                }
+                if !found {
+                    return Err(format!("step {}: \"{want}\" did not appear on the page within 10 seconds", index + 1));
+                }
+                continue;
+            }
             if kind == "scroll" {
                 let dy = step.get("dy").and_then(Value::as_i64).or_else(|| step.get("amount").and_then(Value::as_i64)).unwrap_or(800);
                 self.eval(&format!("window.scrollBy(0, {dy})")).await.ok();
