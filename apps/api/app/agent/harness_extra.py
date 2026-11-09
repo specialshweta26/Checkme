@@ -588,6 +588,19 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         ctx.used_tools.append("computer_notify")
         return _dumps(await computer.system_tool(ctx, "computer_notify", {"title": title, "text": text}))
 
+    async def office_app(app: str, action: str, document: str = "", cells: list[dict[str, Any]] | None = None, text: str = "", title: str = "",
+                         notes: str = "", path: str = "", format: str = "") -> str:  # noqa: A002
+        """Work inside an office app on the user's computer by script (desktop app only). Much faster and safer than pressing controls; use it first for these apps. app: numbers, pages, keynote, excel, word, powerpoint. action: list (open documents), new (returns its name), set_cells (numbers, excel: cells [{"cell": "A1", "value": 40}]; text starting with = is a formula), set_text (pages, word), add_slide (keynote, powerpoint: title, text, notes), read, export (path plus format: csv, xlsx or pdf for numbers; docx or pdf for pages; pptx or pdf for keynote; xlsx, docx or pptx for the Microsoft apps). Export never overwrites a file. Every action except list and new needs document: one you created in this turn or one the user named. Excel, Word and PowerPoint haven't been tested against the real apps, so check the result and say so if something fails."""
+        ctx.used_tools.append("office_app")
+        return _dumps(await computer.office_app(ctx, app, action, document, cells, text, title, notes, path, format))
+
+    async def create_office_file(kind: str, filename: str, spec: dict[str, Any]) -> str:
+        """Create an Excel, Word or PowerPoint file and attach it to this chat; no app needs to be installed, and it works on the website too. kind: xlsx, docx or pptx. xlsx spec: {"sheets": [{"name": "Sales", "rows": [["Item", "Amount"], ["Tea", 40], ["Total", "=SUM(B2:B2)"]], "chart": {"type": "bar", "title": "Amounts", "labels": "A2:A4", "values": "B2:B4"}}]} (chart type bar, line or pie; formulas calculate when the file is opened). docx spec: {"blocks": [{"type": "heading", "text": "...", "level": 1}, {"type": "paragraph", "text": "..."}, {"type": "bullets", "items": ["..."]}, {"type": "table", "rows": [["..."]]}]}. pptx spec: {"slides": [{"title": "...", "bullets": ["..."], "notes": "..."}]}."""
+        from app.agent.office_files import create
+
+        ctx.used_tools.append("create_office_file")
+        return _dumps(await create(ctx, kind, filename, spec))
+
     async def launch_app(name: str) -> str:
         """Open an app on the computer (Finder, Chrome, Excel, VS Code, …). In the desktop app this is the user's machine."""
         ctx.used_tools.append("launch_app")
@@ -855,6 +868,8 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         StructuredTool.from_function(coroutine=computer_screens, name="computer_screens", description=computer_screens.__doc__),
         StructuredTool.from_function(coroutine=computer_ui, name="computer_ui", description=computer_ui.__doc__),
         StructuredTool.from_function(coroutine=computer_notify, name="computer_notify", description=computer_notify.__doc__),
+        StructuredTool.from_function(coroutine=office_app, name="office_app", description=office_app.__doc__),
+        StructuredTool.from_function(coroutine=create_office_file, name="create_office_file", description=create_office_file.__doc__),
         StructuredTool.from_function(coroutine=clipboard_read, name="clipboard_read", description=clipboard_read.__doc__),
         StructuredTool.from_function(coroutine=clipboard_write, name="clipboard_write", description=clipboard_write.__doc__),
         StructuredTool.from_function(coroutine=browser_page_log, name="browser_page_log", description=browser_page_log.__doc__),

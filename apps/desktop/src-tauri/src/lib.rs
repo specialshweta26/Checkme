@@ -20,6 +20,7 @@ mod updates;
 mod grants;
 mod os;
 mod system;
+mod apps;
 
 const STDOUT_LIMIT: usize = 200_000;
 const FILE_TEXT_LIMIT: usize = 80_000;
@@ -962,6 +963,7 @@ async fn run_job(tool: &str, args: &Value, chrome: &Mutex<Option<browser::Chrome
         "save_download" => run_save_download(args).await,
         "open_path" => run_open_path(args),
         "launch_app" => run_launch_app(args),
+        "office_app" => apps::run(args),
         "computer_windows" | "computer_screens" | "computer_clipboard" | "computer_ui" | "computer_notify" => system::run(tool, args),
         "app_discover" => os::discover_apps(),
         "boot" => {

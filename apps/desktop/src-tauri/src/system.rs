@@ -267,14 +267,14 @@ fn applescript(script: &str, args: &[&str]) -> Result<String, String> {
     applescript_for(script, args, 15)
 }
 
-fn applescript_for(script: &str, args: &[&str], seconds: u64) -> Result<String, String> {
+pub(crate) fn applescript_for(script: &str, args: &[&str], seconds: u64) -> Result<String, String> {
     let mut cmd = Command::new("osascript");
     cmd.arg("-");
     cmd.args(args);
     run_with_timeout(cmd, Some(script), seconds)
 }
 
-fn powershell(script: &str, input: Option<&str>) -> Result<String, String> {
+pub(crate) fn powershell(script: &str, input: Option<&str>) -> Result<String, String> {
     let mut cmd = Command::new("powershell");
     cmd.args(["-NoProfile", "-NonInteractive", "-Command", script]);
     run_with_timeout(cmd, input, 15)
