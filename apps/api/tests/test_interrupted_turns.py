@@ -116,3 +116,20 @@ async def test_shutdown_lets_turns_finish_but_not_forever():
     assert await routes.finish_running_turns(0.1) == 1  # the quick one finished; the slow one is cut off
     b.cancel()
     routes.RUNNING_TURNS.clear()
+
+
+def test_a_rows_id_is_read_without_the_database_after_a_rollback():
+    import uuid as _uuid
+
+    from sqlalchemy.orm import make_transient_to_detached
+    from sqlalchemy.orm.attributes import instance_state
+
+    from app.chat.routes import _pk
+    from app.models import User
+
+    row_id = _uuid.uuid4()
+    user = User(id=row_id, email="a@example.com")
+    make_transient_to_detached(user)
+    state = instance_state(user)
+    state._expire(state.dict, set())
+    assert _pk(user) == row_id

@@ -123,3 +123,16 @@ def test_a_dropdown_already_on_that_option_does_not_count_as_stuck():
     for _ in range(4):
         assert _act(ctx, SORT, dict(done))["ok"] is True
     assert ctx._browser_guard["idle"] == 0
+
+
+def test_a_choice_sent_as_value_reaches_the_browser_as_text():
+    args = {"actions": [{"kind": "select", "ref": "e2", "value": "lohi"}, {"kind": "click", "ref": "e3"}], "tab": "t1"}
+    out = guard.normalize(args)
+    assert out["actions"][0]["text"] == "lohi" and "text" not in out["actions"][1] and out["tab"] == "t1"
+    keep = {"actions": [{"kind": "fill", "ref": "e1", "text": "a", "value": "b"}]}
+    assert guard.normalize(keep)["actions"][0]["text"] == "a"
+
+
+def test_logged_errors_drop_quoted_text():
+    text = guard._safe_error({"error": 'this dropdown has no option "hunter2". Its options are: A | B'})
+    assert "hunter2" not in text and "no option" in text

@@ -14,6 +14,7 @@ from fastapi.responses import StreamingResponse
 
 log = logging.getLogger(__name__)
 from pydantic import BaseModel
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -946,6 +947,14 @@ async def _settle_running(user, sess, mode: str | None) -> dict | None:
     return {"text": (getattr(last, "extra", None) or {}).get("text", ""), "partial": stopped.get("partial", ""), "steps": stopped.get("steps", [])}
 
 
+def _pk(row):
+    """A row's id without touching the database: a rollback expires loaded rows, and reading a plain attribute of an
+    expired row needs IO that isn't allowed there (MissingGreenlet)."""
+    state = sa_inspect(row, raiseerr=False)
+    identity = state.identity if state is not None else None
+    return identity[0] if identity else row.id
+
+
 async def _store_stopped(db, user, sess, working_message, progress, run, since, uploads) -> dict:
     """Persist the "Stopped" marker (keeping the partial reply), cancel jobs the turn started, clear approvals."""
     from app.jobs import service as jobs
@@ -954,11 +963,12 @@ async def _store_stopped(db, user, sess, working_message, progress, run, since, 
     steps = [st.get("text") for st in (progress.steps if progress is not None else []) if st.get("kind") != "done" and st.get("text")][:40]
     content = run_cancel.stopped_text(partial, steps, run.reason)
     run.extra = {**(getattr(run, "extra", None) or {}), "stopped": {"partial": partial, "steps": steps}}
+    user_id, session_id = _pk(user), _pk(sess)
     try:
         with anyio.CancelScope(shield=True):
             await db.rollback()
             await db.refresh(working_message)
-            await db.refresh(sess)  # a stopped turn leaves these expired, and saving one mustn't need a reload
+            await db.refresh(sess)
             working_message.content = content
             working_message.meta = {
                 **(working_message.meta or {}),
@@ -970,7 +980,7 @@ async def _store_stopped(db, user, sess, working_message, progress, run, since, 
                 "pending_confirms": [],
             }
             sess.updated_at = datetime.now(timezone.utc)
-            await jobs.stop_chat_jobs(db, user.id, sess.id, since=since)
+            await jobs.stop_chat_jobs(db, user_id, session_id, since=since)
             await db.commit()
     except Exception:  # noqa: BLE001
         log.exception("could not store the stopped marker")
@@ -978,7 +988,7 @@ async def _store_stopped(db, user, sess, working_message, progress, run, since, 
         if progress is not None:
             await progress.finish()
     return {
-        "session_id": str(sess.id),
+        "session_id": str(session_id),
         "text": content,
         "stopped": True,
         "can_continue": True,

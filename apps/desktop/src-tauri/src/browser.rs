@@ -263,9 +263,8 @@ pub async fn launch(start_url: &str) -> Result<Chrome, String> {
     let port = 9333u16;
     let http = http_client(Duration::from_secs(3))?;
     if port_open(&probe, port).await {
-        // A window may already exist with no page showing. Open this address so the user sees it.
-        // Chrome only accepts PUT here: a GET gets 405 and opens nothing.
-        let _ = http.put(format!("http://127.0.0.1:{port}/json/new?{start_url}")).send().await;
+        // Attached to a running Chrome: the job's own navigation picks the page. Opening one here would add a tab per
+        // navigation, and page_ws opens one if every tab has been closed.
         return Ok(Chrome { _child: None, port, http, tab: std::sync::Mutex::new(None) });
     }
     let bin = chrome_candidates()
@@ -698,7 +697,7 @@ impl Chrome {
                 continue;
             }
             let ref_id = step.get("ref").and_then(Value::as_str).unwrap_or("");
-            let text = step.get("text").and_then(Value::as_str).unwrap_or("");
+            let text = step.get("text").or_else(|| step.get("value")).and_then(Value::as_str).unwrap_or("");
             // A real mouse only on the main page: an other-site frame's coordinates are not the page's.
             let js = format!("({ACT_JS})({ref_id:?}, {kind:?}, {text:?}, true)");
             let frame_js = format!("({ACT_JS})({ref_id:?}, {kind:?}, {text:?}, false)");

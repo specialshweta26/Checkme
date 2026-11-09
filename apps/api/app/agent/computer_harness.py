@@ -362,6 +362,8 @@ def deep_link_fallback(tool_name: str, args: dict | None, result: Any) -> Any:
 
 
 async def run_computer(ctx, tool_name: str, args: dict | None = None, *, force_cloud: bool = False) -> Any:
+    if tool_name in browser_guard.ACT_TOOLS:
+        args = browser_guard.normalize(args)
     refused = browser_guard.before(ctx, tool_name, args)
     if refused is not None:
         return refused
