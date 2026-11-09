@@ -1376,11 +1376,8 @@ def _on_desktop(ctx) -> bool:
 
 
 def vision_possible(ctx) -> bool:
-    """Browsing by sight is on, and this turn's browser is the cloud one (the desktop app's own screen needs its next
-    version to report screen scale)."""
-    from app.agent.computer_harness import browser_local
-
-    return bool(setting("browser_vision", True)) and not browser_local(ctx)
+    """Browsing by sight is on. An older desktop app answers with fallback, and the element loop carries on."""
+    return bool(setting("browser_vision", True))
 
 
 async def by_sight(ctx, goal: str, vals: dict[str, str], allow_final: bool, log_steps: list) -> dict:

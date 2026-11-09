@@ -114,11 +114,10 @@ async def _desktop_screen(ctx) -> tuple[dict, str]:
 
 async def _screen(ctx) -> tuple[dict, str]:
     """The current screen: the page state and a PNG data URL ("" when no screenshot could be taken)."""
-    from app.agent.computer_harness import computer_slug, run_computer
-    from app.desktop.client import prefer_local
+    from app.agent.computer_harness import browser_local, computer_slug, run_computer
     from connector_core import BinaryResult
 
-    if prefer_local():
+    if browser_local(ctx):
         return await _desktop_screen(ctx)
     state = await run_computer(ctx, "computer_observe", {})
     state = state if isinstance(state, dict) else {"ok": False, "error": str(state)[:300]}
@@ -169,9 +168,9 @@ async def computer_task(ctx, goal: str, values: dict | None = None, allow_final_
     started = time.monotonic()
     state: dict = {}
     try:
-        from app.desktop.client import prefer_local
+        from app.agent.computer_harness import browser_local
 
-        on_desktop = bool(prefer_local())
+        on_desktop = bool(browser_local(ctx))
         state, image = await _screen(ctx)
         if not image and on_desktop:
             return {"ok": False, "done": False, "fallback": True, "unsupported": "desktop",

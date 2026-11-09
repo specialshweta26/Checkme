@@ -141,7 +141,7 @@ async def test_on_the_desktop_an_empty_page_keeps_the_element_loop(monkeypatch):
         return {"actions": [], "done": True, "result": "form ready", "need_user": ""}
 
     async def sight(*a, **k):
-        raise AssertionError("no vision on the desktop")
+        return {"ok": False, "done": False, "fallback": True, "unsupported": "desktop"}  # an older desktop app
 
     monkeypatch.setattr(fb, "_snapshot", snap)
     monkeypatch.setattr(fb, "plan_step", plan)
@@ -149,3 +149,21 @@ async def test_on_the_desktop_an_empty_page_keeps_the_element_loop(monkeypatch):
     ctx = SimpleNamespace(user=SimpleNamespace(id=None), connectors={}, _browser_on_desktop=True)
     out = await fb._browser_task(ctx, "Search flights", "", {}, 0, False, False, False)
     assert out["done"] and out["result"] == "form ready"
+
+
+def test_desktop_steps_use_the_page_browsers_names():
+    steps = vb._page_steps([{"kind": "key", "key": "Enter"}, {"kind": "click", "x": 5, "y": 6}])
+    assert steps == [{"kind": "press", "text": "Enter"}, {"kind": "click", "x": 5, "y": 6}]
+
+
+async def test_an_older_desktop_app_is_not_driven_by_sight(monkeypatch):
+    from app.agent import computer_harness
+
+    async def run(ctx, tool, args=None, **k):
+        assert tool == "browse_screenshot"
+        return {"ok": True, "url": "https://x.example/"}
+
+    monkeypatch.setattr(computer_harness, "run_computer", run)
+    monkeypatch.setattr(computer_harness, "browser_local", lambda ctx: True)
+    out = await vb.computer_task(SimpleNamespace(), "do it")
+    assert out["fallback"] is True and out["unsupported"] == "desktop"
