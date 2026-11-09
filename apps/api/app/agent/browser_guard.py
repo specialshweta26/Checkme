@@ -29,6 +29,13 @@ def _safe_error(result: dict) -> str:
     return re.sub(r'"[^"]*"', '"…"', str(result.get("error") or ""))[:160]
 
 
+def _warned(result: Any) -> str:
+    rows = result.get("warnings") if isinstance(result, dict) else None
+    if not rows:
+        return ""
+    return "page_click" if any("through the page" in str(w) for w in rows) else "no_effect"
+
+
 def _targets(actions: list, elements: list) -> str:
     """What each step acted on, by control name and what it belongs to. Clicks only: a field's typed text is never logged."""
     names = {str(e.get("ref")): e for e in elements if isinstance(e, dict)}
@@ -207,10 +214,10 @@ def after(ctx: Any, tool: str, args: dict | None, result: Any) -> Any:
     changed = bool(page) and page != before_page
     failed = isinstance(result, dict) and result.get("ok") is False
     log.info(
-        "browser.step kinds=%s ok=%s changed=%s idle=%s tab=%s err=%s on=%s",
+        "browser.step kinds=%s ok=%s changed=%s idle=%s tab=%s err=%s warned=%s on=%s",
         ",".join(str(r.get("kind") or "?") for r in _actions(args) if isinstance(r, dict))[:120],
         result.get("ok") if isinstance(result, dict) else None, changed, state["idle"], bool((args or {}).get("tab")),
-        _safe_error(result) if failed else "", _targets(_actions(args), acted_on),
+        _safe_error(result) if failed else "", _warned(result), _targets(_actions(args), acted_on),
     )
     if changed:
         state["page"] = page

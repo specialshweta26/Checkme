@@ -7,7 +7,7 @@ What Lumio can do today against the target list, and the order to build the rest
 | Capability | Cloud | Desktop | Notes |
 |---|---|---|---|
 | Open URL, reload, back, tabs, URL and title, scroll | Have | Have | |
-| Forward | Have | New | |
+| Forward | Have | New | Step ran in the real app and the page changed; the agent's report didn't include the address |
 | Element tree, page text, shadow DOM, iframes, coordinates | Have | Have | Desktop reads other-site frames separately |
 | Click, double-click, hover, typing, key presses | Have | Have | |
 | Right-click, drag | Have | New | Desktop not yet tested in the real app |
@@ -18,10 +18,10 @@ What Lumio can do today against the target list, and the order to build the rest
 | Downloads | Have | Have | |
 | Infinite scroll, pagination, lazy content | Have | Have | `browser_collect` |
 | Working from the screen (canvas, unreadable pages) | Have | New | Desktop sees only the browser page; not yet tested in the real app |
-| JavaScript alerts, confirm and prompt | New | New | Reported to the agent, declined unless it was told to accept |
+| JavaScript alerts, confirm and prompt | New | New | Reported to the agent, declined unless it was told to accept. A pop-up raised while a page loads doesn't freeze it, but isn't reported on the desktop |
 | Screenshots as evidence in the chat | New | Have | Page only; payment pages skipped. Cloud not yet tested in a real run |
 | One tab per chat | New | Have | Agents running together keep to their own tabs. Cloud not yet tested in a real run |
-| Console errors, failed requests | New | New | `browser_page_log`; response bodies are not captured |
+| Console errors, failed requests | New | New | `browser_page_log`. Only failed requests; no successful requests or response bodies |
 | Zoom, bookmarks, full-screen, broken-link check | Missing | Missing | Low value |
 
 ## Computer
@@ -40,8 +40,10 @@ What Lumio can do today against the target list, and the order to build the rest
 | Notifications | New | Tool call succeeded on macOS; display not confirmed |
 | Screen recording, process monitoring | Missing | |
 | Native dialogs, unexpected popups, app crash recovery | Partial | Clear errors and prompt guidance; nothing detects or recovers automatically |
-| Excel, Word, PowerPoint files | Partial | Read as text, created by scripts; no pivot tables or charts inside the apps |
-| Driving Office and Outlook apps | Missing | Build on accessibility and app scripting |
+| Excel, Word, PowerPoint files | New | `create_office_file`: formulas, charts, tables, slides, notes. Files checked by reading them back, not opened in Office. No pivot tables |
+| Numbers, Pages, Keynote | New | `office_app` by script. Tested on macOS, new documents only |
+| Excel and Word on Mac; Excel, Word, PowerPoint on Windows | Untested | Written, never run against the real apps |
+| PowerPoint on Mac, Outlook, pivot tables, charts inside apps | Missing | |
 
 ## Agent behaviour
 
@@ -76,13 +78,17 @@ What Lumio can do today against the target list, and the order to build the rest
 |---|---|
 | Shop flow on a local copy of the demo site, desktop app 0.1.29 | 3 of 3 correct, 67 to 74 seconds, one order each |
 | Two chats at once on the desktop | Each stayed in its own tab |
-| Real Swag Labs and OrangeHRM logins | Not yet rerun since these changes |
+| Real OrangeHRM login | Not yet rerun since these changes |
+| Real Swag Labs login, desktop app 0.1.35 | **Failed at Add to cart:** signed in and sorted, but clicks had no effect. The local copy passes, cause unknown. Retry added in 0.1.36 |
 | Cloud browser, full run | Not yet run since these changes |
 | Pop-ups, right-click, error log, drag, upload on a practice page, desktop app 0.1.31 | All passed, 35 seconds |
 | Clicking a canvas page by sight, desktop app 0.1.31 | Clicked the right button; the page's own state confirmed it |
 | Monitors, window list, clipboard, desktop app 0.1.32 | Passed; clipboard confirmed separately |
 | TextEdit through menus and native controls, desktop app 0.1.33 | Passed |
 | Calculator through named controls, desktop app 0.1.34 | 7 × 8 = 56 |
+| Numbers by script, desktop app 0.1.35 | New sheet, SUM = 125, CSV export, 23.5 seconds |
+| Pages and Keynote by script, desktop app 0.1.35 | Text and slides written, docx and pptx exported and read back. New Keynote decks start with an empty first slide |
+| Excel, Word and PowerPoint file creation | Checked by reading the files back |
 | New Numbers spreadsheet, formula and CSV export through native controls, desktop app 0.1.34 | Not finished: stopped after 7.5 minutes. 36 control calls took 226 seconds. Phase 4 needs app scripting, not control-by-control work |
 | Stop button on a running turn, 0.1.34 | Passed: the stopped message saved, no error |
 

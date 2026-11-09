@@ -203,3 +203,9 @@ def test_a_declined_pop_up_lets_the_click_be_tried_again():
     assert not guard.final_step_done(ctx)
     assert _act(ctx, {"actions": [{"kind": "accept_dialog"}, {"kind": "click", "ref": "e1"}]}, {**_checkout_page(), "text": "done"})["ok"] is True
     assert guard.final_step_done(ctx)
+
+
+def test_the_step_log_says_when_a_click_needed_the_page_retry():
+    assert guard._warned({"warnings": ["step 1: the mouse click had no effect, so it was clicked through the page instead, which worked."]}) == "page_click"
+    assert guard._warned({"warnings": ["step 1 may not have done anything"]}) == "no_effect"
+    assert guard._warned({"ok": True}) == ""
