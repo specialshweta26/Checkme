@@ -49,6 +49,7 @@ const PAGE_SIG_JS: &str = r#"(() => {
     count('[role="dialog"], [role="menu"], [role="listbox"], [aria-expanded="true"], [open]'),
     count('input:checked, option:checked, [aria-selected="true"], [aria-pressed="true"], [aria-checked="true"]'),
     Math.round(window.scrollY),
+    window.__lumioWatch ? window.__lumioWatch.dialogs.length : 0,
   ].join('|');
 })()"#;
 // Resolves when the DOM has been quiet for a moment and no loading indicator (spinner, progress bar, aria-busy)
@@ -813,6 +814,7 @@ impl Chrome {
             let kind = step.get("kind").and_then(Value::as_str).unwrap_or("click");
             let check_effect = matches!(kind, "click" | "dblclick" | "hover" | "check" | "uncheck");
             let sig_before = if check_effect { self.page_sig().await } else { None };
+            let tabs_before = if check_effect { self.pages().await.map(|p| p.len()).unwrap_or(0) } else { 0 };
             if kind == "wait" {
                 let ms = step.get("ms").and_then(Value::as_u64).unwrap_or(800);
                 tokio::time::sleep(Duration::from_millis(ms)).await;
@@ -983,7 +985,9 @@ impl Chrome {
                 // A slow site can take a few seconds to react, so wait for the page instead of calling it a failure.
                 let mut same = sig_before.is_some() && self.page_sig().await == sig_before;
                 for _ in 0..12 {
-                    if !same {
+                    // A click that opened a new tab worked, even though this page looks the same.
+                    if !same || self.pages().await.map(|p| p.len()).unwrap_or(0) > tabs_before {
+                        same = false;
                         break;
                     }
                     tokio::time::sleep(Duration::from_millis(250)).await;

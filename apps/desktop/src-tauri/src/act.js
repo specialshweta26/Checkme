@@ -149,12 +149,17 @@
   // The page's own click, for when a real mouse press had no effect. Refused on final controls: a second click there
   // could repeat an order.
   if (kind === 'dom_click') {
+    // Only when the mouse's click never reached this control. If it did, the page has already done whatever it does, and
+    // clicking again could add an item twice even though nothing looks different.
+    if (target.__lumioSawClick) return { ok: true, skipped: true };
     const label = String(target.getAttribute('aria-label') || target.innerText || target.value || '');
     if (/\b(pay|buy|purchase|order|checkout|finish|complete|confirm|submit|send|transfer|delete|remove account|book)\b/i.test(label)) return { ok: true, skipped: true };
     target.click();
     return { ok: true };
   }
   if (kind === 'click' || kind === 'dblclick') {
+    target.__lumioSawClick = false;
+    target.addEventListener('click', () => { target.__lumioSawClick = true; }, { once: true, capture: true });
     // A real mouse press opens menus and widgets that ignore a synthetic click (pointerdown / mousedown handlers).
     const at = point(target);
     if (at) return { ok: true, mouse: at, clicks: kind === 'dblclick' ? 2 : 1 };

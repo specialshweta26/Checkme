@@ -15,7 +15,7 @@ from pathlib import Path
 
 HOST = "127.0.0.1"
 PORT = 18765
-VERSION = "35"
+VERSION = "37"
 _HOME = Path(os.environ.get("CHECKME_BROWSER_HOME") or "/tmp")
 SHOT = "/tmp/checkme-browser.png"
 PROFILE = str(_HOME / "profile")
@@ -1340,32 +1340,26 @@ def _step_target(step: dict) -> dict:
     return target if isinstance(target, dict) else {}
 
 
-_NO_RETRY_LABEL = re.compile(r"\b(pay|buy|purchase|order|checkout|finish|complete|confirm|submit|send|transfer|delete|remove account|book)\b", re.I)
+def _open_pages(page) -> int:
+    try:
+        return len(page.context.pages)
+    except Exception:
+        return 0
 
 
 def _still_same(page, before: str, seconds: float = 3.0) -> bool:
-    """A slow site can take a few seconds to react, so wait for the page instead of calling it a failure."""
+    """A slow site can take a few seconds to react, so wait for the page instead of calling it a failure. A click that
+    opened a new tab worked, even though this page looks the same."""
     deadline = time.monotonic() + seconds
+    pages = _open_pages(page)
+    watch = _page_watch.get(id(page)) or {}
+    pop_ups = len(watch.get("dialogs") or [])
     while True:
-        if page_signature(page) != before:
+        if page_signature(page) != before or _open_pages(page) > pages or len(watch.get("dialogs") or []) > pop_ups:
             return False
         if time.monotonic() >= deadline:
             return True
         page.wait_for_timeout(250)
-
-
-def _click_through_page(page, step: dict, node, before: str) -> bool:
-    """Some pages ignore the mouse: try the page's own click once, but never on a final control."""
-    if _NO_RETRY_LABEL.search(str((node or {}).get("name") or "")):
-        return False
-    try:
-        loc = _locator(page, step, node)
-        if loc is None:
-            return False
-        loc.evaluate("el => el.click()")
-    except Exception:
-        return False
-    return not _still_same(page, before, 1.5)
 
 
 def _fill_note(page, step: dict, node, number: int) -> str:
@@ -1399,6 +1393,7 @@ def _act_page(page, actions: list, verify: bool = False):
             t0 = time.monotonic()
             before = str(getattr(page, "url", "") or "")
             sig_before = page_signature(page) if kind in EFFECT_KINDS else None
+            pages_before = _open_pages(page)
             ref = str(step.get("ref") or step.get("selector") or "").strip()
             node = _find(ref) if ref else None
             if verify and _step_target(step) and kind not in {"press", "key", "scroll", "wait", "reload", "back", "forward"}:
@@ -1424,12 +1419,10 @@ def _act_page(page, actions: list, verify: bool = False):
             timings.append({"kind": kind, "act_ms": act_ms, "wait_ms": wait_ms})
             if step.get("_already"):
                 warnings.append(f"step {completed} ({kind}): that option was already chosen in this dropdown, so nothing needed to change. Carry on with the next step.")
-            if sig_before is not None and _still_same(page, sig_before):
-                if kind == "click" and _click_through_page(page, step, node, sig_before):
-                    warnings.append(f"step {completed} (click {ref}): the mouse click had no effect, so it was clicked through the page instead, which worked.")
-                else:
-                    trace[-1]["no_effect"] = True
-                    warnings.append(no_effect_note(completed - 1, kind, ref))
+            if sig_before is not None and _open_pages(page) <= pages_before and _still_same(page, sig_before):
+                # Never click again by itself: a change the page doesn't show (an item added, a form sent) would happen twice.
+                trace[-1]["no_effect"] = True
+                warnings.append(no_effect_note(completed - 1, kind, ref))
             if kind == "fill" and not verify:
                 note = _fill_note(page, step, node, completed)
                 if note:

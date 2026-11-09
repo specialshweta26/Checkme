@@ -350,3 +350,24 @@ def test_text_inside_frames_is_read_and_labelled():
     page = SimpleNamespace(frames=[Frame("https://a.example/", "main"), Frame("https://b.example/x?secret=1", "Parent frame"), Frame("about:blank", ""), Frame("https://c.example/", None)])
     out = _frame_text(page)
     assert out == "[frame https://b.example/x]\nParent frame"
+
+
+def test_a_click_that_opens_a_new_tab_counts_as_working():
+    from app.connectors import computer_daemon as d
+
+    opened = []
+    page = SimpleNamespace(context=SimpleNamespace(pages=opened), wait_for_timeout=lambda ms: opened.append(object()), evaluate=lambda js: "same")
+    assert d._still_same(page, "same", 1.0) is False
+    assert len(opened) == 1
+
+
+def test_a_click_that_raises_a_pop_up_counts_as_working():
+    from app.connectors import computer_daemon as d
+
+    page = SimpleNamespace(context=SimpleNamespace(pages=[]), evaluate=lambda js: "same")
+    d._page_watch[id(page)] = {"dialogs": [], "errors": [], "failed": []}
+    page.wait_for_timeout = lambda ms: d._page_watch[id(page)]["dialogs"].append({"type": "alert"})
+    try:
+        assert d._still_same(page, "same", 1.0) is False
+    finally:
+        d._page_watch.pop(id(page), None)
