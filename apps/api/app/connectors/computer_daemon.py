@@ -16,7 +16,7 @@ from pathlib import Path
 
 HOST = "127.0.0.1"
 PORT = 18765
-VERSION = "38"
+VERSION = "39"
 _HOME = Path(os.environ.get("CHECKME_BROWSER_HOME") or "/tmp")
 SHOT = "/tmp/checkme-browser.png"
 PROFILE = str(_HOME / "profile")
@@ -2465,16 +2465,44 @@ def _browser_version(pw, cfg: dict) -> str:
         return ""
 
 
+def _page_alive(page) -> bool:
+    try:
+        return not page.is_closed()
+    except Exception:
+        return False
+
+
+def _drop_browser() -> None:
+    """Forget a browser that has gone away, so the next command starts a new one. The profile on disk keeps sign-ins."""
+    global _browser_page, _browser_context, _pw, _active_tab
+    for stop in (lambda: _browser_context.close(), lambda: _pw.stop()):
+        try:
+            stop()
+        except Exception:
+            pass
+    _browser_page = _browser_context = _pw = None
+    _tabs.clear()
+    _active_tab = ""
+
+
 def _ensure_page():
     global _browser_page, _browser_context, _pw
+    # A crashed browser or a closed tab doesn't always send a close event, and without this check every later command
+    # would fail with "page has been closed" until the computer restarts.
+    if _browser_page is not None and not _page_alive(_browser_page):
+        _browser_page = None
     if _browser_page is not None:
         if _needs_desktop(_browser_page):
             _paint_desktop(_browser_page)
         drain_browser_events()
         return _browser_page
     if _pw is not None and _browser_context is not None:
-        pages = list(getattr(_browser_context, "pages", None) or [])
-        _browser_page = pages[0] if pages else _browser_context.new_page()
+        try:
+            pages = [p for p in (getattr(_browser_context, "pages", None) or []) if _page_alive(p)]
+            _browser_page = pages[0] if pages else _browser_context.new_page()
+        except Exception:
+            _drop_browser()
+            return _ensure_page()
         _register_tab(_browser_page, activate=True)
         if _needs_desktop(_browser_page):
             _paint_desktop(_browser_page)
