@@ -238,3 +238,14 @@ def test_scrolling_with_no_figure_wanted_is_left_alone():
     guard, ctx = _guard("Scroll down and open the pricing section")
     assert not guard._hand_collecting(ctx, {"elements": []}, [{"kind": "scroll"}] * 6)
 
+
+async def test_price_lines_show_in_line_kinds_and_can_be_summed(monkeypatch):
+    text = "\n".join(f"Book {n}\n£{n}.50\nIn stock\nAdd to basket" for n in range(1, 6)) + "\n£ prices are made up"
+    _browser(monkeypatch, [{"ok": True, "url": "u", "text": text, "elements": []}])
+    ctx = SimpleNamespace()
+    out = await gather.gather(ctx, "next")
+    assert {"starts_with": "£", "lines": 5} in out["line_kinds"]
+    total = gather.query(ctx, out["dataset"], "sum", starts_with=["£"])
+    # The note starts with "£" too but holds no amount, so it's left out of the sum and reported.
+    assert total["sum"] == 17.5 and total["summed_lines"] == 5 and total["skipped_lines"] == 1
+
