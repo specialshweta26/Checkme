@@ -58,6 +58,7 @@ LOCAL_TOOLS = {
     "computer_screens",
     "computer_clipboard",
     "computer_ui",
+    "computer_notify",
     "app_discover",
     "list_grants",
     "list_folder_grants",

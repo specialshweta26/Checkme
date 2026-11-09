@@ -81,3 +81,17 @@ async def test_a_final_menu_item_needs_the_users_own_word(monkeypatch):
     out = await computer.computer_ui(ctx, "menu", "Mail", menu="Edit > Delete")
     assert out["needs_approval"] is True and seen == []
     assert (await computer.computer_ui(ctx, "menu", "Mail", menu="View > Show Sidebar"))["ok"] is True
+
+
+async def test_unnamed_controls_and_close_buttons_are_not_pressed(monkeypatch):
+    seen = []
+    _ui_local(monkeypatch, seen, [
+        {"id": "1.1", "name": "", "role": "AXButton"},
+        {"id": "1.2", "name": "close button", "role": "AXCloseButton"},
+        {"id": "1.3", "name": "Seven", "role": "AXButton"},
+    ])  # fmt: skip
+    ctx = SimpleNamespace(query="work out 7 times 8")
+    await computer.computer_ui(ctx, "read", "Calculator")
+    assert "no name" in (await computer.computer_ui(ctx, "press", "Calculator", id="1.1"))["error"]
+    assert "Closing" in (await computer.computer_ui(ctx, "press", "Calculator", id="1.2"))["error"]
+    assert (await computer.computer_ui(ctx, "press", "Calculator", id="1.3"))["ok"] is True

@@ -756,7 +756,11 @@ async def computer_ui(ctx, action: str, app: str, title: str = "", id: str = "",
     if action == "press":
         if (app, id) not in names:
             return {"ok": False, "error": "Read the window first with action=read, and use an id from that result."}
-        label = names[(app, id)]
+        label, role = names[(app, id)]
+        if role == "AXCloseButton":
+            return {"ok": False, "error": "Closing windows isn't offered, because it can lose unsaved work. Ask the user to close it."}
+        if not label:
+            return {"ok": False, "error": "This control has no name, so what it does can't be known. Look with computer_observe, and use computer_act at its position if you can see what it is."}
     elif action == "menu":
         label = str(menu or "").split(">")[-1].strip()
     if label and _is_final_label(label) and not _user_asked_for(label, getattr(ctx, "query", "")):
@@ -767,7 +771,7 @@ async def computer_ui(ctx, action: str, app: str, title: str = "", id: str = "",
     if action == "read" and isinstance(out, dict):
         for row in out.get("controls") or []:
             if isinstance(row, dict):
-                names[(app, str(row.get("id")))] = str(row.get("name") or "")
+                names[(app, str(row.get("id")))] = (str(row.get("name") or ""), str(row.get("role") or ""))
     return out
 
 

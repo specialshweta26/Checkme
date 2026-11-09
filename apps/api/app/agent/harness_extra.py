@@ -583,6 +583,11 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         ctx.used_tools.append("computer_ui")
         return _dumps(await computer.computer_ui(ctx, action, app, title, id, text, menu, depth))
 
+    async def computer_notify(title: str, text: str = "") -> str:
+        """Show a notification on the user's computer (desktop app only), for when they asked to be told about something."""
+        ctx.used_tools.append("computer_notify")
+        return _dumps(await computer.system_tool(ctx, "computer_notify", {"title": title, "text": text}))
+
     async def launch_app(name: str) -> str:
         """Open an app on the computer (Finder, Chrome, Excel, VS Code, …). In the desktop app this is the user's machine."""
         ctx.used_tools.append("launch_app")
@@ -849,6 +854,7 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         StructuredTool.from_function(coroutine=computer_windows, name="computer_windows", description=computer_windows.__doc__),
         StructuredTool.from_function(coroutine=computer_screens, name="computer_screens", description=computer_screens.__doc__),
         StructuredTool.from_function(coroutine=computer_ui, name="computer_ui", description=computer_ui.__doc__),
+        StructuredTool.from_function(coroutine=computer_notify, name="computer_notify", description=computer_notify.__doc__),
         StructuredTool.from_function(coroutine=clipboard_read, name="clipboard_read", description=clipboard_read.__doc__),
         StructuredTool.from_function(coroutine=clipboard_write, name="clipboard_write", description=clipboard_write.__doc__),
         StructuredTool.from_function(coroutine=browser_page_log, name="browser_page_log", description=browser_page_log.__doc__),
