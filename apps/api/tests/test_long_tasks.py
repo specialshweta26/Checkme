@@ -73,3 +73,62 @@ def test_background_jobs_get_a_bigger_budget_and_phase_checkpoints():
     assert deep.BACKGROUND_STEP_LIMIT > 200 and deep.BACKGROUND_STEP_CAP >= deep.BACKGROUND_STEP_LIMIT
     brief = runner.ROLE_BRIEF["worker"]
     assert "one todo per phase" in brief and "skill_progress" in brief
+
+
+def _run_memory_page(*names):
+    elements = [{"ref": f"e{i}", "role": "button", "name": n} for i, n in enumerate(names)]
+    return {"ok": True, "url": "https://shop.example/items", "title": "Shop", "text": "Products on sale today",
+            "tree": "\n".join(f"- e{i} button {n}" for i, n in enumerate(names)), "elements": elements}
+
+
+def test_with_progress_lists_what_already_happened():
+    text = fb.with_progress("Ran 1 action.", {"done": ["click Add", "click Finish"], "notes": ["Total $25.90"]})
+    assert "1. click Add" in text and "2. click Finish" in text and "Total $25.90" in text and text.endswith("Ran 1 action.")
+
+
+def test_once_labels_finds_controls_that_must_not_repeat():
+    page = _run_memory_page("Add to cart", "Finish", "Place your order")
+    acts = [{"kind": "click", "ref": "e0"}, {"kind": "click", "ref": "e1"}, {"kind": "click", "ref": "e2"}]
+    assert fb.once_labels(acts, page) == ["Finish", "Place your order"]
+
+
+async def test_a_task_never_clicks_finish_twice_and_remembers_its_steps(monkeypatch):
+    from types import SimpleNamespace
+
+    seen = []
+
+    async def plan_step(model, goal, state, values, last, allow_final):
+        seen.append(last)
+        return {"actions": [{"kind": "click", "ref": "e0"}], "done": False, "result": "", "need_user": "", "why": "", "notes": "Total $25.90"}
+
+    async def navigate(ctx, url):
+        return _run_memory_page("Finish")
+
+    async def act(ctx, actions):
+        return {**_run_memory_page("Finish"), "completed": len(actions)}
+
+    async def snapshot(ctx, find=""):
+        return _run_memory_page("Finish")
+
+    async def no_log(*a, **k):
+        return None
+
+    monkeypatch.setattr(fb, "plan_step", plan_step)
+    monkeypatch.setattr(fb, "_navigate", navigate)
+    monkeypatch.setattr(fb, "_act", act)
+    monkeypatch.setattr(fb, "_snapshot", snapshot)
+    monkeypatch.setattr(fb, "_log", no_log)
+    ctx = SimpleNamespace(connectors={}, user=None, used_tools=[])
+    clicks = []
+    real_act = fb._act
+
+    async def counting(ctx, actions):
+        clicks.append(actions)
+        return await real_act(ctx, actions)
+
+    monkeypatch.setattr(fb, "_act", counting)
+    out = await fb._browser_task(ctx, "finish the order", "https://shop.example/items", allow_final_action=True, use_saved=False, save=False)
+    assert len(clicks) == 1
+    assert out["stopped_repeat"] == "Finish" and out["notes"] == ["Total $25.90"]
+    assert out["done_so_far"] and "do_not_repeat" in out
+    assert "Done so far" in seen[1]
