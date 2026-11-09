@@ -27,6 +27,20 @@ def _safe_error(result: dict) -> str:
     return re.sub(r'"[^"]*"', '"…"', str(result.get("error") or ""))[:160]
 
 
+def _targets(actions: list, elements: list) -> str:
+    """What each step acted on, by control name and what it belongs to. Clicks only: a field's typed text is never logged."""
+    names = {str(e.get("ref")): e for e in elements if isinstance(e, dict)}
+    out = []
+    for row in actions:
+        if not isinstance(row, dict):
+            continue
+        el = names.get(str(row.get("ref") or "")) or {}
+        name = str(el.get("name") or "?")[:40] if str(row.get("kind") or "") in {"click", "dblclick", "select", "pick"} else str(row.get("kind") or "?")
+        near = f" ({str(el.get('near'))[:30]})" if el.get("near") else ""
+        out.append(f"{row.get('ref') or ''}={name}{near}")
+    return "; ".join(out)[:400]
+
+
 def normalize(args: dict | None) -> dict | None:
     """Actions may give a dropdown's choice as value; the browsers read text."""
     rows = (args or {}).get("actions")
@@ -154,6 +168,7 @@ def after(ctx: Any, tool: str, args: dict | None, result: Any) -> Any:
         rows = _actions(args)
         ran = rows if result.get("ok") is not False else rows[: int(result.get("completed") or 0)]
         state["once"].update(label.casefold() for label in _once_labels(ran, state["elements"]))
+    acted_on = state["elements"]
     if isinstance(result, dict) and isinstance(result.get("elements"), list):
         state["elements"] = result["elements"]
     if tool not in ACT_TOOLS:
@@ -170,10 +185,10 @@ def after(ctx: Any, tool: str, args: dict | None, result: Any) -> Any:
     changed = bool(page) and page != before_page
     failed = isinstance(result, dict) and result.get("ok") is False
     log.info(
-        "browser.step kinds=%s ok=%s changed=%s idle=%s tab=%s err=%s",
+        "browser.step kinds=%s ok=%s changed=%s idle=%s tab=%s err=%s on=%s",
         ",".join(str(r.get("kind") or "?") for r in _actions(args) if isinstance(r, dict))[:120],
         result.get("ok") if isinstance(result, dict) else None, changed, state["idle"], bool((args or {}).get("tab")),
-        _safe_error(result) if failed else "",
+        _safe_error(result) if failed else "", _targets(_actions(args), acted_on),
     )
     if changed:
         state["page"] = page
