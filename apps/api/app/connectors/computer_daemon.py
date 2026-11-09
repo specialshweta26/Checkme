@@ -15,7 +15,7 @@ from pathlib import Path
 
 HOST = "127.0.0.1"
 PORT = 18765
-VERSION = "30"
+VERSION = "31"
 _HOME = Path(os.environ.get("CHECKME_BROWSER_HOME") or "/tmp")
 SHOT = "/tmp/checkme-browser.png"
 PROFILE = str(_HOME / "profile")
@@ -484,7 +484,7 @@ _SNAPSHOT_JS = """(arg) => {
   const limit = Number(opts.limit) || 150;
   const find = String(opts.find || '').toLowerCase().split(/\\s+/).filter((w) => w.length > 1);
   // Calendar days too ([role=gridcell], dated cells, focusable labelled cells): without them a date can't be clicked by ref.
-  const BASE = 'a, button, input, textarea, select, option, label, summary, [role="button"], [role="link"], [role="textbox"], [role="searchbox"], [role="checkbox"], [role="radio"], [role="combobox"], [role="option"], [role="listbox"], [role="tab"], [role="menuitem"], [role="menuitemradio"], [role="treeitem"], [role="row"], [contenteditable="true"], [role="gridcell"], [data-date], td[title], [aria-label][tabindex]';
+  const BASE = 'a, button, input, textarea, select, option, label, summary, [role="button"], [role="link"], [role="textbox"], [role="searchbox"], [role="checkbox"], [role="radio"], [role="combobox"], [role="option"], [role="listbox"], [role="tab"], [role="menuitem"], [role="menuitemradio"], [role="treeitem"], [role="row"], [contenteditable="true"], [role="gridcell"], [data-date], td[title], [aria-label][tabindex], [draggable="true"]';
   const SUGGEST = '[role="option"], [role="menuitem"], [role="menuitemradio"], [role="treeitem"], [role="listbox"] li, [role="listbox"] button, [role="menu"] li, [role="menu"] button, [role="dialog"] li, [role="listbox"] [tabindex]';
   const tags = {A: 'link', BUTTON: 'button', INPUT: 'textbox', TEXTAREA: 'textbox', SELECT: 'combobox', OPTION: 'option', LABEL: 'label', SUMMARY: 'button', LI: 'option'};
   const inputRole = {submit: 'button', button: 'button', reset: 'button', image: 'button', checkbox: 'checkbox', radio: 'radio', search: 'searchbox', range: 'slider', file: 'file'};

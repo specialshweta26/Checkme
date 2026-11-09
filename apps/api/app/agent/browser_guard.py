@@ -184,7 +184,10 @@ def after(ctx: Any, tool: str, args: dict | None, result: Any) -> Any:
     if tool in ACT_TOOLS and isinstance(result, dict):
         rows = _actions(args)
         ran = rows if result.get("ok") is not False else rows[: int(result.get("completed") or 0)]
-        state["once"].update(label.casefold() for label in _once_labels(ran, state["elements"]))
+        # A declined pop-up means the click didn't take effect, so it can be tried again.
+        declined = any(isinstance(d, dict) and d.get("answer") == "declined" for d in result.get("dialogs") or [])
+        if not declined:
+            state["once"].update(label.casefold() for label in _once_labels(ran, state["elements"]))
     acted_on = state["elements"]
     if isinstance(result, dict) and isinstance(result.get("elements"), list):
         state["elements"] = result["elements"]

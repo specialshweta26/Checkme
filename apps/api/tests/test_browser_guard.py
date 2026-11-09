@@ -192,3 +192,14 @@ def test_a_failed_step_is_not_listed_as_done():
     guard.after(ctx, "browser_snapshot", {}, _checkout_page())
     out = _act(ctx, {"actions": [{"kind": "click", "ref": "e2"}]}, {**_checkout_page(), "ok": False, "error": "no"})
     assert not (out.get("so_far") or {}).get("steps")
+
+
+def test_a_declined_pop_up_lets_the_click_be_tried_again():
+    ctx = _ctx()
+    guard.after(ctx, "browser_snapshot", {}, _checkout_page())
+    finish = {"actions": [{"kind": "click", "ref": "e1"}]}
+    declined = {**_checkout_page(), "text": "still here", "dialogs": [{"type": "confirm", "answer": "declined"}]}
+    assert _act(ctx, finish, declined)["ok"] is True
+    assert not guard.final_step_done(ctx)
+    assert _act(ctx, {"actions": [{"kind": "accept_dialog"}, {"kind": "click", "ref": "e1"}]}, {**_checkout_page(), "text": "done"})["ok"] is True
+    assert guard.final_step_done(ctx)

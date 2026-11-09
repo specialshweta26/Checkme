@@ -829,8 +829,17 @@ impl Chrome {
                 let from = step.get("ref").and_then(Value::as_str).unwrap_or("");
                 let to = step.get("to").or_else(|| step.get("to_ref")).and_then(Value::as_str).unwrap_or("");
                 let page = self.page_ws().await?;
-                let start = self.point_of(&page, from).await?;
-                let end = self.point_of(&page, to).await?;
+                let at = |x: &str, y: &str| Some((step.get(x)?.as_i64()?, step.get(y)?.as_i64()?));
+                let start = if from.is_empty() {
+                    at("x", "y").ok_or_else(|| "drag needs ref or x and y".to_string())?
+                } else {
+                    self.point_of(&page, from).await?
+                };
+                let end = if to.is_empty() {
+                    at("x2", "y2").ok_or_else(|| "drag needs to or x2 and y2".to_string())?
+                } else {
+                    self.point_of(&page, to).await?
+                };
                 self.drag_between(&page, start, end).await?;
                 continue;
             }
