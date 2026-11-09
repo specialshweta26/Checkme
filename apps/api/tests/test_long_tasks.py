@@ -132,3 +132,22 @@ async def test_a_task_never_clicks_finish_twice_and_remembers_its_steps(monkeypa
     assert out["stopped_repeat"] == "Finish" and out["notes"] == ["Total $25.90"]
     assert out["done_so_far"] and "do_not_repeat" in out
     assert "Done so far" in seen[1]
+
+
+def test_steps_after_a_dropdown_wait_for_the_new_page():
+    batch = [{"kind": "fill", "ref": "e0"}, {"kind": "select", "ref": "e1"}, {"kind": "click", "ref": "e2"}]
+    assert [s["kind"] for s in fb.cut_after_dropdown(batch)] == ["fill", "select"]
+    assert fb.cut_after_dropdown(batch[:1]) == batch[:1]
+
+
+def test_amounts_and_references_are_kept_from_each_page():
+    memory = {}
+    state = {"url": "https://shop.example/step-two?x=1", "text": "Overview\nItem total: $23.98\nTax: $1.92\nThanks\nOrder ref 8841"}
+    fb.note_page_facts(memory, state, {})
+    assert memory["seen"]["https://shop.example/step-two"] == ["Item total: $23.98", "Tax: $1.92", "Order ref 8841"]
+
+
+def test_kept_facts_hide_the_users_values():
+    memory = {}
+    fb.note_page_facts(memory, {"url": "https://x.example/", "text": "Order 123 for hunter2"}, {"secret": "hunter2"})
+    assert "hunter2" not in str(memory)

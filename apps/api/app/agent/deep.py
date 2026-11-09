@@ -2729,7 +2729,7 @@ def system_prompt(
         "calendar only if that fails, and check the fields show the dates before Apply. Menus that open on mouse-over: hover, then "
         "click the item. Each model round is slow, so send every step you can already see in ONE browser_act: all the fields of a form plus "
         "its button, or each item to add. It stops at the first step that fails, and refs stay valid until the page changes. Only a step whose "
-        "result decides the next one needs its own call. A control that repeats shows what it belongs to in brackets. A dropdown's line in the element tree lists its options and current choice: use select with that ref and the "
+        "result decides the next one needs its own call, and a sort or dropdown always ends the batch: the list may reorder, so read it before clicking anything in it. A control that repeats shows what it belongs to in brackets. A dropdown's line in the element tree lists its options and current choice: use select with that ref and the "
         "option's text, and check the page changed. When a result lists warnings that a step may not have done anything, do not repeat it: try another way. "
         "When the element tree ends with '… N more elements', call browser_snapshot with find= the words you need. When a download (or publish_file) returns extracted_text, analyze it in YOUR role — your title, "
         "standing instructions, focus, and skills — not as a generic summarizer. If a listed skill covers this file or domain, get_skill "

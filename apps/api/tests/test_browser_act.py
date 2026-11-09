@@ -252,3 +252,16 @@ def test_a_link_is_never_treated_as_a_dropdown():
 def test_tree_line_says_what_a_repeated_control_belongs_to():
     line = tree_line({"ref": "e4", "role": "button", "name": "Add to cart", "near": "Sauce Labs Onesie"})
     assert line == "- e4 button Add to cart (Sauce Labs Onesie)"
+
+
+def test_styled_dropdown_picks_from_the_list_without_waiting_or_typing():
+    loc = _Loc(tag="div", role="")
+    page = _Page([{"name": "Admin", "x": 50, "y": 90}, {"name": "ESS", "x": 50, "y": 120}])
+    assert pick_suggestion(page, loc, {"tag": "div", "x": 50, "y": 40}, "ESS") == "option"
+    assert page.mouse.clicks == [(50, 120)] and page.keyboard.typed == [] and loc.selected is None
+
+
+def test_styled_dropdown_names_what_it_shows_when_nothing_matches():
+    page = _Page([{"name": "Admin", "x": 50, "y": 90}])
+    with pytest.raises(RuntimeError, match='no option "Manager".*Admin'):
+        pick_suggestion(page, _Loc(tag="div", role=""), {"tag": "div", "x": 50, "y": 40}, "Manager")
