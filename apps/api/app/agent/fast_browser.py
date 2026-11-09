@@ -1034,7 +1034,7 @@ Reply with a JSON object only: {"why": "", "actions": [...], "done": false, "res
 - why: one short sentence for the user watching the run later: what you see on the page and why these actions.
 - actions: every step you can already predict, in order, in ONE batch, e.g. [{"kind":"fill","ref":"e3","text":"{{email}}"},{"kind":"fill","ref":"e4","text":"{{password}}"},{"kind":"click","ref":"e5"}].
   kinds: click, fill, type, select (text = option to pick; also for type-ahead lists), check, uncheck, hover (menus that open on mouse-over), press (text = key), scroll, wait_for (text), download (ref of a file link), back, navigate (url), find (text = words to look for).
-  Use only refs from the current Elements list. End the batch at a step whose result you must see first (a type-ahead suggestion list, a menu that opens, a page that loads new fields, a new page).
+  Use only refs from the current Elements list. End the batch at a step whose result you must see first (a type-ahead suggestion list, a menu that opens, a sort or dropdown (the list may reorder), a page that loads new fields, a new page).
 - The Elements list may end with "… N more elements are not listed". If what you need is not listed, send ONE action {"kind":"find","text":"words from its label"} to re-list the page with matching elements first (or scroll).
 - Dates: use {"kind":"pick_date","ref":<the date field>,"text":"YYYY-MM-DD"}: it opens the field's calendar, moves to the month and clicks the day (or fills a date box). Never click calendar days or month arrows one by one. Before Apply / Submit, check the date fields show the dates you meant.
 - Menus: if clicking a menu does not open it, hover it, then click the item in the next batch. When "Last turn" says a step may not have done anything, do not repeat the same step: try its label, its parent, hover, or another way.
@@ -1123,6 +1123,28 @@ def once_labels(actions: list[dict], state: dict) -> list[str]:
         if label and (_is_final_label(label) or _ONCE.search(label)):
             out.append(label)
     return out
+
+
+def cut_after_dropdown(actions: list[dict]) -> list[dict]:
+    """A sort or dropdown can reorder what's below it, so the steps after it would hit the wrong items."""
+    for at, step in enumerate(actions):
+        if str(step.get("kind") or "").lower() in {"select", "pick"}:
+            return actions[: at + 1]
+    return actions
+
+
+_FACT_LINE = re.compile(r"[$₹€£]\s?\d|\b(?:rs\.?|inr|usd|eur|gbp)\s?\d|\b(?:order|booking|confirmation|reference|pnr|invoice)\b.*\d", re.I)
+
+
+def note_page_facts(memory: dict, state: dict | None, values: dict[str, str]) -> None:
+    """Keep amounts and reference numbers from each page: a later page won't show them, and the report needs them."""
+    st = state or {}
+    path = re.sub(r"[?#].*$", "", str(st.get("url") or ""))[-80:]
+    if not path:
+        return
+    lines = [" ".join(line.split())[:120] for line in str(st.get("text") or "").splitlines() if _FACT_LINE.search(line)]
+    if lines:
+        memory.setdefault("seen", {})[path] = [scrub(line, values) for line in lines[:12]]
 
 
 def with_progress(last: str, memory: dict) -> str:
@@ -1387,10 +1409,15 @@ async def _browser_task(ctx, goal: str, url: str = "", values: dict | None = Non
                         allow_final_action: bool = False, use_saved: bool = True, save: bool = True) -> dict:  # fmt: skip
     memory: dict = {"done": [], "notes": [], "once": set()}
     out = await _run_task(ctx, goal, url, values, max_steps, allow_final_action, use_saved, save, memory)
+    if isinstance(out, dict):
+        log.info("browser.task ended done=%s rounds=%s notes=%s pages_with_facts=%s fallback=%s", out.get("done"), len(memory["done"]),
+                 len(memory["notes"]), len(memory.get("seen") or {}), bool(out.get("fallback")))  # fmt: skip
     if isinstance(out, dict) and memory["done"]:
         out["done_so_far"] = memory["done"][-25:]
         if memory["notes"]:
             out["notes"] = memory["notes"][-20:]
+        if memory.get("seen"):
+            out["seen_on_pages"] = dict(list(memory["seen"].items())[-8:])
         if not out.get("done"):
             # Whoever carries on must not do these again: a repeated checkout is a second order.
             out["do_not_repeat"] = "The steps in done_so_far already happened. Continue from there; never start the task over."
@@ -1484,7 +1511,16 @@ async def _run_task(ctx, goal: str, url: str, values: dict | None, max_steps: in
             plan_ms = int((time.monotonic() - t0) * 1000)
             if plan and plan.get("notes") and scrub(plan["notes"], vals) not in memory["notes"]:
                 memory["notes"].append(scrub(plan["notes"], vals))
-            if plan is None or (not plan["actions"] and not plan["done"] and not plan["need_user"]):
+            note_page_facts(memory, state, vals)
+            if plan and plan.get("notes") and not plan["actions"] and not plan["done"] and not plan["need_user"]:
+                # Noting something down isn't a failed turn, but it can't go on forever either.
+                redirects += 1
+                if redirects > 2:
+                    failures += 1
+                last = "Noted. Now send the actions for what is left, or done=true with the result."
+                log_steps.append({"step": i + 1, "model": model, "plan_ms": plan_ms, "ok": True, "why": "noted facts"})
+            elif plan is None or (not plan["actions"] and not plan["done"] and not plan["need_user"]):
+                log.info("browser.task no usable plan step=%s model=%s plan_ms=%s empty=%s", i + 1, model, plan_ms, plan is not None)
                 failures += 1
                 last = "Your last reply was not a usable JSON plan. Reply with the JSON object only."
                 log_steps.append({"step": i + 1, "model": model, "plan_ms": plan_ms, "ok": False, "why": "no plan"})
@@ -1516,7 +1552,9 @@ async def _run_task(ctx, goal: str, url: str, values: dict | None, max_steps: in
                 return _result(state, vals, ok=True, done=True, via="model", result=scrub(plan["result"], vals),
                                saved_trace=bool(trace_id), _trace_id=trace_id or "", log=log_steps, took_ms=int((time.monotonic() - started) * 1000))  # fmt: skip
             else:
-                actions = plan["actions"]
+                actions = cut_after_dropdown(plan["actions"])
+                if len(actions) < len(plan["actions"]):
+                    plan = {**plan, "done": False}
                 blocked = "" if allow_final_action else final_click(actions, state)
                 if blocked:
                     return _result(state, vals, ok=True, done=False, stopped_before=blocked,
@@ -1571,8 +1609,9 @@ async def _run_task(ctx, goal: str, url: str, values: dict | None, max_steps: in
                 act_ms = int((time.monotonic() - t1) * 1000)
                 log_steps.append({"step": i + 1, "model": model, "plan_ms": plan_ms, "act_ms": act_ms, "actions": [a.get("kind") for a in actions], "ok": ok})
                 log.info(
-                    "browser.task step=%d model=%s plan_ms=%d act_ms=%d actions=%s ok=%s",
+                    "browser.task step=%d model=%s plan_ms=%d act_ms=%d actions=%s ok=%s err=%s",
                     i + 1, model, plan_ms, act_ms, ",".join(str(a.get("kind")) for a in actions), ok,
+                    "" if ok or isinstance(err, list) else scrub(str(err or ""), vals)[:120],
                 )  # fmt: skip
                 if _blocked(state):
                     return _result(state, vals, ok=False, done=False, need_user=BOT_WALL_NEED, log=log_steps)

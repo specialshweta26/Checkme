@@ -15,7 +15,7 @@ from pathlib import Path
 
 HOST = "127.0.0.1"
 PORT = 18765
-VERSION = "27"
+VERSION = "28"
 _HOME = Path(os.environ.get("CHECKME_BROWSER_HOME") or "/tmp")
 SHOT = "/tmp/checkme-browser.png"
 PROFILE = str(_HOME / "profile")
@@ -1879,7 +1879,8 @@ def pick_suggestion(page, loc, node, text: str) -> str:
         return "native"
     if tag == "a" and str((node or {}).get("href") or "") and str((node or {}).get("role") or "") != "combobox":
         raise RuntimeError("this is a link, not a dropdown: click it to follow it, or take a snapshot and use the dropdown's own ref")
-    if loc is not None:
+    if loc is not None and not tag:
+        # Only when the element's kind is unknown: on anything else this just waits out its 2.5 s timeout.
         try:
             loc.select_option(value, timeout=2500)
             return "native"
@@ -1887,6 +1888,15 @@ def pick_suggestion(page, loc, node, text: str) -> str:
             pass
     _click_target(page, loc, node)
     page.wait_for_timeout(200)
+    if tag and tag not in {"input", "textarea"} and not info.get("ce"):
+        # A styled dropdown with no box to type in: choose from the list the click opened.
+        hit = _wait_suggestion(page, value, tries=5)
+        if hit is not None and hit.get("x") is not None and score_option(value, str(hit.get("name") or "")) >= 40:
+            page.mouse.click(int(hit["x"]), int(hit["y"]))
+            page.wait_for_timeout(200)
+            return "option"
+        names = " | ".join(str(row.get("name") or "") for row in _suggestion_hits(page)[:25])
+        raise RuntimeError(f'no option "{value}" in the list that opened. It shows: {names or "nothing readable"}')
     _type_keys(page, value, replace=True)
     hit = _wait_suggestion(page, value)
     if hit is not None and hit.get("x") is not None:

@@ -539,6 +539,14 @@ impl Chrome {
             return Err(format!("couldn't find {text} in the calendar: take a snapshot and click the day, or use its month arrows"));
         }
         if self.picker(target, "focus", text).await.get("ok").and_then(Value::as_bool) != Some(true) {
+            // No box to type in: a styled dropdown shows its choices as a list, so pick from that.
+            let listed = self.picker(target, "suggest", text).await;
+            if let Some(at) = listed.get("at") {
+                let (x, y) = (at["x"].as_i64().unwrap_or(0), at["y"].as_i64().unwrap_or(0));
+                self.mouse_at(target, x, y, 1).await?;
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                return Ok(());
+            }
             return Err("clicking this field opened nothing to type in; look at the page and pick the value from what opened".into());
         }
         self.cdp_on(target, "Input.insertText", json!({ "text": text }), Duration::from_secs(8)).await?;
