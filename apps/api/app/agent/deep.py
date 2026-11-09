@@ -3127,6 +3127,27 @@ async def _ask_teammate(ctx: RunContext, agent_id: str, prompt: str) -> dict:
     return {"from": member.name, "agent_id": str(member.id), "reply": item["text"]}
 
 
+async def _do_what_was_promised(ctx, graph, text, result, progress, callbacks, limit, thread) -> str:
+    """The reply promised work but nothing ran, and nothing happens after a turn ends. Give it one more go."""
+    from app.agent import cancel as run_cancel
+
+    log.info("reply only promised work; continuing the turn")
+    if progress is not None:
+        await progress.emit("Doing it now", kind="retry")
+    try:
+        result = await graph.ainvoke(
+            {"messages": [{"role": "user", "content": "[Automatic check, not from the user] You said you would do this, but nothing has run and nothing happens after this turn ends. Do it now with your tools, then give your complete reply."}]},
+            config={"recursion_limit": limit, **thread, **({"callbacks": callbacks} if callbacks else {})},
+            durability="exit",
+        )
+    except Exception as exc:  # noqa: BLE001
+        if isinstance(exc, run_cancel.TurnCancelled) or run_cancel.is_cancelled():
+            raise run_cancel.TurnCancelled("stopped") from exc
+        log.warning("promised-work continuation failed: %s", type(exc).__name__)
+        return text
+    return last_text(result.get("messages") if isinstance(result, dict) else []) or text
+
+
 async def _finish_what_is_left(ctx, graph, query, text, result, progress, callbacks, limit, thread) -> str:
     """Check the finished turn against the request, and continue the same run once if work is left. The check can be
     wrong, so its verdict is never shown to the user as fact: the agent's own reply says what it did and didn't do."""
@@ -3744,6 +3765,8 @@ async def _run_deep_agent(
             log.exception("deep agent failed")
             text = f"I could not finish that request: {str(exc)[:240]}"
             break
+    if finished and get_settings().agent_finish_check and finish_check.only_promised(ctx, text):
+        text = await _do_what_was_promised(ctx, graph, text, result, progress, callbacks, limit, thread)
     if finished and get_settings().agent_finish_check and finish_check.should_check(ctx, text):
         text = await _finish_what_is_left(ctx, graph, query, text, result, progress, callbacks, limit, thread)
     timer.mark("agent", _t)

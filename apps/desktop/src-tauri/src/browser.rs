@@ -54,7 +54,7 @@ const PAGE_SIG_JS: &str = r#"(() => {
 // Resolves when the DOM has been quiet for a moment and no loading indicator (spinner, progress bar, aria-busy)
 // shows, or at the caps. Replaces fixed sleeps after an action.
 const SETTLE_JS: &str = r#"new Promise((resolve) => {
-  const BUSY = '[aria-busy="true"], [role="progressbar"], .spinner, .loading, .loader, .spinner-border, .MuiCircularProgress-root, .ant-spin-spinning, [class*="spinner"], [data-loading="true"]';
+  const BUSY = '[aria-busy="true"], [role="progressbar"], .spinner, .loading, .loader, [id*="loading" i], [class*="loading" i], .spinner-border, .MuiCircularProgress-root, .ant-spin-spinning, [class*="spinner"], [data-loading="true"]';
   const busy = () => {
     for (const el of document.querySelectorAll(BUSY)) {
       const r = el.getBoundingClientRect();

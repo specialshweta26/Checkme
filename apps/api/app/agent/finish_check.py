@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -23,6 +24,16 @@ _SYSTEM = (
     "can't be done, counts as complete, because trying again won't change that. If in doubt, it's complete. "
     'Answer in JSON: {"complete": true or false, "unfinished": ["short item", ...]}'
 )
+
+
+_PROMISE = re.compile(r"\bI(?:'|’)?(?: will|ll)\b.*\b(?:report|check|look|start|open|get back|let you know|update you)\b|\bI(?:'|’)ve started\b|\bI(?:'|’)m (?:starting|checking|opening|looking)\b", re.I | re.S)
+
+
+def only_promised(ctx: Any, text: str) -> bool:
+    """The reply says work is coming but nothing ran. Nothing will happen after the turn ends, so it has to be done now."""
+    if not text or ctx.teammate_depth or ctx.pending or ctx.question or ctx.used_tools:
+        return False
+    return len(text) < 400 and bool(_PROMISE.search(text)) and "?" not in text
 
 
 def should_check(ctx: Any, text: str) -> bool:
