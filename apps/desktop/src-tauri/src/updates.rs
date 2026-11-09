@@ -9,7 +9,7 @@ use tauri::AppHandle;
 use tauri_plugin_updater::UpdaterExt;
 
 const FIRST_CHECK_AFTER: Duration = Duration::from_secs(20);
-const CHECK_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
+const CHECK_EVERY: Duration = Duration::from_secs(60 * 60);
 const CHECK_AGAIN_AFTER_FAILURE: Duration = Duration::from_secs(5 * 60);
 const INSTALL_TRIES: u32 = 3;
 const UPDATE_NOW: &str = "Update now";

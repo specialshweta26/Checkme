@@ -92,3 +92,33 @@ async def test_the_feed_points_at_the_public_website(github, monkeypatch):
     monkeypatch.setattr(updates.time, "monotonic", lambda: 1.0)
     out = await update_feed()
     assert out["platforms"]["darwin-aarch64"]["url"].startswith("https://lumio.example/api/desktop/update/asset/")
+
+
+async def test_a_restart_during_an_outage_uses_the_saved_feed(github, monkeypatch):
+    async def saved():
+        return FEED
+
+    monkeypatch.setattr(updates, "_feed", None)
+    monkeypatch.setattr(updates, "_load_feed", saved)
+    _Client.answers = [504, 504, 504]
+    out = await updates.latest("https://api.example")
+    assert out["version"] == "0.1.26"
+
+
+async def test_a_good_feed_is_saved(github, monkeypatch):
+    saved = []
+
+    async def save(raw):
+        saved.append(raw)
+
+    monkeypatch.setattr(updates, "_feed", None)
+    monkeypatch.setattr(updates, "_save_feed", save)
+    monkeypatch.setattr(_Client, "get", _Client.get)
+
+    class Body(_Client):
+        async def get(self, url):
+            return httpx.Response(200, content=b'{"version": "9"}')
+
+    monkeypatch.setattr(updates.httpx, "AsyncClient", Body)
+    assert (await updates.latest("https://api.example"))["version"] == "9"
+    assert saved == [b'{"version": "9"}']
