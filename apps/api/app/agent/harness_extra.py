@@ -555,6 +555,29 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         ctx.used_tools.append("open_path")
         return _dumps(await computer.open_path(ctx, path), 32000)
 
+    async def computer_windows(action: str = "list", app: str = "", title: str = "", x: int | None = None, y: int | None = None,
+                               width: int | None = None, height: int | None = None) -> str:
+        """The open windows on the user's computer (desktop app only). action: list (every window with its app, title, position and size), focus (bring app, optionally the window whose title contains title, to the front), move_resize (x, y, width, height), minimize. Closing windows isn't offered, because it can lose unsaved work."""
+        ctx.used_tools.append("computer_windows")
+        args = {"action": action, "app": app, "title": title}
+        args.update({k: v for k, v in (("x", x), ("y", y), ("width", width), ("height", height)) if v is not None})
+        return _dumps(await computer.system_tool(ctx, "computer_windows", args))
+
+    async def computer_screens() -> str:
+        """The monitors on the user's computer (desktop app only): position, size and which is the main one."""
+        ctx.used_tools.append("computer_screens")
+        return _dumps(await computer.system_tool(ctx, "computer_screens", {}))
+
+    async def clipboard_read() -> str:
+        """Read the text on the user's clipboard (desktop app only). Only when the user's own message asks for it."""
+        ctx.used_tools.append("clipboard_read")
+        return _dumps(await computer.clipboard_read(ctx))
+
+    async def clipboard_write(text: str) -> str:
+        """Put text on the user's clipboard (desktop app only), replacing what is there. Only when the user asks for it."""
+        ctx.used_tools.append("clipboard_write")
+        return _dumps(await computer.system_tool(ctx, "computer_clipboard", {"action": "write", "text": text}))
+
     async def launch_app(name: str) -> str:
         """Open an app on the computer (Finder, Chrome, Excel, VS Code, …). In the desktop app this is the user's machine."""
         ctx.used_tools.append("launch_app")
@@ -818,6 +841,10 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         StructuredTool.from_function(coroutine=browser_act, name="browser_act", description=browser_act.__doc__, args_schema=BrowserActInput),
         StructuredTool.from_function(coroutine=browser_collect, name="browser_collect", description=browser_collect.__doc__, args_schema=BrowserCollectInput),
         StructuredTool.from_function(coroutine=browser_screenshot, name="browser_screenshot", description=browser_screenshot.__doc__),
+        StructuredTool.from_function(coroutine=computer_windows, name="computer_windows", description=computer_windows.__doc__),
+        StructuredTool.from_function(coroutine=computer_screens, name="computer_screens", description=computer_screens.__doc__),
+        StructuredTool.from_function(coroutine=clipboard_read, name="clipboard_read", description=clipboard_read.__doc__),
+        StructuredTool.from_function(coroutine=clipboard_write, name="clipboard_write", description=clipboard_write.__doc__),
         StructuredTool.from_function(coroutine=browser_page_log, name="browser_page_log", description=browser_page_log.__doc__),
         StructuredTool.from_function(coroutine=browser_tabs, name="browser_tabs", description=browser_tabs.__doc__),
         *(

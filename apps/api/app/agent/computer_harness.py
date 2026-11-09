@@ -710,6 +710,26 @@ async def open_path(ctx, path: str) -> Any:
     return published
 
 
+_ASKED_FOR_CLIPBOARD = re.compile(r"clipboard|copied|paste", re.I)
+DESKTOP_ONLY = "This works only in the Lumio desktop app, on the user's own computer."
+
+
+async def system_tool(ctx, tool: str, args: dict | None = None) -> Any:
+    """Windows, screens and clipboard on the user's computer. There is no cloud version."""
+    local = await _try_local(ctx, tool, args or {})
+    if local is None:
+        return {"ok": False, "error": DESKTOP_ONLY}
+    return local
+
+
+async def clipboard_read(ctx) -> Any:
+    """The clipboard can hold passwords and anything else the user copied, and a web page could ask the agent to read
+    it, so it is read only when the user's own message is about it."""
+    if not _ASKED_FOR_CLIPBOARD.search(str(getattr(ctx, "query", "") or "")):
+        return {"ok": False, "error": "Not read: only read the clipboard when the user asks you to in their own message."}
+    return await system_tool(ctx, "computer_clipboard", {"action": "read"})
+
+
 async def launch_app(ctx, name: str) -> Any:
     key = (name or "").strip().lower()
     if not key:
