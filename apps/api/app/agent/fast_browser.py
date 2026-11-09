@@ -1111,7 +1111,7 @@ async def plan_step(model: str, goal: str, state: dict, values: dict[str, str], 
 
 
 # Run-once controls: clicking one of these twice in a run means the planner lost its place, and could order or send twice.
-_ONCE = re.compile(r"\b(finish|complete|submit|confirm|place|checkout)\b", re.I)
+_ONCE = re.compile(r"^\W*(finish|complete|submit|confirm|place|checkout)\b", re.I)
 
 
 def once_labels(actions: list[dict], state: dict) -> list[str]:

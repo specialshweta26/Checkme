@@ -817,12 +817,16 @@ impl Chrome {
             }
             if kind == "reload" {
                 self.cdp("Page.reload", json!({})).await.ok();
-                tokio::time::sleep(Duration::from_millis(800)).await;
+                self.wait_for_page(1500).await;
                 continue;
             }
             if kind == "back" {
                 self.eval("history.back()").await.ok();
-                tokio::time::sleep(Duration::from_millis(600)).await;
+                self.wait_for_page(1500).await;
+                continue;
+            }
+            if kind == "dismiss_dialog" {
+                self.eval("window.__lumioWatch && (window.__lumioWatch.acceptNext = false)").await.ok();
                 continue;
             }
             if kind == "accept_dialog" {
@@ -861,7 +865,7 @@ impl Chrome {
             }
             if kind == "forward" {
                 self.eval("history.forward()").await.ok();
-                tokio::time::sleep(Duration::from_millis(600)).await;
+                self.wait_for_page(1500).await;
                 continue;
             }
             if kind == "wait_for" || kind == "waitfor" {
@@ -933,7 +937,7 @@ impl Chrome {
             }
             if result.get("already").and_then(Value::as_bool) == Some(true) {
                 let chosen = result.get("selected").and_then(Value::as_str).unwrap_or("");
-                warnings.push(format!("{chosen} was already chosen in this dropdown, so nothing needed to change. Carry on with the next step."));
+                warnings.push(format!("{chosen} was already chosen, so nothing needed to change. Carry on with the next step."));
             }
             if let Some(at) = result.get("mouse") {
                 let (x, y) = (at.get("x").and_then(Value::as_i64), at.get("y").and_then(Value::as_i64));
@@ -952,6 +956,14 @@ impl Chrome {
             }
             if result.get("insert").and_then(Value::as_bool) == Some(true) && !text.is_empty() {
                 self.cdp_on(&target, "Input.insertText", json!({ "text": text }), Duration::from_secs(8)).await?;
+                if kind == "fill" {
+                    let read = self.eval_on(&target, &format!("({ACT_JS})({ref_id:?}, \"read_value\", \"\", false)")).await;
+                    if let Some(value) = read.ok().and_then(|r| r.get("value").and_then(Value::as_str).map(str::to_string)) {
+                        if value.trim() != text.trim() {
+                            warnings.push(format!("step {} (fill {ref_id}): the field doesn't show what was typed. Check it before going on.", index + 1));
+                        }
+                    }
+                }
             }
             if result.get("submit").and_then(Value::as_bool) == Some(true) {
                 let key = result.get("key").and_then(Value::as_str).unwrap_or("Enter");
@@ -965,7 +977,16 @@ impl Chrome {
             }
             if check_effect {
                 self.settle().await;
-                if sig_before.is_some() && self.page_sig().await == sig_before {
+                // A slow site can take a few seconds to react, so wait for the page instead of calling it a failure.
+                let mut same = sig_before.is_some() && self.page_sig().await == sig_before;
+                for _ in 0..12 {
+                    if !same {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    same = self.page_sig().await == sig_before;
+                }
+                if same {
                     // Some pages ignore the mouse here: try the page's own click once, unless it's a final control.
                     let mut retried = false;
                     if kind == "click" && result.get("mouse").is_some() {

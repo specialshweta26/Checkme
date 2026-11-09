@@ -15,7 +15,7 @@ from pathlib import Path
 
 HOST = "127.0.0.1"
 PORT = 18765
-VERSION = "31"
+VERSION = "32"
 _HOME = Path(os.environ.get("CHECKME_BROWSER_HOME") or "/tmp")
 SHOT = "/tmp/checkme-browser.png"
 PROFILE = str(_HOME / "profile")
@@ -569,6 +569,29 @@ _SNAPSHOT_JS = """(arg) => {
     });
     return rows;
   };
+  // What a control is showing right now, so a step can be checked without guessing from the page's text.
+  const stateOf = (el) => {
+    const out = {};
+    const type = (el.getAttribute('type') || '').toLowerCase();
+    const aria = (name) => el.getAttribute('aria-' + name);
+    if (el.tagName === 'INPUT' && (type === 'checkbox' || type === 'radio')) out.checked = !!el.checked;
+    else if (aria('checked') !== null) out.checked = aria('checked') === 'true';
+    if (aria('selected') !== null) out.selected = aria('selected') === 'true';
+    if (aria('expanded') !== null) out.expanded = aria('expanded') === 'true';
+    if (el.disabled === true || aria('disabled') === 'true') out.disabled = true;
+    const secret = type === 'password' || (el.getAttribute('autocomplete') || '').toLowerCase().startsWith('cc-') || (el.getAttribute('autocomplete') || '').toLowerCase() === 'one-time-code';
+    if ((el.tagName === 'TEXTAREA' || (el.tagName === 'INPUT' && !['checkbox', 'radio', 'button', 'submit', 'reset', 'file', 'image', 'hidden'].includes(type))) && !secret) {
+      out.value = String(el.value || '').slice(0, 80);
+    }
+    return out;
+  };
+  // A tick box's value is usually just "on": its label, or the text beside it, says what it is.
+  const boxName = (el) => {
+    const labelled = el.labels && el.labels[0] ? el.labels[0].innerText : '';
+    const beside = el.nextSibling && el.nextSibling.nodeType === 3 ? el.nextSibling.textContent : (el.previousSibling && el.previousSibling.nodeType === 3 ? el.previousSibling.textContent : '');
+    return (el.getAttribute('aria-label') || labelled || beside || el.getAttribute('name') || '').replace(/\\s+/g, ' ').trim().slice(0, 80);
+  };
+  const isBox = (el) => el.tagName === 'INPUT' && ['checkbox', 'radio'].includes((el.getAttribute('type') || '').toLowerCase());
   const origin = Number(start) || 0;
   const shownEls = ranked.slice(0, limit);
   return addNear(shownEls.map((el, i) => {
@@ -596,6 +619,8 @@ _SNAPSHOT_JS = """(arg) => {
       label,
       autocomplete: attr('autocomplete'),
       download: el.hasAttribute('download') ? (attr('download') || '1') : '',
+      ...stateOf(el),
+      ...(isBox(el) ? { name: boxName(el) } : {}),
       ...(el.tagName === 'SELECT' ? {
         name: (el.getAttribute('aria-label') || label || el.getAttribute('name') || '').slice(0, 80),
         options: Array.from(el.options || []).slice(0, 25).map((o) => (o.text || '').replace(/\\s+/g, ' ').trim().slice(0, 40)),
@@ -970,6 +995,16 @@ def tree_line(node: dict) -> str:
         parts.append("[file]")
     if node.get("options"):
         parts.append(f"[dropdown, now: {node.get('selected') or ''}; options: {' | '.join(str(o) for o in node['options'])}]")
+    if node.get("checked") is not None:
+        parts.append("[checked]" if node["checked"] else "[not checked]")
+    if node.get("selected") is True:
+        parts.append("[selected]")
+    if node.get("expanded") is not None:
+        parts.append("[expanded]" if node["expanded"] else "[collapsed]")
+    if node.get("disabled"):
+        parts.append("[disabled]")
+    if node.get("value"):
+        parts.append(f"[value: {node['value']}]")
     return " ".join(parts)
 
 
@@ -1240,6 +1275,49 @@ def _step_target(step: dict) -> dict:
     return target if isinstance(target, dict) else {}
 
 
+_NO_RETRY_LABEL = re.compile(r"\b(pay|buy|purchase|order|checkout|finish|complete|confirm|submit|send|transfer|delete|remove account|book)\b", re.I)
+
+
+def _still_same(page, before: str, seconds: float = 3.0) -> bool:
+    """A slow site can take a few seconds to react, so wait for the page instead of calling it a failure."""
+    deadline = time.monotonic() + seconds
+    while True:
+        if page_signature(page) != before:
+            return False
+        if time.monotonic() >= deadline:
+            return True
+        page.wait_for_timeout(250)
+
+
+def _click_through_page(page, step: dict, node, before: str) -> bool:
+    """Some pages ignore the mouse: try the page's own click once, but never on a final control."""
+    if _NO_RETRY_LABEL.search(str((node or {}).get("name") or "")):
+        return False
+    try:
+        loc = _locator(page, step, node)
+        if loc is None:
+            return False
+        loc.evaluate("el => el.click()")
+    except Exception:
+        return False
+    return not _still_same(page, before, 1.5)
+
+
+def _fill_note(page, step: dict, node, number: int) -> str:
+    """A field that doesn't show what was typed. Secret fields are never read."""
+    if is_secret_target(descriptor(node) if node else {}) or step.get("secret"):
+        return ""
+    want = str(step.get("text") or step.get("value") or "").strip()
+    try:
+        loc = _locator(page, step, node)
+        shown = loc.input_value(timeout=1000) if loc is not None else None
+    except Exception:
+        return ""
+    if want and shown is not None and shown.strip() != want:
+        return f"step {number} (fill): the field doesn't show what was typed. Check it before going on."
+    return ""
+
+
 def _act_page(page, actions: list, verify: bool = False):
     """Run steps in order; stop at the first failure and return a fresh snapshot. ``verify`` (replay) also checks
     each step's target was found by its stored descriptor and typed values stuck."""
@@ -1281,9 +1359,16 @@ def _act_page(page, actions: list, verify: bool = False):
             timings.append({"kind": kind, "act_ms": act_ms, "wait_ms": wait_ms})
             if step.get("_already"):
                 warnings.append(f"step {completed} ({kind}): that option was already chosen in this dropdown, so nothing needed to change. Carry on with the next step.")
-            if sig_before is not None and page_signature(page) == sig_before:
-                trace[-1]["no_effect"] = True
-                warnings.append(no_effect_note(completed - 1, kind, ref))
+            if sig_before is not None and _still_same(page, sig_before):
+                if kind == "click" and _click_through_page(page, step, node, sig_before):
+                    warnings.append(f"step {completed} (click {ref}): the mouse click had no effect, so it was clicked through the page instead, which worked.")
+                else:
+                    trace[-1]["no_effect"] = True
+                    warnings.append(no_effect_note(completed - 1, kind, ref))
+            if kind == "fill" and not verify:
+                note = _fill_note(page, step, node, completed)
+                if note:
+                    warnings.append(note)
     except Exception as exc:
         _settle(page)
         data = _snapshot(page)
@@ -2119,6 +2204,8 @@ def _act_step(page, step: dict) -> dict | None:
         return _upload_file(page, loc, node, step)
     elif kind == "accept_dialog":
         _accept_next.update(on=True, text=str(step.get("text") or step.get("value") or "") or None)
+    elif kind == "dismiss_dialog":
+        _accept_next.update(on=False, text=None)
     elif kind == "download":
         return _click_download(page, loc, node, step)
     elif kind == "reload":

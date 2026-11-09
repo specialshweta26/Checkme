@@ -48,6 +48,29 @@
       ordered.push({ el, ox, oy });
     }
   }
+  // What a control is showing right now, so a step can be checked without guessing from the page's text.
+  const stateOf = (el) => {
+    const out = {};
+    const type = (el.getAttribute('type') || '').toLowerCase();
+    const aria = (name) => el.getAttribute('aria-' + name);
+    if (el.tagName === 'INPUT' && (type === 'checkbox' || type === 'radio')) out.checked = !!el.checked;
+    else if (aria('checked') !== null) out.checked = aria('checked') === 'true';
+    if (aria('selected') !== null) out.selected = aria('selected') === 'true';
+    if (aria('expanded') !== null) out.expanded = aria('expanded') === 'true';
+    if (el.disabled === true || aria('disabled') === 'true') out.disabled = true;
+    const secret = type === 'password' || (el.getAttribute('autocomplete') || '').toLowerCase().startsWith('cc-') || (el.getAttribute('autocomplete') || '').toLowerCase() === 'one-time-code';
+    if ((el.tagName === 'TEXTAREA' || (el.tagName === 'INPUT' && !['checkbox', 'radio', 'button', 'submit', 'reset', 'file', 'image', 'hidden'].includes(type))) && !secret) {
+      out.value = String(el.value || '').slice(0, 80);
+    }
+    return out;
+  };
+  // A tick box's value is usually just "on": its label, or the text beside it, says what it is.
+  const boxName = (el) => {
+    const labelled = el.labels && el.labels[0] ? el.labels[0].innerText : '';
+    const beside = el.nextSibling && el.nextSibling.nodeType === 3 ? el.nextSibling.textContent : (el.previousSibling && el.previousSibling.nodeType === 3 ? el.previousSibling.textContent : '');
+    return (el.getAttribute('aria-label') || labelled || beside || el.getAttribute('name') || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+  };
+  const isBox = (el) => el.tagName === 'INPUT' && ['checkbox', 'radio'].includes((el.getAttribute('type') || '').toLowerCase());
   const first = Number(start) || 0;
   // find: words the agent is looking for; matching elements go first so a long page doesn't hide them.
   const words = String(find || '').toLowerCase().split(/\s+/).filter((w) => w.length > 1);
@@ -95,10 +118,10 @@
     const role = (el.getAttribute('role') || (el.tagName === 'INPUT' && inputRole[(el.getAttribute('type') || '').toLowerCase()]) || tags[el.tagName] || el.tagName.toLowerCase());
     const choices = el.tagName === 'SELECT' ? Array.from(el.options || []).slice(0, 25).map((o) => (o.text || '').replace(/\s+/g, ' ').trim().slice(0, 40)) : null;
     const chosen = el.tagName === 'SELECT' && el.selectedOptions && el.selectedOptions[0] ? (el.selectedOptions[0].text || '').trim().slice(0, 40) : '';
-    return { ref, role, name: el.tagName === 'SELECT' ? (el.getAttribute('aria-label') || (el.labels && el.labels[0] && el.labels[0].innerText) || el.getAttribute('name') || '').replace(/\s+/g, ' ').trim().slice(0, 80) : name, tag: el.tagName.toLowerCase(), href: el.href || '', in_view: inView(item), x: Math.round(r.x + r.width / 2 + item.ox), y: Math.round(r.y + r.height / 2 + item.oy), ...(choices ? { options: choices, selected: chosen } : {}) };
+    return { ref, role, ...stateOf(el), name: isBox(el) ? boxName(el) : el.tagName === 'SELECT' ? (el.getAttribute('aria-label') || (el.labels && el.labels[0] && el.labels[0].innerText) || el.getAttribute('name') || '').replace(/\s+/g, ' ').trim().slice(0, 80) : name, tag: el.tagName.toLowerCase(), href: el.href || '', in_view: inView(item), x: Math.round(r.x + r.width / 2 + item.ox), y: Math.round(r.y + r.height / 2 + item.oy), ...(choices ? { options: choices, selected: chosen } : {}) };
   });
   addNear(elements, (i) => shown[i].el);
-  const tree = elements.map((n) => ('- ' + n.ref + ' ' + n.role + ' ' + (n.name || '') + (n.near ? ' (' + n.near + ')' : '') + (n.href ? ' ' + n.href : '') + (n.options ? ' [dropdown, now: ' + n.selected + '; options: ' + n.options.join(' | ') + ']' : '')).trim()).join('\n');
+  const tree = elements.map((n) => ('- ' + n.ref + ' ' + n.role + ' ' + (n.name || '') + (n.near ? ' (' + n.near + ')' : '') + (n.href ? ' ' + n.href : '') + (n.options ? ' [dropdown, now: ' + n.selected + '; options: ' + n.options.join(' | ') + ']' : '') + (n.checked === undefined ? '' : (n.checked ? ' [checked]' : ' [not checked]')) + (n.selected === true ? ' [selected]' : '') + (n.expanded === undefined ? '' : (n.expanded ? ' [expanded]' : ' [collapsed]')) + (n.disabled ? ' [disabled]' : '') + (n.value ? ' [value: ' + n.value + ']' : '')).trim()).join('\n');
   const parts = [];
   for (const { root } of roots) {
     const body = root.body;
