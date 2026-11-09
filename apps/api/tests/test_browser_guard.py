@@ -255,3 +255,13 @@ def test_going_back_to_a_list_between_real_work_is_fine():
         assert guard.before(ctx, "browser_navigate", nav) is None
         guard.after(ctx, "browser_navigate", nav, _page("list"))
         _act(ctx, {"actions": [{"kind": "click", "ref": f"e{n}"}]}, _page(f"detail {n}"))
+
+
+def test_delete_on_another_row_is_not_a_repeat():
+    ctx = _ctx()
+    rows = {**_page(), "elements": [{"ref": "e1", "name": "Delete", "near": "MacBook Pro"}, {"ref": "e2", "name": "Delete", "near": "Sony vaio"}]}
+    guard.after(ctx, "browser_snapshot", {}, rows)
+    assert _act(ctx, {"actions": [{"kind": "click", "ref": "e1"}]}, {**rows, "text": "one gone"})["ok"] is True
+    assert _act(ctx, {"actions": [{"kind": "click", "ref": "e2"}]}, {**rows, "text": "two gone"})["ok"] is True
+    again = _act(ctx, {"actions": [{"kind": "click", "ref": "e2"}]}, {**rows, "text": "two gone"})
+    assert again["already_done"] is True
