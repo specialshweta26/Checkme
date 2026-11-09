@@ -9,6 +9,12 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
 const SNAPSHOT_JS: &str = include_str!("snapshot.js");
+/// Chrome flags that stop it pausing pages in hidden or covered windows. Playwright uses the same ones.
+const BACKGROUND_FLAGS: [&str; 3] = [
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding",
+    "--disable-background-timer-throttling",
+];
 const COLLECT_JS: &str = include_str!("collect.js");
 const ACT_JS: &str = include_str!("act.js");
 const PICKER_JS: &str = include_str!("picker.js");
@@ -286,6 +292,9 @@ pub async fn launch(start_url: &str) -> Result<Chrome, String> {
         .arg("--no-default-browser-check")
         .arg("--disable-sync")
         .arg("--disable-blink-features=AutomationControlled")
+        // Keep pages running while the window is behind other windows. Otherwise macOS reports the page as hidden,
+        // Chrome pauses it, and scrolling never loads more (an infinite-scroll page stayed at 10 items).
+        .args(BACKGROUND_FLAGS)
         .arg("--window-size=1280,800")
         .arg(start_url)
         .stdout(Stdio::null())
