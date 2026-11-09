@@ -683,14 +683,26 @@ impl Chrome {
         }
         if let Ok(shot) = self.screenshot_b64().await {
             data["screenshot_b64"] = json!(shot);
+            data["shot_in_page_pixels"] = json!(true);
         }
         data["ok"] = json!(true);
         data["ran_on"] = json!("local_computer");
         Ok(data)
     }
 
+    /// One image pixel per page pixel, on any display: a position in the image is a position to click, and the file is
+    /// a quarter of the size on a Retina screen.
     pub async fn screenshot_b64(&self) -> Result<String, String> {
-        let result = self.cdp("Page.captureScreenshot", json!({ "format": "png" })).await?;
+        let size = self.eval("[window.innerWidth, window.innerHeight, window.devicePixelRatio || 1]").await.unwrap_or(Value::Null);
+        let part = |i: usize| size.get(i).and_then(Value::as_f64);
+        let params = match (part(0), part(1), part(2)) {
+            (Some(width), Some(height), Some(ratio)) if width > 0.0 && height > 0.0 && ratio > 0.0 => json!({
+                "format": "png",
+                "clip": { "x": 0, "y": 0, "width": width, "height": height, "scale": 1.0 / ratio }
+            }),
+            _ => json!({ "format": "png" }),
+        };
+        let result = self.cdp("Page.captureScreenshot", params).await?;
         result
             .get("data")
             .and_then(Value::as_str)
@@ -862,18 +874,19 @@ impl Chrome {
                 continue;
             }
             if let (Some(x), Some(y)) = (step.get("x").and_then(Value::as_i64), step.get("y").and_then(Value::as_i64)) {
-                self.cdp(
-                    "Input.dispatchMouseEvent",
-                    json!({ "type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1 }),
-                )
-                .await
-                .ok();
-                self.cdp(
-                    "Input.dispatchMouseEvent",
-                    json!({ "type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1 }),
-                )
-                .await
-                .ok();
+                let page = self.page_ws().await?;
+                match kind {
+                    "rightclick" | "contextclick" | "context_click" => self.mouse_right(&page, x, y).await?,
+                    "dblclick" => self.mouse_at(&page, x, y, 2).await?,
+                    _ => self.mouse_at(&page, x, y, 1).await?,
+                }
+                self.settle().await;
+                continue;
+            }
+            if kind == "type" && step.get("ref").is_none() {
+                // Working from the screen: type into whatever was just clicked.
+                let text = step.get("text").and_then(Value::as_str).unwrap_or("");
+                self.type_text(text).await?;
                 continue;
             }
             let ref_id = step.get("ref").and_then(Value::as_str).unwrap_or("");

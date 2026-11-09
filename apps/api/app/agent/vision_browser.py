@@ -8,8 +8,8 @@ when the model answers in words (done), a safety check needs the user, or the st
 
 Same rules as the fast loop: values the user gave are {{placeholders}} substituted only when typing; never a final or
 irreversible click unless the user asked for it; bot checks and safety checks go to the user. Every step is kept in
-the run history with its screenshot. Runs on the cloud browser; the desktop app needs to report its screen scale first
-(screen_scale in computer_observe) before its own screen can be driven.
+the run history with its screenshot. On the cloud computer it sees the screen. On the desktop app it sees only the browser
+page, never the rest of the user's screen, and acts through the page.
 """
 
 from __future__ import annotations
@@ -87,11 +87,39 @@ def to_actions(model_actions: list, values: dict[str, str]) -> tuple[list[dict],
     return out, skipped
 
 
+def _page_steps(actions: list[dict]) -> list[dict]:
+    """Steps for the desktop browser, which has "press" where the computer tool's steps say "key"."""
+    out = []
+    for step in actions:
+        if step.get("kind") == "key":
+            out.append({"kind": "press", "text": step.get("key")})
+        else:
+            out.append(step)
+    return out
+
+
+async def _desktop_screen(ctx) -> tuple[dict, str]:
+    """The browser page in the desktop app: its state and a PNG data URL ("" if this app version can't provide one that
+    positions can be read from)."""
+    from app.agent.computer_harness import run_computer
+    from app.desktop.agent import take_page_shot
+
+    state = await run_computer(ctx, "browse_screenshot", {})
+    state = state if isinstance(state, dict) else {"ok": False, "error": str(state)[:300]}
+    png = take_page_shot(str(state.get("page_shot_key") or ""))
+    if not png or not state.get("shot_in_page_pixels"):
+        return state, ""
+    return state, "data:image/png;base64," + base64.b64encode(png).decode()
+
+
 async def _screen(ctx) -> tuple[dict, str]:
     """The current screen: the page state and a PNG data URL ("" when no screenshot could be taken)."""
     from app.agent.computer_harness import computer_slug, run_computer
+    from app.desktop.client import prefer_local
     from connector_core import BinaryResult
 
+    if prefer_local():
+        return await _desktop_screen(ctx)
     state = await run_computer(ctx, "computer_observe", {})
     state = state if isinstance(state, dict) else {"ok": False, "error": str(state)[:300]}
     if state.get("screenshot_b64"):
@@ -143,10 +171,11 @@ async def computer_task(ctx, goal: str, values: dict | None = None, allow_final_
     try:
         from app.desktop.client import prefer_local
 
-        if prefer_local():
-            return {"ok": False, "done": False, "fallback": True, "unsupported": "desktop",
-                    "note": "Seeing and clicking on this computer's own screen needs the next desktop app version."}
+        on_desktop = bool(prefer_local())
         state, image = await _screen(ctx)
+        if not image and on_desktop:
+            return {"ok": False, "done": False, "fallback": True, "unsupported": "desktop",
+                    "note": "Working from the screen needs a newer Lumio desktop app. Continue with browser_act."}
         if not image:
             return _result(state, vals, ok=False, done=False, fallback=True, note="No screenshot of the computer was available.")
         if state.get("bot_wall"):
@@ -190,7 +219,10 @@ async def computer_task(ctx, goal: str, values: dict | None = None, allow_final_
                 if actions:
                     from app.agent.computer_harness import run_computer
 
-                    await run_computer(ctx, "computer_act", {"actions": actions})
+                    if on_desktop:
+                        await run_computer(ctx, "browser_act", {"actions": _page_steps(actions)})
+                    else:
+                        await run_computer(ctx, "computer_act", {"actions": actions})
                 state, image = await _screen(ctx)
                 await _log(_describe(actions, vals), f"step {step + 1} by sight" + (f"; skipped {', '.join(skipped)}" if skipped else ""),
                            True, state)  # fmt: skip
