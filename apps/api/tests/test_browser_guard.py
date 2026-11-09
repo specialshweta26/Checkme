@@ -209,3 +209,31 @@ def test_the_step_log_says_when_a_click_needed_the_page_retry():
     assert guard._warned({"warnings": ["step 1: the mouse click had no effect, so it was clicked through the page instead, which worked."]}) == "page_click"
     assert guard._warned({"warnings": ["step 1 may not have done anything"]}) == "no_effect"
     assert guard._warned({"ok": True}) == ""
+
+
+def test_results_say_whether_the_page_and_address_changed():
+    ctx = _ctx()
+    guard.after(ctx, "browser_snapshot", {}, _checkout_page())
+    click = {"actions": [{"kind": "click", "ref": "e2"}]}
+    moved = _act(ctx, click, {**_checkout_page(), "url": "https://shop.example/next", "text": "next"})
+    assert moved["check"] == {"page_changed": True, "url_changed": True}
+    assert moved["navigated"] == {"from": "https://shop.example/items", "to": "https://shop.example/next"}
+    same = _act(ctx, {"actions": [{"kind": "click", "ref": "e1"}]}, {**_checkout_page(), "url": "https://shop.example/next", "text": "next"})
+    assert same["check"] == {"page_changed": False, "url_changed": False} and "navigated" not in same
+
+
+def _named(ref, name, near=None):
+    return {"ref": ref, "role": "button", "name": name, **({"near": near} if near else {})}
+
+
+def test_a_moved_control_is_found_again_only_if_it_is_certain():
+    ctx = _ctx()
+    guard.after(ctx, "browser_snapshot", {}, {**_page(), "elements": [_named("e1", "Add to cart", "Onesie"), _named("e2", "Open")]})
+    args = {"actions": [{"kind": "click", "ref": "e2"}, {"kind": "click", "ref": "e1"}], "tab": "t1"}
+    failed = {"ok": False, "error": "step 2 failed, the 1 before it ran: ref not found: e1"}
+    guard.after(ctx, "browser_act", args, failed)
+    moved = guard.stale_retry(ctx, args, failed, [_named("e9", "Add to cart", "Onesie")])
+    assert moved == {"actions": [{"kind": "click", "ref": "e9"}], "tab": "t1"}
+    assert guard.stale_retry(ctx, args, failed, [_named("e8", "Add to cart", "Onesie"), _named("e9", "Add to cart", "Onesie")]) is None
+    assert guard.stale_retry(ctx, args, failed, [_named("e9", "Add to cart", "Backpack")]) is None
+    assert guard.stale_retry(ctx, args, {"ok": False, "error": "something else"}, [_named("e9", "Add to cart", "Onesie")]) is None

@@ -172,9 +172,14 @@
     return { ok: true };
   }
   if (kind === 'check' || kind === 'uncheck') {
+    const want = kind === 'check';
+    const now = () => (target.tagName === 'INPUT' ? !!target.checked : target.getAttribute('aria-checked') === 'true');
+    if (now() === want) return { ok: true, already: true, selected: want ? 'That box' : 'That box being unticked' };
     target.click();
+    if (now() !== want) return { ok: false, error: 'the box did not change: it is still ' + (want ? 'unticked' : 'ticked') };
     return { ok: true };
   }
+  if (kind === 'read_value') return { ok: true, value: target.tagName === 'INPUT' && (target.getAttribute('type') || '').toLowerCase() === 'password' ? null : read(target) };
   if (kind === 'hover') {
     // Menus that open on hover listen for real pointer movement (and CSS :hover needs it), so move the mouse there.
     const at = point(target);

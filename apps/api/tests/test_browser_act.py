@@ -316,3 +316,10 @@ def test_a_page_answers_pop_ups_safely_and_reports_them():
     again = {}
     d._take_dialogs(again, page)
     assert "dialogs" not in again
+
+
+def test_tree_lines_show_a_controls_state():
+    assert tree_line({"ref": "e1", "role": "checkbox", "name": "checkbox 1", "input_type": "checkbox", "checked": False}) == "- e1 checkbox checkbox 1 [checkbox] [not checked]"
+    assert "[checked]" in tree_line({"ref": "e2", "role": "checkbox", "name": "b", "checked": True})
+    line = tree_line({"ref": "e3", "role": "textbox", "name": "City", "value": "Pune", "disabled": True})
+    assert "[disabled]" in line and "[value: Pune]" in line

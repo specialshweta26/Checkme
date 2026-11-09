@@ -379,7 +379,50 @@ async def run_computer(ctx, tool_name: str, args: dict | None = None, *, force_c
         await browser_tabs.forget(ctx, where)
         with_tab = await browser_tabs.tab_for(ctx, tool_name, args, where, plain)
         result = await _run_computer(ctx, tool_name, with_tab if with_tab is not None else args, force_cloud=force_cloud)
-    return browser_guard.after(ctx, tool_name, with_tab if with_tab is not None else args, result)
+    sent = with_tab if with_tab is not None else args
+    out = browser_guard.after(ctx, tool_name, sent, result)
+    if tool_name in browser_guard.ACT_TOOLS:
+        out = await _after_failed_step(ctx, tool_name, sent, out, plain)
+    return out
+
+
+MAX_FAILURE_SHOTS = 5
+
+
+async def _after_failed_step(ctx, tool_name: str, sent: dict | None, out: Any, plain) -> Any:
+    """A control that moved gets one more try on the fresh page. A step that still failed leaves a screenshot as evidence."""
+    if not isinstance(out, dict) or out.get("ok") is not False or out.get("repeated") or out.get("already_done") or out.get("stopped"):
+        return out
+    if not getattr(ctx, "_retargeting", False):
+        ctx._retargeting = True
+        try:
+            page = await plain("browser_snapshot", {"tab": sent["tab"]} if (sent or {}).get("tab") else {})
+            moved = browser_guard.stale_retry(ctx, sent, out, page.get("elements") or [] if isinstance(page, dict) else [])
+            if moved is not None:
+                retried = await _run_computer(ctx, tool_name, moved)
+                retried = browser_guard.after(ctx, tool_name, moved, retried)
+                if isinstance(retried, dict) and retried.get("ok") is not False:
+                    retried.setdefault("warnings", []).append("A control had moved when the page changed, so it was found again by name and the step retried.")
+                    return retried
+        except Exception as exc:  # noqa: BLE001 - the original failure still gets reported
+            log.info("browser retarget skipped: %s", type(exc).__name__)
+        finally:
+            ctx._retargeting = False
+    taken = int(getattr(ctx, "_failure_shots", 0) or 0)
+    if taken < MAX_FAILURE_SHOTS and not getattr(ctx, "_taking_failure_shot", False):
+        ctx._taking_failure_shot = True
+        ctx._failure_shots = taken + 1
+        try:
+            from app.agent.page_shots import capture
+
+            shot = await capture(ctx, f"failed step {taken + 1}")
+            if isinstance(shot, dict) and shot.get("ok"):
+                out["failure_screenshot"] = shot.get("filename")
+        except Exception as exc:  # noqa: BLE001 - a missing picture must not hide the failure
+            log.info("failure screenshot skipped: %s", type(exc).__name__)
+        finally:
+            ctx._taking_failure_shot = False
+    return out
 
 
 async def _run_computer(ctx, tool_name: str, args: dict | None = None, *, force_cloud: bool = False) -> Any:

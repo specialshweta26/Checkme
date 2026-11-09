@@ -65,6 +65,38 @@ def _carry_progress(state: dict, tool: str, args: dict | None, result: dict, act
         result["so_far"] = {"steps": state.get("log", [])[-30:], "seen_on_pages": seen}
 
 
+_STALE = re.compile(r"ref (?:not found: )?(e\d+)|ref not found: (e\d+)", re.I)
+_STEP = re.compile(r"step (\d+) failed", re.I)
+
+
+def stale_retry(ctx: Any, args: dict | None, result: Any, fresh: list) -> dict | None:
+    """When a step's ref has gone because the page re-rendered, the steps still to run with their refs moved to the same
+    controls on the fresh page. None unless every one is found exactly once, with its name and what it belongs to matching."""
+    state = getattr(ctx, "_browser_guard", None)
+    if not isinstance(state, dict) or not isinstance(result, dict) or result.get("ok") is not False:
+        return None
+    error = str(result.get("error") or "")
+    if not _STALE.search(error) and "older page" not in error:
+        return None
+    rows = _actions(args)
+    found = _STEP.search(error)
+    start = int(found.group(1)) - 1 if found else int(result.get("completed") or 0)
+    old = {str(e.get("ref")): e for e in state.get("acted_on") or [] if isinstance(e, dict)}
+    moved = []
+    for row in rows[start:]:
+        if not isinstance(row, dict) or not row.get("ref"):
+            moved.append(row)
+            continue
+        was = old.get(str(row["ref"]))
+        if not was or not was.get("name"):
+            return None
+        same = [e for e in fresh if isinstance(e, dict) and e.get("name") == was.get("name") and e.get("role") == was.get("role") and e.get("near") == was.get("near")]
+        if len(same) != 1:
+            return None
+        moved.append({**row, "ref": same[0].get("ref")})
+    return {**(args or {}), "actions": moved} if moved else None
+
+
 def normalize(args: dict | None) -> dict | None:
     """Actions may give a dropdown's choice as value; the browsers read text."""
     rows = (args or {}).get("actions")
@@ -196,6 +228,9 @@ def after(ctx: Any, tool: str, args: dict | None, result: Any) -> Any:
         if not declined:
             state["once"].update(label.casefold() for label in _once_labels(ran, state["elements"]))
     acted_on = state["elements"]
+    state["acted_on"] = acted_on
+    if isinstance(result, dict) and tool not in ACT_TOOLS and result.get("url"):
+        state["url"] = str(result["url"])
     if isinstance(result, dict) and isinstance(result.get("elements"), list):
         state["elements"] = result["elements"]
     if isinstance(result, dict) and tool in ACT_TOOLS | PAGE_READS:
@@ -212,6 +247,12 @@ def after(ctx: Any, tool: str, args: dict | None, result: Any) -> Any:
         return result
     before_page = state["page"]
     changed = bool(page) and page != before_page
+    if isinstance(result, dict) and result.get("url"):
+        url = str(result["url"])
+        was = str(state.get("url") or "")
+        result["check"] = {"page_changed": changed, "url_changed": bool(was) and url != was}
+        if was and url != was:
+            result["navigated"] = {"from": was, "to": url}
     failed = isinstance(result, dict) and result.get("ok") is False
     log.info(
         "browser.step kinds=%s ok=%s changed=%s idle=%s tab=%s err=%s warned=%s on=%s",
@@ -219,6 +260,8 @@ def after(ctx: Any, tool: str, args: dict | None, result: Any) -> Any:
         result.get("ok") if isinstance(result, dict) else None, changed, state["idle"], bool((args or {}).get("tab")),
         _safe_error(result) if failed else "", _warned(result), _targets(_actions(args), acted_on),
     )
+    if isinstance(result, dict) and result.get("url"):
+        state["url"] = str(result["url"])
     if changed:
         state["page"] = page
         state["idle"] = 0

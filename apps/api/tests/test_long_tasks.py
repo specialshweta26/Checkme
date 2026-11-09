@@ -179,3 +179,9 @@ async def test_a_second_task_in_the_turn_knows_what_the_first_did(monkeypatch):
     await fb._browser_task(ctx, "add one", "https://shop.example/items", use_saved=False, save=False)
     await fb._browser_task(ctx, "add one", "https://shop.example/items", use_saved=False, save=False)
     assert "Done so far" in seen[-1]
+
+
+def test_only_a_label_starting_with_a_final_word_counts_as_run_once():
+    page = _run_memory_page("Click for JS Confirm", "Confirm order", "Finish")
+    acts = [{"kind": "click", "ref": f"e{i}"} for i in range(3)]
+    assert fb.once_labels(acts, page) == ["Confirm order", "Finish"]
