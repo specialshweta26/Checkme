@@ -454,6 +454,13 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         ctx.used_tools.append("browser_download")
         return _dumps(await fast.browser_download(ctx, url, ref, filename))
 
+    async def browser_screenshot(label: str = "") -> str:
+        """Save a screenshot of the current browser page into this chat, as evidence or when the user asks for one. Only the page is captured, never the rest of the screen. label says what it shows ("order confirmation"). Take it while the page is showing, before moving on. browser_task does this by itself when its goal mentions screenshots."""
+        from app.agent.page_shots import capture
+
+        ctx.used_tools.append("browser_screenshot")
+        return _dumps(await capture(ctx, label))
+
     async def browser_tabs() -> str:
         """List open browser tabs (t1, t2): URL, title, and which is active on the live screen."""
         ctx.used_tools.append("browser_tabs")
@@ -805,6 +812,7 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         StructuredTool.from_function(coroutine=browser_snapshot, name="browser_snapshot", description=browser_snapshot.__doc__, args_schema=SnapshotInput),
         StructuredTool.from_function(coroutine=browser_act, name="browser_act", description=browser_act.__doc__, args_schema=BrowserActInput),
         StructuredTool.from_function(coroutine=browser_collect, name="browser_collect", description=browser_collect.__doc__, args_schema=BrowserCollectInput),
+        StructuredTool.from_function(coroutine=browser_screenshot, name="browser_screenshot", description=browser_screenshot.__doc__),
         StructuredTool.from_function(coroutine=browser_tabs, name="browser_tabs", description=browser_tabs.__doc__),
         *(
             [StructuredTool.from_function(coroutine=browser_task, name="browser_task", description=browser_task.__doc__, args_schema=BrowserTaskInput)]

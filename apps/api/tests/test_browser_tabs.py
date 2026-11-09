@@ -1,122 +1,61 @@
-"""Daemon tab bookkeeping (fake Playwright pages): open, target, switch, close, popups."""
+"""Each chat gets its own tab, and screenshots go into the chat."""
 
-from __future__ import annotations
+from types import SimpleNamespace
 
-import pytest
-
-from app.connectors import computer_daemon as d
-
-
-class FakePage:
-    def __init__(self, ctx, url="about:blank"):
-        self.ctx, self.url, self.handlers, self.front = ctx, url, {}, False
-
-    def on(self, ev, fn):
-        self.handlers[ev] = fn
-
-    def title(self):
-        return f"title {self.url}"
-
-    def goto(self, url, **kw):
-        self.url = url
-
-    def wait_for_timeout(self, ms):
-        return None
-
-    def bring_to_front(self):
-        for p in self.ctx.pages:
-            p.front = False
-        self.front = True
-
-    def close(self):
-        self.ctx.pages.remove(self)
-        if "close" in self.handlers:
-            self.handlers["close"](self)
+from app.agent import browser_tabs as tabs
+from app.agent import page_shots
+from app.desktop import agent as desktop
 
 
-class FakeContext:
-    def __init__(self):
-        self.pages: list[FakePage] = []
-        self.handlers = {}
-
-    def new_page(self):
-        page = FakePage(self)
-        self.pages.append(page)
-        return page
-
-    def on(self, ev, fn):
-        self.handlers[ev] = fn
-
-    def popup(self, url):
-        page = self.new_page()
-        page.url = url
-        self.handlers["page"](page)
-        return page
+def test_a_chat_keeps_its_own_tab():
+    assert tabs.choose({"tab": "t2", "at": 1}, {"other": {"tab": "t1", "at": 1000}}, 1000) == ("t2", "mine")
 
 
-@pytest.fixture
-def browser(monkeypatch):
-    ctx = FakeContext()
-    first = ctx.new_page()
-    monkeypatch.setattr(d, "_tabs", {})
-    monkeypatch.setattr(d, "_tab_refs", {})
-    monkeypatch.setattr(d, "_tab_seq", 0)
-    monkeypatch.setattr(d, "_active_tab", "")
-    monkeypatch.setattr(d, "_pending_pages", [])
-    monkeypatch.setattr(d, "_pending_downloads", [])
-    monkeypatch.setattr(d, "_browser_context", ctx)
-    monkeypatch.setattr(d, "_browser_page", first)
-    d._register_tab(first, activate=True)
-    ctx.on("page", d._on_new_page)
-    monkeypatch.setattr(d, "_needs_desktop", lambda page: False)
-    monkeypatch.setattr(d, "_snapshot", lambda page: {"ok": True, "url": page.url})
-    monkeypatch.setattr(d, "_dump", lambda page: {"ok": True, "url": page.url})
-    return ctx
+def test_the_first_chat_takes_the_page_already_open():
+    assert tabs.choose(None, {}, 1000) == ("", "claim")
 
 
-def test_new_tab_switch_and_list(browser):
-    out = d.handle({"command": "new_tab", "url": "https://a.test/"})
-    assert out["tab"] == "t2" and out["url"] == "https://a.test/"
-    assert d._active_tab == "t2"
-    bg = d.handle({"command": "new_tab", "url": "https://b.test/", "background": True})
-    assert bg["tab"] == "t3" and d._active_tab == "t2"
-    listed = d.handle({"command": "tabs"})
-    assert [t["tab"] for t in listed["tabs"]] == ["t1", "t2", "t3"]
-    assert [t["active"] for t in listed["tabs"]] == [False, True, False]
-    d.handle({"command": "switch_tab", "tab": "t1"})
-    assert d._active_tab == "t1" and d._tabs["t1"].front
+def test_a_second_chat_at_the_same_time_gets_a_new_tab():
+    assert tabs.choose(None, {"other": {"tab": "t1", "at": 990}}, 1000) == ("", "new")
 
 
-def test_commands_target_a_tab_without_switching(browser):
-    d.handle({"command": "new_tab", "url": "https://a.test/", "background": True})
-    out = d.handle({"command": "navigate", "url": "https://c.test/", "tab": "t2"})
-    assert out["tab"] == "t2" and d._tabs["t2"].url == "https://c.test/"
-    assert d._active_tab == "t1" and d._tabs["t1"].url == "about:blank"
-    with pytest.raises(RuntimeError, match="no tab t9"):
-        d.handle({"command": "snapshot", "tab": "t9"})
+def test_an_idle_tab_is_reused_before_opening_another():
+    others = {"busy": {"tab": "t1", "at": 9990}, "idle": {"tab": "t2", "at": 100}}
+    assert tabs.choose(None, others, 10000) == ("t2", "reuse")
 
 
-def test_popups_become_tabs_and_close_falls_back(browser):
-    browser.popup("https://popup.test/")
-    d.drain_browser_events()
-    assert "t2" in d._tabs and d._active_tab == "t1"
-    d.handle({"command": "switch_tab", "tab": "t2"})
-    out = d.handle({"command": "close_tab"})
-    assert out["closed"] == "t2" and d._active_tab == "t1"
-    last = d.handle({"command": "close_tab", "tab": "t1"})
-    assert "cleared" in last["note"] and "t1" in d._tabs
+def test_a_closed_tab_is_recognised():
+    assert tabs.tab_gone({"ok": False, "error": "no tab t3; open tabs: t1"})
+    assert not tabs.tab_gone({"ok": False, "error": "page failed"})
+    assert not tabs.tab_gone({"ok": True})
 
 
-def test_tab_limit(browser, monkeypatch):
-    monkeypatch.setattr(d, "MAX_TABS", 2)
-    d.handle({"command": "new_tab"})
-    with pytest.raises(RuntimeError, match="at most 2 tabs"):
-        d.handle({"command": "new_tab"})
+async def test_calls_without_a_chat_or_with_their_own_tab_are_left_alone():
+    async def call(tool, args):
+        raise AssertionError("no browser call expected")
+
+    no_chat = SimpleNamespace(session_id=None, user=SimpleNamespace(id=1))
+    with_chat = SimpleNamespace(session_id="s1", user=SimpleNamespace(id=1))
+    assert await tabs.tab_for(no_chat, "browser_act", {}, "cloud", call) is None
+    assert await tabs.tab_for(with_chat, "browser_act", {"tab": "t9"}, "cloud", call) is None
+    assert await tabs.tab_for(with_chat, "computer_observe", {}, "cloud", call) is None
 
 
-def test_page_event_does_not_call_playwright_until_drained(browser):
-    page = browser.popup("https://popup.test/")
-    assert "close" not in page.handlers
-    assert "t2" not in d._tabs
-    d.drain_browser_events()
-    assert "close" in page.handlers and "t2" in d._tabs
+def test_goals_asking_for_evidence_get_screenshots():
+    assert page_shots.wants_shots("Capture screenshots of the saved record")
+    assert page_shots.wants_shots("Screenshot evidence.")
+    assert not page_shots.wants_shots("Sort products by price")
+
+
+def test_screenshot_names_are_safe_and_ordered():
+    assert page_shots.shot_name(2, "Order: Confirmed!/Done") == "screenshot-02-order-confirmed-done.png"
+    assert page_shots.shot_name(1, "") == "screenshot-01-page.png"
+
+
+def test_a_page_screenshot_is_kept_apart_from_the_live_panel():
+    import base64
+
+    out = desktop._keep_page_shot({"ok": True, "screenshot_b64": base64.b64encode(b"\x89PNG-data").decode()})
+    assert "screenshot_b64" not in out
+    assert desktop.take_page_shot(out["page_shot_key"]) == b"\x89PNG-data"
+    assert desktop.take_page_shot(out["page_shot_key"]) == b""
