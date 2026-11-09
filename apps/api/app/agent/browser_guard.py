@@ -120,6 +120,11 @@ def after(ctx: Any, tool: str, args: dict | None, result: Any) -> Any:
         return result
     before_page = state["page"]
     changed = bool(page) and page != before_page
+    log.info(
+        "browser.step kinds=%s ok=%s changed=%s idle=%s",
+        ",".join(str(r.get("kind") or "?") for r in _actions(args) if isinstance(r, dict))[:120],
+        result.get("ok") if isinstance(result, dict) else None, changed, state["idle"],
+    )
     if changed:
         state["page"] = page
         state["idle"] = 0

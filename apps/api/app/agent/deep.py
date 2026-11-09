@@ -62,6 +62,8 @@ from connector_core.text import clip
 log = logging.getLogger(__name__)
 
 MAX_TOOL_CHARS = 24000
+BROWSER_PAGE_TOOLS = {"browser_navigate", "browser_snapshot", "browser_act", "browser_tabs", "browse_open", "browse_act", "browse_screenshot"}
+BROWSER_PAGE_CHARS = 400_000
 INSPECT_CHARS = 32000
 MAIL_DETAIL_TOOLS = {"get_thread", "get_message"}
 CATALOG_TOOLS = {
@@ -1356,7 +1358,13 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
                 "data": result,
             }
         )
-        payload = compact_payload(result, 60000 if tool_name in MAIL_DETAIL_TOOLS else MAX_TOOL_CHARS)
+        # A page reduced to an outline loses its text and elements and reads as blank: the browser tools get the whole
+        # page (each is capped by its reader) and trim it for the model themselves.
+        if tool_name in BROWSER_PAGE_TOOLS:
+            payload_limit = BROWSER_PAGE_CHARS
+        else:
+            payload_limit = 60000 if tool_name in MAIL_DETAIL_TOOLS else MAX_TOOL_CHARS
+        payload = compact_payload(result, payload_limit)
         if isinstance(payload, dict) and payload.get("too_large"):
             payload["result_id"] = rid
         if tool_name not in CATALOG_TOOLS:
@@ -2709,7 +2717,7 @@ def system_prompt(
         "If text_omitted is true, the snapshot dropped the middle of the page. If next_offset is set, call browser_collect again with that offset until every match is in hand. "
         "If the result is too_large, inspect_result and page until every requested row is in hand. Quote only prices and review text the tool returned, and say when a price can still vary by size. "
         "Reviews are the ones shown on the page, not a full export. "
-        "Loop until done: inspect the snapshot (tree, verified, alerts, tables) → browser_act one logical step → read the new snapshot → continue. "
+        "Loop until done: inspect the snapshot (tree, verified, alerts, tables) → browser_act everything you can already see to do → read the new snapshot → continue. "
         f"{_fast_browser_hint()}"
         "Identify controls by role and name first, then label, then visible text; computer_act x,y last. "
         "Fill whole forms from the snapshot: one fill per ordinary field. Comboboxes and type-ahead lists "
@@ -2719,7 +2727,9 @@ def system_prompt(
         "pick a dropdown option. Dates, checkboxes, radios, and page file pickers are your job (upload with path= a computer file; "
         "download saves the file). Dates: fill the date field itself with YYYY-MM-DD (the browser converts it); click through a "
         "calendar only if that fails, and check the fields show the dates before Apply. Menus that open on mouse-over: hover, then "
-        "click the item. A dropdown's line in the element tree lists its options and current choice: use select with that ref and the "
+        "click the item. Each model round is slow, so send every step you can already see in ONE browser_act: all the fields of a form plus "
+        "its button, or each item to add. It stops at the first step that fails, and refs stay valid until the page changes. Only a step whose "
+        "result decides the next one needs its own call. A control that repeats shows what it belongs to in brackets. A dropdown's line in the element tree lists its options and current choice: use select with that ref and the "
         "option's text, and check the page changed. When a result lists warnings that a step may not have done anything, do not repeat it: try another way. "
         "When the element tree ends with '… N more elements', call browser_snapshot with find= the words you need. When a download (or publish_file) returns extracted_text, analyze it in YOUR role — your title, "
         "standing instructions, focus, and skills — not as a generic summarizer. If a listed skill covers this file or domain, get_skill "

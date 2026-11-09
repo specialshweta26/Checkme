@@ -180,6 +180,19 @@ fn no_effect_note(index: usize, kind: &str, ref_id: &str) -> String {
     )
 }
 
+/// True at most once every few seconds.
+fn shot_due() -> bool {
+    static LAST: std::sync::OnceLock<std::sync::Mutex<Option<std::time::Instant>>> = std::sync::OnceLock::new();
+    let Ok(mut last) = LAST.get_or_init(|| std::sync::Mutex::new(None)).lock() else {
+        return true;
+    };
+    if last.is_some_and(|at| at.elapsed() < Duration::from_secs(3)) {
+        return false;
+    }
+    *last = Some(std::time::Instant::now());
+    true
+}
+
 pub struct Chrome {
     _child: Option<Child>,
     port: u16,
@@ -628,7 +641,9 @@ impl Chrome {
                 result = self.eval_on(&target, &format!("({ACT_JS})(\"\", {kind:?}, {text:?})")).await?;
             }
             if result.get("ok").and_then(Value::as_bool) == Some(false) {
-                return Err(result.get("error").and_then(Value::as_str).unwrap_or("browser action failed").to_string());
+                let reason = result.get("error").and_then(Value::as_str).unwrap_or("browser action failed");
+                // In a batch, the earlier steps already happened: say so, or they get done twice.
+                return Err(if index > 0 { format!("step {} failed, the {index} before it ran: {reason}", index + 1) } else { reason.to_string() });
             }
             if let Some(at) = result.get("mouse") {
                 let (x, y) = (at.get("x").and_then(Value::as_i64), at.get("y").and_then(Value::as_i64));
@@ -661,8 +676,20 @@ impl Chrome {
                 }
             }
         }
-        self.settle().await;
+        // A click step has already waited for the page; waiting again only adds time.
+        let settled = actions.last().is_some_and(|s| {
+            s.get("x").is_none() && matches!(s.get("kind").and_then(Value::as_str).unwrap_or("click"), "click" | "dblclick" | "hover" | "check" | "uncheck")
+        });
+        if !settled {
+            self.settle().await;
+        }
         let mut data = self.snapshot().await?;
+        // A full screenshot with every step is slow to upload, and the live panel doesn't need one more often than this.
+        if !shot_due() {
+            if let Some(obj) = data.as_object_mut() {
+                obj.remove("screenshot_b64");
+            }
+        }
         if !warnings.is_empty() {
             data["warnings"] = json!(warnings);
         }

@@ -13,6 +13,7 @@ from app.connectors.computer_daemon import (
     launch_options,
     looks_combobox,
     pick_suggestion,
+    tree_line,
     safe_upload_path,
     score_option,
 )
@@ -246,3 +247,8 @@ def test_a_link_is_never_treated_as_a_dropdown():
     with pytest.raises(RuntimeError, match="link, not a dropdown"):
         pick_suggestion(page, _Loc(tag="a", role="link"), {"tag": "a", "role": "link", "href": "https://x.example/"}, "Price")
     assert page.keyboard.typed == [] and page.mouse.clicks == []
+
+
+def test_tree_line_says_what_a_repeated_control_belongs_to():
+    line = tree_line({"ref": "e4", "role": "button", "name": "Add to cart", "near": "Sauce Labs Onesie"})
+    assert line == "- e4 button Add to cart (Sauce Labs Onesie)"
