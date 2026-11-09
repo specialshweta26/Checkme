@@ -21,6 +21,8 @@ SAME_ACTION_LIMIT = 2  # identical action, same page, no change: this many tries
 NO_CHANGE_WARN = 5  # different actions in a row that changed nothing: warn
 NO_CHANGE_STOP = 10  # ... stop
 PAGE_READS = {"browser_navigate", "browser_snapshot", "browse_open"}
+NAV_TOOLS = {"browser_navigate", "browse_open"}
+SAME_PAGE_OPENS = 3
 MAX_FACT_PAGES = 5
 
 
@@ -177,6 +179,23 @@ def _stop_reply(state: dict) -> dict:
 
 def before(ctx: Any, tool: str, args: dict | None) -> dict | None:
     """A reply to return instead of running the action, or None to run it."""
+    if tool in NAV_TOOLS:
+        state = _state(ctx)
+        url = str((args or {}).get("url") or "")
+        if state is not None and url:
+            seen = state.setdefault("opened", {})
+            seen[url] = seen.get(url, 0) + 1
+            if seen[url] > SAME_PAGE_OPENS:
+                log.warning("browser.guard refused to reopen a page opens=%s", seen[url])
+                return {
+                    "ok": False,
+                    "repeated": True,
+                    "error": (
+                        f"Not opened: this address has been opened {seen[url] - 1} times with nothing done on it in between, and "
+                        "opening it again won't show anything new. Work from what you've read, use browser_snapshot, or tell the user what you couldn't get."
+                    ),
+                }
+        return None
     if tool not in ACT_TOOLS or _passive(args):
         return None
     state = _state(ctx)
@@ -265,6 +284,7 @@ def after(ctx: Any, tool: str, args: dict | None, result: Any) -> Any:
     if changed:
         state["page"] = page
         state["idle"] = 0
+        state["opened"] = {}  # work happened, so going back to a page is ordinary (a list and its detail pages)
         return result
     if isinstance(result, dict) and any("already chosen" in str(w) for w in (result.get("warnings") or [])):
         return result  # the step had nothing to do: not a failed try

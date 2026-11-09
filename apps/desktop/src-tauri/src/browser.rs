@@ -61,6 +61,9 @@ const SETTLE_JS: &str = r#"new Promise((resolve) => {
       if (r.width < 4 || r.height < 4 || r.bottom < 0 || r.top > window.innerHeight) continue;
       const st = getComputedStyle(el);
       if (st.visibility === 'hidden' || st.display === 'none' || Number(st.opacity || 1) < 0.05) continue;
+      // A class like "lazy-loading" can stay on a finished element: only a short loading message, or an empty spinner, counts.
+      const words = String(el.innerText || '').trim();
+      if (el.matches('[id*="loading" i], [class*="loading" i]') && words && !(words.length < 60 && /load|wait/i.test(words))) continue;
       const now = el.getAttribute('aria-valuenow');
       if (now !== null && Number(now) >= Number(el.getAttribute('aria-valuemax') || 100)) continue;
       return true;
@@ -128,7 +131,7 @@ fn frames_of_page(targets: &[Value], page_ws: &str) -> Vec<String> {
 fn merge_frame(page: &mut Value, frame: &Value) {
     let elements = frame.get("elements").and_then(Value::as_array).cloned().unwrap_or_default();
     let text = frame.get("text").and_then(Value::as_str).unwrap_or("").trim();
-    if elements.is_empty() && text.len() < 20 {
+    if elements.is_empty() && text.is_empty() {
         return;
     }
     let url = frame.get("url").and_then(Value::as_str).unwrap_or("");

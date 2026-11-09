@@ -15,7 +15,7 @@ from pathlib import Path
 
 HOST = "127.0.0.1"
 PORT = 18765
-VERSION = "34"
+VERSION = "35"
 _HOME = Path(os.environ.get("CHECKME_BROWSER_HOME") or "/tmp")
 SHOT = "/tmp/checkme-browser.png"
 PROFILE = str(_HOME / "profile")
@@ -749,6 +749,25 @@ def omitted_line(omitted: int) -> str:
     )
 
 
+def _frame_text(page, per_frame: int = 2000, total: int = 8000) -> str:
+    """Text inside the page's frames, which the main page's text doesn't include. Each is labelled with where it's from."""
+    parts: list[str] = []
+    room = total
+    for frame in _frames_of(page)[1:]:
+        if room <= 0:
+            break
+        try:
+            text = str(frame.evaluate("() => (document.body && document.body.innerText) || ''") or "").strip()
+        except Exception:
+            continue
+        if not text:
+            continue
+        piece = text[: min(per_frame, room)]
+        room -= len(piece)
+        parts.append(f"[frame {_strip_url(getattr(frame, 'url', ''))}]\n{piece}")
+    return "\n".join(parts)
+
+
 def _snapshot(page, find: str = ""):
     nodes: list[dict] = []
     start = 0
@@ -779,6 +798,9 @@ def _snapshot(page, find: str = ""):
     if omitted:
         tree += "\n" + omitted_line(omitted)
     data = _dump(page)
+    extra = _frame_text(page)
+    if extra:
+        data["text"] = f"{data.get('text') or ''}\n{extra}".strip()
     data["tree"] = tree
     if omitted:
         data["elements_omitted"] = omitted
@@ -933,6 +955,9 @@ _BUSY_JS = """() => {
     if (r.width < 4 || r.height < 4 || r.bottom < 0 || r.top > window.innerHeight) continue;
     const st = window.getComputedStyle(el);
     if (st.visibility === 'hidden' || st.display === 'none' || Number(st.opacity || 1) < 0.05) continue;
+    // A class like "lazy-loading" can stay on a finished element: only a short loading message, or an empty spinner, counts.
+    const words = String(el.innerText || '').trim();
+    if (el.matches('[id*="loading" i], [class*="loading" i]') && words && !(words.length < 60 && /load|wait/i.test(words))) continue;
     const now = el.getAttribute('aria-valuenow');
     if (now !== null && Number(now) >= Number(el.getAttribute('aria-valuemax') || 100)) continue;
     return true;
