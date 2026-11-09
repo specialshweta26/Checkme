@@ -262,7 +262,8 @@ pub async fn launch(start_url: &str) -> Result<Chrome, String> {
     let http = http_client(Duration::from_secs(3))?;
     if port_open(&probe, port).await {
         // A window may already exist with no page showing. Open this address so the user sees it.
-        let _ = http.get(format!("http://127.0.0.1:{port}/json/new?{start_url}")).send().await;
+        // Chrome only accepts PUT here: a GET gets 405 and opens nothing.
+        let _ = http.put(format!("http://127.0.0.1:{port}/json/new?{start_url}")).send().await;
         return Ok(Chrome { _child: None, port, http });
     }
     let bin = chrome_candidates()
@@ -297,7 +298,13 @@ impl Chrome {
     }
 
     async fn page_ws(&self) -> Result<String, String> {
-        let pages = self.pages().await?;
+        let mut pages = self.pages().await?;
+        if !pages.iter().any(|p| p.get("type").and_then(Value::as_str) == Some("page")) {
+            // Every tab is closed (for one, after an app update): open one instead of failing the task.
+            let url = format!("http://127.0.0.1:{}/json/new?about:blank", self.port);
+            let _ = self.http.put(&url).send().await;
+            pages = self.pages().await?;
+        }
         let mut blank = None;
         for page in &pages {
             if page.get("type").and_then(Value::as_str) != Some("page") {
