@@ -146,6 +146,14 @@
     return { ok: true, picker: true, mouse: at || undefined, clicks: 1 };
   }
 
+  // The page's own click, for when a real mouse press had no effect. Refused on final controls: a second click there
+  // could repeat an order.
+  if (kind === 'dom_click') {
+    const label = String(target.getAttribute('aria-label') || target.innerText || target.value || '');
+    if (/\b(pay|buy|purchase|order|checkout|finish|complete|confirm|submit|send|transfer|delete|remove account|book)\b/i.test(label)) return { ok: true, skipped: true };
+    target.click();
+    return { ok: true };
+  }
   if (kind === 'click' || kind === 'dblclick') {
     // A real mouse press opens menus and widgets that ignore a synthetic click (pointerdown / mousedown handlers).
     const at = point(target);

@@ -801,6 +801,11 @@ impl Chrome {
     pub async fn act(&self, actions: &[Value]) -> Result<Value, String> {
         let mut warnings: Vec<String> = vec![];
         self.eval(WATCH_JS).await.ok();
+        // A real mouse needs the page in front; several chats can be working in their own tabs.
+        let front = self.tab.lock().ok().and_then(|current| current.clone());
+        if let Some(id) = front {
+            let _ = self.http.get(format!("http://127.0.0.1:{}/json/activate/{id}", self.port)).send().await;
+        }
         for (index, step) in actions.iter().enumerate() {
             let kind = step.get("kind").and_then(Value::as_str).unwrap_or("click");
             let check_effect = matches!(kind, "click" | "dblclick" | "hover" | "check" | "uncheck");
@@ -961,7 +966,22 @@ impl Chrome {
             if check_effect {
                 self.settle().await;
                 if sig_before.is_some() && self.page_sig().await == sig_before {
-                    warnings.push(no_effect_note(index, kind, ref_id));
+                    // Some pages ignore the mouse here: try the page's own click once, unless it's a final control.
+                    let mut retried = false;
+                    if kind == "click" && result.get("mouse").is_some() {
+                        let again = format!("({ACT_JS})({ref_id:?}, \"dom_click\", \"\", false)");
+                        if let Ok(done) = self.eval_on(&target, &again).await {
+                            if done.get("ok").and_then(Value::as_bool) == Some(true) && done.get("skipped").is_none() {
+                                self.settle().await;
+                                retried = self.page_sig().await != sig_before;
+                            }
+                        }
+                    }
+                    if retried {
+                        warnings.push(format!("step {} ({kind} {ref_id}): the mouse click had no effect, so it was clicked through the page instead, which worked.", index + 1));
+                    } else {
+                        warnings.push(no_effect_note(index, kind, ref_id));
+                    }
                 }
             }
         }
