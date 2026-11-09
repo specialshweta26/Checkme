@@ -775,6 +775,32 @@ async def computer_ui(ctx, action: str, app: str, title: str = "", id: str = "",
     return out
 
 
+OFFICE_WRITES = {"set_cells", "set_text", "add_slide"}
+OFFICE_NAMED = OFFICE_WRITES | {"read", "export"}
+
+
+async def office_app(ctx, app: str, action: str, document: str = "", cells: list | None = None, text: str = "", title: str = "",
+                     notes: str = "", path: str = "", format: str = "") -> Any:  # noqa: A002
+    """Work in an office app by script. A document must be one this turn created, or one the user named in their own
+    message: the user's other open files are never touched."""
+    made = getattr(ctx, "_office_documents", None)
+    if made is None:
+        made = set()
+        ctx._office_documents = made
+    if action in OFFICE_NAMED:
+        name = str(document or "").strip()
+        wrote = str(getattr(ctx, "query", "") or "").casefold()
+        if not name or (name.casefold() not in made and name.casefold() not in wrote):
+            return {"ok": False, "error": f"Not done: '{name}' wasn't created in this turn or named by the user. Create a new document, or ask the user which one to use."}
+    args = {"app": app, "action": action, "document": document, "text": text, "title": title, "notes": notes, "path": path, "format": format}
+    if cells is not None:
+        args["cells"] = cells
+    out = await system_tool(ctx, "office_app", args)
+    if action == "new" and isinstance(out, dict) and out.get("ok") and out.get("document"):
+        made.add(str(out["document"]).casefold())
+    return out
+
+
 async def launch_app(ctx, name: str) -> Any:
     key = (name or "").strip().lower()
     if not key:

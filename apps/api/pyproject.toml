@@ -31,6 +31,8 @@ dependencies = [
     "pypdfium2>=4.30",
     "pillow>=10.0",
     "python-docx>=1.1",
+    "openpyxl>=3.1",
+    "python-pptx>=1.0",
     "daytona>=0.226",
     "e2b-desktop>=2.7",
 ]
