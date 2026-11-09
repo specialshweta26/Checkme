@@ -130,9 +130,18 @@ def final_step_done(ctx: Any) -> bool:
 
 
 def _once_labels(actions: list, elements: list) -> list[str]:
+    """Run-once clicks, each with what it belongs to: Delete on one row isn't a repeat of Delete on another."""
     from app.agent.fast_browser import once_labels
 
-    return once_labels([a for a in actions if isinstance(a, dict)], {"elements": elements})
+    near = {str(e.get("ref")): str(e.get("near") or "") for e in elements if isinstance(e, dict)}
+    out = []
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        for label in once_labels([action], {"elements": elements}):
+            where = near.get(str(action.get("ref") or ""), "")
+            out.append(f"{label} ({where})" if where else label)
+    return out
 
 
 def is_stuck(ctx: Any) -> bool:
