@@ -117,12 +117,16 @@ on walk(el, pathText, depth)
       set n to title of el
       if n is missing value then set n to ""
     end try
-    if n is "" then
-      try
-        set n to description of el
-        if n is missing value then set n to ""
-      end try
-    end if
+    -- "description" in System Events is only the generic role ("button"): the real label is in these attributes.
+    repeat with attributeName in {"AXDescription", "AXIdentifier", "AXHelp"}
+      if n is "" then
+        try
+          set n to value of attribute attributeName of el
+          if n is missing value then set n to ""
+        end try
+      end if
+    end repeat
+    if sr is not "" and sr is not missing value then set r to sr
     if sr is not "AXSecureTextField" then
       try
         set v to value of el
@@ -247,8 +251,14 @@ fn run_with_timeout(mut cmd: Command, input: Option<&str>, seconds: u64) -> Resu
 }
 
 fn friendly(message: &str) -> String {
-    if message.contains("not allowed assistive access") || message.contains("-1719") || message.contains("-25211") {
+    if message.contains("not allowed assistive access") || message.contains("-25211") {
         return "Allow Lumio in System Settings → Privacy & Security → Accessibility, then try again.".into();
+    }
+    if message.contains("-1719") {
+        return "That control or window is no longer there. Read the window again and use a fresh id.".into();
+    }
+    if message.contains("-600") || message.contains("-1728") || message.contains("-609") {
+        return "That app isn't responding or has quit. Open it with launch_app, check what it shows, and carry on from there.".into();
     }
     message.lines().last().unwrap_or("the system refused").chars().take(300).collect()
 }
@@ -499,8 +509,24 @@ fn clipboard_tool(args: &Value) -> Result<Value, String> {
     }
 }
 
+fn notify_tool(args: &Value) -> Result<Value, String> {
+    let title = text_arg(args, "title");
+    let text = text_arg(args, "text");
+    if cfg!(target_os = "macos") {
+        applescript("on run argv\n  display notification (item 2 of argv) with title (item 1 of argv)\nend run", &[title, text])?;
+    } else {
+        let (title, text) = (title.replace('\'', "''"), text.replace('\'', "''"));
+        let script = format!(
+            "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; $n = New-Object Windows.Forms.NotifyIcon; $n.Icon = [Drawing.SystemIcons]::Information; $n.Visible = $true; $n.ShowBalloonTip(5000, '{title}', '{text}', 'Info'); Start-Sleep -Seconds 1; $n.Dispose()"
+        );
+        powershell(&script, None)?;
+    }
+    Ok(json!({ "ok": true }))
+}
+
 pub fn run(tool: &str, args: &Value) -> Value {
     let out = match tool {
+        "computer_notify" => notify_tool(args),
         "computer_windows" => windows_tool(args),
         "computer_screens" => screens_tool(),
         "computer_clipboard" => clipboard_tool(args),
@@ -547,6 +573,8 @@ mod tests {
     fn permission_errors_say_what_to_do() {
         assert!(friendly("execution error: osascript is not allowed assistive access. (-1719)").contains("Accessibility"));
         assert_eq!(friendly("line one\nline two"), "line two");
+        assert!(friendly("execution error: Invalid index. (-1719)").contains("Read the window again"));
+        assert!(friendly("execution error: Application isn't running. (-600)").contains("launch_app"));
     }
 
     #[test]
