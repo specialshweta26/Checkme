@@ -110,7 +110,7 @@ T1 to T9 are each from a single run, not all on the same build. T4 passed, faile
 | T7 Drag, hover, right-click | Drag and drop, hover content, context menu pop-up | Pass | 62 s |
 | T8 Upload and download | File upload form, file download | Pass | 56 s |
 | T9 Shop flow, stop before paying | Cart edits, native pop-ups, stopping before payment | **Partial:** cart and $1,890 total correct, stopped before payment, but pop-up messages not captured | 144 s |
-| T10 Count across every page | Script-loaded pages, pagination, counting | Pass: 10 pages, 100 quotes, 10 by Einstein, in the last 5 runs. Earlier it counted 6 Einstein quotes, not 10 | 32–78 s |
+| T10 Count across every page | Script-loaded pages, pagination, counting | Pass: 10 pages, 100 quotes, 10 by Einstein, in the last 4 runs. Earlier it counted 6 Einstein quotes, not 10 | 33–49 s |
 
 **8 pass, 2 partial.**
 
@@ -125,16 +125,16 @@ A model adding things up from memory across pages can be confidently wrong. Now 
 | C3 | First 5 pages of a shop catalogue: books and total price | 100, £3,456.07 |
 | C4 | Infinite scroll: load everything, then count quotes and Einstein's | 100, 10 |
 
-Results on the final build (#197), cloud browser:
+Results on the last two builds (#196 and #197), cloud browser:
 
 | Test | Runs | Right | Time |
 |---|---|---|---|
-| T10 | 5 | 5 | 32–78 s |
-| C2 | 5 | 5 | 34–76 s |
-| C3 | 5 | 5 | 26–63 s |
+| T10 | 4 | 4 | 33–49 s |
+| C2 | 4 | 4 | 34–76 s |
+| C3 | 4 | 4 | 26–63 s |
 | C4 | 4 | 4 | 66–75 s |
 
-The T10, C2 and C3 runs include two builds before #197, which changed only scrolling. C4 counts only runs after #197.
+#197 changed only how hand scrolling is stopped, which T10, C2 and C3 don't use. C4 counts only runs on #197: before it, 3 of 4 C4 runs were wrong.
 
 What went wrong along the way, all fixed generically:
 
