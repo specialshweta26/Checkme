@@ -265,3 +265,35 @@ def test_delete_on_another_row_is_not_a_repeat():
     assert _act(ctx, {"actions": [{"kind": "click", "ref": "e2"}]}, {**rows, "text": "two gone"})["ok"] is True
     again = _act(ctx, {"actions": [{"kind": "click", "ref": "e2"}]}, {**rows, "text": "two gone"})
     assert again["already_done"] is True
+
+
+def _listing():
+    return {**_page(), "elements": [{"ref": "e9", "role": "link", "name": "Next →"}]}
+
+
+def test_paging_by_hand_for_a_total_is_sent_to_gather():
+    ctx = SimpleNamespace(query="How many orders are there in total?")
+    guard.after(ctx, "browser_snapshot", {}, _listing())
+    click = {"actions": [{"kind": "click", "ref": "e9"}]}
+    assert guard.before(ctx, "browser_act", click) is None
+    guard.after(ctx, "browser_act", click, {**_listing(), "text": "page 2"})
+    second = guard.before(ctx, "browser_act", click)
+    assert second["use_gather"] is True and "browser_gather" in second["error"]
+
+
+def test_paging_is_free_when_no_figure_is_asked_for():
+    ctx = SimpleNamespace(query="Open the third page of results")
+    guard.after(ctx, "browser_snapshot", {}, _listing())
+    click = {"actions": [{"kind": "click", "ref": "e9"}]}
+    for n in range(4):
+        assert guard.before(ctx, "browser_act", click) is None
+        guard.after(ctx, "browser_act", click, {**_listing(), "text": f"page {n}"})
+
+
+def test_gather_itself_may_page():
+    ctx = SimpleNamespace(query="What is the total?", _gathering=True)
+    guard.after(ctx, "browser_snapshot", {}, _listing())
+    click = {"actions": [{"kind": "click", "ref": "e9"}]}
+    for n in range(4):
+        assert guard.before(ctx, "browser_act", click) is None
+        guard.after(ctx, "browser_act", click, {**_listing(), "text": f"page {n}"})

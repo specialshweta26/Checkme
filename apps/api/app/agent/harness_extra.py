@@ -460,7 +460,7 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         return _dumps(await computer.run_computer(ctx, "browser_page_log", {}))
 
     async def browser_gather(how: str = "auto", next_label: str = "", max_pages: int = 50) -> str:
-        """Collect a listing that spans many pages, in code, from the current page. Use this before any count, total or list across pages or a long table. how: next (Next button), load_more, scroll, or auto to work it out. next_label if the control has another name. Up to 200 pages. It returns a dataset id: answer from gathered_query, which does the arithmetic."""
+        """Collect a listing that spans many pages, in code, from the current page. Use this before any count, total or list across pages or a long table. how: next (Next button), load_more, scroll, or auto to work it out. next_label if the control has another name. Up to 200 pages. It goes back to the first page by itself, so call it from anywhere in the listing. It returns a dataset id: answer from gathered_query, which does the arithmetic."""
         from app.agent.gather import gather
 
         ctx.used_tools.append("browser_gather")
