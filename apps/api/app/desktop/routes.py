@@ -2,16 +2,40 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
 from app.deps import current_user
 from app.desktop import agent as desktop
+from app.desktop import updates as desktop_updates
 from app.models import User
 
 router = APIRouter(prefix="/desktop", tags=["desktop"])
+
+
+@router.get("/update/latest.json")
+async def update_feed(request: Request):
+    """No sign-in: an app must be able to update even when signed out. Everything here is public on GitHub."""
+    base = str(request.base_url).rstrip("/").replace("http://", "https://", 1)
+    if "localhost" in base or "127.0.0.1" in base:
+        base = str(request.base_url).rstrip("/")
+    try:
+        return await desktop_updates.latest(base)
+    except desktop_updates.UpdateUnavailable as exc:
+        raise HTTPException(503, "Update feed unavailable") from exc
+
+
+@router.get("/update/asset/{tag}/{name}")
+async def update_asset(tag: str, name: str):
+    try:
+        data = await desktop_updates.asset(tag, name)
+    except LookupError as exc:
+        raise HTTPException(404, "No such file") from exc
+    except desktop_updates.UpdateUnavailable as exc:
+        raise HTTPException(503, "Update file unavailable") from exc
+    return Response(content=data, media_type="application/octet-stream")
 
 
 class PairIn(BaseModel):
