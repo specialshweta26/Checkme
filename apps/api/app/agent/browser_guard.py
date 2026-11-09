@@ -230,14 +230,18 @@ def before(ctx: Any, tool: str, args: dict | None) -> dict | None:
                     ),
                 }
         return None
-    if tool not in ACT_TOOLS or _passive(args):
+    if tool not in ACT_TOOLS:
         return None
     state = _state(ctx)
     if state is None:
         return None
+    # Before the passive check: scrolling changes nothing on the page, but scrolling to collect a figure must go to gather.
+    collecting = _hand_collecting(ctx, state, _actions(args))
+    if _passive(args) and not collecting:
+        return None
     if state["stuck"]:
         return _stop_reply(state)
-    if _hand_collecting(ctx, state, _actions(args)):
+    if collecting:
         log.info("browser.guard sent a counting task to browser_gather")
         return {
             "ok": False,
