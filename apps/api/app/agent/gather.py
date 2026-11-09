@@ -1,0 +1,251 @@
+"""Collect a multi-page listing in code and answer questions about it in code.
+
+A model adding things up from memory across many pages can be confidently wrong: one ran through all ten pages of a
+listing, got the page and item totals right, and still miscounted an author. So the pages are read by code and stored, and
+counts and sums are worked out by code from what was stored, with a figure for each page so the answer can be checked.
+
+Generic: it finds "next" controls by what they're called, and treats each line of page text as a record (a table row is one
+line, with tabs between cells).
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+from typing import Any
+
+log = logging.getLogger(__name__)
+
+MAX_PAGES = 200
+MAX_CHARS = 2_000_000
+ROWS_RETURNED = 60
+SAME_PAGE_TRIES = 2
+SCROLL_WAIT_MS = 1500
+MAX_ROUNDS = 300
+_NEXT_WORDS = ("next", "next page", "next »", "next ›", "next →", "next >", "›", "»", ">", "→", "older", "more results")
+_MORE_WORDS = ("load more", "show more", "see more", "view more", "more")
+_MONEY = re.compile(r"(?:[$₹€£]|\b(?:rs\.?|inr|usd|eur|gbp)\s?)\s*(-?\d[\d,]*(?:\.\d+)?)", re.I)
+_NUMBER = re.compile(r"-?\d[\d,]*(?:\.\d+)?")
+
+
+def _clean_name(raw: Any) -> str:
+    return " ".join(str(raw or "").split()).casefold()
+
+
+def find_control(elements: list, words: tuple[str, ...], wanted: str = "") -> dict | None:
+    """The enabled control with one of these names, or None. Links and buttons only, so it can't land on a text field."""
+    names = (_clean_name(wanted),) if wanted else words
+    for row in elements or []:
+        if not isinstance(row, dict) or row.get("disabled"):
+            continue
+        if str(row.get("role") or "") in {"textbox", "searchbox", "combobox", "checkbox", "radio"}:
+            continue
+        if _clean_name(row.get("name")) in names:
+            return row
+    return None
+
+
+def _lines(text: str) -> list[str]:
+    return [line.strip() for line in str(text or "").splitlines() if line.strip()]
+
+
+def grow(so_far: list[str], page: dict) -> tuple[list[str], bool]:
+    """A page that grows in place, read again. A long page comes back as its start and end, so the new end is stitched on
+    where it overlaps what's already held. Identical lines are real records, so this never removes duplicates. Returns the
+    lines, and False if part of the page may be missing."""
+    lines = _lines(page.get("text"))
+    if not page.get("text_omitted"):
+        return lines, True
+    tail = lines[lines.index("…") + 1 :] if "…" in lines else lines
+    for size in range(min(len(so_far), len(tail)), 0, -1):
+        if so_far[-size:] == tail[:size]:
+            return so_far + tail[size:], True
+    if not so_far:
+        return lines, False
+    return so_far + tail, False
+
+
+def _store(ctx: Any) -> dict:
+    store = getattr(ctx, "_gathered", None)
+    if store is None:
+        store = {}
+        ctx._gathered = store
+    return store
+
+
+async def _read(ctx: Any, call: Any) -> dict:
+    page = await call(ctx, "browser_snapshot", {})
+    return page if isinstance(page, dict) else {"ok": False, "error": str(page)[:200]}
+
+
+async def gather(ctx: Any, how: str = "auto", next_label: str = "", max_pages: int = 50) -> dict:
+    """Walk the listing from the current page and keep each page's text. how: next, load_more, scroll or auto."""
+    from app.agent.computer_harness import run_computer as call
+
+    limit = max(1, min(int(max_pages or 50), MAX_PAGES))
+    rounds = 0
+    how = str(how or "auto").lower()
+    if how not in {"auto", "next", "load_more", "scroll"}:
+        return {"ok": False, "error": "how must be auto, next, load_more or scroll"}
+    pages: list[dict] = []
+    cut: list[int] = []
+    stopped = ""
+    page = await _read(ctx, call)
+    if page.get("ok") is False:
+        return {"ok": False, "error": str(page.get("error") or "couldn't read the page")[:300]}
+    used = how
+    grown: list[str] = []
+    while True:
+        text = str(page.get("text") or "")
+        url = str(page.get("url") or "")
+        if used in {"load_more", "scroll"}:
+            grown, whole = grow(grown, page)
+            if not whole and 1 not in cut:
+                cut.append(1)
+            pages = [{"url": url, "lines": grown}]
+        else:
+            if page.get("text_omitted"):
+                cut.append(len(pages) + 1)
+            pages.append({"url": url, "lines": _lines(text)})
+        if used not in {"load_more", "scroll"} and len(pages) >= limit:
+            stopped = f"reached the limit of {limit} pages"
+            break
+        elements = page.get("elements") or []
+        control = None
+        if used in {"auto", "next"}:
+            control = find_control(elements, _NEXT_WORDS, next_label)
+            if control is not None:
+                used = "next"
+        if control is None and used in {"auto", "load_more"}:
+            control = find_control(elements, _MORE_WORDS, next_label)
+            if control is not None:
+                used = "load_more"
+                grown = _lines(text)
+                pages = [{"url": url, "lines": grown}]
+        if control is None and used in {"auto", "scroll"} and used != "scroll":
+            used = "scroll"
+            grown = _lines(text)
+            pages = [{"url": url, "lines": grown}]
+        if control is None and used != "scroll":
+            stopped = f"no {('Next' if used == 'next' else 'Load more')} control on the last page read, so this is the end"
+            break
+        # Slow pages take a moment to fill, so give them a few chances before calling this the end.
+        steps = [{"kind": "click", "ref": control.get("ref")}] if control is not None else [{"kind": "scroll", "dy": 3000}, {"kind": "wait", "ms": SCROLL_WAIT_MS}]
+        after = await call(ctx, "browser_act", {"actions": steps})
+        tries = 0
+        while isinstance(after, dict) and after.get("ok") is not False and str(after.get("text") or "") == text and tries < SAME_PAGE_TRIES:
+            tries += 1
+            again = steps if control is None else [{"kind": "wait", "ms": SCROLL_WAIT_MS}]
+            after = await call(ctx, "browser_act", {"actions": again})
+        if not isinstance(after, dict) or after.get("ok") is False:
+            stopped = f"stopped: {str((after or {}).get('error') if isinstance(after, dict) else after)[:200]}"
+            break
+        rounds += 1
+        if str(after.get("text") or "") == text:
+            stopped = "the page stopped changing, so this is the end"
+            break
+        if rounds >= MAX_ROUNDS:
+            stopped = f"stopped after {MAX_ROUNDS} rounds"
+            break
+        page = after
+    store = _store(ctx)
+    dataset = f"d{len(store) + 1}"
+    kept: list[dict] = []
+    room = MAX_CHARS
+    for row in pages:
+        lines: list[str] = []
+        for line in row["lines"]:
+            if room <= 0:
+                break
+            room -= len(line)
+            lines.append(line)
+        kept.append({"url": row["url"], "lines": lines})
+    store[dataset] = kept
+    out = {
+        "ok": True,
+        "dataset": dataset,
+        "pages": len(kept),
+        "lines": sum(len(row["lines"]) for row in kept),
+        "how": used,
+        "stopped": stopped,
+        "note": "Use gathered_query on this dataset for every count, sum and list, and report its figures. Don't count by eye.",
+    }
+    if cut:
+        out["warning"] = f"Pages {cut} were too long to read in full, so figures may be low. Say so in your answer."
+    return out
+
+
+def _matches(line: str, wanted: list[str], unwanted: list[str]) -> bool:
+    low = line.casefold()
+    return all(w in low for w in wanted) and not any(w in low for w in unwanted)
+
+
+def _amount(line: str, column: int | None) -> float | None:
+    source = line
+    if column is not None:
+        cells = line.split("\t")
+        if column < 1 or column > len(cells):
+            return None
+        source = cells[column - 1]
+    hits = _MONEY.findall(source)
+    if len(hits) > 1:
+        return None  # several amounts: which one is meant needs a column
+    raw = hits[0] if hits else None
+    if raw is None:
+        numbers = _NUMBER.findall(source)
+        if len(numbers) != 1:
+            return None
+        raw = numbers[0]
+    try:
+        return float(raw.replace(",", ""))
+    except ValueError:
+        return None
+
+
+def _as_list(raw: Any) -> list[str]:
+    rows = raw if isinstance(raw, list) else [raw]
+    return [str(w).casefold() for w in rows if str(w or "").strip()]
+
+
+def query(ctx: Any, dataset: str, action: str = "count", contains: Any = "", exclude: Any = "", column: int | None = None,
+          unique: bool = False, offset: int = 0) -> dict:  # fmt: skip
+    """Count, sum or list the stored lines that contain every word in contains and none in exclude."""
+    pages = _store(ctx).get(str(dataset))
+    if pages is None:
+        return {"ok": False, "error": f"No dataset {dataset} in this turn. Run browser_gather first."}
+    if action not in {"count", "sum", "list"}:
+        return {"ok": False, "error": "action must be count, sum or list"}
+    wanted, unwanted = _as_list(contains), _as_list(exclude)
+    seen: set[str] = set()
+    per_page: list[int] = []
+    hits: list[str] = []
+    for row in pages:
+        found = 0
+        for line in row["lines"]:
+            if not _matches(line, wanted, unwanted):
+                continue
+            if unique:
+                if line in seen:
+                    continue
+                seen.add(line)
+            found += 1
+            hits.append(line)
+        per_page.append(found)
+    out: dict[str, Any] = {"ok": True, "dataset": dataset, "pages": len(pages), "matched_lines": len(hits), "per_page": per_page}
+    if action == "sum":
+        amounts = [_amount(line, column) for line in hits]
+        good = [a for a in amounts if a is not None]
+        out["sum"] = round(sum(good), 2)
+        out["summed_lines"] = len(good)
+        skipped = [line for line, a in zip(hits, amounts) if a is None]
+        if skipped:
+            out["skipped_lines"] = len(skipped)
+            out["skipped_sample"] = [line[:120] for line in skipped[:5]]
+            out["warning"] = "Some matching lines had no single clear amount and aren't in the sum. Narrow contains, or give column."
+    if action == "list":
+        start = max(0, int(offset or 0))
+        out["rows"] = [line[:300] for line in hits[start : start + ROWS_RETURNED]]
+        out["more"] = len(hits) > start + ROWS_RETURNED
+    else:
+        out["sample"] = [line[:160] for line in hits[:5]]
+    return out

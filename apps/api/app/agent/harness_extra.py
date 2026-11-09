@@ -459,6 +459,21 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         ctx.used_tools.append("browser_page_log")
         return _dumps(await computer.run_computer(ctx, "browser_page_log", {}))
 
+    async def browser_gather(how: str = "auto", next_label: str = "", max_pages: int = 50) -> str:
+        """Collect a listing that spans many pages, in code, from the current page. Use this before any count, total or list across pages or a long table. how: next (Next button), load_more, scroll, or auto to work it out. next_label if the control has another name. Up to 200 pages. It returns a dataset id: answer from gathered_query, which does the arithmetic."""
+        from app.agent.gather import gather
+
+        ctx.used_tools.append("browser_gather")
+        return _dumps(await gather(ctx, how, next_label, max_pages))
+
+    async def gathered_query(dataset: str, action: str = "count", contains: list[str] | None = None, exclude: list[str] | None = None,
+                             column: int | None = None, unique: bool = False, offset: int = 0) -> str:
+        """Count, sum or list lines from a browser_gather dataset. Each line of page text is one record, and a table row is one line. action: count, sum or list. contains: every word must be in the line (no case). exclude: none may be. column: for sum, the table column to add, from 1 (needed if a row has several amounts). unique: count identical lines once. Returns the figure and a count per page, so check per_page looks right, including that repeated page headers aren't being counted."""
+        from app.agent.gather import query
+
+        ctx.used_tools.append("gathered_query")
+        return _dumps(query(ctx, dataset, action, contains or [], exclude or [], column, unique, offset))
+
     async def browser_screenshot(label: str = "") -> str:
         """Save a screenshot of the current browser page into this chat, as evidence or when the user asks for one. Only the page is captured, never the rest of the screen. label says what it shows ("order confirmation"). Take it while the page is showing, before moving on. browser_task does this by itself when its goal mentions screenshots."""
         from app.agent.page_shots import capture
@@ -864,6 +879,8 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         StructuredTool.from_function(coroutine=browser_act, name="browser_act", description=browser_act.__doc__, args_schema=BrowserActInput),
         StructuredTool.from_function(coroutine=browser_collect, name="browser_collect", description=browser_collect.__doc__, args_schema=BrowserCollectInput),
         StructuredTool.from_function(coroutine=browser_screenshot, name="browser_screenshot", description=browser_screenshot.__doc__),
+        StructuredTool.from_function(coroutine=browser_gather, name="browser_gather", description=browser_gather.__doc__),
+        StructuredTool.from_function(coroutine=gathered_query, name="gathered_query", description=gathered_query.__doc__),
         StructuredTool.from_function(coroutine=computer_windows, name="computer_windows", description=computer_windows.__doc__),
         StructuredTool.from_function(coroutine=computer_screens, name="computer_screens", description=computer_screens.__doc__),
         StructuredTool.from_function(coroutine=computer_ui, name="computer_ui", description=computer_ui.__doc__),
