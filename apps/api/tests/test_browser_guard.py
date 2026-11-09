@@ -237,3 +237,21 @@ def test_a_moved_control_is_found_again_only_if_it_is_certain():
     assert guard.stale_retry(ctx, args, failed, [_named("e8", "Add to cart", "Onesie"), _named("e9", "Add to cart", "Onesie")]) is None
     assert guard.stale_retry(ctx, args, failed, [_named("e9", "Add to cart", "Backpack")]) is None
     assert guard.stale_retry(ctx, args, {"ok": False, "error": "something else"}, [_named("e9", "Add to cart", "Onesie")]) is None
+
+
+def test_a_page_reopened_with_nothing_done_is_refused():
+    ctx = _ctx()
+    nav = {"url": "https://shop.example/items"}
+    for _ in range(guard.SAME_PAGE_OPENS):
+        assert guard.before(ctx, "browser_navigate", nav) is None
+        guard.after(ctx, "browser_navigate", nav, _page())
+    assert guard.before(ctx, "browser_navigate", nav)["repeated"] is True
+
+
+def test_going_back_to_a_list_between_real_work_is_fine():
+    ctx = _ctx()
+    nav = {"url": "https://shop.example/list"}
+    for n in range(guard.SAME_PAGE_OPENS * 2):
+        assert guard.before(ctx, "browser_navigate", nav) is None
+        guard.after(ctx, "browser_navigate", nav, _page("list"))
+        _act(ctx, {"actions": [{"kind": "click", "ref": f"e{n}"}]}, _page(f"detail {n}"))

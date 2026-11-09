@@ -333,3 +333,20 @@ def test_finish_check_spots_a_reply_that_only_promises_work():
     assert not fc.only_promised(ctx, "Paris is the capital of France.")
     assert not fc.only_promised(ctx, "I'll check that. Which account do you mean?")
     assert not fc.only_promised(SimpleNamespace(teammate_depth=0, pending=[], question=None, used_tools=["browser_act"]), "I'll report back.")
+
+
+def test_text_inside_frames_is_read_and_labelled():
+    from app.connectors.computer_daemon import _frame_text
+
+    class Frame:
+        def __init__(self, url, text):
+            self.url, self.text = url, text
+
+        def evaluate(self, js):
+            if self.text is None:
+                raise RuntimeError("detached")
+            return self.text
+
+    page = SimpleNamespace(frames=[Frame("https://a.example/", "main"), Frame("https://b.example/x?secret=1", "Parent frame"), Frame("about:blank", ""), Frame("https://c.example/", None)])
+    out = _frame_text(page)
+    assert out == "[frame https://b.example/x]\nParent frame"
