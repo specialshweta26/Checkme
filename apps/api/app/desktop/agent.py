@@ -57,6 +57,7 @@ LOCAL_TOOLS = {
     "computer_windows",
     "computer_screens",
     "computer_clipboard",
+    "computer_ui",
     "app_discover",
     "list_grants",
     "list_folder_grants",
@@ -252,7 +253,7 @@ async def call_local(user_id, tool: str, args: dict | None = None) -> dict:
         return {"ok": False, "fallback_cloud": True, "error": f"{tool} runs on the cloud computer"}
     if not await is_online(user_id):
         raise LocalOffline("desktop app is not connected")
-    timeout = 90 if tool.startswith("browser") or tool in {"computer_observe", "computer_act", "boot", "screen_png"} else 60
+    timeout = 90 if tool.startswith("browser") or tool in {"computer_observe", "computer_act", "computer_ui", "boot", "screen_png"} else 60
     try:
         timeout = int((args or {}).get("timeout") or timeout)
     except (TypeError, ValueError):
