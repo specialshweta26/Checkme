@@ -42,10 +42,11 @@
   // Clickable things that aren't links or buttons: table headers that sort, and anything the page styles as clickable.
   const looksClickable = (root) => {
     const out = [];
-    const nodes = Array.from(root.querySelectorAll('th, [onclick], div, span, li, td, img, svg')).slice(0, 2500);
+    const nodes = Array.from(root.querySelectorAll('th, [onclick], [oncontextmenu], [ondblclick], [onmouseover], [onmouseenter], figure, div, span, li, td, img, svg')).slice(0, 2500);
     for (const el of nodes) {
       if (el.closest(INTERACTIVE)) continue;
-      if (el.tagName === 'TH' || el.hasAttribute('onclick')) { out.push(el); continue; }
+      if (el.tagName === 'TH' || el.tagName === 'FIGURE' || ['onclick', 'oncontextmenu', 'ondblclick', 'onmouseover', 'onmouseenter'].some((a) => el.hasAttribute(a))) { out.push(el); continue; }
+      if (el.tagName === 'IMG' && el.getBoundingClientRect().width >= 40 && !el.closest('figure')) { out.push(el); continue; }
       const st = window.getComputedStyle(el);
       if (st.cursor !== 'pointer') continue;
       const up = el.parentElement;
@@ -100,6 +101,9 @@
     : byView;
   // A field with no name of its own: its label through aria, or the short text of the box around it ("Select State").
   const contextName = (el) => {
+    if (!['INPUT', 'TEXTAREA'].includes(el.tagName) && el.getAttribute('role') !== 'combobox') {
+      return String(el.getAttribute('alt') || el.getAttribute('title') || el.id || '').slice(0, 80);
+    }
     const by = (el.getAttribute('aria-labelledby') || '').split(/\s+/).map((id) => { const n = id && el.ownerDocument.getElementById(id); return n ? n.textContent : ''; }).join(' ').trim();
     if (by) return by.slice(0, 80);
     let box = el.parentElement;
@@ -113,6 +117,11 @@
   };
   // Identical controls ("Add to cart" on every product) say what they belong to.
   const nearText = (el, name) => {
+    if (el.tagName === 'TH' && el.closest('table')) {
+      const table = el.closest('table');
+      const label = table.getAttribute('aria-label') || (table.caption && table.caption.innerText) || table.id;
+      return String(label || 'table ' + (Array.from(el.ownerDocument.querySelectorAll('table')).indexOf(table) + 1)).slice(0, 50);
+    }
     let best = '';
     let node = el.parentElement;
     for (let depth = 0; node && depth < 6; depth += 1, node = node.parentElement) {

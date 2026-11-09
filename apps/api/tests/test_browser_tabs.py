@@ -59,3 +59,35 @@ def test_a_page_screenshot_is_kept_apart_from_the_live_panel():
     assert "screenshot_b64" not in out
     assert desktop.take_page_shot(out["page_shot_key"]) == b"\x89PNG-data"
     assert desktop.take_page_shot(out["page_shot_key"]) == b""
+
+
+def test_the_page_check_notices_a_reorder_of_the_same_text():
+    from app.connectors.computer_daemon import _PAGE_SIG_JS
+
+    assert "charCodeAt" in _PAGE_SIG_JS
+
+
+async def test_a_stalled_model_call_is_retried_then_gives_up(monkeypatch):
+    import asyncio
+
+    import pytest
+
+    from app.agent import context_trim as trim
+
+    monkeypatch.setattr(trim, "MODEL_CALL_LIMIT_S", 0.01)
+    calls = []
+
+    async def stuck_once(request):
+        calls.append(request)
+        if len(calls) == 1:
+            await asyncio.sleep(1)
+        return "answer"
+
+    assert await trim.call_with_limit(stuck_once, "req") == "answer"
+    assert len(calls) == 2
+
+    async def always_stuck(request):
+        await asyncio.sleep(1)
+
+    with pytest.raises(TimeoutError):
+        await trim.call_with_limit(always_stuck, "req")

@@ -13,6 +13,7 @@ Only what is sent to the model changes; the stored conversation keeps everything
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -28,6 +29,8 @@ KEEP_KEYS = ("ok", "url", "title", "error", "warnings", "result", "done", "need_
              "via", "completed", "deep_link_failed", "fallback_url", "bot_wall", "status", "took_ms")  # fmt: skip
 OLD_RESULT_CHARS = 4000
 RECENT_MESSAGES = 4
+MODEL_CALL_LIMIT_S = 150
+MODEL_CALL_TRIES = 2
 
 
 def _brief(content: str) -> str:
@@ -98,6 +101,17 @@ def middleware():
             if saved:
                 log.info("context trimmed: %d characters of old tool results", saved)
                 request = request.override(messages=messages)
-            return await handler(request)
+            return await call_with_limit(handler, request)
 
     return TrimOldPages()
+
+
+async def call_with_limit(handler, request):  # noqa: ANN001
+    """A model call that has stalled gets one more try, so it can't freeze the turn. The client's own timeout covers only
+    the gap between pieces of a reply, and turns have sat for minutes with nothing happening."""
+    for attempt in range(MODEL_CALL_TRIES):
+        try:
+            return await asyncio.wait_for(handler(request), MODEL_CALL_LIMIT_S)
+        except asyncio.TimeoutError:
+            log.warning("model call stalled for %ss (try %s of %s)", MODEL_CALL_LIMIT_S, attempt + 1, MODEL_CALL_TRIES)
+    raise TimeoutError("The AI model didn't answer in time.")
