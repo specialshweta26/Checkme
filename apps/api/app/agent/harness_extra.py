@@ -467,12 +467,12 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         return _dumps(await gather(ctx, how, next_label, max_pages))
 
     async def gathered_query(dataset: str, action: str = "count", contains: list[str] | None = None, exclude: list[str] | None = None,
-                             column: int | None = None, unique: bool = False, offset: int = 0) -> str:
-        """Count, sum or list lines from a browser_gather dataset. Each line of page text is one record, and a table row is one line. action: count, sum or list. contains: every word must be in the line (no case). exclude: none may be. column: for sum, the table column to add, from 1 (needed if a row has several amounts). unique: count identical lines once. Returns the figure and a count per page, so check per_page looks right, including that repeated page headers aren't being counted."""
+                             column: int | None = None, unique: bool = False, offset: int = 0, starts_with: list[str] | None = None) -> str:
+        """Count, sum or list lines from a browser_gather dataset. Each line of page text is one line here, and a table row is one line; a record shown over several lines has one line of each kind. action: count, sum or list. contains: every word must be in the line (no case), anywhere, even inside other text. starts_with: the line must start with one of these whole words; use it with browser_gather's line_kinds to count records. exclude: none may be. column: for sum, the table column to add, from 1 (needed if a row has several amounts). unique: count identical lines once. Returns the figure and a count per page, so check per_page looks right, including that repeated page headers aren't being counted."""
         from app.agent.gather import query
 
         ctx.used_tools.append("gathered_query")
-        return _dumps(query(ctx, dataset, action, contains or [], exclude or [], column, unique, offset))
+        return _dumps(query(ctx, dataset, action, contains or [], exclude or [], column, unique, offset, starts_with or []))
 
     async def browser_screenshot(label: str = "") -> str:
         """Save a screenshot of the current browser page into this chat, as evidence or when the user asks for one. Only the page is captured, never the rest of the screen. label says what it shows ("order confirmation"). Take it while the page is showing, before moving on. browser_task does this by itself when its goal mentions screenshots."""

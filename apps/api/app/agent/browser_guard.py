@@ -24,6 +24,7 @@ PAGE_READS = {"browser_navigate", "browser_snapshot", "browse_open"}
 NAV_TOOLS = {"browser_navigate", "browse_open"}
 SAME_PAGE_OPENS = 3
 NEXT_CLICKS_ALLOWED = 2
+SCROLLS_ALLOWED = 2
 MAX_FACT_PAGES = 5
 
 
@@ -138,10 +139,19 @@ def _wants_a_figure(ctx: Any) -> bool:
 
 
 def _next_click(actions: list, elements: list) -> bool:
-    from app.agent.gather import _NEXT_WORDS, _clean_name
+    from app.agent.gather import _NEXT_WORDS, names_match
 
-    names = {str(e.get("ref")): _clean_name(e.get("name")) for e in elements if isinstance(e, dict)}
-    return any(isinstance(a, dict) and str(a.get("kind") or "").lower() == "click" and names.get(str(a.get("ref") or "")) in _NEXT_WORDS for a in actions)
+    names = {str(e.get("ref")): e.get("name") for e in elements if isinstance(e, dict)}
+    return any(isinstance(a, dict) and str(a.get("kind") or "").lower() == "click" and names_match(names.get(str(a.get("ref") or "")), _NEXT_WORDS) for a in actions)
+
+
+def _hand_collecting(ctx: Any, state: dict, actions: list) -> bool:
+    """Paging or scrolling by hand towards a figure. Once a gather has run, the page is free to use for anything else."""
+    if getattr(ctx, "_gathering", False) or getattr(ctx, "_gathered", None) or not _wants_a_figure(ctx):
+        return False
+    state["next_clicks"] = state.get("next_clicks", 0) + (1 if _next_click(actions, state["elements"]) else 0)
+    state["scrolls"] = state.get("scrolls", 0) + sum(1 for a in actions if isinstance(a, dict) and str(a.get("kind") or "").lower() == "scroll")
+    return state["next_clicks"] >= NEXT_CLICKS_ALLOWED or state["scrolls"] > SCROLLS_ALLOWED
 
 
 def _once_labels(actions: list, elements: list) -> list[str]:
@@ -227,18 +237,17 @@ def before(ctx: Any, tool: str, args: dict | None) -> dict | None:
         return None
     if state["stuck"]:
         return _stop_reply(state)
-    if not getattr(ctx, "_gathering", False) and _wants_a_figure(ctx) and _next_click(_actions(args), state["elements"]):
-        state["next_clicks"] = state.get("next_clicks", 0) + 1
-        if state["next_clicks"] >= NEXT_CLICKS_ALLOWED:
-            log.info("browser.guard sent a counting task to browser_gather")
-            return {
-                "ok": False,
-                "use_gather": True,
-                "error": (
-                    "Not run: this request needs a count or total, and paging by hand gets those wrong. Call browser_gather now (it "
-                    "goes back to the first page by itself), then gathered_query, and report its figures."
-                ),
-            }
+    if _hand_collecting(ctx, state, _actions(args)):
+        log.info("browser.guard sent a counting task to browser_gather")
+        return {
+            "ok": False,
+            "use_gather": True,
+            "error": (
+                "Not run: this request needs a count or total, and paging or scrolling by hand gets those wrong. Call browser_gather "
+                "now (it goes back to the first page by itself and handles Next, Load more and scrolling), then gathered_query, and "
+                "report its figures."
+            ),
+        }
     again = next((label for label in _once_labels(_actions(args), state["elements"]) if label.casefold() in state["once"]), "")
     if again:
         log.warning("browser.guard refused a second click on a run-once control")

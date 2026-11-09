@@ -1647,6 +1647,8 @@ async def _run_task(ctx, goal: str, url: str, values: dict | None, max_steps: in
                 )  # fmt: skip
                 if _blocked(state):
                     return _result(state, vals, ok=False, done=False, need_user=BOT_WALL_NEED, log=log_steps)
+                if state.get("use_gather"):
+                    return _result(state, vals, ok=False, done=False, note=str(state.get("error") or ""), log=log_steps)
                 if isinstance(err, list):
                     return _result(state, vals, ok=False, done=False, need_user="Missing values: " + ", ".join(err), log=log_steps)
                 warned = [str(w) for w in (state.get("warnings") or [])][:3] if ok else []

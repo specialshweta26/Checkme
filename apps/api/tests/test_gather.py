@@ -182,3 +182,59 @@ def test_stitching_copes_with_a_footer_that_is_always_last():
     read = {"text": "head\n…\ncut\nq1\nby A\nq2\nby B\nq3\nby A\nfooter", "text_omitted": True}
     more, whole = gather.grow(held, read)
     assert whole and more == ["head", "q1", "by A", "q2", "by B", "q3", "by A", "footer"]
+
+
+async def test_a_label_without_the_arrow_still_finds_the_control(monkeypatch):
+    _browser(monkeypatch, [_page(1), _page(2, last=True)])
+    out = await gather.gather(SimpleNamespace(), "next", next_label="Next")
+    assert out["pages"] == 2
+
+
+def test_a_wrong_label_falls_back_to_the_usual_names():
+    assert gather.find_control([{"ref": "e2", "role": "link", "name": "Next →"}], gather._NEXT_WORDS, "Forward")["ref"] == "e2"
+    assert gather.find_control([{"ref": "e2", "role": "link", "name": "Next »"}], gather._NEXT_WORDS, "Next")["ref"] == "e2"
+
+
+def test_a_word_inside_other_text_is_called_out_when_counting_records():
+    lines = [f"by Author {n}" for n in range(10)] + ["Baby steps", "Written by nobody"]
+    ctx = _ctx(lines)
+    loose = gather.query(ctx, "d1", "count", ["by"])
+    assert loose["matched_lines"] == 12 and "starts_with ['by']" in loose["warning"]
+    exact = gather.query(ctx, "d1", "count", starts_with=["by"])
+    assert exact["matched_lines"] == 10 and "warning" not in exact
+
+
+def test_starts_with_needs_whole_words():
+    assert gather.query(_ctx(["by Ann", "bystander", "BY Bob"]), "d1", "count", starts_with=["by"])["matched_lines"] == 2
+
+
+async def test_gather_says_how_lines_start(monkeypatch):
+    text = "\n".join(f"“Quote {n}”\nby Person {n}\nTags: a" for n in range(5))
+    _browser(monkeypatch, [{"ok": True, "url": "u", "text": text, "elements": []}])
+    out = await gather.gather(SimpleNamespace(), "next")
+    assert {"starts_with": "by", "lines": 5} in out["line_kinds"] and {"starts_with": "Tags:", "lines": 5} in out["line_kinds"]
+
+
+def _guard(query):
+    from app.agent import browser_guard
+
+    return browser_guard, SimpleNamespace(query=query)
+
+
+def test_scrolling_by_hand_towards_a_figure_is_sent_to_gather():
+    guard, ctx = _guard("Load all of them. How many quotes are there?")
+    state = {"elements": []}
+    assert not guard._hand_collecting(ctx, state, [{"kind": "scroll"}, {"kind": "scroll"}])
+    assert guard._hand_collecting(ctx, state, [{"kind": "scroll"}])
+
+
+def test_a_figure_request_is_free_to_use_the_page_after_gathering():
+    guard, ctx = _guard("How many quotes are there?")
+    ctx._gathered = {"d1": []}
+    assert not guard._hand_collecting(ctx, {"elements": []}, [{"kind": "scroll"}] * 6)
+
+
+def test_scrolling_with_no_figure_wanted_is_left_alone():
+    guard, ctx = _guard("Scroll down and open the pricing section")
+    assert not guard._hand_collecting(ctx, {"elements": []}, [{"kind": "scroll"}] * 6)
+

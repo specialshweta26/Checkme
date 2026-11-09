@@ -74,6 +74,7 @@ def computer_missing() -> dict:
 
 DESKTOP_SAVE_MAX = 5
 DESKTOP_SAVE_TIMEOUT_S = 75
+DOWNLOADS_SEEN_TTL_S = 30 * 86400
 
 
 async def save_on_desktop(ctx, items: list[dict]) -> int:
@@ -113,11 +114,43 @@ async def save_on_desktop(ctx, items: list[dict]) -> int:
     return saved
 
 
-async def _publish_downloads(ctx, result: dict) -> dict:
-    published = []
-    for item in result.get("downloads") or []:
+async def _new_downloads(ctx, items: list) -> list[dict]:
+    """Only files not handled before. The browser lists its recent downloads with every result, so without this each step
+    would attach them again and put another copy in the user's Downloads folder."""
+    from app.cache import get_redis
+
+    seen = getattr(ctx, "_seen_downloads", None)
+    if seen is None:
+        seen = set()
+        ctx._seen_downloads = seen
+    user_id = getattr(getattr(ctx, "user", None), "id", None)
+    fresh = []
+    for item in items:
         if not isinstance(item, dict) or not item.get("path"):
             continue
+        mark = str(item.get("id") or item["path"])
+        if mark in seen:
+            continue
+        seen.add(mark)
+        if user_id is not None:
+            try:
+                key = f"browser:downloads_seen:{user_id}"
+                if not await get_redis().sadd(key, mark):
+                    continue
+                await get_redis().expire(key, DOWNLOADS_SEEN_TTL_S)
+            except Exception:  # noqa: BLE001 - Redis down: this turn's own record above still stops repeats
+                pass
+        fresh.append(item)
+    return fresh
+
+
+async def _publish_downloads(ctx, result: dict) -> dict:
+    published = []
+    fresh = await _new_downloads(ctx, result.get("downloads") or [])
+    if not fresh:
+        result.pop("downloads", None)
+        return result
+    for item in fresh:
         if item.get("download_url"):
             published.append(item)
             continue
