@@ -38,6 +38,7 @@ LOCAL_TOOLS = {
     "browser_navigate",
     "browse_open",
     "browser_snapshot",
+    "browser_page_log",
     "browser_act",
     "browser_collect",
     "browse_act",

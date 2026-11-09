@@ -36,7 +36,7 @@ from app.connectors.computer_daemon import looks_secret, secret_text
 log = logging.getLogger(__name__)
 
 ALLOWED_KINDS = {
-    "click", "dblclick", "fill", "type", "select", "pick", "check", "uncheck", "hover", "press", "scroll",
+    "click", "dblclick", "rightclick", "drag", "fill", "type", "select", "pick", "check", "uncheck", "hover", "press", "scroll",
     "wait", "wait_for", "download", "back", "forward", "reload", "navigate", "find", "pick_date",
 }  # fmt: skip
 MAX_BATCH = 12
@@ -1078,7 +1078,7 @@ def parse_plan(raw: str) -> dict | None:
         if len(clean) >= MAX_BATCH:
             break
         if isinstance(step, dict) and str(step.get("kind") or "").lower() in ALLOWED_KINDS:
-            clean.append({k: v for k, v in step.items() if k in {"kind", "ref", "text", "value", "url", "dy", "wait_ms", "ms"}})
+            clean.append({k: v for k, v in step.items() if k in {"kind", "ref", "to", "text", "value", "url", "dy", "wait_ms", "ms"}})
     return {
         "actions": clean,
         "done": bool(data.get("done")),

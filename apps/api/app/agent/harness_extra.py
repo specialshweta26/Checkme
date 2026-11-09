@@ -368,7 +368,7 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         return _dumps(fast.for_model(await computer.run_computer(ctx, "browser_snapshot", args)))
 
     async def browser_act(actions: list[dict[str, Any]], tab: str = "") -> str:
-        """Act on the live computer browser using snapshot refs (e0, e1). kind: click, dblclick, rightclick, fill, type, select, pick, pick_date, check, hover, drag, press, scroll, wait, wait_for, upload, download, reload, back, forward. For a date use pick_date with the date field's ref and text YYYY-MM-DD: it opens the calendar, goes to the month and clicks the day. fill puts a value in a field. type does that and submits it (Enter, or the Send/Submit button if the draft is still there). For type-ahead lists use type or select/pick (field ref + value). Read composer and the end of text to confirm the result. If composer still holds the draft, it was not submitted. Do not reload the page to check. upload needs path; download saves the file and returns extracted_text plus download_url — analyze that text in your role and skills, then post the analysis in chat. For a deep dive on tabular files, run_code on the saved path. Read verified/alerts/tables/downloads on the returned snapshot. Do not request_takeover for a dropdown. Returns a fresh snapshot."""
+        """Act on the live computer browser using snapshot refs (e0, e1). kind: click, dblclick, rightclick, fill, type, select, pick, pick_date, check, hover, drag (ref and to), press, scroll, wait, wait_for, upload, download, reload, back, forward, accept_dialog. For a date use pick_date with the date field's ref and text YYYY-MM-DD: it opens the calendar, goes to the month and clicks the day. fill puts a value in a field. type does that and submits it (Enter, or the Send/Submit button if the draft is still there). For type-ahead lists use type or select/pick (field ref + value). Read composer and the end of text to confirm the result. If composer still holds the draft, it was not submitted. Do not reload the page to check. upload needs path; download saves the file and returns extracted_text plus download_url — analyze that text in your role and skills, then post the analysis in chat. For a deep dive on tabular files, run_code on the saved path. Read verified/alerts/tables/downloads on the returned snapshot. Do not request_takeover for a dropdown. Returns a fresh snapshot."""
         ctx.used_tools.append("browser_act")
         args: dict[str, Any] = {"actions": actions}
         if tab:
@@ -453,6 +453,11 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         """Download a file from the site directly with the browser's signed-in cookies (no click-through), given its URL (a link href) or the ref of its link/button. Returns the saved file with extracted_text and download_url, like browser_act download."""
         ctx.used_tools.append("browser_download")
         return _dumps(await fast.browser_download(ctx, url, ref, filename))
+
+    async def browser_page_log() -> str:
+        """Errors the current browser page has logged and its failed web requests (addresses without query strings). Use it when a page isn't behaving and what you can see doesn't explain why."""
+        ctx.used_tools.append("browser_page_log")
+        return _dumps(await computer.run_computer(ctx, "browser_page_log", {}))
 
     async def browser_screenshot(label: str = "") -> str:
         """Save a screenshot of the current browser page into this chat, as evidence or when the user asks for one. Only the page is captured, never the rest of the screen. label says what it shows ("order confirmation"). Take it while the page is showing, before moving on. browser_task does this by itself when its goal mentions screenshots."""
@@ -813,6 +818,7 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         StructuredTool.from_function(coroutine=browser_act, name="browser_act", description=browser_act.__doc__, args_schema=BrowserActInput),
         StructuredTool.from_function(coroutine=browser_collect, name="browser_collect", description=browser_collect.__doc__, args_schema=BrowserCollectInput),
         StructuredTool.from_function(coroutine=browser_screenshot, name="browser_screenshot", description=browser_screenshot.__doc__),
+        StructuredTool.from_function(coroutine=browser_page_log, name="browser_page_log", description=browser_page_log.__doc__),
         StructuredTool.from_function(coroutine=browser_tabs, name="browser_tabs", description=browser_tabs.__doc__),
         *(
             [StructuredTool.from_function(coroutine=browser_task, name="browser_task", description=browser_task.__doc__, args_schema=BrowserTaskInput)]
