@@ -10,6 +10,8 @@ use tauri_plugin_updater::UpdaterExt;
 
 const FIRST_CHECK_AFTER: Duration = Duration::from_secs(20);
 const CHECK_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
+const CHECK_AGAIN_AFTER_FAILURE: Duration = Duration::from_secs(5 * 60);
+const INSTALL_TRIES: u32 = 3;
 const UPDATE_NOW: &str = "Update now";
 const LATER: &str = "Later";
 
@@ -57,9 +59,21 @@ async fn check_once(app: &AppHandle, declined: &mut Option<String>) -> Result<()
         *declined = Some(update.version.clone());
         return Ok(());
     }
-    if let Err(err) = update.download_and_install(|_, _| {}, || {}).await {
-        tell_failed().await;
-        return Err(err.to_string());
+    // Downloads fail now and then for a moment, so a single failure shouldn't send the user to wait for the next start.
+    let mut tries = 0;
+    loop {
+        tries += 1;
+        match update.download_and_install(|_, _| {}, || {}).await {
+            Ok(()) => break,
+            Err(err) if tries >= INSTALL_TRIES => {
+                tell_failed().await;
+                return Err(err.to_string());
+            }
+            Err(err) => {
+                eprintln!("update try {tries} failed: {err}");
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        }
     }
     app.restart();
 }
@@ -73,10 +87,14 @@ pub fn start(app: AppHandle) {
         tokio::time::sleep(FIRST_CHECK_AFTER).await;
         let mut declined = None;
         loop {
-            if let Err(err) = check_once(&app, &mut declined).await {
-                eprintln!("update check failed: {err}");
-            }
-            tokio::time::sleep(CHECK_EVERY).await;
+            let wait = match check_once(&app, &mut declined).await {
+                Ok(()) => CHECK_EVERY,
+                Err(err) => {
+                    eprintln!("update check failed: {err}");
+                    CHECK_AGAIN_AFTER_FAILURE
+                }
+            };
+            tokio::time::sleep(wait).await;
         }
     });
 }
@@ -107,12 +125,15 @@ mod tests {
     }
 
     #[test]
-    fn config_only_trusts_github_releases_and_ships_update_files() {
+    fn config_uses_our_feed_then_github_and_ships_update_files() {
         let conf: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
         let updater = &conf["plugins"]["updater"];
         assert_eq!(
             updater["endpoints"],
-            serde_json::json!(["https://github.com/specialshweta26/Checkme/releases/latest/download/latest.json"])
+            serde_json::json!([
+                "https://checkme-api-kw68.onrender.com/api/desktop/update/latest.json",
+                "https://github.com/specialshweta26/Checkme/releases/latest/download/latest.json"
+            ])
         );
         let key = updater["pubkey"].as_str().unwrap();
         let decoded = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, key).expect("a real public key");

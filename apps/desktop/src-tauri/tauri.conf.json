@@ -18,6 +18,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEFGRjE1QjgxQ0FBRTc2MzcKUldRM2RxN0tnVnZ4cndTcmR4NVdFa2U0cERhNzdIZEZ1QndJM3lKeFlUTVo0cVEwZHdFV0Nnb24K",
       "endpoints": [
+        "https://checkme-api-kw68.onrender.com/api/desktop/update/latest.json",
         "https://github.com/specialshweta26/Checkme/releases/latest/download/latest.json"
       ],
       "windows": {
