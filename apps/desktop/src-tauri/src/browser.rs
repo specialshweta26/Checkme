@@ -12,6 +12,10 @@ const SNAPSHOT_JS: &str = include_str!("snapshot.js");
 const COLLECT_JS: &str = include_str!("collect.js");
 const ACT_JS: &str = include_str!("act.js");
 const PICKER_JS: &str = include_str!("picker.js");
+const WATCH_JS: &str = include_str!("watch.js");
+const DRAIN_DIALOGS_JS: &str = "window.__lumioWatch ? window.__lumioWatch.drain() : []";
+/// A pop-up raised while a page loaded, closed because it blocked the page. Reported with the next page read.
+static DISMISSED_DIALOG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 const TEACH_JS: &str = include_str!("teach.js");
 const DRAIN_TEACH_JS: &str = r#"(() => { const b = window.__lumioTeachBuf || []; window.__lumioTeachBuf = []; return b.slice(0, 200); })()"#;
 const SUBMIT_IF_DRAFT_JS: &str = r#"(() => {
@@ -415,6 +419,121 @@ impl Chrome {
         Ok(result.pointer("/result/value").cloned().unwrap_or(Value::Null))
     }
 
+    /// Closes a pop-up that is blocking the page. Declining is the safe answer: a page's "OK" can confirm something.
+    async fn dismiss_dialog(&self) -> bool {
+        let closed = self.cdp("Page.handleJavaScriptDialog", json!({ "accept": false })).await.is_ok();
+        if closed {
+            DISMISSED_DIALOG.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        closed
+    }
+
+    pub async fn page_log(&self) -> Result<Value, String> {
+        self.eval(WATCH_JS).await?;
+        let mut data = self.eval("window.__lumioWatch.log()").await?;
+        data["ok"] = json!(true);
+        data["ran_on"] = json!("local_computer");
+        Ok(data)
+    }
+
+    /// Attach a file to a page's file input. Node ids only live for one connection, so all three calls share one.
+    async fn upload_on(&self, ws_url: &str, ref_id: &str, path: &str) -> Result<(), String> {
+        let (mut ws, _) = connect_async(ws_url).await.map_err(|e| e.to_string())?;
+        let mut next_id: u64 = 0;
+        macro_rules! call {
+            ($method:expr, $params:expr) => {{
+                next_id += 1;
+                let id = next_id;
+                let payload = json!({ "id": id, "method": $method, "params": $params });
+                ws.send(Message::Text(payload.to_string().into())).await.map_err(|e| e.to_string())?;
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+                loop {
+                    let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+                    let msg = tokio::time::timeout(left, ws.next())
+                        .await
+                        .map_err(|_| "Chrome did not answer".to_string())?
+                        .ok_or_else(|| "Chrome closed".to_string())?
+                        .map_err(|e| e.to_string())?;
+                    let Message::Text(text) = msg else { continue };
+                    let v: Value = serde_json::from_str(text.as_str()).map_err(|e| e.to_string())?;
+                    if v.get("id") != Some(&json!(id)) {
+                        continue;
+                    }
+                    break match v.get("error") {
+                        Some(err) => Err(err.to_string()),
+                        None => Ok(v.get("result").cloned().unwrap_or(json!({}))),
+                    };
+                }
+            }};
+        }
+        let doc: Result<Value, String> = call!("DOM.getDocument", json!({ "depth": 0 }));
+        let root = doc?.pointer("/root/nodeId").and_then(Value::as_i64).unwrap_or(0);
+        // The ref is usually the input itself; a styled upload button hides the real one elsewhere on the page.
+        for selector in [format!("[data-checkme-ref=\"{ref_id}\"]"), "input[type=file]".to_string()] {
+            let found: Result<Value, String> = call!("DOM.querySelector", json!({ "nodeId": root, "selector": selector }));
+            let node = found?.get("nodeId").and_then(Value::as_i64).unwrap_or(0);
+            if node == 0 {
+                continue;
+            }
+            let set: Result<Value, String> = call!("DOM.setFileInputFiles", json!({ "nodeId": node, "files": [path] }));
+            if set.is_ok() {
+                return Ok(());
+            }
+        }
+        Err("no file input on this page to attach the file to; click the upload button and look at what opens".into())
+    }
+
+    async fn mouse_right(&self, target: &str, x: i64, y: i64) -> Result<(), String> {
+        let wait = Duration::from_secs(8);
+        self.cdp_on(target, "Input.dispatchMouseEvent", json!({ "type": "mouseMoved", "x": x, "y": y }), wait).await?;
+        for phase in ["mousePressed", "mouseReleased"] {
+            self.cdp_on(
+                target,
+                "Input.dispatchMouseEvent",
+                json!({ "type": phase, "x": x, "y": y, "button": "right", "clickCount": 1 }),
+                wait,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// Press on one point, move to another in a few steps (drag handlers listen for movement), and let go.
+    async fn drag_between(&self, target: &str, from: (i64, i64), to: (i64, i64)) -> Result<(), String> {
+        let wait = Duration::from_secs(8);
+        self.cdp_on(target, "Input.dispatchMouseEvent", json!({ "type": "mouseMoved", "x": from.0, "y": from.1 }), wait).await?;
+        self.cdp_on(
+            target,
+            "Input.dispatchMouseEvent",
+            json!({ "type": "mousePressed", "x": from.0, "y": from.1, "button": "left", "clickCount": 1 }),
+            wait,
+        )
+        .await?;
+        for part in 1..=5i64 {
+            let (x, y) = (from.0 + (to.0 - from.0) * part / 5, from.1 + (to.1 - from.1) * part / 5);
+            self.cdp_on(target, "Input.dispatchMouseEvent", json!({ "type": "mouseMoved", "x": x, "y": y, "button": "left", "buttons": 1 }), wait).await?;
+            tokio::time::sleep(Duration::from_millis(40)).await;
+        }
+        self.cdp_on(
+            target,
+            "Input.dispatchMouseEvent",
+            json!({ "type": "mouseReleased", "x": to.0, "y": to.1, "button": "left", "clickCount": 1 }),
+            wait,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Where a ref sits on screen, scrolled into view.
+    async fn point_of(&self, target: &str, ref_id: &str) -> Result<(i64, i64), String> {
+        let found = self.eval_on(target, &format!("({ACT_JS})({ref_id:?}, \"hover\", \"\", true)")).await?;
+        let at = found.get("mouse");
+        match (at.and_then(|m| m.get("x")).and_then(Value::as_i64), at.and_then(|m| m.get("y")).and_then(Value::as_i64)) {
+            (Some(x), Some(y)) => Ok((x, y)),
+            _ => Err(format!("{ref_id} can't be reached with the mouse; take a snapshot and try another element")),
+        }
+    }
+
     async fn cdp_on(&self, ws_url: &str, method: &str, params: Value, wait: Duration) -> Result<Value, String> {
         let (mut ws, _) = connect_async(ws_url).await.map_err(|e| e.to_string())?;
         let payload = json!({ "id": 1, "method": method, "params": params });
@@ -447,13 +566,17 @@ impl Chrome {
     }
 
     async fn eval_wait(&self, expression: &str, wait: Duration) -> Result<Value, String> {
-        let result = self
-            .cdp_wait(
-                "Runtime.evaluate",
-                json!({ "expression": expression, "returnByValue": true, "awaitPromise": false }),
-                wait,
-            )
-            .await?;
+        let params = json!({ "expression": expression, "returnByValue": true, "awaitPromise": false });
+        let result = match self.cdp_wait("Runtime.evaluate", params.clone(), wait).await {
+            Ok(result) => result,
+            Err(err) => {
+                // A pop-up freezes the page's scripts: close it and read again.
+                if err != "Chrome did not answer" || !self.dismiss_dialog().await {
+                    return Err(err);
+                }
+                self.cdp_wait("Runtime.evaluate", params, wait).await?
+            }
+        };
         if let Some(ex) = result.get("exceptionDetails") {
             // A script that threw used to come back as an empty page, so the agent re-opened a page that was fine.
             // Report what failed instead.
@@ -527,6 +650,7 @@ impl Chrome {
     /// first; when the page has more than MAX_ELEMENTS, the tree says how many were left out.
     pub async fn snapshot_find(&self, find: &str) -> Result<Value, String> {
         self.arm_teach().await;
+        self.eval(WATCH_JS).await.ok();
         let find: String = find.chars().filter(|c| !c.is_control()).take(120).collect();
         let mut data = self.eval(&format!("({SNAPSHOT_JS})(0, {MAX_ELEMENTS}, {find:?})")).await?;
         if !data.is_object() {
@@ -550,6 +674,13 @@ impl Chrome {
             obj.remove("total");
         }
         note_omitted(&mut data, total);
+        let mut dialogs = self.eval(DRAIN_DIALOGS_JS).await.ok().and_then(|v| v.as_array().cloned()).unwrap_or_default();
+        if DISMISSED_DIALOG.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            dialogs.push(json!({ "type": "unknown", "message": "A pop-up blocked the page and was closed.", "answer": "declined" }));
+        }
+        if !dialogs.is_empty() {
+            data["dialogs"] = json!(dialogs);
+        }
         if let Ok(shot) = self.screenshot_b64().await {
             data["screenshot_b64"] = json!(shot);
         }
@@ -657,6 +788,7 @@ impl Chrome {
 
     pub async fn act(&self, actions: &[Value]) -> Result<Value, String> {
         let mut warnings: Vec<String> = vec![];
+        self.eval(WATCH_JS).await.ok();
         for (index, step) in actions.iter().enumerate() {
             let kind = step.get("kind").and_then(Value::as_str).unwrap_or("click");
             let check_effect = matches!(kind, "click" | "dblclick" | "hover" | "check" | "uncheck");
@@ -674,6 +806,31 @@ impl Chrome {
             if kind == "back" {
                 self.eval("history.back()").await.ok();
                 tokio::time::sleep(Duration::from_millis(600)).await;
+                continue;
+            }
+            if kind == "accept_dialog" {
+                let answer = step.get("text").or_else(|| step.get("value")).and_then(Value::as_str).unwrap_or("");
+                self.eval(&format!("window.__lumioWatch.accept({answer:?})")).await?;
+                continue;
+            }
+            if kind == "drag" {
+                let from = step.get("ref").and_then(Value::as_str).unwrap_or("");
+                let to = step.get("to").or_else(|| step.get("to_ref")).and_then(Value::as_str).unwrap_or("");
+                let page = self.page_ws().await?;
+                let start = self.point_of(&page, from).await?;
+                let end = self.point_of(&page, to).await?;
+                self.drag_between(&page, start, end).await?;
+                continue;
+            }
+            if kind == "upload" {
+                let raw = step.get("path").or_else(|| step.get("file")).or_else(|| step.get("text")).and_then(Value::as_str).unwrap_or("");
+                let path = match crate::grants::resolve_existing(raw) {
+                    Ok(path) => path,
+                    Err(err) => return Err(err.to_json().get("error").and_then(Value::as_str).unwrap_or("that file can't be used").to_string()),
+                };
+                let from = step.get("ref").and_then(Value::as_str).unwrap_or("");
+                let page = self.page_ws().await?;
+                self.upload_on(&page, from, &path.to_string_lossy()).await?;
                 continue;
             }
             if kind == "forward" {
@@ -754,8 +911,12 @@ impl Chrome {
             if let Some(at) = result.get("mouse") {
                 let (x, y) = (at.get("x").and_then(Value::as_i64), at.get("y").and_then(Value::as_i64));
                 if let (Some(x), Some(y)) = (x, y) {
-                    let clicks = result.get("clicks").and_then(Value::as_u64).unwrap_or(1);
-                    self.mouse_at(&target, x, y, clicks).await?;
+                    if result.get("button").and_then(Value::as_str) == Some("right") {
+                        self.mouse_right(&target, x, y).await?;
+                    } else {
+                        let clicks = result.get("clicks").and_then(Value::as_u64).unwrap_or(1);
+                        self.mouse_at(&target, x, y, clicks).await?;
+                    }
                 }
             }
             if result.get("picker").and_then(Value::as_bool) == Some(true) {

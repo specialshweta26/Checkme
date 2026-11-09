@@ -764,6 +764,7 @@ async fn run_browser(slot: &Mutex<Option<browser::Chrome>>, tool: &str, args: &V
             data["note"] = json!("The Chrome window on this computer is yours. Finish the step there, then tell Lumio to continue.");
             data
         }),
+        "browser_page_log" => chrome.page_log().await,
         "browser_tabs" => chrome.tabs().await,
         "browser_new_tab" => chrome.new_tab(args.get("url").and_then(Value::as_str).unwrap_or("")).await,
         "browser_switch_tab" => chrome.switch_tab(args.get("tab").and_then(Value::as_str).unwrap_or("")).await,

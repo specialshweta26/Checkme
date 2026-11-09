@@ -157,6 +157,12 @@
     target.click();
     return { ok: true };
   }
+  if (kind === 'rightclick' || kind === 'contextclick' || kind === 'context_click') {
+    const at = point(target);
+    if (at) return { ok: true, mouse: at, clicks: 1, button: 'right' };
+    target.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+    return { ok: true };
+  }
   if (kind === 'check' || kind === 'uncheck') {
     target.click();
     return { ok: true };

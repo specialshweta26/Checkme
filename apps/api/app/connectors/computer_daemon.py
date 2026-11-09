@@ -15,7 +15,7 @@ from pathlib import Path
 
 HOST = "127.0.0.1"
 PORT = 18765
-VERSION = "29"
+VERSION = "30"
 _HOME = Path(os.environ.get("CHECKME_BROWSER_HOME") or "/tmp")
 SHOT = "/tmp/checkme-browser.png"
 PROFILE = str(_HOME / "profile")
@@ -2117,6 +2117,8 @@ def _act_step(page, step: dict) -> dict | None:
             page.wait_for_timeout(timeout)
     elif kind == "upload":
         return _upload_file(page, loc, node, step)
+    elif kind == "accept_dialog":
+        _accept_next.update(on=True, text=str(step.get("text") or step.get("value") or "") or None)
     elif kind == "download":
         return _click_download(page, loc, node, step)
     elif kind == "reload":
@@ -2473,6 +2475,68 @@ def _remote_fetch(cmd: dict) -> dict:
             pass
 
 
+_page_watch: dict = {}
+_accept_next: dict = {"on": False, "text": None}
+
+
+def _strip_url(url: str) -> str:
+    return re.split(r"[?#]", str(url or ""), maxsplit=1)[0][:200]
+
+
+def _watch_page(page) -> None:
+    """Note pop-ups, errors and failed requests for the agent. A pop-up left unanswered would freeze the page; declining
+    is the safe answer unless the agent was told to accept it."""
+    watch = {"dialogs": [], "errors": [], "failed": []}
+    _page_watch[id(page)] = watch
+
+    def keep(key: str, item, cap: int) -> None:
+        watch[key].append(item)
+        del watch[key][:-cap]
+
+    def on_dialog(dialog) -> None:
+        yes = _accept_next["on"] and dialog.type != "beforeunload"
+        answer = _accept_next["text"]
+        _accept_next.update(on=False, text=None)
+        keep("dialogs", {"type": dialog.type, "message": str(dialog.message or "")[:300], "answer": "accepted" if yes else "declined"}, 10)
+        try:
+            if yes:
+                dialog.accept(answer or dialog.default_value or "")
+            else:
+                dialog.dismiss()
+        except Exception:
+            pass
+
+    def on_console(message) -> None:
+        if message.type == "error":
+            keep("errors", str(message.text or "")[:300], 30)
+
+    def on_response(response) -> None:
+        if response.status >= 400:
+            keep("failed", {"url": _strip_url(response.url), "status": response.status}, 30)
+
+    def on_failed(request) -> None:
+        keep("failed", {"url": _strip_url(request.url), "error": str(request.failure or "")[:100]}, 30)
+
+    def on_error(error) -> None:
+        keep("errors", str(error)[:300], 30)
+
+    try:
+        page.on("dialog", on_dialog)
+        page.on("console", on_console)
+        page.on("pageerror", on_error)
+        page.on("response", on_response)
+        page.on("requestfailed", on_failed)
+    except Exception:
+        pass
+
+
+def _take_dialogs(data, page) -> None:
+    watch = _page_watch.get(id(page))
+    if isinstance(data, dict) and watch and watch["dialogs"]:
+        data["dialogs"] = list(watch["dialogs"])
+        watch["dialogs"].clear()
+
+
 def _register_tab(page, activate: bool) -> str:
     global _tab_seq, _active_tab
     for tid, pg in _tabs.items():
@@ -2481,11 +2545,13 @@ def _register_tab(page, activate: bool) -> str:
     _tab_seq += 1
     tid = f"t{_tab_seq}"
     _tabs[tid] = page
+    _watch_page(page)
 
     def _closed(*_):
         global _active_tab, _browser_page
         _tabs.pop(tid, None)
         _tab_refs.pop(id(page), None)
+        _page_watch.pop(id(page), None)
         if _active_tab == tid:
             _active_tab = next(reversed(_tabs), "") if _tabs else ""
             _browser_page = _tabs.get(_active_tab)
@@ -2614,7 +2680,12 @@ def handle(cmd: dict) -> dict:
         if command in {"navigate", "goto", "snapshot", "act", "replay", "observe", "screenshot", "load_html", "collect"}:
             tid, page = _page_for(cmd)
             data = _handle_page(command, cmd, page)
+            _take_dialogs(data, page)
             return _with_tab(data, tid) if isinstance(data, dict) else data
+        if command == "page_log":
+            _tid, page = _page_for(cmd)
+            watch = _page_watch.get(id(page)) or {}
+            return {"ok": True, "errors": list(watch.get("errors") or []), "failed": list(watch.get("failed") or [])}
         return _handle_page(command, cmd, _ensure_page())
     finally:
         drain_browser_events()

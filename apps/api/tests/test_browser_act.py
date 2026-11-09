@@ -1,6 +1,7 @@
 """Generic type-ahead / dropdown picking and browser-operator actions."""
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -275,3 +276,43 @@ def test_a_dropdown_already_on_that_option_is_not_a_failure():
     loc = Loc(tag="select", role="")
     assert pick_suggestion(_Page(), loc, {"tag": "select"}, "Price (low to high)") == "already"
     assert loc.selected is None
+
+
+def test_failed_request_addresses_lose_their_query_strings():
+    from app.connectors.computer_daemon import _strip_url
+
+    assert _strip_url("https://x.example/api/a?token=secret#frag") == "https://x.example/api/a"
+
+
+def test_a_page_answers_pop_ups_safely_and_reports_them():
+    from app.connectors import computer_daemon as d
+
+    handlers = {}
+    page = SimpleNamespace(on=lambda name, fn: handlers.__setitem__(name, fn))
+    d._watch_page(page)
+
+    class Dialog:
+        type = "confirm"
+        message = "Delete this?"
+        default_value = ""
+        answered = None
+
+        def accept(self, text=""):
+            self.answered = "accept"
+
+        def dismiss(self):
+            self.answered = "dismiss"
+
+    first = Dialog()
+    handlers["dialog"](first)
+    assert first.answered == "dismiss"
+    d._accept_next.update(on=True, text=None)
+    second = Dialog()
+    handlers["dialog"](second)
+    assert second.answered == "accept" and d._accept_next["on"] is False
+    out = {}
+    d._take_dialogs(out, page)
+    assert [row["answer"] for row in out["dialogs"]] == ["declined", "accepted"]
+    again = {}
+    d._take_dialogs(again, page)
+    assert "dialogs" not in again

@@ -15,7 +15,7 @@ from app.cache import get_redis
 
 log = logging.getLogger(__name__)
 
-PAGE_TOOLS = {"browser_navigate", "browser_snapshot", "browser_act", "browser_collect", "browser_download", "browse_open", "browse_act", "browse_screenshot"}
+PAGE_TOOLS = {"browser_navigate", "browser_snapshot", "browser_act", "browser_collect", "browser_download", "browser_page_log", "browse_open", "browse_act", "browse_screenshot"}
 HOLD_S = 2 * 3600
 IDLE_S = 600
 

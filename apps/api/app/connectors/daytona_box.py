@@ -32,6 +32,7 @@ _COMPUTER_USE = {
     "web_fetch",
     "browser_search",
     "browser_snapshot",
+    "browser_page_log",
     "browser_act",
     "browser_collect",
     "browser_tabs",
@@ -426,6 +427,14 @@ DAYTONA_TOOLS = [
             "required": ["url"],
         },
         group="computer",
+        tags=("computer", "browser"),
+    ),
+    ToolSpec(
+        name="browser_page_log",
+        description="Errors the current page has logged and its failed web requests, addresses without query strings. For working out why a page isn't behaving.",
+        input_schema={"type": "object", "properties": {"tab": {"type": "string"}}},
+        group="computer",
+        read_only=True,
         tags=("computer", "browser"),
     ),
     ToolSpec(
@@ -1713,6 +1722,8 @@ async def _invoke_daytona(row, name: str, args: dict[str, Any]) -> Any:
                 "wait_ms": int(args.get("wait_ms") or 1500),
             }
             return await _browser_cmd(proc, payload, 90, fs)
+        if name == "browser_page_log":
+            return await _browser_rpc(proc, {"command": "page_log", "tab": str(args.get("tab") or "")}, 30, fs)
         if name == "browse_screenshot":
             return await _browser_cmd(proc, {"action": "screenshot", "tab": str(args.get("tab") or "")}, 60, fs)
         if name == "run_code":
