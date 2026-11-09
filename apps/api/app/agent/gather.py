@@ -239,13 +239,26 @@ async def _gather(ctx: Any, call: Any, how: str, next_label: str, max_pages: int
     return out
 
 
+_CURRENCY_START = re.compile(r"^([$₹€£¥]|rs\.?|inr|usd|eur|gbp)\s?-?\d", re.I)
+
+
 def _first_word(line: str) -> str:
     return line.split(maxsplit=1)[0] if line.split() else ""
 
 
+def _kind(line: str) -> str:
+    """A line's first word, or its currency for a line that starts with an amount ("£51.77" is a "£" line)."""
+    money = _CURRENCY_START.match(line)
+    if money:
+        return money.group(1)
+    word = _first_word(line)
+    return word if word[:1].isalpha() else ""
+
+
 def _line_kinds(pages: list[dict]) -> list[dict]:
-    """How lines commonly start, with how many do: a listing's records repeat the same labels, so this shows what to count."""
-    counts = Counter(word for row in pages for word in map(_first_word, row["lines"]) if word[:1].isalpha())
+    """How lines commonly start, with how many do: a listing's records repeat the same labels, so this shows what to count.
+    Prices count too, so a total can use starts_with with the currency."""
+    counts = Counter(kind for row in pages for kind in map(_kind, row["lines"]) if kind)
     return [{"starts_with": word, "lines": n} for word, n in counts.most_common(LINE_KINDS) if n >= MIN_KIND_LINES]
 
 
