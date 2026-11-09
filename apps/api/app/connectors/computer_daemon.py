@@ -15,7 +15,7 @@ from pathlib import Path
 
 HOST = "127.0.0.1"
 PORT = 18765
-VERSION = "28"
+VERSION = "29"
 _HOME = Path(os.environ.get("CHECKME_BROWSER_HOME") or "/tmp")
 SHOT = "/tmp/checkme-browser.png"
 PROFILE = str(_HOME / "profile")
@@ -1279,6 +1279,8 @@ def _act_page(page, actions: list, verify: bool = False):
                 page.wait_for_timeout(pause)
                 wait_ms = pause
             timings.append({"kind": kind, "act_ms": act_ms, "wait_ms": wait_ms})
+            if step.get("_already"):
+                warnings.append(f"step {completed} ({kind}): that option was already chosen in this dropdown, so nothing needed to change. Carry on with the next step.")
             if sig_before is not None and page_signature(page) == sig_before:
                 trace[-1]["no_effect"] = True
                 warnings.append(no_effect_note(completed - 1, kind, ref))
@@ -1875,7 +1877,13 @@ def pick_suggestion(page, loc, node, text: str) -> str:
     if not tag:
         tag = str(info.get("tag") or "")
     if loc is not None and tag == "select":
-        loc.select_option(_native_option(loc, value), timeout=12000)
+        chosen = _native_option(loc, value)
+        try:
+            if loc.input_value(timeout=1000) == chosen:
+                return "already"  # nothing will change on the page, and that isn't a failure
+        except Exception:
+            pass
+        loc.select_option(chosen, timeout=12000)
         return "native"
     if tag == "a" and str((node or {}).get("href") or "") and str((node or {}).get("role") or "") != "combobox":
         raise RuntimeError("this is a link, not a dropdown: click it to follow it, or take a snapshot and use the dropdown's own ref")
@@ -2062,7 +2070,9 @@ def _act_step(page, step: dict) -> dict | None:
     elif kind in {"select", "select_option", "pick"}:
         if loc is None and node is None:
             raise RuntimeError(f"unknown select ref {ref}; take a new browser_snapshot")
-        pick_suggestion(page, loc, node, str(step.get("text") or step.get("value") or ""))
+        how = pick_suggestion(page, loc, node, str(step.get("text") or step.get("value") or ""))
+        if how == "already":
+            step["_already"] = True
     elif kind == "check":
         if loc is None:
             raise RuntimeError(f"unknown check ref {ref}")

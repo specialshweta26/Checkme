@@ -129,6 +129,8 @@ def after(ctx: Any, tool: str, args: dict | None, result: Any) -> Any:
         state["page"] = page
         state["idle"] = 0
         return result
+    if isinstance(result, dict) and any("already chosen" in str(w) for w in (result.get("warnings") or [])):
+        return result  # the step had nothing to do: not a failed try
     key = f"{_action_key(tool, args)}:{before_page}"
     state["tries"][key] = state["tries"].get(key, 0) + 1
     state["idle"] += 1

@@ -178,6 +178,8 @@
     const opt = !want ? null : options.find((o) => String(o.value || '').toLowerCase() === want || label(o).toLowerCase() === want)
       || options.find((o) => label(o).toLowerCase().includes(want));
     if (!opt) return { ok: false, error: 'this dropdown has no option "' + text + '". Its options are: ' + options.map(label).join(' | ') };
+    // Already on it: nothing will change on the page, and that isn't a failure.
+    if (target.value === opt.value) return { ok: true, selected: label(opt), already: true, composer: read(target) };
     focusField(target);
     target.value = opt.value;
     target.dispatchEvent(new Event('input', { bubbles: true }));
