@@ -71,7 +71,7 @@ async def test_load_more_keeps_only_the_grown_page(monkeypatch):
 async def test_cut_off_pages_are_flagged(monkeypatch):
     _browser(monkeypatch, [{**_page(1, last=True), "text_omitted": True}])
     out = await gather.gather(SimpleNamespace(), "next")
-    assert "too long" in out["warning"]
+    assert "couldn't be read" in out["warning"]
 
 
 def _ctx(*pages):
@@ -117,13 +117,13 @@ def test_next_controls_are_found_by_name(name, found):
 def test_a_long_page_is_stitched_without_losing_real_duplicates():
     held, whole = gather.grow([], {"text": "a\nby Einstein\nb\nby Einstein"})
     assert whole and held == ["a", "by Einstein", "b", "by Einstein"]
-    more, whole = gather.grow(held, {"text": "a\n…\nb\nby Einstein\nc\nby Einstein", "text_omitted": True})
+    more, whole = gather.grow(held, {"text": "a\n…\ncut off\nby Einstein\nb\nby Einstein\nc\nby Einstein", "text_omitted": True})
     assert whole and more == ["a", "by Einstein", "b", "by Einstein", "c", "by Einstein"]
 
 
 def test_a_gap_in_a_long_page_is_flagged():
     more, whole = gather.grow(["a", "b"], {"text": "a\n…\nx\ny", "text_omitted": True})
-    assert not whole and more == ["a", "b", "x", "y"]
+    assert not whole and more == ["a", "b"]  # never adds text that might be counted twice
 
 
 async def test_a_slow_page_gets_more_chances(monkeypatch):
@@ -166,3 +166,19 @@ async def test_gathering_goes_back_to_the_first_page_first(monkeypatch):
     assert out["went_back_pages"] == 1 and out["pages"] == 3
     assert gather.query(ctx, out["dataset"], "count", ["row"])["per_page"] == [1, 1, 1]
     assert ctx._gathering is False
+
+
+async def test_figures_from_an_incomplete_dataset_say_so(monkeypatch):
+    _browser(monkeypatch, [{**_page(1, last=True), "text_omitted": True}])
+    ctx = SimpleNamespace()
+    out = await gather.gather(ctx, "next")
+    assert out["incomplete"] is True
+    figure = gather.query(ctx, out["dataset"], "count", ["einstein"])
+    assert figure["incomplete"] is True and "Tell the user" in figure["warning"]
+
+
+def test_stitching_copes_with_a_footer_that_is_always_last():
+    held = ["head", "q1", "by A", "q2", "by B", "footer"]
+    read = {"text": "head\n…\ncut\nq1\nby A\nq2\nby B\nq3\nby A\nfooter", "text_omitted": True}
+    more, whole = gather.grow(held, read)
+    assert whole and more == ["head", "q1", "by A", "q2", "by B", "q3", "by A", "footer"]

@@ -20,6 +20,8 @@ MAX_PAGES = 200
 MAX_CHARS = 2_000_000
 ROWS_RETURNED = 60
 SAME_PAGE_TRIES = 2
+MIN_OVERLAP = 3
+JOIN_LINES = 12
 SCROLL_WAIT_MS = 1500
 MAX_ROUNDS = 300
 _NEXT_WORDS = ("next", "next page", "next »", "next ›", "next →", "next >", "›", "»", ">", "→", "older", "more results")
@@ -58,12 +60,16 @@ def grow(so_far: list[str], page: dict) -> tuple[list[str], bool]:
     if not page.get("text_omitted"):
         return lines, True
     tail = lines[lines.index("…") + 1 :] if "…" in lines else lines
-    for size in range(min(len(so_far), len(tail)), 0, -1):
-        if so_far[-size:] == tail[:size]:
-            return so_far + tail[size:], True
-    if not so_far:
-        return lines, False
-    return so_far + tail, False
+    tail = tail[1:]  # the end section starts wherever the cut fell, usually partway through a line
+    # Find where the new end starts in what's held, and take everything from there from the new read. That copes with a
+    # footer that's always last. A few lines must match: one or two can match by chance when records repeat.
+    for size in range(min(JOIN_LINES, len(tail)), MIN_OVERLAP - 1, -1):
+        start = tail[:size]
+        for at in range(len(so_far) - size, -1, -1):
+            if so_far[at : at + size] == start:
+                return so_far[:at] + tail, True
+    # Where the new end joins can't be found. Adding it could count things twice, and leaving it out could miss them.
+    return so_far or lines, False
 
 
 def _store(ctx: Any) -> dict:
@@ -189,6 +195,8 @@ async def _gather(ctx: Any, call: Any, how: str, next_label: str, max_pages: int
             lines.append(line)
         kept.append({"url": row["url"], "lines": lines})
     store[dataset] = kept
+    if cut:
+        _store(ctx).setdefault("_incomplete", set()).add(dataset)
     out = {
         "ok": True,
         "dataset": dataset,
@@ -201,7 +209,8 @@ async def _gather(ctx: Any, call: Any, how: str, next_label: str, max_pages: int
     if rewound:
         out["went_back_pages"] = rewound
     if cut:
-        out["warning"] = f"Pages {cut} were too long to read in full, so figures may be low. Say so in your answer."
+        out["incomplete"] = True
+        out["warning"] = f"Part of page(s) {cut} couldn't be read, so any count or total from this dataset may be wrong. Tell the user it's incomplete instead of giving it as the answer."
     return out
 
 
@@ -262,6 +271,9 @@ def query(ctx: Any, dataset: str, action: str = "count", contains: Any = "", exc
             hits.append(line)
         per_page.append(found)
     out: dict[str, Any] = {"ok": True, "dataset": dataset, "pages": len(pages), "matched_lines": len(hits), "per_page": per_page}
+    if dataset in _store(ctx).get("_incomplete", ()):
+        out["incomplete"] = True
+        out["warning"] = "This dataset is incomplete, so this figure may be wrong. Tell the user that rather than giving it as the answer."
     if action == "sum":
         amounts = [_amount(line, column) for line in hits]
         good = [a for a in amounts if a is not None]
@@ -271,7 +283,8 @@ def query(ctx: Any, dataset: str, action: str = "count", contains: Any = "", exc
         if skipped:
             out["skipped_lines"] = len(skipped)
             out["skipped_sample"] = [line[:120] for line in skipped[:5]]
-            out["warning"] = "Some matching lines had no single clear amount and aren't in the sum. Narrow contains, or give column."
+            note = "Some matching lines had no single clear amount and aren't in the sum. Narrow contains, or give column."
+            out["warning"] = f"{out['warning']} {note}" if out.get("warning") else note
     if action == "list":
         start = max(0, int(offset or 0))
         out["rows"] = [line[:300] for line in hits[start : start + ROWS_RETURNED]]
