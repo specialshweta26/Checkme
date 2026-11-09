@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -19,6 +20,24 @@ PASSIVE_KINDS = {"scroll", "wait", "wait_for", "hover"}  # reading a page legiti
 SAME_ACTION_LIMIT = 2  # identical action, same page, no change: this many tries
 NO_CHANGE_WARN = 5  # different actions in a row that changed nothing: warn
 NO_CHANGE_STOP = 10  # ... stop
+
+
+def _safe_error(result: dict) -> str:
+    """The error's cause for the log, without quoted text: a "no option" message repeats what was typed."""
+    return re.sub(r'"[^"]*"', '"…"', str(result.get("error") or ""))[:160]
+
+
+def normalize(args: dict | None) -> dict | None:
+    """Actions may give a dropdown's choice as value; the browsers read text."""
+    rows = (args or {}).get("actions")
+    if not isinstance(rows, list):
+        return args
+    fixed = []
+    for row in rows:
+        if isinstance(row, dict) and not row.get("text") and row.get("value") not in (None, ""):
+            row = {**row, "text": str(row["value"])}
+        fixed.append(row)
+    return {**(args or {}), "actions": fixed}
 
 
 def _state(ctx: Any) -> dict | None:
@@ -120,10 +139,12 @@ def after(ctx: Any, tool: str, args: dict | None, result: Any) -> Any:
         return result
     before_page = state["page"]
     changed = bool(page) and page != before_page
+    failed = isinstance(result, dict) and result.get("ok") is False
     log.info(
-        "browser.step kinds=%s ok=%s changed=%s idle=%s",
+        "browser.step kinds=%s ok=%s changed=%s idle=%s tab=%s err=%s",
         ",".join(str(r.get("kind") or "?") for r in _actions(args) if isinstance(r, dict))[:120],
-        result.get("ok") if isinstance(result, dict) else None, changed, state["idle"],
+        result.get("ok") if isinstance(result, dict) else None, changed, state["idle"], bool((args or {}).get("tab")),
+        _safe_error(result) if failed else "",
     )
     if changed:
         state["page"] = page
