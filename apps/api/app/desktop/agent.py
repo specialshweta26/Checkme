@@ -262,7 +262,35 @@ async def call_local(user_id, tool: str, args: dict | None = None) -> dict:
     if not isinstance(out, dict):
         return {"ok": False, "error": "invalid desktop result"}
     out.setdefault("ran_on", "local_computer")
+    if tool == "browse_screenshot":
+        # Kept apart from the live panel's frame, which can be the whole desktop rather than this page.
+        out = _keep_page_shot(out)
     return _ingest_screen(user_id, out)
+
+
+_PAGE_SHOTS: dict[str, bytes] = {}
+
+
+def _keep_page_shot(result: dict) -> dict:
+    raw = result.pop("screenshot_b64", None)
+    if raw:
+        import base64
+
+        try:
+            png = base64.b64decode(raw)
+        except Exception:  # noqa: BLE001
+            png = b""
+        if png:
+            while len(_PAGE_SHOTS) >= 20:
+                _PAGE_SHOTS.pop(next(iter(_PAGE_SHOTS)))
+            key = uuid.uuid4().hex
+            _PAGE_SHOTS[key] = png
+            result["page_shot_key"] = key
+    return result
+
+
+def take_page_shot(key: str) -> bytes:
+    return _PAGE_SHOTS.pop(key, b"")
 
 
 def _ingest_screen(user_id, result: dict) -> dict:

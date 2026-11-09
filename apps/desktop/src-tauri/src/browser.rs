@@ -197,6 +197,8 @@ pub struct Chrome {
     _child: Option<Child>,
     port: u16,
     http: reqwest::Client,
+    /// The tab this job works on (from its `tab` argument); jobs run one at a time.
+    tab: std::sync::Mutex<Option<String>>,
 }
 
 fn chrome_candidates() -> Vec<PathBuf> {
@@ -249,7 +251,7 @@ pub async fn attach() -> Result<Chrome, String> {
         return Err("Chrome is not open".into());
     }
     let http = http_client(Duration::from_secs(3))?;
-    Ok(Chrome { _child: None, port, http })
+    Ok(Chrome { _child: None, port, http, tab: std::sync::Mutex::new(None) })
 }
 
 pub async fn launch(start_url: &str) -> Result<Chrome, String> {
@@ -264,7 +266,7 @@ pub async fn launch(start_url: &str) -> Result<Chrome, String> {
         // A window may already exist with no page showing. Open this address so the user sees it.
         // Chrome only accepts PUT here: a GET gets 405 and opens nothing.
         let _ = http.put(format!("http://127.0.0.1:{port}/json/new?{start_url}")).send().await;
-        return Ok(Chrome { _child: None, port, http });
+        return Ok(Chrome { _child: None, port, http, tab: std::sync::Mutex::new(None) });
     }
     let bin = chrome_candidates()
         .into_iter()
@@ -287,7 +289,7 @@ pub async fn launch(start_url: &str) -> Result<Chrome, String> {
         child.kill().await.ok();
         return Err(err);
     }
-    Ok(Chrome { _child: Some(child), port, http })
+    Ok(Chrome { _child: Some(child), port, http, tab: std::sync::Mutex::new(None) })
 }
 
 impl Chrome {
@@ -297,7 +299,70 @@ impl Chrome {
         res.json().await.map_err(|e| e.to_string())
     }
 
+    pub fn use_tab(&self, tab: Option<&str>) {
+        if let Ok(mut current) = self.tab.lock() {
+            *current = tab.filter(|id| !id.is_empty()).map(str::to_string);
+        }
+    }
+
+    pub async fn tabs(&self) -> Result<Value, String> {
+        let pages = self.pages().await?;
+        let rows: Vec<Value> = pages
+            .iter()
+            .filter(|p| p.get("type").and_then(Value::as_str) == Some("page"))
+            .map(|p| {
+                json!({
+                    "tab": p.get("id").and_then(Value::as_str).unwrap_or(""),
+                    "url": p.get("url").and_then(Value::as_str).unwrap_or(""),
+                    "title": p.get("title").and_then(Value::as_str).unwrap_or(""),
+                })
+            })
+            .collect();
+        Ok(json!({ "ok": true, "tabs": rows, "ran_on": "local_computer" }))
+    }
+
+    pub async fn new_tab(&self, url: &str) -> Result<Value, String> {
+        let target = if url.is_empty() { "about:blank" } else { url };
+        let res = self
+            .http
+            .put(format!("http://127.0.0.1:{}/json/new?{target}", self.port))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        let page: Value = res.json().await.map_err(|e| e.to_string())?;
+        let id = page.get("id").and_then(Value::as_str).ok_or_else(|| "Chrome did not open a tab".to_string())?.to_string();
+        self.use_tab(Some(&id));
+        let mut data = self.snapshot().await?;
+        data["tab"] = json!(id);
+        Ok(data)
+    }
+
+    pub async fn switch_tab(&self, id: &str) -> Result<Value, String> {
+        let _ = self.http.get(format!("http://127.0.0.1:{}/json/activate/{id}", self.port)).send().await;
+        self.use_tab(Some(id));
+        let mut data = self.snapshot().await?;
+        data["tab"] = json!(id);
+        Ok(data)
+    }
+
+    pub async fn close_tab(&self, id: &str) -> Result<Value, String> {
+        let _ = self.http.get(format!("http://127.0.0.1:{}/json/close/{id}", self.port)).send().await;
+        self.use_tab(None);
+        self.tabs().await
+    }
+
     async fn page_ws(&self) -> Result<String, String> {
+        let wanted = self.tab.lock().ok().and_then(|current| current.clone());
+        if let Some(id) = wanted {
+            let pages = self.pages().await?;
+            let found = pages.iter().find(|p| {
+                p.get("type").and_then(Value::as_str) == Some("page") && p.get("id").and_then(Value::as_str) == Some(id.as_str())
+            });
+            return match found.and_then(|p| p.get("webSocketDebuggerUrl")).and_then(Value::as_str) {
+                Some(ws) => Ok(ws.to_string()),
+                None => Err(format!("no tab {id}; it has been closed")),
+            };
+        }
         let mut pages = self.pages().await?;
         if !pages.iter().any(|p| p.get("type").and_then(Value::as_str) == Some("page")) {
             // Every tab is closed (for one, after an app update): open one instead of failing the task.
@@ -1300,7 +1365,7 @@ mod frame_tests {
                 .unwrap();
             let http = http_client(Duration::from_secs(3)).unwrap();
             wait_debug(&http, port).await.unwrap();
-            let chrome = Chrome { _child: None, port, http };
+            let chrome = Chrome { _child: None, port, http, tab: std::sync::Mutex::new(None) };
 
             let t0 = std::time::Instant::now();
             let page = chrome.navigate(&format!("http://127.0.0.1:{web}/signin"), 6000).await.unwrap();

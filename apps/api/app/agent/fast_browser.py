@@ -29,6 +29,7 @@ import uuid
 from typing import Any
 from urllib.parse import urlparse
 
+from app.agent.page_shots import wants_shots
 from app.config import get_settings
 from app.connectors.computer_daemon import looks_secret, secret_text
 
@@ -1147,6 +1148,23 @@ def note_page_facts(memory: dict, state: dict | None, values: dict[str, str]) ->
         memory.setdefault("seen", {})[path] = [scrub(line, values) for line in lines[:12]]
 
 
+async def _shot_new_page(ctx, memory: dict, state: dict | None) -> None:
+    """Goals that ask for evidence get one screenshot of each page the task reaches."""
+    from app.agent.page_shots import capture
+
+    path = re.sub(r"[?#].*$", "", str((state or {}).get("url") or ""))
+    if not path or path in memory.setdefault("shot_paths", set()):
+        return
+    memory["shot_paths"].add(path)
+    try:
+        out = await capture(ctx, str((state or {}).get("title") or ""))
+    except Exception as exc:  # noqa: BLE001 - a missing picture never stops the task
+        log.info("browser.task screenshot failed: %s", type(exc).__name__)
+        return
+    if out.get("ok"):
+        memory.setdefault("shots", []).append(out.get("filename"))
+
+
 def with_progress(last: str, memory: dict) -> str:
     """What the planner reads as "Last turn": everything this run has done, so it can't lose its place."""
     parts = []
@@ -1416,6 +1434,8 @@ async def _browser_task(ctx, goal: str, url: str = "", values: dict | None = Non
         out["done_so_far"] = memory["done"][-25:]
         if memory["notes"]:
             out["notes"] = memory["notes"][-20:]
+        if memory.get("shots"):
+            out["screenshots_attached"] = memory["shots"]
         if memory.get("seen"):
             out["seen_on_pages"] = dict(list(memory["seen"].items())[-8:])
         if not out.get("done"):
@@ -1501,6 +1521,7 @@ async def _run_task(ctx, goal: str, url: str, values: dict | None, max_steps: in
             model = strong  # a long flow needs the planner that keeps the whole plan in mind
         escalated = model == strong
         failures, last, redirects, blank_rounds = 0, "", 0, 0
+        shots_wanted = wants_shots(goal)
         for i in range(limit):
             t0 = time.monotonic()
             try:
@@ -1512,6 +1533,8 @@ async def _run_task(ctx, goal: str, url: str, values: dict | None, max_steps: in
             if plan and plan.get("notes") and scrub(plan["notes"], vals) not in memory["notes"]:
                 memory["notes"].append(scrub(plan["notes"], vals))
             note_page_facts(memory, state, vals)
+            if shots_wanted:
+                await _shot_new_page(ctx, memory, state)
             if plan and plan.get("notes") and not plan["actions"] and not plan["done"] and not plan["need_user"]:
                 # Noting something down isn't a failed turn, but it can't go on forever either.
                 redirects += 1

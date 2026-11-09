@@ -732,6 +732,7 @@ async fn run_browser(slot: &Mutex<Option<browser::Chrome>>, tool: &str, args: &V
     let Some(chrome) = chrome.as_ref() else {
         return json!({ "ok": false, "error": "Chrome is not open" });
     };
+    chrome.use_tab(args.get("tab").and_then(Value::as_str));
     let out = match tool {
         "browser_navigate" | "browse_open" => {
             let url = start_url.unwrap_or("");
@@ -763,7 +764,10 @@ async fn run_browser(slot: &Mutex<Option<browser::Chrome>>, tool: &str, args: &V
             data["note"] = json!("The Chrome window on this computer is yours. Finish the step there, then tell Lumio to continue.");
             data
         }),
-        "browser_tabs" | "browser_new_tab" | "browser_switch_tab" | "browser_close_tab" => chrome.snapshot().await,
+        "browser_tabs" => chrome.tabs().await,
+        "browser_new_tab" => chrome.new_tab(args.get("url").and_then(Value::as_str).unwrap_or("")).await,
+        "browser_switch_tab" => chrome.switch_tab(args.get("tab").and_then(Value::as_str).unwrap_or("")).await,
+        "browser_close_tab" => chrome.close_tab(args.get("tab").and_then(Value::as_str).unwrap_or("")).await,
         _ => Ok(json!({ "ok": false, "error": format!("{tool} is not supported on this computer") })),
     };
     match out {

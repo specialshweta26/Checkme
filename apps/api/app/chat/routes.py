@@ -958,6 +958,7 @@ async def _store_stopped(db, user, sess, working_message, progress, run, since, 
         with anyio.CancelScope(shield=True):
             await db.rollback()
             await db.refresh(working_message)
+            await db.refresh(sess)  # a stopped turn leaves these expired, and saving one mustn't need a reload
             working_message.content = content
             working_message.meta = {
                 **(working_message.meta or {}),

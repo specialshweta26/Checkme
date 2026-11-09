@@ -14,7 +14,7 @@ import secrets
 from contextvars import ContextVar
 from typing import Any
 
-from app.agent import browser_guard
+from app.agent import browser_guard, browser_tabs
 from app.agent.coding import COMPUTER_SLUG
 from app.desktop.agent import LOCAL_TOOLS
 
@@ -365,7 +365,18 @@ async def run_computer(ctx, tool_name: str, args: dict | None = None, *, force_c
     refused = browser_guard.before(ctx, tool_name, args)
     if refused is not None:
         return refused
-    result = await _run_computer(ctx, tool_name, args, force_cloud=force_cloud)
+    where = "desktop" if browser_local(ctx) else "cloud"
+
+    async def plain(tool: str, tool_args: dict) -> Any:
+        return await _run_computer(ctx, tool, tool_args, force_cloud=force_cloud)
+
+    with_tab = await browser_tabs.tab_for(ctx, tool_name, args, where, plain)
+    result = await _run_computer(ctx, tool_name, with_tab if with_tab is not None else args, force_cloud=force_cloud)
+    if with_tab is not None and browser_tabs.tab_gone(result):
+        # The tab was closed: get this chat a new one and try once more.
+        await browser_tabs.forget(ctx, where)
+        with_tab = await browser_tabs.tab_for(ctx, tool_name, args, where, plain)
+        result = await _run_computer(ctx, tool_name, with_tab if with_tab is not None else args, force_cloud=force_cloud)
     return browser_guard.after(ctx, tool_name, args, result)
 
 

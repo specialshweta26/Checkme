@@ -1275,7 +1275,7 @@ async def _browser_cmd(proc, payload: dict, timeout: int = 90, fs=None) -> dict:
             fs,
         )
     if action == "screenshot":
-        return await _browser_rpc(proc, {"command": "observe"}, timeout, fs)
+        return await _browser_rpc(proc, {"command": "observe", "tab": payload.get("tab") or ""}, timeout, fs)
     kind = action
     step: dict[str, Any] = {"kind": kind}
     if payload.get("selector"):
@@ -1714,7 +1714,7 @@ async def _invoke_daytona(row, name: str, args: dict[str, Any]) -> Any:
             }
             return await _browser_cmd(proc, payload, 90, fs)
         if name == "browse_screenshot":
-            return await _browser_cmd(proc, {"action": "screenshot"}, 60, fs)
+            return await _browser_cmd(proc, {"action": "screenshot", "tab": str(args.get("tab") or "")}, 60, fs)
         if name == "run_code":
             code = args["code"]
             runner = getattr(proc, "code_run", None)
