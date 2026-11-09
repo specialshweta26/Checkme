@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.db import get_db
 from app.deps import current_user
 from app.desktop import agent as desktop
@@ -16,13 +17,11 @@ router = APIRouter(prefix="/desktop", tags=["desktop"])
 
 
 @router.get("/update/latest.json")
-async def update_feed(request: Request):
+async def update_feed():
     """No sign-in: an app must be able to update even when signed out. Everything here is public on GitHub."""
-    base = str(request.base_url).rstrip("/").replace("http://", "https://", 1)
-    if "localhost" in base or "127.0.0.1" in base:
-        base = str(request.base_url).rstrip("/")
     try:
-        return await desktop_updates.latest(base)
+        # The API has no public address of its own: the app reaches it through the website.
+        return await desktop_updates.latest(get_settings().public_web_url)
     except desktop_updates.UpdateUnavailable as exc:
         raise HTTPException(503, "Update feed unavailable") from exc
 

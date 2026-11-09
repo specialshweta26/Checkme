@@ -131,7 +131,7 @@ mod tests {
         assert_eq!(
             updater["endpoints"],
             serde_json::json!([
-                "https://checkme-api-kw68.onrender.com/api/desktop/update/latest.json",
+                "https://checkme-web-kw68.onrender.com/api/desktop/update/latest.json",
                 "https://github.com/specialshweta26/Checkme/releases/latest/download/latest.json"
             ])
         );

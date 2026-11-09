@@ -80,3 +80,15 @@ async def test_an_outage_serves_the_last_good_feed(github, monkeypatch):
     _Client.answers = [504, 504, 504]
     out = await updates.latest("https://api.example")
     assert out["version"] == "0.1.26"
+
+
+async def test_the_feed_points_at_the_public_website(github, monkeypatch):
+    from app.config import get_settings
+    from app.desktop.routes import update_feed
+
+    monkeypatch.setattr(get_settings(), "public_web_url", "https://lumio.example")
+    monkeypatch.setattr(updates, "_feed", (0.0, FEED))
+    monkeypatch.setattr(updates, "FEED_TTL_S", 10**9)
+    monkeypatch.setattr(updates.time, "monotonic", lambda: 1.0)
+    out = await update_feed()
+    assert out["platforms"]["darwin-aarch64"]["url"].startswith("https://lumio.example/api/desktop/update/asset/")
