@@ -1028,7 +1028,9 @@ def heal_fields(rep: dict, proposed: bool) -> dict:
 # --- the fast loop -----------------------------------------------------------------------------------------------
 FAST_SYSTEM = """You drive a web browser for an AI assistant, quickly and carefully.
 Each turn you get the goal, the current page (URL, title, alerts, a text excerpt and numbered interactive elements such as "- e3 textbox Email [email]") and what happened last turn.
-Reply with a JSON object only: {"why": "", "actions": [...], "done": false, "result": "", "need_user": ""}.
+Reply with a JSON object only: {"why": "", "actions": [...], "done": false, "result": "", "need_user": "", "notes": ""}.
+- "Done so far" lists what this run has already done, in order. Never redo a listed step and never start the goal over: do only what is left. As soon as the last part of the goal is done, reply done=true. A page that looks like the start does not mean the work is undone.
+- notes: facts the goal asks you to report that are on this page now and may be gone later (names, prices, totals, confirmation numbers). Everything in notes must also go in result when you finish.
 - why: one short sentence for the user watching the run later: what you see on the page and why these actions.
 - actions: every step you can already predict, in order, in ONE batch, e.g. [{"kind":"fill","ref":"e3","text":"{{email}}"},{"kind":"fill","ref":"e4","text":"{{password}}"},{"kind":"click","ref":"e5"}].
   kinds: click, fill, type, select (text = option to pick; also for type-ahead lists), check, uncheck, hover (menus that open on mouse-over), press (text = key), scroll, wait_for (text), download (ref of a file link), back, navigate (url), find (text = words to look for).
@@ -1081,6 +1083,7 @@ def parse_plan(raw: str) -> dict | None:
         "result": str(data.get("result") or "")[:2000],
         "need_user": str(data.get("need_user") or "")[:500],
         "why": " ".join(str(data.get("why") or "").split())[:300],
+        "notes": " ".join(str(data.get("notes") or "").split())[:500],
     }
 
 
@@ -1103,6 +1106,34 @@ async def plan_step(model: str, goal: str, state: dict, values: dict[str, str], 
         timeout=PLAN_TIMEOUT_S,
     )
     return parse_plan(resp.choices[0].message.content or "")
+
+
+# Run-once controls: clicking one of these twice in a run means the planner lost its place, and could order or send twice.
+_ONCE = re.compile(r"\b(finish|complete|submit|confirm|place|checkout)\b", re.I)
+
+
+def once_labels(actions: list[dict], state: dict) -> list[str]:
+    """Labels of the batch's clicks that must not happen twice in one run."""
+    elements = {str(e.get("ref")): e for e in state.get("elements") or [] if isinstance(e, dict)}
+    out = []
+    for step in actions:
+        if str(step.get("kind") or "").lower() not in {"click", "dblclick"}:
+            continue
+        label = str((elements.get(str(step.get("ref") or "")) or {}).get("name") or "").strip()
+        if label and (_is_final_label(label) or _ONCE.search(label)):
+            out.append(label)
+    return out
+
+
+def with_progress(last: str, memory: dict) -> str:
+    """What the planner reads as "Last turn": everything this run has done, so it can't lose its place."""
+    parts = []
+    if memory.get("done"):
+        parts.append("Done so far (do not redo):\n" + "\n".join(f"{n}. {row}" for n, row in enumerate(memory["done"][-25:], 1)))
+    if memory.get("notes"):
+        parts.append("Your notes so far: " + " | ".join(memory["notes"][-20:]))
+    parts.append(last or "start")
+    return "\n".join(parts)
 
 
 def _is_final_label(label: str) -> bool:
@@ -1354,6 +1385,20 @@ async def _log(action: str, why: str = "", ok: bool = True, state: dict | None =
 
 async def _browser_task(ctx, goal: str, url: str = "", values: dict | None = None, max_steps: int = 0,
                         allow_final_action: bool = False, use_saved: bool = True, save: bool = True) -> dict:  # fmt: skip
+    memory: dict = {"done": [], "notes": [], "once": set()}
+    out = await _run_task(ctx, goal, url, values, max_steps, allow_final_action, use_saved, save, memory)
+    if isinstance(out, dict) and memory["done"]:
+        out["done_so_far"] = memory["done"][-25:]
+        if memory["notes"]:
+            out["notes"] = memory["notes"][-20:]
+        if not out.get("done"):
+            # Whoever carries on must not do these again: a repeated checkout is a second order.
+            out["do_not_repeat"] = "The steps in done_so_far already happened. Continue from there; never start the task over."
+    return out
+
+
+async def _run_task(ctx, goal: str, url: str, values: dict | None, max_steps: int, allow_final_action: bool, use_saved: bool,
+                    save: bool, memory: dict) -> dict:  # fmt: skip
     """See the module docstring. Never raises: problems come back as ``fallback: true`` with the page.
     ``save=False`` (healing a saved run) keeps the run unsaved and returns its steps as ``_recorded``."""
     vals = {str(k): str(v) for k, v in (values or {}).items() if v is not None}
@@ -1432,11 +1477,13 @@ async def _browser_task(ctx, goal: str, url: str = "", values: dict | None = Non
         for i in range(limit):
             t0 = time.monotonic()
             try:
-                plan = await plan_step(model, goal, state, vals, last, allow_final_action)
+                plan = await plan_step(model, goal, state, vals, with_progress(last, memory), allow_final_action)
             except Exception as exc:  # noqa: BLE001 - model error: escalate or fall back
                 log.info("browser.task plan failed model=%s: %s", model, type(exc).__name__)
                 plan = None
             plan_ms = int((time.monotonic() - t0) * 1000)
+            if plan and plan.get("notes") and scrub(plan["notes"], vals) not in memory["notes"]:
+                memory["notes"].append(scrub(plan["notes"], vals))
             if plan is None or (not plan["actions"] and not plan["done"] and not plan["need_user"]):
                 failures += 1
                 last = "Your last reply was not a usable JSON plan. Reply with the JSON object only."
@@ -1475,6 +1522,14 @@ async def _browser_task(ctx, goal: str, url: str = "", values: dict | None = Non
                     return _result(state, vals, ok=True, done=False, stopped_before=blocked,
                                    result=f"Stopped before '{blocked}' (a final action). If the user asked for it in chat, call again with allow_final_action; otherwise ask them first.",
                                    log=log_steps, took_ms=int((time.monotonic() - started) * 1000))  # fmt: skip
+                once = once_labels(actions, state)
+                again = next((label for label in once if label.casefold() in memory["once"]), "")
+                if again:
+                    log.warning("browser.task refused to click a run-once control twice")
+                    await _log(f"Stopped before clicking '{again}' again", "It was already clicked in this run.", False, state, shot=False)
+                    return _result(state, vals, ok=True, done=False, stopped_repeat=again,
+                                   result=f"Stopped: '{again}' was already clicked once in this run, so it was not clicked again. Report what was done.",
+                                   log=log_steps, took_ms=int((time.monotonic() - started) * 1000))  # fmt: skip
                 finds = [a for a in actions if str(a.get("kind") or "").lower() == "find"]
                 if finds:
                     words = " ".join(str(a.get("text") or a.get("value") or "") for a in finds).strip()
@@ -1508,6 +1563,11 @@ async def _browser_task(ctx, goal: str, url: str = "", values: dict | None = Non
                 await _log(summarize_actions(actions, before, vals), plan.get("why", ""), bool(ok), state,
                            "" if ok or isinstance(err, list) else scrub(str(err or ""), vals))  # fmt: skip
                 recorded.extend(kept)
+                ran = int(state.get("completed") or 0) if not ok else len(actions)
+                if ok or ran:
+                    path = re.sub(r"[?#].*$", "", str(state.get("url") or ""))[-80:]
+                    memory["done"].append(f"{summarize_actions(actions[:ran], before, vals)}"[:240] + (f" (now at {path})" if path else ""))
+                    memory["once"].update(label.casefold() for label in once_labels(actions[:ran], before))
                 act_ms = int((time.monotonic() - t1) * 1000)
                 log_steps.append({"step": i + 1, "model": model, "plan_ms": plan_ms, "act_ms": act_ms, "actions": [a.get("kind") for a in actions], "ok": ok})
                 log.info(
