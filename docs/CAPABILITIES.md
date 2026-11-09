@@ -136,6 +136,19 @@ Results on the last two builds (#196 and #197), cloud browser:
 
 #197 changed only how hand scrolling is stopped, which T10, C2 and C3 don't use. C4 counts only runs on #197: before it, 3 of 4 C4 runs were wrong.
 
+
+On the desktop app (0.1.41, with #200), same tests:
+
+| Test | Runs | Right | Time |
+|---|---|---|---|
+| T10 | 1 | 1 | 36 s |
+| C2 | 1 | 1 | 17 s |
+| C3 | 1 | 1 | 96 s |
+| C4 | 3 | 3 | 55–127 s |
+
+Earlier desktop runs found two more problems. C3 failed because gather's summary of how lines start left out lines beginning with a price, so the agent added up every line and gave up (#200). C4 reported 90 because macOS marks the pages of a window behind other windows as hidden, and Chrome then pauses them, so scrolling loaded nothing. The desktop browser now starts with the flags that stop this, the same ones the cloud browser uses (#201, desktop 0.1.41). The flags apply once the desktop browser restarts after updating.
+
+On the desktop, C2 showed all 57 rows on one page and read the figures itself instead of using gather. The answer was right, but nothing makes the agent use gather when a single page holds the whole list.
 What went wrong along the way, all fixed generically:
 
 | Problem | Fix |
@@ -174,7 +187,7 @@ Limits: each line of page text is one record, so a record shown over several lin
 - **Restart cost:** the first browser use after an update to the cloud browser took about 4.6 minutes earlier in testing. In the latest updates it took seconds, so this may depend on the cloud computer.
 - **Empty replies:** two of about 40 test requests came back with no reply text, and the logs showed no error.
 - **Tabs:** chat tabs aren't closed, so they build up (10 to 16 seen).
-- **Not covered:** logins, the desktop browser for this suite, and real business systems.
+- **Not covered:** logins, most of this suite on the desktop browser (only the counting tests have run there), and real business systems.
 
 ## Reliability checklist
 
