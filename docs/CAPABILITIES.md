@@ -32,13 +32,14 @@ What Lumio can do today against the target list, and the order to build the rest
 | Files: read, write, copy, move, rename, delete, search | Have | Limited to folders the user grants |
 | Terminal, scripts, Git | Have | Interactive terminal sessions not tested |
 | Teach a task and replay it | Have | |
-| Windows: list, switch, resize, move | Missing | Only the front window's title today |
-| Clipboard | Missing | |
-| Several monitors | Missing | |
-| Native accessibility (macOS, Windows, Linux) | Missing | Needed to work reliably inside native apps |
+| Windows: list, focus, move, resize, minimize | New | Listing tested on macOS; the rest not tested. Closing isn't offered, because it can lose unsaved work |
+| Clipboard | New | Tested on macOS. Read only when the user's own message mentions it |
+| Several monitors | New | `computer_screens` lists them, tested with one screen. Choosing a monitor to work on isn't built |
+| Native accessibility | New | `computer_ui`: read, press, set value, focus, menus. Tested on macOS. Windows compiles, never run. Linux not built |
 | OCR | Partial | The vision model reads screens; no separate OCR |
-| Screen recording, notifications, process monitoring | Missing | |
-| Native dialogs, unexpected popups, app crash recovery | Missing | |
+| Notifications | New | Tool call succeeded on macOS; display not confirmed |
+| Screen recording, process monitoring | Missing | |
+| Native dialogs, unexpected popups, app crash recovery | Partial | Clear errors and prompt guidance; nothing detects or recovers automatically |
 | Excel, Word, PowerPoint files | Partial | Read as text, created by scripts; no pivot tables or charts inside the apps |
 | Driving Office and Outlook apps | Missing | Build on accessibility and app scripting |
 
@@ -77,6 +78,13 @@ What Lumio can do today against the target list, and the order to build the rest
 | Two chats at once on the desktop | Each stayed in its own tab |
 | Real Swag Labs and OrangeHRM logins | Not yet rerun since these changes |
 | Cloud browser, full run | Not yet run since these changes |
+| Pop-ups, right-click, error log, drag, upload on a practice page, desktop app 0.1.31 | All passed, 35 seconds |
+| Clicking a canvas page by sight, desktop app 0.1.31 | Clicked the right button; the page's own state confirmed it |
+| Monitors, window list, clipboard, desktop app 0.1.32 | Passed; clipboard confirmed separately |
+| TextEdit through menus and native controls, desktop app 0.1.33 | Passed |
+| Calculator through named controls, desktop app 0.1.34 | 7 × 8 = 56 |
+| New Numbers spreadsheet, formula and CSV export through native controls, desktop app 0.1.34 | Not finished: stopped after 7.5 minutes. 36 control calls took 226 seconds. Phase 4 needs app scripting, not control-by-control work |
+| Stop button on a running turn, 0.1.34 | Passed: the stopped message saved, no error |
 
 ## Build order
 
