@@ -236,7 +236,7 @@ async def wait_result(job_id: str, timeout_s: float) -> dict:
             except Exception:  # noqa: BLE001
                 pass
             return json.loads(raw.decode() if isinstance(raw, (bytes, bytearray)) else raw)
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.05)
     raise LocalOffline("desktop agent did not return a result")
 
 

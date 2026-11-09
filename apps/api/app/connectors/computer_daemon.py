@@ -15,7 +15,7 @@ from pathlib import Path
 
 HOST = "127.0.0.1"
 PORT = 18765
-VERSION = "26"
+VERSION = "27"
 _HOME = Path(os.environ.get("CHECKME_BROWSER_HOME") or "/tmp")
 SHOT = "/tmp/checkme-browser.png"
 PROFILE = str(_HOME / "profile")
@@ -491,6 +491,8 @@ _SNAPSHOT_JS = """(arg) => {
   const visible = (el) => {
     const r = el.getBoundingClientRect();
     if (r.width < 1 || r.height < 1) return false;
+    // A closed side menu is parked off the page or marked hidden: its links aren't there for a person to click.
+    if (r.right <= 0 || el.closest('[aria-hidden="true"]')) return false;
     const st = window.getComputedStyle(el);
     if (st.visibility === 'hidden' || st.display === 'none') return false;
     if (Number(st.opacity || 1) > 0.05) return true;
@@ -533,15 +535,43 @@ _SNAPSHOT_JS = """(arg) => {
     for (const child of collect(el, BASE + ', li, button, [tabindex]:not([tabindex="-1"])')) add(child, suggest);
   }
   for (const el of collect(document, BASE)) add(el, rest);
-  const ordered = suggest.filter(inView).concat(suggest.filter((el) => !inView(el)))
+  // Page order keeps refs the same after a scroll; on-screen first only matters when the list has to be cut.
+  const ordered = suggest.length + rest.length <= limit ? suggest.concat(rest) : suggest.filter(inView).concat(suggest.filter((el) => !inView(el)))
     .concat(rest.filter(inView)).concat(rest.filter((el) => !inView(el)));
   const hay = (el) => [el.getAttribute('aria-label'), el.innerText, el.getAttribute('placeholder'), el.getAttribute('title'), el.getAttribute('name'), el.id]
     .filter(Boolean).join(' ').toLowerCase();
   const hits = (el) => find.reduce((n, w) => n + (hay(el).includes(w) ? 1 : 0), 0);
   const ranked = find.length ? ordered.map((el, i) => [el, hits(el), i]).sort((a, b) => (b[1] - a[1]) || (a[2] - b[2])).map((row) => row[0]) : ordered;
   try { window.__checkmeSnapTotal = ordered.length; } catch (e) {}
+  // Identical controls ("Add to cart" on every product) say what they belong to.
+  const nearText = (el, name) => {
+    let best = '';
+    let node = el.parentElement;
+    for (let depth = 0; node && depth < 6; depth += 1, node = node.parentElement) {
+      const lines = String(node.innerText || '').split('\\n').map((l) => l.trim()).filter(Boolean);
+      if (lines.filter((l) => l === name).length > 1) break;
+      const others = lines.filter((l) => l !== name && l.length > 2);
+      if (others.length) best = others[0].slice(0, 50);
+      if (others.length >= 2) break;
+    }
+    return best;
+  };
+  const addNear = (rows, elOf) => {
+    const counts = {};
+    rows.forEach((n) => { if (n.name) counts[n.name] = (counts[n.name] || 0) + 1; });
+    let budget = 60;
+    rows.forEach((n, i) => {
+      if (counts[n.name] > 1 && budget > 0) {
+        budget -= 1;
+        const near = nearText(elOf(i), n.name);
+        if (near && !n.name.includes(near)) n.near = near;
+      }
+    });
+    return rows;
+  };
   const origin = Number(start) || 0;
-  return ranked.slice(0, limit).map((el, i) => {
+  const shownEls = ranked.slice(0, limit);
+  return addNear(shownEls.map((el, i) => {
     const ref = 'e' + (origin + i);
     try { el.setAttribute('data-checkme-ref', ref); } catch (e) {}
     const secretField = el.tagName === 'INPUT' && (el.getAttribute('type') || '').toLowerCase() === 'password';
@@ -574,7 +604,7 @@ _SNAPSHOT_JS = """(arg) => {
       x: Math.round(r.x + r.width / 2),
       y: Math.round(r.y + r.height / 2),
     };
-  });
+  }), (i) => shownEls[i]);
 }"""
 
 # Visible type-ahead / menu rows (open shadow roots included). Used while picking a suggestion.
@@ -931,6 +961,8 @@ def wait_ready(page, kind: str = "", before_url: str | None = None) -> int:
 def tree_line(node: dict) -> str:
     """One snapshot line for the model: ref, role, name, plus the input type and a download hint."""
     parts = [f"- {node.get('ref')} {node.get('role')} {node.get('name') or ''}".strip()]
+    if node.get("near"):
+        parts.append(f"({node['near']})")
     kind = str(node.get("input_type") or "").lower()
     if kind and kind not in {"text", "submit", "button"}:
         parts.append(f"[{kind}]")

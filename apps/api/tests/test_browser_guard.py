@@ -104,3 +104,13 @@ def test_other_tools_pass_through():
     ctx = _ctx()
     assert guard.before(ctx, "computer_observe", {}) is None
     assert guard.after(ctx, "computer_observe", {}, {"ok": True}) == {"ok": True}
+
+
+def test_a_big_page_reaches_the_browser_tools_whole():
+    # An outline of a big page has no text or elements, and the agent read such pages as blank.
+    from app.agent.deep import BROWSER_PAGE_CHARS, BROWSER_PAGE_TOOLS, MAX_TOOL_CHARS, compact_payload
+
+    assert {"browser_navigate", "browser_snapshot", "browser_act"} <= BROWSER_PAGE_TOOLS
+    page = {"url": "https://x.example/", "text": "a" * 12000, "tree": "- e1 button Go\n" * 500, "elements": ["e"] * 3000}
+    assert compact_payload(page, MAX_TOOL_CHARS).get("too_large") is True
+    assert compact_payload(page, BROWSER_PAGE_CHARS)["text"] == page["text"]
