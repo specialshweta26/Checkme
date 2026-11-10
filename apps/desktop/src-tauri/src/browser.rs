@@ -17,6 +17,7 @@ const BACKGROUND_FLAGS: [&str; 3] = [
 ];
 const COLLECT_JS: &str = include_str!("collect.js");
 const ACT_JS: &str = include_str!("act.js");
+const DRAG_JS: &str = include_str!("drag.js");
 const PICKER_JS: &str = include_str!("picker.js");
 const WATCH_JS: &str = include_str!("watch.js");
 const DRAIN_DIALOGS_JS: &str = "window.__lumioWatch ? window.__lumioWatch.drain() : []";
@@ -753,6 +754,11 @@ impl Chrome {
                 self.mouse_at(target, x, y, 1).await?;
                 return Ok(());
             }
+            if found.get("jumped").and_then(Value::as_bool) == Some(true) {
+                // The calendar's month or year dropdown was set: let it redraw, then look again.
+                tokio::time::sleep(Duration::from_millis(350)).await;
+                continue;
+            }
             match found.get("next") {
                 Some(next) => {
                     let (x, y) = (next["x"].as_i64().unwrap_or(0), next["y"].as_i64().unwrap_or(0));
@@ -863,6 +869,13 @@ impl Chrome {
                 } else {
                     self.point_of(&page, to).await?
                 };
+                // Pages using the browser's own drag and drop ignore these mouse events: send them the drag events instead.
+                if !from.is_empty() && !to.is_empty() {
+                    let html5 = self.eval_on(&page, &format!("({DRAG_JS})({from:?}, {to:?})")).await.ok();
+                    if html5.as_ref().and_then(|v| v.get("html5")).and_then(Value::as_bool) == Some(true) {
+                        continue;
+                    }
+                }
                 self.drag_between(&page, start, end).await?;
                 continue;
             }
@@ -1502,6 +1515,7 @@ mod frame_tests {
         assert!(ACT_JS.contains("nativeDate") && ACT_JS.contains("datetime-local"));
         assert!(SNAPSHOT_JS.contains("(start, limit, find)") && SNAPSHOT_JS.contains("total: ordered.length"));
         assert!(SETTLE_JS.contains("aria-busy") && PAGE_SIG_JS.contains("aria-expanded"));
+        assert!(DRAG_JS.contains("new DataTransfer()") && DRAG_JS.contains("(from, to)"));
         assert!(ACT_JS.contains("picker: true") && PICKER_JS.contains("mode === 'calendar'") && PICKER_JS.contains("mode === 'suggest'"));
     }
 

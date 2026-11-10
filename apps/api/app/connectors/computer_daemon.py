@@ -16,7 +16,7 @@ from pathlib import Path
 
 HOST = "127.0.0.1"
 PORT = 18765
-VERSION = "40"
+VERSION = "41"
 _HOME = Path(os.environ.get("CHECKME_BROWSER_HOME") or "/tmp")
 SHOT = "/tmp/checkme-browser.png"
 PROFILE = str(_HOME / "profile")
@@ -1902,11 +1902,39 @@ def calendar_open(page) -> bool:
     return any(parse_date(part.strip()) for c in data.get("cells") or [] for part in str(c.get("text") or "").split("|") if part.strip())
 
 
+_CALENDAR_JUMP_JS = r"""(wy, wm) => {
+  // Calendars with month and year dropdowns (common for birth dates): set those instead of clicking an arrow per month.
+  // Only dropdowns inside the calendar itself, never the form's own fields.
+  const M = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+  const shows = (el) => { const r = el.getBoundingClientRect(); return r.width > 2 && r.height > 2 && getComputedStyle(el).visibility !== 'hidden'; };
+  const inCalendar = (el) => el.closest('[class*="calendar" i], [class*="datepicker" i], [class*="date-picker" i], [role="dialog"], [role="application"]');
+  let moved = false;
+  for (const s of document.querySelectorAll('select')) {
+    if (!shows(s) || !inCalendar(s)) continue;
+    const opts = Array.from(s.options);
+    const texts = opts.map((o) => String(o.text || '').trim().toLowerCase());
+    let pick = null;
+    if (opts.length >= 10 && texts.filter((t) => /^\d{4}$/.test(t)).length >= opts.length * 0.8) pick = opts.find((o) => o.text.trim() === String(wy));
+    else if (opts.length === 12 && texts.every((t, i) => t.startsWith(M[i]))) pick = opts[wm - 1];
+    if (pick && s.value !== pick.value) {
+      const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set;
+      setter.call(s, pick.value);
+      s.dispatchEvent(new Event('input', { bubbles: true }));
+      s.dispatchEvent(new Event('change', { bubbles: true }));
+      moved = true;
+    }
+  }
+  return moved;
+}"""
+
+
 def pick_calendar_day(page, text: str, months: int = 24) -> bool:
-    """In an open calendar, click the day for ``text``, moving month by month until it shows. True when picked."""
+    """In an open calendar, click the day for ``text``, moving month by month until it shows. A calendar with month and
+    year dropdowns is set with those first, so a date years away (a birth date) is reached. True when picked."""
     want = parse_date(text)
     if want is None:
         return False
+    jumped = False
     for _ in range(months):
         try:
             data = page.evaluate(_CALENDAR_JS) or {}
@@ -1915,6 +1943,14 @@ def pick_calendar_day(page, text: str, months: int = 24) -> bool:
         move = plan_calendar(data, want)
         if move is None:
             return False
+        if move[0] != "click" and not jumped:
+            jumped = True
+            try:
+                if page.evaluate("(a) => (" + _CALENDAR_JUMP_JS + ")(a[0], a[1])", [want.year, want.month]):
+                    page.wait_for_timeout(350)
+                    continue
+            except Exception:
+                pass
         kind, at = move
         page.mouse.click(int(at["x"]), int(at["y"]))
         page.wait_for_timeout(250 if kind == "click" else 350)
