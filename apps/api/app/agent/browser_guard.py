@@ -298,6 +298,11 @@ def before(ctx: Any, tool: str, args: dict | None) -> dict | None:
             "error": (
                 f"Not run: '{again}' was already clicked in this turn, so that step has happened. Clicking it again could "
                 "repeat an order or a send. Do not start the task over: report what was done."
+                + (
+                    " If you meant another row, wait a moment and read the page again (browser_snapshot): once the row you "
+                    "removed is gone from the page, removing another one is allowed."
+                    if _REMOVING.search(again) else ""
+                )
             ),
         }
     key = f"{_action_key(tool, args)}:{state['page']}"

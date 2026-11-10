@@ -83,7 +83,8 @@ def for_model(result: Any) -> Any:
     BROWSER_COMPACT_SNAPSHOT, the elements list and screenshot fields when the numbered tree is present."""
     if not isinstance(result, dict):
         return result
-    out = dict(result)
+    # Pop-ups first: older results are later cut to their opening part, and these are often the answer ("Product added").
+    out = {"dialogs": result["dialogs"], **result} if result.get("dialogs") else dict(result)
     out.pop("trace", None)
     timing = out.pop("timing", None)
     if isinstance(timing, dict) and timing.get("total_ms") is not None:
@@ -1308,7 +1309,8 @@ def _with_popups(ctx, out: Any, since: int) -> Any:
     """The pop-ups this task's pages showed, with their messages: its reply is otherwise only the last page."""
     seen = (getattr(ctx, "_popups", None) or [])[since:]
     if isinstance(out, dict) and seen:
-        out["popups"] = list(seen)
+        # First, so a later trim of this long result to its opening part keeps them.
+        return {"popups": list(seen), **{k: v for k, v in out.items() if k != "popups"}}
     return out
 
 

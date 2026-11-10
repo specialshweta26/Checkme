@@ -375,3 +375,12 @@ def test_a_delete_still_on_the_page_is_not_clicked_again():
     assert _act(ctx, {"actions": [{"kind": "click", "ref": "e7"}]}, {**row, "text": "MacBook still"})["ok"] is True
     assert _act(ctx, {"actions": [{"kind": "click", "ref": "e7"}]}, {**row, "text": "MacBook still 2"})["already_done"] is True
 
+
+def test_a_refused_delete_says_how_to_go_on():
+    ctx = _ctx()
+    rows = {**_page(), "text": "two", "elements": [{"ref": "e1", "name": "Delete", "near": "Sony"}, {"ref": "e2", "name": "Delete", "near": "Sony"}]}
+    guard.after(ctx, "browser_snapshot", {}, rows)
+    assert _act(ctx, {"actions": [{"kind": "click", "ref": "e1"}]}, {**rows, "text": "two still"})["ok"] is True
+    refused = _act(ctx, {"actions": [{"kind": "click", "ref": "e2"}]}, {**rows, "text": "two still"})
+    assert refused["already_done"] is True and "read the page again" in refused["error"]
+
