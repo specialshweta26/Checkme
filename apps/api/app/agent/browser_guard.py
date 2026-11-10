@@ -162,16 +162,33 @@ def _label_count(label: str, elements: list) -> int:
     )
 
 
+_REMOVING = re.compile(r"^\W*(delete|remove|clear|discard|trash)\b", re.I)
+
+
 def _another_row(state: dict, label: str) -> bool:
     """Identical rows (the same item in a cart twice) have identical Delete buttons. If there are fewer of them than when
-    one was clicked, that one is gone, so this click is on another row. Place order on the same page stays refused."""
+    one was clicked, that one is gone, so this click is on another row. For a removing control (Delete, Remove), it's
+    enough that the clicked one disappeared from the page at some point since: a row can't be removed twice, and a list
+    is cleared one row at a time. Place order, Pay and Send on the same page stay refused."""
     key = label.casefold()
     before = (state.get("once_count") or {}).get(key)
     now = _label_count(label, state["elements"])
-    if before is not None and 0 < now < before:
+    if before is None or now <= 0:
+        return False
+    vanished = _REMOVING.search(label) and (state.get("once_min") or {}).get(key, before) < before
+    if now < before or vanished:
         state["once_count"][key] = now
+        state.setdefault("once_min", {})[key] = now
         return True
     return False
+
+
+def _track_gone(state: dict) -> None:
+    """After each page read, note the fewest of each clicked run-once control seen since it was clicked."""
+    for key, recorded in (state.get("once_count") or {}).items():
+        mins = state.setdefault("once_min", {})
+        seen = _label_count(key, state["elements"])
+        mins[key] = min(mins.get(key, recorded), seen)
 
 
 def _once_labels(actions: list, elements: list) -> list[str]:
@@ -317,12 +334,14 @@ def after(ctx: Any, tool: str, args: dict | None, result: Any) -> Any:
             for label in _once_labels(ran, state["elements"]):
                 state["once"].add(label.casefold())
                 state.setdefault("once_count", {})[label.casefold()] = _label_count(label, state["elements"])
+                state.setdefault("once_min", {})[label.casefold()] = state["once_count"][label.casefold()]
     acted_on = state["elements"]
     state["acted_on"] = acted_on
     if isinstance(result, dict) and tool not in ACT_TOOLS and result.get("url"):
         state["url"] = str(result["url"])
     if isinstance(result, dict) and isinstance(result.get("elements"), list):
         state["elements"] = result["elements"]
+        _track_gone(state)
     if isinstance(result, dict) and tool in ACT_TOOLS | PAGE_READS:
         _carry_progress(state, tool, args, result, acted_on)
     if tool not in ACT_TOOLS:

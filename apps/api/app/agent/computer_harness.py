@@ -440,6 +440,7 @@ def note_popups(ctx, result: Any) -> None:
             return
     for row in rows:
         if isinstance(row, dict) and len(seen) < MAX_POPUPS:
+            log.info("browser.popup type=%s answer=%s", row.get("type"), row.get("answer"))
             seen.append({"type": str(row.get("type") or ""), "message": str(row.get("message") or "")[:300], "answer": str(row.get("answer") or "")})
 
 

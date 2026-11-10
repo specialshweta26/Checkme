@@ -348,3 +348,30 @@ def test_a_closed_alert_still_counts_the_click():
     assert _act(ctx, {"actions": [{"kind": "click", "ref": "e1"}]}, done)["ok"] is True
     assert _act(ctx, {"actions": [{"kind": "click", "ref": "e1"}]}, done)["already_done"] is True
 
+
+def test_lone_rows_can_be_deleted_one_after_another():
+    ctx = _ctx()
+    one = lambda item: {**_page(), "text": item, "elements": [{"ref": "e7", "name": "Delete"}]}
+    empty = {**_page(), "text": "empty cart", "elements": []}
+    guard.after(ctx, "browser_snapshot", {}, one("MacBook Pro"))
+    assert _act(ctx, {"actions": [{"kind": "click", "ref": "e7"}]}, empty)["ok"] is True
+    guard.after(ctx, "browser_snapshot", {}, one("Sony vaio i5"))
+    assert _act(ctx, {"actions": [{"kind": "click", "ref": "e7"}]}, empty)["ok"] is True
+
+
+def test_place_order_stays_once_even_after_it_disappears():
+    ctx = _ctx()
+    form = {**_page(), "text": "form", "elements": [{"ref": "e1", "name": "Place order"}]}
+    guard.after(ctx, "browser_snapshot", {}, form)
+    assert _act(ctx, {"actions": [{"kind": "click", "ref": "e1"}]}, {**_page(), "text": "thanks", "elements": []})["ok"] is True
+    guard.after(ctx, "browser_snapshot", {}, form)
+    assert _act(ctx, {"actions": [{"kind": "click", "ref": "e1"}]}, form)["already_done"] is True
+
+
+def test_a_delete_still_on_the_page_is_not_clicked_again():
+    ctx = _ctx()
+    row = {**_page(), "text": "MacBook", "elements": [{"ref": "e7", "name": "Delete"}]}
+    guard.after(ctx, "browser_snapshot", {}, row)
+    assert _act(ctx, {"actions": [{"kind": "click", "ref": "e7"}]}, {**row, "text": "MacBook still"})["ok"] is True
+    assert _act(ctx, {"actions": [{"kind": "click", "ref": "e7"}]}, {**row, "text": "MacBook still 2"})["already_done"] is True
+
