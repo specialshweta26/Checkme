@@ -319,3 +319,32 @@ def test_scrolling_without_a_figure_stays_passive():
     for _ in range(5):
         assert guard.before(ctx, "browser_act", {"actions": [{"kind": "scroll", "dy": 3000}]}) is None
 
+
+def _cart(n):
+    rows = [{"ref": f"e{i}", "name": "Delete", "near": "Sony vaio i5"} for i in range(1, n + 1)]
+    return {**_page(), "text": f"{n} in cart", "elements": rows}
+
+
+def test_identical_rows_can_each_be_deleted():
+    ctx = _ctx()
+    guard.after(ctx, "browser_snapshot", {}, _cart(3))
+    for n in (3, 2):
+        assert _act(ctx, {"actions": [{"kind": "click", "ref": "e1"}]}, _cart(n - 1))["ok"] is True
+
+
+def test_a_final_control_still_present_is_not_clicked_twice():
+    ctx = _ctx()
+    order = {**_page(), "elements": [{"ref": "e1", "name": "Place order"}]}
+    guard.after(ctx, "browser_snapshot", {}, order)
+    assert _act(ctx, {"actions": [{"kind": "click", "ref": "e1"}]}, {**order, "text": "thanks"})["ok"] is True
+    assert _act(ctx, {"actions": [{"kind": "click", "ref": "e1"}]}, {**order, "text": "thanks"})["already_done"] is True
+
+
+def test_a_closed_alert_still_counts_the_click():
+    ctx = _ctx()
+    order = {**_page(), "elements": [{"ref": "e1", "name": "Place order"}]}
+    guard.after(ctx, "browser_snapshot", {}, order)
+    done = {**order, "text": "placed", "dialogs": [{"type": "alert", "message": "Thank you", "answer": "closed"}]}
+    assert _act(ctx, {"actions": [{"kind": "click", "ref": "e1"}]}, done)["ok"] is True
+    assert _act(ctx, {"actions": [{"kind": "click", "ref": "e1"}]}, done)["already_done"] is True
+

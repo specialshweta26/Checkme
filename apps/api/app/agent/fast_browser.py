@@ -101,6 +101,9 @@ def page_brief(state: dict | None, text_chars: int = 3000, tree_chars: int = 700
     alerts = (st.get("verified") or {}).get("alerts") or st.get("alerts") or []
     if alerts:
         parts.append("Alerts: " + " | ".join(str(a)[:160] for a in alerts[:6]))
+    popups = [d for d in (st.get("dialogs") or []) if isinstance(d, dict)]
+    if popups:
+        parts.append("Pop-ups after the last step: " + " | ".join(f"{d.get('type')}: {str(d.get('message') or '')[:160]}" for d in popups[:6]))
     if st.get("bot_wall"):
         parts.append("The page is a bot check / CAPTCHA.")
     composer = str(st.get("composer") or "").strip()
@@ -1297,6 +1300,14 @@ def summarize_actions(actions: list[dict], state: dict, values: dict[str, str]) 
     return ", ".join(parts)[:300]
 
 
+def _with_popups(ctx, out: Any, since: int) -> Any:
+    """The pop-ups this task's pages showed, with their messages: its reply is otherwise only the last page."""
+    seen = (getattr(ctx, "_popups", None) or [])[since:]
+    if isinstance(out, dict) and seen:
+        out["popups"] = list(seen)
+    return out
+
+
 async def browser_task(ctx, goal: str, url: str = "", values: dict | None = None, max_steps: int = 0,
                        allow_final_action: bool = False, use_saved: bool = True, save: bool = True) -> dict:  # fmt: skip
     """browser_task, kept in the run history (docs/BROWSING.md "Run history"). A call made inside another run (healing
@@ -1304,8 +1315,9 @@ async def browser_task(ctx, goal: str, url: str = "", values: dict | None = None
     from app.browser_runs import runlog
 
     user_id = getattr(getattr(ctx, "user", None), "id", None)
+    popups_before = len(getattr(ctx, "_popups", None) or [])
     if runlog.CURRENT.get() is not None or user_id is None or not setting("browser_run_log", True):
-        return await _browser_task(ctx, goal, url, values, max_steps, allow_final_action, use_saved, save)
+        return _with_popups(ctx, await _browser_task(ctx, goal, url, values, max_steps, allow_final_action, use_saved, save), popups_before)
     run = runlog.RunLog(user_id, goal, host_of(url))
     token = runlog.CURRENT.set(run)
     try:
@@ -1322,6 +1334,7 @@ async def browser_task(ctx, goal: str, url: str = "", values: dict | None = None
                 out.setdefault("note", "The site blocked the cloud browser, so this ran in your Lumio desktop app's browser.")
     finally:
         runlog.CURRENT.reset(token)
+    out = _with_popups(ctx, out, popups_before)
     if isinstance(out, dict):
         if not run.host:
             run.host = host_of(str((out.get("page") or {}).get("url") or ""))

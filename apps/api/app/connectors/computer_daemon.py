@@ -16,7 +16,7 @@ from pathlib import Path
 
 HOST = "127.0.0.1"
 PORT = 18765
-VERSION = "43"
+VERSION = "44"
 _HOME = Path(os.environ.get("CHECKME_BROWSER_HOME") or "/tmp")
 SHOT = "/tmp/checkme-browser.png"
 PROFILE = str(_HOME / "profile")
@@ -2765,7 +2765,9 @@ def _watch_page(page) -> None:
         yes = _accept_next["on"] and dialog.type != "beforeunload"
         answer = _accept_next["text"]
         _accept_next.update(on=False, text=None)
-        keep("dialogs", {"type": dialog.type, "message": str(dialog.message or "")[:300], "answer": "accepted" if yes else "declined"}, 10)
+        # An alert only informs: closing it isn't declining anything.
+        answer_word = "closed" if dialog.type == "alert" else ("accepted" if yes else "declined")
+        keep("dialogs", {"type": dialog.type, "message": str(dialog.message or "")[:300], "answer": answer_word}, 10)
         try:
             if yes:
                 dialog.accept(answer or dialog.default_value or "")

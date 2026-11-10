@@ -154,6 +154,26 @@ def _hand_collecting(ctx: Any, state: dict, actions: list) -> bool:
     return state["next_clicks"] >= NEXT_CLICKS_ALLOWED or state["scrolls"] > SCROLLS_ALLOWED
 
 
+def _label_count(label: str, elements: list) -> int:
+    """How many controls on the page have this run-once label, with what each belongs to."""
+    want = label.casefold()
+    return sum(
+        1 for e in elements if isinstance(e, dict) and any(x.casefold() == want for x in _once_labels([{"kind": "click", "ref": e.get("ref")}], elements))
+    )
+
+
+def _another_row(state: dict, label: str) -> bool:
+    """Identical rows (the same item in a cart twice) have identical Delete buttons. If there are fewer of them than when
+    one was clicked, that one is gone, so this click is on another row. Place order on the same page stays refused."""
+    key = label.casefold()
+    before = (state.get("once_count") or {}).get(key)
+    now = _label_count(label, state["elements"])
+    if before is not None and 0 < now < before:
+        state["once_count"][key] = now
+        return True
+    return False
+
+
 def _once_labels(actions: list, elements: list) -> list[str]:
     """Run-once clicks, each with what it belongs to: Delete on one row isn't a repeat of Delete on another."""
     from app.agent.fast_browser import once_labels
@@ -252,7 +272,7 @@ def before(ctx: Any, tool: str, args: dict | None) -> dict | None:
                 "report its figures."
             ),
         }
-    again = next((label for label in _once_labels(_actions(args), state["elements"]) if label.casefold() in state["once"]), "")
+    again = next((label for label in _once_labels(_actions(args), state["elements"]) if label.casefold() in state["once"] and not _another_row(state, label)), "")
     if again:
         log.warning("browser.guard refused a second click on a run-once control")
         return {
@@ -291,10 +311,12 @@ def after(ctx: Any, tool: str, args: dict | None, result: Any) -> Any:
     if tool in ACT_TOOLS and isinstance(result, dict):
         rows = _actions(args)
         ran = rows if result.get("ok") is not False else rows[: int(result.get("completed") or 0)]
-        # A declined pop-up means the click didn't take effect, so it can be tried again.
-        declined = any(isinstance(d, dict) and d.get("answer") == "declined" for d in result.get("dialogs") or [])
+        # A declined confirm means the click didn't take effect, so it can be tried again. An alert only informs.
+        declined = any(isinstance(d, dict) and d.get("answer") == "declined" and d.get("type") != "alert" for d in result.get("dialogs") or [])
         if not declined:
-            state["once"].update(label.casefold() for label in _once_labels(ran, state["elements"]))
+            for label in _once_labels(ran, state["elements"]):
+                state["once"].add(label.casefold())
+                state.setdefault("once_count", {})[label.casefold()] = _label_count(label, state["elements"])
     acted_on = state["elements"]
     state["acted_on"] = acted_on
     if isinstance(result, dict) and tool not in ACT_TOOLS and result.get("url"):
