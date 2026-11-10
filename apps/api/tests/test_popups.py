@@ -43,3 +43,20 @@ async def test_a_replayed_run_keeps_its_popups():
         harness.computer_slug = original
     assert ctx._popups[0]["message"] == "Product added"
 
+
+def test_popups_come_first_so_trimming_keeps_them():
+    ctx = SimpleNamespace(_popups=[{"type": "alert", "message": "Product added", "answer": "closed"}])
+    out = fb._with_popups(ctx, {"ok": True, "page": {"text": "x" * 5000}}, since=0)
+    assert next(iter(out)) == "popups"
+    page = fb.for_model({"ok": True, "text": "x" * 5000, "dialogs": [{"type": "alert", "message": "Product added"}]})
+    assert next(iter(page)) == "dialogs"
+
+
+def test_trimmed_page_results_keep_their_popups():
+    import json
+
+    from app.agent.context_trim import _brief
+
+    old = json.dumps({"ok": True, "page": {"url": "u", "text": "x" * 5000}, "popups": [{"type": "alert", "message": "Product added"}]})
+    assert "Product added" in _brief(old)
+

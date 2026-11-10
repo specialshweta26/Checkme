@@ -25,7 +25,7 @@ PAGE_TOOLS = {
     "browser_new_tab", "browser_switch_tab", "browser_close_tab", "browser_search", "browser_rank_links", "browser_handoff",
     "browser_download", "computer_observe", "computer_act", "browse_open", "browse_act", "browse_screenshot",
 }  # fmt: skip
-KEEP_KEYS = ("ok", "url", "title", "error", "warnings", "result", "done", "need_user", "stopped_before", "needs_approval",
+KEEP_KEYS = ("popups", "dialogs", "ok", "url", "title", "error", "warnings", "result", "done", "need_user", "stopped_before", "needs_approval",
              "via", "completed", "deep_link_failed", "fallback_url", "bot_wall", "status", "took_ms")  # fmt: skip
 OLD_RESULT_CHARS = 4000
 RECENT_MESSAGES = 4
