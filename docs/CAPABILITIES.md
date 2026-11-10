@@ -114,6 +114,24 @@ T1 to T9 are each from a single run, not all on the same build. T4 passed, faile
 
 **8 pass, 2 partial.**
 
+### On the desktop app
+
+The same nine tests (T1–T9) on the desktop app, final results on 0.1.43:
+
+| Test | Result | Time |
+|---|---|---|
+| T1 | Pass on rerun. The first run hit a short error on the site itself | 20 s |
+| T2 | Pass | 15 s |
+| T3 | Pass after the date fix: every field right | 39 s |
+| T4 | Pass | 76 s |
+| T5 | Pass, including the shadow DOM text the cloud gets wrong | 22 s |
+| T6 | Pass. It reported all 12 open browser tabs, not just the 2 for this task | 23 s |
+| T7 | Pass after the drag fix: B, A, user2, and the pop-up message | 28 s |
+| T8 | Pass | 56 s |
+| T9 | Pass: $1,890, stopped at the order form | 112 s |
+
+**9 pass**, each from one run. T3 also passes on the cloud now (every field right, 96 s), so T5 and T9 on the cloud are the remaining partials.
+
 ### Counting across pages
 
 A model adding things up from memory across pages can be confidently wrong. Now code collects the pages (`browser_gather`) and does the counting and adding (`gathered_query`), with a figure for each page. If the agent pages or scrolls by hand towards a count, it's stopped and sent to gather. Three more tests check it, on public sites with known answers:
@@ -177,6 +195,9 @@ Limits: each line of page text is one record, so a record shown over several lin
 | A reply could promise work and end with nothing done | The turn continues once |
 | A re-sorted page looked unchanged | The check compares page text, not its length |
 | An automatic click retry flipped a sort, opened extra tabs and added an item twice | Removed on the cloud browser. On the desktop it runs only if the click never reached the control |
+| A birth date years away couldn't be picked: calendars were stepped a month at a time, and the cloud stopped after 24 | A calendar's own month and year dropdowns are set first, on both browsers |
+| The desktop's drag did nothing on pages using the browser's own drag and drop | Those pages get the drag events directly; others still get the mouse |
+| A checkbox showed its neighbour's label in brackets ("Sports (Reading)"), so the wrong one was ticked | A label no longer counts as a duplicate of its own control |
 | The double-order guard blocked Delete on a second row, and a test's Confirm button | The guard tells rows apart and only matches labels starting with a final word |
 
 ### Still open
@@ -187,7 +208,7 @@ Limits: each line of page text is one record, so a record shown over several lin
 - **Restart cost:** the first browser use after an update to the cloud browser took about 4.6 minutes earlier in testing. In the latest updates it took seconds, so this may depend on the cloud computer.
 - **Empty replies:** two of about 40 test requests came back with no reply text, and the logs showed no error.
 - **Tabs:** chat tabs aren't closed, so they build up (10 to 16 seen).
-- **Not covered:** logins, most of this suite on the desktop browser (only the counting tests have run there), and real business systems.
+- **Not covered:** logins and real business systems. On the desktop, each test has run once, so stability there isn't known yet.
 
 ## Reliability checklist
 
