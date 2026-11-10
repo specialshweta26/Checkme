@@ -416,9 +416,31 @@ async def run_computer(ctx, tool_name: str, args: dict | None = None, *, force_c
         result = await _run_computer(ctx, tool_name, with_tab if with_tab is not None else args, force_cloud=force_cloud)
     sent = with_tab if with_tab is not None else args
     out = browser_guard.after(ctx, tool_name, sent, result)
+    note_popups(ctx, out)
     if tool_name in browser_guard.ACT_TOOLS:
         out = await _after_failed_step(ctx, tool_name, sent, out, plain)
     return out
+
+
+MAX_POPUPS = 20
+
+
+def note_popups(ctx, result: Any) -> None:
+    """Keep each pop-up (alert, confirm, prompt) the page showed this turn. A pop-up can arrive in any step's result, and a
+    long task's own reply only shows its last page, so this is how its messages reach the answer."""
+    rows = result.get("dialogs") if isinstance(result, dict) else None
+    if not rows or ctx is None:
+        return
+    seen = getattr(ctx, "_popups", None)
+    if seen is None:
+        seen = []
+        try:
+            ctx._popups = seen
+        except AttributeError:
+            return
+    for row in rows:
+        if isinstance(row, dict) and len(seen) < MAX_POPUPS:
+            seen.append({"type": str(row.get("type") or ""), "message": str(row.get("message") or "")[:300], "answer": str(row.get("answer") or "")})
 
 
 MAX_FAILURE_SHOTS = 5
