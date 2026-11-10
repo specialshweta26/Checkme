@@ -135,11 +135,14 @@
   };
   const addNear = (rows, elOf) => {
     const counts = {};
-    rows.forEach((n) => { if (n.name) counts[n.name] = (counts[n.name] || 0) + 1; });
+    // A label and the box it names (a checkbox and "Sports") share a name without being two of the same control, so the
+    // label doesn't count, and neither gets a neighbour's text in brackets ("Sports (Reading)" read as Reading).
+    const labelOfListed = (el) => !!(el && el.tagName === 'LABEL' && el.control);
+    rows.forEach((n, i) => { if (n.name && !labelOfListed(elOf(i))) counts[n.name] = (counts[n.name] || 0) + 1; });
     rows.forEach((n, i) => { if (!n.name && !n.options) { n.name = contextName(elOf(i)); } });
     let budget = 60;
     rows.forEach((n, i) => {
-      if (counts[n.name] > 1 && budget > 0) {
+      if (counts[n.name] > 1 && budget > 0 && !labelOfListed(elOf(i))) {
         budget -= 1;
         const near = nearText(elOf(i), n.name);
         if (near && !n.name.includes(near)) n.near = near;
