@@ -132,6 +132,30 @@
     }
     if (!shown.length) return { ok: false };  // no calendar on screen: never click some other arrow (a carousel)
     const target = wy * 12 + wm;
+    if (((wy, wm) => {
+      // Calendars with month and year dropdowns (common for birth dates): set those instead of clicking an arrow per month.
+      // Only dropdowns inside the calendar itself, never the form's own fields.
+      const M = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+      const shows = (el) => { const r = el.getBoundingClientRect(); return r.width > 2 && r.height > 2 && getComputedStyle(el).visibility !== 'hidden'; };
+      const inCalendar = (el) => el.closest('[class*="calendar" i], [class*="datepicker" i], [class*="date-picker" i], [role="dialog"], [role="application"]');
+      let moved = false;
+      for (const s of document.querySelectorAll('select')) {
+        if (!shows(s) || !inCalendar(s)) continue;
+        const opts = Array.from(s.options);
+        const texts = opts.map((o) => String(o.text || '').trim().toLowerCase());
+        let pick = null;
+        if (opts.length >= 10 && texts.filter((t) => /^\d{4}$/.test(t)).length >= opts.length * 0.8) pick = opts.find((o) => o.text.trim() === String(wy));
+        else if (opts.length === 12 && texts.every((t, i) => t.startsWith(M[i]))) pick = opts[wm - 1];
+        if (pick && s.value !== pick.value) {
+          const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set;
+          setter.call(s, pick.value);
+          s.dispatchEvent(new Event('input', { bubbles: true }));
+          s.dispatchEvent(new Event('change', { bubbles: true }));
+          moved = true;
+        }
+      }
+      return moved;
+    })(wy, wm)) return { ok: true, jumped: true };
     if (target > Math.max(...shown) && read.next) return { ok: true, next: read.next };
     if (target < Math.min(...shown) && read.prev) return { ok: true, next: read.prev };
     return { ok: false };
