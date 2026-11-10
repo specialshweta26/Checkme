@@ -674,10 +674,14 @@ async def _internal(ctx, name: str, args: dict) -> Any:
     if not slug:
         return computer.computer_missing()
     if getattr(ctx, "call_impl", None) is not None:
-        return await ctx.call_impl(slug, name, args)
-    from app.connectors.runtime import RuntimeConnector
+        out = await ctx.call_impl(slug, name, args)
+    else:
+        from app.connectors.runtime import RuntimeConnector
 
-    return await RuntimeConnector(ctx.connectors[slug]).call(name, args)
+        out = await RuntimeConnector(ctx.connectors[slug]).call(name, args)
+    # A replayed run's pages show pop-ups too ("Product added"): keep them, as run_computer does.
+    computer.note_popups(ctx, out)
+    return out
 
 
 async def _act(ctx, actions: list[dict]) -> dict:
