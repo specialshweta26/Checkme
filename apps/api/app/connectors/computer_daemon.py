@@ -16,7 +16,7 @@ from pathlib import Path
 
 HOST = "127.0.0.1"
 PORT = 18765
-VERSION = "42"
+VERSION = "43"
 _HOME = Path(os.environ.get("CHECKME_BROWSER_HOME") or "/tmp")
 SHOT = "/tmp/checkme-browser.png"
 PROFILE = str(_HOME / "profile")
@@ -1043,12 +1043,40 @@ def wait_ready(page, kind: str = "", before_url: str | None = None) -> int:
         except Exception:
             pass
     if clicky or navigated:
+        # A click that sends a request often answers with a pop-up ("Product added") and no change on the page:
+        # wait for the requests it started, so the pop-up is in this step's result rather than a later one.
+        wait_requests(page, started)
         # Report screens and search pages often show a spinner while results load: wait it out, then settle again.
         if wait_not_busy(page):
             try:
                 page.evaluate(_QUIET_JS, [quiet, cap])
             except Exception:
                 pass
+    return int((time.monotonic() - started) * 1000)
+
+
+REQUEST_WAIT_MS = 2500
+
+
+def wait_requests(page, since: float, cap_ms: int = REQUEST_WAIT_MS) -> int:
+    """Wait for the page's own requests (fetch, XHR) started at or after ``since`` to finish, up to cap_ms. Older ones,
+    such as a page that polls all the time, don't hold this up beyond the cap. Returns the ms waited."""
+    watch = _page_watch.get(id(page)) or {}
+    inflight = watch.get("inflight")
+    if inflight is None:
+        return 0
+    started = time.monotonic()
+    while (time.monotonic() - started) * 1000 < cap_ms:
+        if not any(at >= since - 0.05 for at in list(inflight.values())):
+            break
+        try:
+            page.wait_for_timeout(100)
+        except Exception:
+            break
+    try:
+        page.wait_for_timeout(150)  # the response's own handler runs, and opens its pop-up, just after it arrives
+    except Exception:
+        pass
     return int((time.monotonic() - started) * 1000)
 
 
@@ -2726,7 +2754,7 @@ def _strip_url(url: str) -> str:
 def _watch_page(page) -> None:
     """Note pop-ups, errors and failed requests for the agent. A pop-up left unanswered would freeze the page; declining
     is the safe answer unless the agent was told to accept it."""
-    watch = {"dialogs": [], "errors": [], "failed": []}
+    watch = {"dialogs": [], "errors": [], "failed": [], "inflight": {}}
     _page_watch[id(page)] = watch
 
     def keep(key: str, item, cap: int) -> None:
@@ -2750,11 +2778,22 @@ def _watch_page(page) -> None:
         if message.type == "error":
             keep("errors", str(message.text or "")[:300], 30)
 
+    def on_request(request) -> None:
+        if request.resource_type in {"xhr", "fetch"}:
+            watch["inflight"][id(request)] = time.monotonic()
+            if len(watch["inflight"]) > 200:  # a page that never finishes its requests: keep only the recent ones
+                for key in list(watch["inflight"])[:100]:
+                    watch["inflight"].pop(key, None)
+
+    def on_done(request) -> None:
+        watch["inflight"].pop(id(request), None)
+
     def on_response(response) -> None:
         if response.status >= 400:
             keep("failed", {"url": _strip_url(response.url), "status": response.status}, 30)
 
     def on_failed(request) -> None:
+        on_done(request)
         keep("failed", {"url": _strip_url(request.url), "error": str(request.failure or "")[:100]}, 30)
 
     def on_error(error) -> None:
@@ -2764,6 +2803,8 @@ def _watch_page(page) -> None:
         page.on("dialog", on_dialog)
         page.on("console", on_console)
         page.on("pageerror", on_error)
+        page.on("request", on_request)
+        page.on("requestfinished", on_done)
         page.on("response", on_response)
         page.on("requestfailed", on_failed)
     except Exception:
