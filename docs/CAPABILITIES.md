@@ -105,14 +105,14 @@ T1 to T9 are each from a single run, not all on the same build. T4 passed, faile
 | T2 Filter, change page size, calculate | Grid controls, calculation | Pass: 12 people, Michael Silva 66, $3,339,260 | 42 s |
 | T3 Long form with dependent dropdowns | Date picker, type-ahead, styled dropdowns, confirmation | Pass: all fields correct | 102 s |
 | T4 Slow content and changing controls | Waiting for loaders, disabled to enabled fields | Pass, but see the note above | 87 s |
-| T5 Frames and shadow DOM | Nested frames, editor frame, shadow DOM | **Partial:** frames correct, shadow DOM answer wrong | 334 s |
+| T5 Frames and shadow DOM | Nested frames, editor frame, shadow DOM | Pass in the last 3 runs. Earlier it reported the shadow DOM's hidden default text | 41–46 s |
 | T6 Several windows | New tab, switching back | Pass | 38 s |
 | T7 Drag, hover, right-click | Drag and drop, hover content, context menu pop-up | Pass | 62 s |
 | T8 Upload and download | File upload form, file download | Pass | 56 s |
-| T9 Shop flow, stop before paying | Cart edits, native pop-ups, stopping before payment | **Partial:** cart and $1,890 total correct, stopped before payment, but pop-up messages not captured | 144 s |
+| T9 Shop flow, stop before paying | Cart edits, native pop-ups, stopping before payment | Pass in the last 3 runs: cart emptied, $1,890, both "Product added" pop-ups, stopped at the order form | 83–104 s |
 | T10 Count across every page | Script-loaded pages, pagination, counting | Pass: 10 pages, 100 quotes, 10 by Einstein, in the last 4 runs. Earlier it counted 6 Einstein quotes, not 10 | 33–49 s |
 
-**8 pass, 2 partial.**
+**10 pass.** T5 and T9 were rerun after the fixes below; the rest are from earlier runs.
 
 ### On the desktop app
 
@@ -130,7 +130,7 @@ The same nine tests (T1–T9) on the desktop app, final results on 0.1.43:
 | T8 | Pass | 56 s |
 | T9 | Pass: $1,890, stopped at the order form | 112 s |
 
-**9 pass**, each from one run. T3 also passes on the cloud now (every field right, 96 s), so T5 and T9 on the cloud are the remaining partials.
+**9 pass**, each from one run. T3 also passes on the cloud now (every field right, 96 s), and T5 and T9 now pass on the cloud as well.
 
 ### Counting across pages
 
@@ -198,13 +198,16 @@ Limits: each line of page text is one record, so a record shown over several lin
 | A birth date years away couldn't be picked: calendars were stepped a month at a time, and the cloud stopped after 24 | A calendar's own month and year dropdowns are set first, on both browsers |
 | The desktop's drag did nothing on pages using the browser's own drag and drop | Those pages get the drag events directly; others still get the mouse |
 | A checkbox showed its neighbour's label in brackets ("Sports (Reading)"), so the wrong one was ticked | A label no longer counts as a duplicate of its own control |
+| A pop-up sent after a click's request returned ("Product added") was missed: the result was ready first | A click waits up to 2.5 s for the requests it started |
+| Pop-ups were then lost on the way to the answer: left out of browser_task's page summary and its reply, skipped in replays, and dropped when old results were trimmed | Each pop-up of the turn is kept, returned by browser_task, kept in trimmed results, and listed first |
+| Alerts were reported as "declined", which the guard read as a click that didn't happen | Alerts are "closed"; only confirms and prompts can be declined |
+| A cart with the same item twice, or one item after another, couldn't be emptied: each Delete after the first was refused as a repeat | Removing another row is allowed once the clicked one has gone from the page. Place order, Pay and Send stay strictly once |
 | The double-order guard blocked Delete on a second row, and a test's Confirm button | The guard tells rows apart and only matches labels starting with a final word |
 
 ### Still open
 
-- **Shadow DOM:** it can report a hidden default instead of the text on screen (T5).
-- **Pop-up messages:** a pop-up that appears after a delay can be missed (T9).
-- **Speed on frame-heavy pages:** T5 took over 5 minutes.
+- **One run of T5 answered in 3 s**, too fast to have used the browser, probably from memory of an earlier chat. The answer was right.
+- **Speed on frame-heavy pages:** T5 took over 5 minutes earlier; it now takes about 45 s.
 - **Restart cost:** the first browser use after an update to the cloud browser took about 4.6 minutes earlier in testing. In the latest updates it took seconds, so this may depend on the cloud computer.
 - **Empty replies:** two of about 40 test requests came back with no reply text, and the logs showed no error.
 - **Tabs:** chat tabs aren't closed, so they build up (10 to 16 seen).
