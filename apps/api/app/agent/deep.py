@@ -1976,8 +1976,8 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
             await ctx.progress.emit(f"Using skill: {data['name']}", kind="skill", tool="get_skill")
         return dumps(data, 16000)
 
-    async def skill_progress(step: int, note: str = "", artifact_label: str = "", artifact_value: str = "", done: bool = False) -> str:
-        """Checkpoint the skill this task is following: steps done, a progress note, anything produced. Saved at once, so the task resumes here after a restart or handover."""
+    async def skill_progress(step: int, evidence: str = "", note: str = "", artifact_label: str = "", artifact_value: str = "", done: bool = False) -> str:
+        """Pass a step of the skill this task follows. step: the number of the step that just worked. evidence: words from the page, pop-up or file that show it worked; they are checked against what the computer showed, and the step only passes if they match. A passed step never runs again, and steps pass in order. Saved at once, so the task resumes here after a restart or handover."""
         from app.skills import task_state as ts
 
         ctx.used_tools.append("skill_progress")
@@ -1985,14 +1985,22 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
             return dumps({"error": "This task is not following a skill. Load one with get_skill first."})
         by = getattr(ctx.agent, "name", "") or ""
         artifact = {"label": artifact_label, "value": artifact_value} if (artifact_label or artifact_value) else None
-        state = await ts.checkpoint(ctx.task_state["id"], step_index=step, note=note, artifact=artifact, by=by)
+        observed = list(getattr(ctx, "_observed", None) or [])
+        # A step done without the computer (writing a reply, a calculation) has nothing on screen to check.
+        checked = bool(observed)
+        passed = await ts.pass_step(ctx.task_state["id"], step, evidence, observed + [note, artifact_value], checked=checked,
+                                    note=note, artifact=artifact, by=by)  # fmt: skip
+        if not passed["ok"]:
+            log.info("skill_progress refused step=%s repeat=%s", step, bool(passed.get("repeat")))
+            return dumps({"saved": False, "error": passed["message"], "state": ts.serialize(passed.get("state"))}, 4000)
+        state = passed["state"]
         if state is None:
             return dumps({"error": "Task state is gone."})
         if done:
             state = await ts.finish(state["id"], note or "Done.", by=by) or state
         ctx.task_state = state
         await _narrate_task_state(ctx, note)
-        return dumps({"saved": True, "state": ts.serialize(state)}, 4000)
+        return dumps({"saved": True, "message": passed["message"], "state": ts.serialize(state)}, 4000)
 
     async def start_teaching() -> str:
         """Record the computer while the user demonstrates a workflow (the user may narrate out loud from the screen panel). Max ten minutes by default."""

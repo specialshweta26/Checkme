@@ -117,6 +117,7 @@ async def _migrate() -> None:
         await conn.execute(text("ALTER TABLE inbox_items ADD COLUMN IF NOT EXISTS alert_reason VARCHAR(20) DEFAULT ''"))
         await conn.execute(text("ALTER TABLE inbox_items ADD COLUMN IF NOT EXISTS alert_state VARCHAR(12) DEFAULT ''"))
         await conn.execute(text("ALTER TABLE inbox_items ADD COLUMN IF NOT EXISTS alerted_at TIMESTAMPTZ"))
+        await conn.execute(text("ALTER TABLE task_skill_states ADD COLUMN IF NOT EXISTS flow JSONB DEFAULT '{}'::jsonb"))
         await conn.execute(text("ALTER TABLE inbox_items ADD COLUMN IF NOT EXISTS sent_similarity DOUBLE PRECISION"))
         await conn.execute(text("ALTER TABLE inbox_items ADD COLUMN IF NOT EXISTS sent_at TIMESTAMPTZ"))
         await conn.execute(

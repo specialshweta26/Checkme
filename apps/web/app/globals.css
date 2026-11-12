@@ -3133,3 +3133,34 @@ button.provider:disabled { opacity: .6; cursor: default; }
 .avatar-icon-grid.mascots button { width: 100%; height: auto; aspect-ratio: 1; padding: 2px; background: transparent; border-width: 2px; border-radius: 12px; }
 .avatar-icon-grid.mascots button img { width: 100%; height: 100%; border-radius: 9px; display: block; transition: filter 0.15s ease; }
 .avatar-icon-grid.mascots button:hover { border-color: var(--line); }
+
+/* Skill flow canvas (components/SkillFlow.tsx): steps as linked nodes; passed ticked, current highlighted. */
+.skill-flow { margin: 10px 0; }
+.skill-flow-head { font-size: 12px; margin-bottom: 6px; }
+.skill-flow-nodes { list-style: none; margin: 0; padding: 0; display: grid; gap: 0; }
+.skill-node { display: grid; justify-items: start; }
+.skill-node-box {
+  display: flex; gap: 10px; align-items: flex-start; padding: 8px 12px; border: 1px solid var(--line-strong);
+  border-radius: 12px; background: var(--panel); min-width: min(420px, 100%); max-width: 100%;
+  transition: border-color var(--motion-fast) var(--ease-standard), background var(--motion-fast) var(--ease-standard);
+}
+.skill-node-mark {
+  flex: none; width: 24px; height: 24px; border-radius: 999px; display: grid; place-items: center; font-size: 12px;
+  font-weight: 600; background: var(--lift); color: var(--muted);
+}
+.skill-node-text { display: grid; gap: 2px; min-width: 0; }
+.skill-node-title { font-size: 14px; overflow-wrap: anywhere; }
+.skill-node-sub { font-size: 12px; overflow-wrap: anywhere; }
+.skill-node-sub.ok { color: #15803d; }
+.skill-node-sub.now { color: var(--accent); font-weight: 600; }
+.skill-node-link { width: 2px; height: 14px; margin-left: 23px; background: var(--line-strong); }
+.skill-node.passed .skill-node-box { border-color: rgba(21, 128, 61, 0.35); background: rgba(21, 128, 61, 0.06); }
+.skill-node.passed .skill-node-mark { background: #15803d; color: #fff; }
+.skill-node.passed .skill-node-link { background: rgba(21, 128, 61, 0.45); }
+.skill-node.current .skill-node-box { border-color: var(--accent); background: var(--accent-soft); box-shadow: var(--focus-ring); }
+.skill-node.current .skill-node-mark { background: var(--accent); color: #fff; }
+.skill-node.pending .skill-node-box { opacity: 0.72; }
+.skill-node.wait .skill-node-box { border-style: dashed; }
+.skill-flow.compact .skill-node-box { padding: 5px 10px; min-width: 0; }
+.skill-flow.compact .skill-node-title { font-size: 13px; }
+.skill-flow.compact .skill-node-link { height: 8px; }

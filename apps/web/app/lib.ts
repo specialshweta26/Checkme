@@ -80,6 +80,7 @@ export type AgentSkill = {
   transcript?: { t?: number; text?: string }[];
   notes?: string[];
   frames?: { index: number; t?: number }[];
+  flow?: import("./components/SkillFlow").Flow;
 };
 
 export function skillBusy(skill: Pick<AgentSkill, "status"> | null | undefined) {

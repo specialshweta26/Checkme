@@ -140,7 +140,7 @@ def _row_dict(row) -> dict:
     out = {}
     for key in (
         "id", "user_id", "agent_id", "task_key", "session_id", "job_id", "parent_id", "skill_id", "skill_name",
-        "skill_version", "status", "step_index", "step_count", "notes", "artifacts", "result", "created_at", "updated_at",
+        "skill_version", "status", "step_index", "step_count", "notes", "artifacts", "flow", "result", "created_at", "updated_at",
     ):
         value = getattr(row, key, None)
         if isinstance(value, uuid.UUID):
@@ -148,6 +148,7 @@ def _row_dict(row) -> dict:
         out[key] = value
     out["notes"] = list(out.get("notes") or [])
     out["artifacts"] = list(out.get("artifacts") or [])
+    out["flow"] = dict(out.get("flow") or {})
     return out
 
 
@@ -162,8 +163,17 @@ def serialize(state: dict | None) -> dict | None:
         "agent_id": state.get("agent_id"),
         "notes": list(state.get("notes") or [])[-10:],
         "artifacts": list(state.get("artifacts") or [])[-10:],
+        "flow": flow_view(state.get("flow")),
         "updated_at": _iso(state.get("updated_at")),
     }
+
+
+def flow_view(run: dict | None) -> dict | None:
+    """The run's nodes for the app's flow canvas: number, title, kind, status, and which one is current."""
+    if not run or not run.get("nodes"):
+        return None
+    keep = ("id", "n", "title", "kind", "status", "done_when", "evidence", "next")
+    return {"current": run.get("current"), "nodes": [{k: x.get(k) for k in keep if x.get(k) not in (None, "")} for x in run["nodes"]]}
 
 
 def step_label(state: dict) -> str:
@@ -285,6 +295,9 @@ async def begin(
         await STORE.update(current["id"], status="dropped")
     if skill is None:
         return None, False
+    from app.skills import flow as skill_flow
+
+    run = skill_flow.fresh_run(skill_flow.build(skill))
     state = await STORE.create(
         {
             "user_id": str(user.id),
@@ -297,9 +310,10 @@ async def begin(
             "skill_version": str(skill.get("revision") or skill.get("updated_at") or skill.get("created_at") or "")[:40],
             "status": "active",
             "step_index": 0,
-            "step_count": count_steps(skill),
+            "step_count": len(run["nodes"]),
             "notes": [],
             "artifacts": [],
+            "flow": run,
             "result": "",
         }
     )
@@ -342,6 +356,34 @@ async def checkpoint(
     return updated
 
 
+async def pass_step(state_id, n: int, evidence: str, observed: list[str] | None, *, checked: bool = True, note: str = "",
+                    artifact: dict | None = None, by: str = "") -> dict:  # fmt: skip
+    """Pass step ``n`` of the state's flow, checked against what the computer showed. Returns {"ok", "message", "state"}.
+    A passed step is never passed again; the current step must pass before the next one."""
+    from app.skills import flow as skill_flow
+
+    state = await STORE.get(state_id)
+    if state is None:
+        return {"ok": False, "message": "Task state is gone.", "state": None}
+    run = state.get("flow") or {}
+    if not run.get("nodes"):
+        updated = await checkpoint(state_id, step_index=n, note=note, artifact=artifact, by=by)
+        return {"ok": True, "message": "Saved.", "state": updated}
+    out = skill_flow.advance(run, int(n), evidence, observed, checked=checked)
+    if not out["ok"]:
+        return {"ok": False, "repeat": bool(out.get("repeat")), "message": out["message"], "state": state}
+    new_run = out["run"]
+    fields: dict[str, Any] = {"flow": new_run, "step_index": len(skill_flow.passed(new_run))}
+    text = note.strip() or f"Step {n} passed: {str(evidence)[:200]}"
+    fields["notes"] = (list(state.get("notes") or []) + [{"at": _iso(_now()), "text": text[:1000], "by": by}])[-MAX_NOTES:]
+    if artifact and (artifact.get("value") or artifact.get("label")):
+        item = {"at": _iso(_now()), "label": str(artifact.get("label") or "")[:120], "value": str(artifact.get("value") or "")[:2000], "by": by}
+        fields["artifacts"] = (list(state.get("artifacts") or []) + [item])[-MAX_ARTIFACTS:]
+    updated = await STORE.update(state_id, **fields)
+    await _mirror_working(updated)
+    return {"ok": True, "message": out["message"], "state": updated}
+
+
 # ---------------------------------------------------------------- handover
 
 
@@ -361,6 +403,7 @@ async def handover(state: dict, to_agent_id, task_key: str, by: str = "", to_nam
             "status": "active",
             "step_index": int(state.get("step_index") or 0),
             "step_count": int(state.get("step_count") or 0),
+            "flow": dict(state.get("flow") or {}),
             "notes": list(state.get("notes") or []) + [{"at": _iso(_now()), "text": f"Handed over by {by or 'a teammate'}.", "by": by}],
             "artifacts": list(state.get("artifacts") or []),
             "result": "",
@@ -469,6 +512,13 @@ def prompt_block(state: dict | None, resumed: bool = False, can_background: bool
     arts = list(state.get("artifacts") or [])[-6:]
     if arts:
         lines.append("Artifacts so far: " + "; ".join(f"{a.get('label')}: {str(a.get('value'))[:200]}" for a in arts))
+    from app.skills import flow as skill_flow
+
+    flow_lines = skill_flow.prompt_lines(state.get("flow") or {})
+    if flow_lines:
+        lines.extend(flow_lines)
+        lines.append("Put anything the task produced in artifact_label/artifact_value. When handing the task to a teammate, the state goes with it.")
+        return "\n".join(lines) + "\n"
     lines.append(
         "After finishing each step, call skill_progress(step=<steps done>, note=..., artifact_label/artifact_value for "
         "anything produced). When handing the task to a teammate, the state goes with it."

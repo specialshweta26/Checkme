@@ -11,6 +11,7 @@ import { Markdown } from "../components/Markdown";
 import { dismissFocusCard, focusCardDismissed, FocusOnboarding } from "../components/FocusCard";
 import { AgentAvatar } from "../components/AgentAvatar";
 import { JobTimeline } from "../components/JobTimeline";
+import SkillFlow from "../components/SkillFlow";
 import { Thinking } from "../components/Thinking";
 import { announceWorkspaceChanged, chatHref, deleteSession, getMe, isLumioDesktop, listSessions, loadSession, rememberScope, saveDownload, uploadFiles, startTeaching, stopTeaching, type ChatSessionRow, type Me, type UploadedFile, type WorkspaceRoster } from "../lib";
 
@@ -1028,6 +1029,12 @@ export default function ChatPage() {
                         : ""}
                       {m.meta.task_state.status === "handed_off" ? " · handed over" : m.meta.task_state.status === "done" ? " · done" : ""}
                     </div>
+                  ) : null}
+                  {m.meta?.task_state?.flow?.nodes?.length ? (
+                    <details className="skill-flow-turn">
+                      <summary className="muted">Skill steps</summary>
+                      <SkillFlow flow={m.meta.task_state.flow} compact />
+                    </details>
                   ) : null}
                   {m.meta?.job?.id && !m.meta?.job_result ? (
                     <JobTimeline
