@@ -35,7 +35,7 @@ def test_steps_pass_in_order_with_evidence_seen_on_the_page():
     early = flow.advance(run, 2, "cart is empty", ["Cart is empty"])
     assert not early["ok"] and "current step is 1" in early["message"]
     unseen = flow.advance(run, 1, "Products in cart", ["STORE Home"])
-    assert not unseen["ok"] and "wasn't in anything" in unseen["message"] and "the cart shows" in unseen["message"]
+    assert not unseen["ok"] and "isn't on the screen now" in unseen["message"] and "the cart shows" in unseen["message"]
     ok = flow.advance(run, 1, "“Products”", ["Products Pic Title Price"])
     assert ok["ok"] and ok["run"]["current"] == "n2" and "Next is step 2" in ok["message"]
 
