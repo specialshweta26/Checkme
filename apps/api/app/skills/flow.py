@@ -94,12 +94,22 @@ def _norm(text: str) -> str:
     return " ".join(re.sub(r"[“”\"'`]", "", str(text or "")).casefold().split())
 
 
+_GONE = re.compile(r"^\s*(?:gone|absent|removed|not shown)\s*:\s*", re.I)
+
+
 def evidence_seen(evidence: str, observed: list[str]) -> bool:
-    """The evidence must be words that really appeared in what the computer showed during this task."""
-    want = _norm(evidence).strip(" .,:;!?")
+    """The evidence must be words that really appeared in what the computer showed during this task. For a step that
+    removes something, "gone: <words>" passes when those words were shown earlier in the task and the latest page
+    doesn't show them."""
+    raw = str(evidence or "")
+    gone = bool(_GONE.match(raw))
+    want = _norm(_GONE.sub("", raw)).strip(" .,:;!?")
     if len(want) < MIN_EVIDENCE:
         return False
-    return any(want in _norm(seen) for seen in observed or [])
+    pages = [_norm(seen) for seen in observed or [] if str(seen or "").strip()]
+    if not gone:
+        return any(want in page for page in pages)
+    return len(pages) >= 2 and want not in pages[-1] and any(want in page for page in pages[:-1])
 
 
 def advance(run: dict, n: int, evidence: str, observed: list[str] | None, *, checked: bool = True) -> dict[str, Any]:
@@ -167,6 +177,7 @@ def prompt_lines(run: dict) -> list[str]:
         lines.append(f"  · … {len(upcoming) - 3} more")
     lines.append(
         f"When step {here['n']} has worked, check the page shows it, then call skill_progress(step={here['n']}, evidence=<words "
-        "from the page, pop-up or file that show it>). Without matching evidence the step doesn't pass."
+        "from the page, pop-up or file that show it>). If the step removes something, read the page again and give "
+        "evidence=\"gone: <words that were there before>\". Without matching evidence the step doesn't pass."
     )
     return lines

@@ -1557,6 +1557,7 @@ class SkillProgressInput(BaseModel):
     evidence: str = Field(
         default="",
         description="Words copied from the page, pop-up or file name that show this step worked, such as a heading or a message. "
+        "For a step that removes something, read the page again and write gone: <words that were there before>. "
         "They are checked against what the computer showed; without a match the step doesn't pass.",
     )
     note: str = Field(default="", description="One line on what this step did or found.")
@@ -1993,7 +1994,7 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
         observed = list(getattr(ctx, "_observed", None) or [])
         # A step done without the computer (writing a reply, a calculation) has nothing on screen to check.
         checked = bool(observed)
-        passed = await ts.pass_step(ctx.task_state["id"], step, evidence, observed + [note, artifact_value], checked=checked,
+        passed = await ts.pass_step(ctx.task_state["id"], step, evidence, observed, checked=checked,
                                     note=note, artifact=artifact, by=by)  # fmt: skip
         if not passed["ok"]:
             log.info("skill_progress refused step=%s reason=%s observed=%d evidence_chars=%d", step, passed.get("reason"), len(observed), len(evidence or ""))
