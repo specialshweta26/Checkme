@@ -223,6 +223,7 @@ Real report runs went back through earlier skill steps again and again, because 
 - **No repeats:** a passed step is refused if asked again ("Step N is already done… It never runs again").
 - **Canvas:** the skill page and the chat show the flow as linked boxes: passed (ticked, with what was seen), current, and waiting steps.
 - **Recorded skills** are written with one step per line, each ending "Done when".
+- **Editing:** on the skill page, Edit flow changes each step's title, what to do, Done when and type (step or wait); adds, deletes and reorders steps; and adds branches, "if <condition>, go to step N". Branches only go forward, because a passed step never runs again. Saving writes the instructions back from the flow; editing the text instead rebuilds the flow from it. A run follows a branch when the agent passes the step with next_step, and the steps it jumps over show as skipped. Tested live: a branch that skipped a step whose work was already done (35 s).
 
 Also from the same runs: a background job that stops to wait for the user now posts its message to the chat, and the user's reply reaches it; Generate and Export count once per turn.
 
@@ -233,7 +234,7 @@ Tested on a public five-step skill (the demoblaze cart and the-internet's slow-l
 | Cloud | 5 | 5 | 83–139 s |
 | Desktop | 2 | 2 | 82–102 s |
 
-Limits: evidence proves the words are on the screen, not what they mean. In one desktop run the cart was already empty, and "delete every item" passed on the heading "Products". Flows are a straight line for now: the canvas shows them but can't edit them or add branches.
+Limits: evidence proves the words are on the screen, not what they mean. In one desktop run the cart was already empty, and "delete every item" passed on the heading "Products". Flow editing is in the app (below).
 
 ## Reliability checklist
 
