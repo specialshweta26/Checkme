@@ -84,3 +84,12 @@ def test_the_skill_progress_tool_accepts_evidence():
     assert "evidence" in SkillProgressInput.model_fields
     assert SkillProgressInput(step=1, evidence="Products").evidence == "Products"
 
+
+def test_a_removal_passes_with_gone_once_the_words_left_the_page():
+    run = flow.advance(_run(), 1, "Products", ["Products"])["run"]
+    before, after = "Products MacBook Pro 1100 Delete", "Products Total"
+    assert flow.advance(run, 2, "gone: MacBook Pro", [before, after])["ok"]
+    assert not flow.advance(run, 2, "gone: MacBook Pro", [before, before])["ok"]  # still there
+    assert not flow.advance(run, 2, "gone: Sony vaio", [before, after])["ok"]  # never there
+    assert not flow.advance(run, 2, "gone: MacBook Pro", [after])["ok"]  # nothing earlier to compare with
+
