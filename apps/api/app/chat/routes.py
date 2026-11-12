@@ -731,9 +731,14 @@ async def _maybe_start_job(db, user, sess, agent, group, confirms, text, agent_t
     from app.jobs import service as jobs
     from app.jobs.worker import wake
 
-    if group is not None or confirms or not is_coding_agent(agent):
+    if group is not None or confirms:
         return None
     latest = await jobs.latest_chat_job(db, user.id, sess.id, agent.id)
+    if latest is not None and latest.status in {"waiting_input", "waiting_approval"}:
+        # The job asked something and is waiting: this message is the answer, whatever kind of agent this is.
+        return await _answer_waiting_job(db, user, sess, agent, latest, text, request_id)
+    if not is_coding_agent(agent):
+        return None
     if latest is not None and continues_job(text, latest.status, str((latest.meta or {}).get("repo") or "")):
         return await _continue_job(db, user, sess, agent, latest, text, request_id)
     if not looks_like_coding_task(text):
@@ -758,6 +763,54 @@ async def _maybe_start_job(db, user, sess, agent, group, confirms, text, agent_t
         "route": "job",
         "job": info,
         "jobs_started": [info],
+        "pending_confirms": [],
+        "used_tools": [],
+        "speaker": speaker,
+        "request_id": request_id,
+        "uploads": [],
+    }
+
+
+async def _answer_waiting_job(db, user, sess, agent, job, text, request_id):
+    """A reply to a job that is waiting: an answer to its question, the end of a hand-over, or a yes/no on an action."""
+    from app.jobs import service as jobs
+    from app.jobs.worker import wake
+
+    from app.agent.approval import reply_intent
+    from app.channels.service import STOP_WORDS
+
+    said = (text or "").strip().lower().rstrip(".! ")
+    pending = list((job.meta or {}).get("pending") or [])
+    handoff = job.status == "waiting_approval" and bool(pending) and all(jobs._is_handoff(p) for p in pending)
+    if said in STOP_WORDS | {"cancel", "cancel it"} or (handoff and reply_intent(text) == "decline"):
+        # "stop", or a no to a hand-over, ends the job rather than carrying on with it.
+        await jobs.stop_chat_jobs(db, user.id, sess.id, agent_id=agent.id)
+        events, reply = [], "⏹ Stopped."
+    elif job.status == "waiting_input":
+        return await _continue_job(db, user, sess, agent, job, text, request_id)
+    elif handoff:
+        events, reply = jobs.resume_after_handoff(job, text), "Thanks, carrying on from here."
+    else:
+        try:
+            events = jobs.respond_to_approval(job, text)
+            reply = "Okay." if job.status == "queued" else "Noted."
+        except jobs.JobError as exc:
+            events, reply = [], str(exc)
+    for ev in events:
+        db.add(ev)
+    info = jobs.serialize_job(job)
+    speaker = {"id": str(agent.id), "name": agent.name, "color": getattr(agent, "color", "") or "", "title": getattr(agent, "title", "") or ""}
+    meta = {"request_id": request_id, "route": "job", "jobs": [info], "speaker": speaker, "agent_id": str(agent.id), "agent_name": agent.name,
+            "followup": True, "job": info, "job_after": await _last_event_id(db, job)}  # fmt: skip
+    await _store(db, sess, user.id, request_id, text, reply, meta)
+    if events:
+        wake()
+    return {
+        "text": reply,
+        "session_id": str(sess.id),
+        "route": "job",
+        "job": info,
+        "jobs": [info],
         "pending_confirms": [],
         "used_tools": [],
         "speaker": speaker,

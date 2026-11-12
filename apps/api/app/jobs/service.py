@@ -260,6 +260,7 @@ def apply_outcome(job: AgentJob, query: str, result: dict) -> list[JobEvent]:
     if pending:
         meta["pending"] = pending
         job.status = "waiting_approval"
+        job.result = text
         events.append(event(job, "message", text))
         for p in pending:
             events.append(
@@ -450,6 +451,28 @@ def decline(job: AgentJob, token: str) -> list[JobEvent]:
     return [event(job, "status", f"Understood. I’ll leave {card.get('title') or 'that action'} as it is.", {"status": "queued", "declined": True})]
 
 
+def _is_handoff(card: dict) -> bool:
+    return card.get("kind") == "handoff" or (card.get("preview") or {}).get("kind") == "handoff"
+
+
+def resume_after_handoff(job: AgentJob, text: str) -> list[JobEvent]:
+    """The job handed the computer to the user (to sign in, solve a check) and the user replied in the chat: they are
+    done, so carry on from what the screen shows now. Nothing the hand-over prepared is run."""
+    pending = list((job.meta or {}).get("pending") or [])
+    if job.status != "waiting_approval" or not pending or not all(_is_handoff(p) for p in pending):
+        raise JobError("This job is not waiting for you to finish on the computer.")
+    meta = dict(job.meta or {})
+    meta["confirmations"] = []
+    meta["pending"] = []
+    meta["next_query"] = (
+        f"The user finished on the computer and replied: {clip(text, 500)}. Read the screen again and continue the task "
+        "from where it is now. Don't repeat steps that are already done."
+    )
+    job.meta = meta
+    job.status = "queued"
+    return [event(job, "status", "Thanks, carrying on from here.", {"status": "queued", "handoff_done": True})]
+
+
 def respond_to_approval(job: AgentJob, text: str, action_title: str | None = None, token: str | None = None) -> list[JobEvent]:
     """Turn a clear conversational yes/no into the existing, token-bound approval transition."""
     if job.status != "waiting_approval":
@@ -571,7 +594,16 @@ async def post_to_chat(db: AsyncSession, job: AgentJob, text: str | None = None)
     """The job's result (or its question) as one assistant message in the agent chat."""
     if job.session_id is None:
         return
-    body = text or (job.result if job.status in {"done", "waiting_input"} else f"The background job stopped: {job.error or job.status}.")
+    body = text or (
+        job.result if job.status in {"done", "waiting_input", "waiting_approval"} else f"The background job stopped: {job.error or job.status}."
+    )
+    if not text and job.status == "waiting_approval":
+        pending = list((job.meta or {}).get("pending") or [])
+        if pending and all(_is_handoff(p) for p in pending):
+            body = f"{body}\n\nWhen you've finished on the computer, reply here (for example “done”) and I'll carry on."
+        elif pending:
+            titles = ", ".join(str(p.get("title") or "the action") for p in pending)
+            body = f"{body}\n\nThis needs your OK: {titles}. Reply “yes” to go ahead or “no” to leave it."
     meta: dict[str, Any] = {"job": serialize_job(job), "job_result": True, "agent_id": str(job.agent_id) if job.agent_id else None}
     q = (job.meta or {}).get("question") if job.status == "waiting_input" else None
     if q:

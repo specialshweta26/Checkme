@@ -466,6 +466,13 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         ctx.used_tools.append("browser_gather")
         return _dumps(await gather(ctx, how, next_label, max_pages))
 
+    async def browser_poll(click: str, until: str, every_s: int = 10, max_s: int = 300) -> str:
+        """Wait for a slow job on a site: click the control named click (such as Refresh) every every_s seconds until until appears on the page, as text or a control's name (such as Download, Completed). Up to max_s seconds (at most 600). Use it instead of refreshing by hand when a report, export or status takes time to be ready."""
+        from app.agent.poll import poll
+
+        ctx.used_tools.append("browser_poll")
+        return _dumps(await poll(ctx, click, until, every_s, max_s))
+
     async def gathered_query(dataset: str, action: str = "count", contains: list[str] | None = None, exclude: list[str] | None = None,
                              column: int | None = None, unique: bool = False, offset: int = 0, starts_with: list[str] | None = None) -> str:
         """Count, sum or list lines from a browser_gather dataset. Each line of page text is one line here, and a table row is one line; a record shown over several lines has one line of each kind. action: count, sum or list. contains: every word must be in the line (no case), anywhere, even inside other text. starts_with: the line must start with one of these whole words; use it with browser_gather's line_kinds to count records. exclude: none may be. column: for sum, the table column to add, from 1 (needed if a row has several amounts). unique: count identical lines once. Returns the figure and a count per page, so check per_page looks right, including that repeated page headers aren't being counted."""
@@ -881,6 +888,7 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         StructuredTool.from_function(coroutine=browser_screenshot, name="browser_screenshot", description=browser_screenshot.__doc__),
         StructuredTool.from_function(coroutine=browser_gather, name="browser_gather", description=browser_gather.__doc__),
         StructuredTool.from_function(coroutine=gathered_query, name="gathered_query", description=gathered_query.__doc__),
+        StructuredTool.from_function(coroutine=browser_poll, name="browser_poll", description=browser_poll.__doc__),
         StructuredTool.from_function(coroutine=computer_windows, name="computer_windows", description=computer_windows.__doc__),
         StructuredTool.from_function(coroutine=computer_screens, name="computer_screens", description=computer_screens.__doc__),
         StructuredTool.from_function(coroutine=computer_ui, name="computer_ui", description=computer_ui.__doc__),
