@@ -213,6 +213,28 @@ Limits: each line of page text is one record, so a record shown over several lin
 - **Tabs:** chat tabs aren't closed, so they build up (10 to 16 seen).
 - **Not covered:** logins and real business systems. On the desktop, each test has run once, so stability there isn't known yet.
 
+## Skills as a flow
+
+Real report runs went back through earlier skill steps again and again, because a run only kept a step counter the agent set itself. Now a skill runs as a flow of nodes:
+
+- **Nodes:** each numbered step of the skill (on its own line or inline) is a node, with what to do, "done when", and the next node. A step that waits ("refresh until the download appears") is one node and uses `browser_poll`, so waiting never goes back through earlier steps.
+- **One current node:** the run is saved on the task, so it survives restarts and hand-overs. Steps pass in order.
+- **Validation:** a step passes only with evidence, words on the screen after the step (the latest three page reads, pop-ups, downloads). A removal uses "gone: <words>": they must have been shown earlier and not be on the latest page. A step done without the computer passes unchecked and is marked so.
+- **No repeats:** a passed step is refused if asked again ("Step N is already done… It never runs again").
+- **Canvas:** the skill page and the chat show the flow as linked boxes: passed (ticked, with what was seen), current, and waiting steps.
+- **Recorded skills** are written with one step per line, each ending "Done when".
+
+Also from the same runs: a background job that stops to wait for the user now posts its message to the chat, and the user's reply reaches it; Generate and Export count once per turn.
+
+Tested on a public five-step skill (the demoblaze cart and the-internet's slow-loading page), on the final builds:
+
+| Browser | Runs | All steps passed | Time |
+|---|---|---|---|
+| Cloud | 5 | 5 | 83–139 s |
+| Desktop | 2 | 2 | 82–102 s |
+
+Limits: evidence proves the words are on the screen, not what they mean. In one desktop run the cart was already empty, and "delete every item" passed on the heading "Products". Flows are a straight line for now: the canvas shows them but can't edit them or add branches.
+
 ## Reliability checklist
 
 | Item | Status |
@@ -222,7 +244,7 @@ Limits: each line of page text is one record, so a record shown over several lin
 | Native dialogs | Accept, dismiss and prompt text checked on a real site |
 | Navigation tracking | Each result says if the page and address changed |
 | Wait strategy | Waits for loaders and page changes; some fixed waits remain in rarely used paths |
-| Retry | Deliberately limited, because automatic retries caused double actions |
+| Retry | Deliberately limited, because automatic retries caused double actions. Skill steps never repeat once passed |
 | Verification after each action | Results carry the evidence, but the model decides what to do with it. Counts and totals across pages are now done in code |
 | Evidence capture | Screenshots on request, and up to 5 on failed steps per turn |
 
