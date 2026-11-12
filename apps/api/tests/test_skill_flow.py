@@ -176,3 +176,13 @@ def test_written_back_steps_end_their_sentences():
     clean, _ = flow.normalize({"nodes": [{"id": "a", "do": "Open the cart", "done_when": "Products shows", "branches": [{"to": "b", "when": "it is empty"}]}, {"id": "b", "do": "Report"}]})
     assert flow.to_instruction(clean).split("\n")[0] == "1. Open the cart. If it is empty, go to step 2. Done when: Products shows."
 
+
+def test_a_report_wait_written_in_plain_words_is_a_wait_step():
+    text = ("1. Generate the report. 2. it will take some time to generate report , click refresh , and under action icon when "
+            "download button icons appears click on that and download report")
+    nodes = flow.build({"instruction": text})["nodes"]
+    assert nodes[0]["kind"] == "step" and nodes[1]["kind"] == "wait"
+    run = flow.fresh_run(flow.build({"instruction": text}))
+    run = flow.advance(run, 1, "Report submitted", ["Report submitted"])["run"]
+    assert "browser_poll(click=" in "\n".join(flow.prompt_lines(run))
+
