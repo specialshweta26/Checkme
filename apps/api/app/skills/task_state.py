@@ -371,7 +371,7 @@ async def pass_step(state_id, n: int, evidence: str, observed: list[str] | None,
         return {"ok": True, "message": "Saved.", "state": updated}
     out = skill_flow.advance(run, int(n), evidence, observed, checked=checked)
     if not out["ok"]:
-        return {"ok": False, "repeat": bool(out.get("repeat")), "message": out["message"], "state": state}
+        return {"ok": False, "repeat": bool(out.get("repeat")), "reason": out.get("reason", ""), "message": out["message"], "state": state}
     new_run = out["run"]
     fields: dict[str, Any] = {"flow": new_run, "step_index": len(skill_flow.passed(new_run))}
     text = note.strip() or f"Step {n} passed: {str(evidence)[:200]}"
