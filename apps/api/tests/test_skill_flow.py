@@ -100,3 +100,73 @@ def test_evidence_must_be_on_screen_after_the_step_not_from_before_it():
     assert not flow.advance(run, 2, "MacBook Pro 1100 Delete", reads)["ok"]  # only before the delete
     assert flow.advance(run, 2, "gone: MacBook Pro", reads)["ok"]
 
+
+
+# ---------------------------------------------------------------- editing
+
+
+def _edited():
+    return {
+        "nodes": [
+            {"id": "a", "title": "Open the report list", "do": "Open Report Explorer.", "done_when": "Report Explorer shows"},
+            {"id": "b", "title": "Generate", "do": "Pick the report and click Generate Report.", "branches": [{"to": "d", "when": "a report for these dates is already listed"}]},
+            {"id": "c", "title": "Wait", "do": "Refresh Request Status until the download arrow appears.", "kind": "wait"},
+            {"id": "d", "title": "Download", "do": "Download the report.", "done_when": "the file is in Downloads"},
+        ]
+    }
+
+
+def test_an_edited_flow_is_numbered_and_its_branch_kept():
+    clean, errors = flow.normalize(_edited())
+    assert not errors and [x["id"] for x in clean["nodes"]] == ["n1", "n2", "n3", "n4"]
+    assert clean["nodes"][1]["branches"] == [{"to": "n4", "when": "a report for these dates is already listed"}]
+    assert clean["nodes"][2]["kind"] == "wait" and clean["nodes"][3]["next"] == []
+
+
+def test_edits_that_cant_run_are_refused():
+    back = _edited()
+    back["nodes"][2]["branches"] = [{"to": "a", "when": "it failed"}]
+    assert any("only go forward" in e for e in flow.normalize(back)[1])
+    empty = _edited()
+    empty["nodes"][0]["do"] = empty["nodes"][0]["title"] = ""
+    assert any("says nothing to do" in e for e in flow.normalize(empty)[1])
+    assert flow.normalize({"nodes": []})[1]
+
+
+def test_the_text_is_written_back_from_the_flow():
+    clean, _ = flow.normalize(_edited())
+    text = flow.to_instruction(clean, "Report for the dates given.")
+    assert text.startswith("Report for the dates given.\n1. Open Report Explorer. Done when: Report Explorer shows.")
+    assert "If a report for these dates is already listed, go to step 4." in text
+    assert flow.preamble_of("Intro line. 1. Do x. 2. Do y.") == "Intro line."
+
+
+def test_an_edited_flow_wins_over_the_text():
+    clean, _ = flow.normalize(_edited())
+    built = flow.build({"instruction": "1. Something else. 2. Other.", "flow": clean})
+    assert len(built["nodes"]) == 4 and built["nodes"][1]["branches"]
+
+
+def test_a_branch_jumps_forward_and_skips_what_it_passes_over():
+    run = flow.fresh_run(flow.normalize(_edited())[0])
+    run = flow.advance(run, 1, "Report Explorer", ["Report Explorer"])["run"]
+    wrong = flow.advance(run, 2, "already listed", ["already listed"], go_to=3)
+    assert wrong["ok"]  # step 3 is the usual next step, so it is allowed
+    out = flow.advance(run, 2, "already listed", ["already listed"], go_to=4)
+    assert out["ok"] and out["run"]["current"] == "n4" and flow.node(out["run"], "n3")["status"] == "skipped"
+    bad = flow.advance(run, 2, "already listed", ["already listed"], go_to=1)
+    assert not bad["ok"] and "can't go to step 1" in bad["message"]
+    text = "\n".join(flow.prompt_lines(run))
+    assert "If a report for these dates is already listed: go to step 4" in text and "next_step=4" in text
+
+
+def test_a_skill_row_returns_its_edited_flow():
+    from types import SimpleNamespace as NS
+
+    from app.skills import service
+
+    clean, _ = flow.normalize(_edited())
+    row = NS(instruction="1. a. 2. b.", name="R", flow=clean)
+    assert len(service._flow_of(row)["nodes"]) == 4
+    row.flow = {}
+    assert len(service._flow_of(row)["nodes"]) == 2

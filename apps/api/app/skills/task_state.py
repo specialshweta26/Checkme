@@ -172,7 +172,7 @@ def flow_view(run: dict | None) -> dict | None:
     """The run's nodes for the app's flow canvas: number, title, kind, status, and which one is current."""
     if not run or not run.get("nodes"):
         return None
-    keep = ("id", "n", "title", "kind", "status", "done_when", "evidence", "next")
+    keep = ("id", "n", "title", "kind", "status", "done_when", "evidence", "next", "branches")
     return {"current": run.get("current"), "nodes": [{k: x.get(k) for k in keep if x.get(k) not in (None, "")} for x in run["nodes"]]}
 
 
@@ -357,7 +357,7 @@ async def checkpoint(
 
 
 async def pass_step(state_id, n: int, evidence: str, observed: list[str] | None, *, checked: bool = True, note: str = "",
-                    artifact: dict | None = None, by: str = "") -> dict:  # fmt: skip
+                    artifact: dict | None = None, by: str = "", go_to: int = 0) -> dict:  # fmt: skip
     """Pass step ``n`` of the state's flow, checked against what the computer showed. Returns {"ok", "message", "state"}.
     A passed step is never passed again; the current step must pass before the next one."""
     from app.skills import flow as skill_flow
@@ -369,7 +369,7 @@ async def pass_step(state_id, n: int, evidence: str, observed: list[str] | None,
     if not run.get("nodes"):
         updated = await checkpoint(state_id, step_index=n, note=note, artifact=artifact, by=by)
         return {"ok": True, "message": "Saved.", "state": updated}
-    out = skill_flow.advance(run, int(n), evidence, observed, checked=checked)
+    out = skill_flow.advance(run, int(n), evidence, observed, checked=checked, go_to=int(go_to or 0))
     if not out["ok"]:
         return {"ok": False, "repeat": bool(out.get("repeat")), "reason": out.get("reason", ""), "message": out["message"], "state": state}
     new_run = out["run"]

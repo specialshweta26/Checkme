@@ -25,6 +25,7 @@ def add_version(session, row, *, bump: bool) -> int:
             kind=row.kind or "saved",
             steps=list(row.steps or []),
             instruction=row.instruction or "",
+            flow=dict(getattr(row, "flow", None) or {}),
         )
     )
     return revision
