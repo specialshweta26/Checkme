@@ -110,19 +110,19 @@ def advance(run: dict, n: int, evidence: str, observed: list[str] | None, *, che
     target = next((x for x in run.get("nodes") or [] if x.get("n") == n), None)
     here = current(run)
     if target is None:
-        return {"ok": False, "run": run, "message": f"This skill has no step {n}."}
+        return {"ok": False, "reason": "no_step", "run": run, "message": f"This skill has no step {n}."}
     if target.get("status") == "passed":
         nxt = here
         tail = f" Carry on with step {nxt['n']}: {nxt['title']}" if nxt else " Every step is done: finish and report."
-        return {"ok": False, "repeat": True, "run": run, "message": f"Step {n} is already done (evidence: {target.get('evidence') or '-'}). It never runs again.{tail}"}
+        return {"ok": False, "reason": "repeat", "repeat": True, "run": run, "message": f"Step {n} is already done (evidence: {target.get('evidence') or '-'}). It never runs again.{tail}"}
     if here is None:
-        return {"ok": False, "run": run, "message": "Every step is done: finish and report."}
+        return {"ok": False, "reason": "finished", "run": run, "message": "Every step is done: finish and report."}
     if target["id"] != here["id"]:
-        return {"ok": False, "run": run, "message": f"The current step is {here['n']}: {here['title']}. Do that one first; steps run in order."}
+        return {"ok": False, "reason": "order", "run": run, "message": f"The current step is {here['n']}: {here['title']}. Do that one first; steps run in order."}
     if not str(evidence or "").strip():
-        return {"ok": False, "run": run, "message": f"Give evidence for step {n}: words from the page, pop-up or file that show it worked{_hint(here)}."}
+        return {"ok": False, "reason": "no_evidence", "run": run, "message": f"Give evidence for step {n}: words from the page, pop-up or file that show it worked{_hint(here)}."}
     if checked and not evidence_seen(evidence, observed or []):
-        return {"ok": False, "run": run, "message": (
+        return {"ok": False, "reason": "unseen", "run": run, "message": (
             f"Not passed: '{str(evidence)[:120]}' wasn't in anything the computer showed during this task. Read the page again "
             f"and check step {n} really worked{_hint(here)}, then give words that are on it."
         )}  # fmt: skip

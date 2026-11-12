@@ -1991,7 +1991,7 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
         passed = await ts.pass_step(ctx.task_state["id"], step, evidence, observed + [note, artifact_value], checked=checked,
                                     note=note, artifact=artifact, by=by)  # fmt: skip
         if not passed["ok"]:
-            log.info("skill_progress refused step=%s repeat=%s", step, bool(passed.get("repeat")))
+            log.info("skill_progress refused step=%s reason=%s observed=%d evidence_chars=%d", step, passed.get("reason"), len(observed), len(evidence or ""))
             return dumps({"saved": False, "error": passed["message"], "state": ts.serialize(passed.get("state"))}, 4000)
         state = passed["state"]
         if state is None:
