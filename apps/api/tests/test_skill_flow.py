@@ -35,7 +35,7 @@ def test_steps_pass_in_order_with_evidence_seen_on_the_page():
     early = flow.advance(run, 2, "cart is empty", ["Cart is empty"])
     assert not early["ok"] and "current step is 1" in early["message"]
     unseen = flow.advance(run, 1, "Products in cart", ["STORE Home"])
-    assert not unseen["ok"] and "wasn't in anything" in unseen["message"] and "the cart shows" in unseen["message"]
+    assert not unseen["ok"] and "isn't on the screen now" in unseen["message"] and "the cart shows" in unseen["message"]
     ok = flow.advance(run, 1, "“Products”", ["Products Pic Title Price"])
     assert ok["ok"] and ok["run"]["current"] == "n2" and "Next is step 2" in ok["message"]
 
@@ -92,4 +92,11 @@ def test_a_removal_passes_with_gone_once_the_words_left_the_page():
     assert not flow.advance(run, 2, "gone: MacBook Pro", [before, before])["ok"]  # still there
     assert not flow.advance(run, 2, "gone: Sony vaio", [before, after])["ok"]  # never there
     assert not flow.advance(run, 2, "gone: MacBook Pro", [after])["ok"]  # nothing earlier to compare with
+
+
+def test_evidence_must_be_on_screen_after_the_step_not_from_before_it():
+    run = flow.advance(_run(), 1, "Products", ["Products"])["run"]
+    reads = ["Products MacBook Pro 1100 Delete", "Products Total", "Products Total", "Products Total"]
+    assert not flow.advance(run, 2, "MacBook Pro 1100 Delete", reads)["ok"]  # only before the delete
+    assert flow.advance(run, 2, "gone: MacBook Pro", reads)["ok"]
 

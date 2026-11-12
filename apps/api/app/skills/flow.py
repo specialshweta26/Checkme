@@ -16,6 +16,7 @@ from typing import Any
 
 MAX_NODES = 60
 MIN_EVIDENCE = 3
+RECENT_READS = 3  # positive evidence must be on screen after the step: one of the latest reads, not any earlier one
 _STEP_START = re.compile(r"(?:(?<=\s)|^)(?:step\s*)?(\d{1,2})[.)]\s+", re.I)
 _DONE_WHEN = re.compile(r"\b(?:done when|it worked when|success(?: is)? when|check)\s*:\s*", re.I)
 _WAITS = re.compile(r"\b(until|till|wait (?:for|until)|keep refreshing|refresh .* (?:until|till)|once it (?:appears|shows))\b", re.I)
@@ -108,7 +109,7 @@ def evidence_seen(evidence: str, observed: list[str]) -> bool:
         return False
     pages = [_norm(seen) for seen in observed or [] if str(seen or "").strip()]
     if not gone:
-        return any(want in page for page in pages)
+        return any(want in page for page in pages[-RECENT_READS:])
     return len(pages) >= 2 and want not in pages[-1] and any(want in page for page in pages[:-1])
 
 
@@ -133,7 +134,7 @@ def advance(run: dict, n: int, evidence: str, observed: list[str] | None, *, che
         return {"ok": False, "reason": "no_evidence", "run": run, "message": f"Give evidence for step {n}: words from the page, pop-up or file that show it worked{_hint(here)}."}
     if checked and not evidence_seen(evidence, observed or []):
         return {"ok": False, "reason": "unseen", "run": run, "message": (
-            f"Not passed: '{str(evidence)[:120]}' wasn't in anything the computer showed during this task. Read the page again "
+            f"Not passed: '{str(evidence)[:120]}' isn't on the screen now (the latest page reads). Read the page again "
             f"and check step {n} really worked{_hint(here)}, then give words that are on it."
         )}  # fmt: skip
     nodes = []
