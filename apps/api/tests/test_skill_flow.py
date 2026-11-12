@@ -76,3 +76,11 @@ async def test_a_task_state_runs_the_flow_and_refuses_repeats(task_store):
     again, resumed = await ts.begin(user, ts.task_key_for(job_id="j9"), skill=None)
     assert resumed and again["flow"]["current"] == "n2" and "→ 2. NOW" in ts.prompt_block(again, resumed=True)
     assert ts.serialize(again)["flow"]["nodes"][0]["status"] == "passed"
+
+
+def test_the_skill_progress_tool_accepts_evidence():
+    from app.agent.deep import SkillProgressInput
+
+    assert "evidence" in SkillProgressInput.model_fields
+    assert SkillProgressInput(step=1, evidence="Products").evidence == "Products"
+

@@ -1553,7 +1553,12 @@ class GetSkillInput(BaseModel):
 
 
 class SkillProgressInput(BaseModel):
-    step: int = Field(description="How many steps of the skill are done now (1 after the first step).")
+    step: int = Field(description="The number of the step that just worked (the current step).")
+    evidence: str = Field(
+        default="",
+        description="Words copied from the page, pop-up or file name that show this step worked, such as a heading or a message. "
+        "They are checked against what the computer showed; without a match the step doesn't pass.",
+    )
     note: str = Field(default="", description="One line on what this step did or found.")
     artifact_label: str = Field(default="", description="Name of something produced (link, file, id, quote). Optional.")
     artifact_value: str = Field(default="", description="Its value. Optional.")
