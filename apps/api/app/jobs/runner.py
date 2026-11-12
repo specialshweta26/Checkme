@@ -241,8 +241,8 @@ async def run_job(job_id, session_factory: Callable | None = None, agent_impl: C
             await service.after_terminal(db, job)
             await _forget_run(job)
         elif job.status in {"waiting_input", "waiting_approval"} and job.parent_id is None:
-            if job.kind == "event":
-                await service.post_to_chat(db, job)
+            # The question or hand-over is a message in the chat itself, not only a line in the job's timeline.
+            await service.post_to_chat(db, job)
             if job.status == "waiting_approval" and job.agent_id:
                 agent_row = await db.get(WorkspaceAgent, job.agent_id)
                 if agent_row is not None:

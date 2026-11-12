@@ -307,7 +307,8 @@ def before(ctx: Any, tool: str, args: dict | None) -> dict | None:
         }
     key = f"{_action_key(tool, args)}:{state['page']}"
     tries = state["tries"].get(key, 0)
-    if tries >= SAME_ACTION_LIMIT:
+    # Code that repeats a step on purpose (gather, polling a Refresh button) isn't a stuck agent.
+    if tries >= SAME_ACTION_LIMIT and not getattr(ctx, "_gathering", False):
         state["tries"][key] = tries + 1
         state["idle"] += 1
         log.info("browser.guard refused a repeat tries=%s idle=%s", tries + 1, state["idle"])
@@ -383,6 +384,8 @@ def after(ctx: Any, tool: str, args: dict | None, result: Any) -> Any:
         return result
     if isinstance(result, dict) and any("already chosen" in str(w) for w in (result.get("warnings") or [])):
         return result  # the step had nothing to do: not a failed try
+    if getattr(ctx, "_gathering", False):
+        return result
     key = f"{_action_key(tool, args)}:{before_page}"
     state["tries"][key] = state["tries"].get(key, 0) + 1
     state["idle"] += 1
