@@ -170,3 +170,9 @@ def test_a_skill_row_returns_its_edited_flow():
     assert len(service._flow_of(row)["nodes"]) == 4
     row.flow = {}
     assert len(service._flow_of(row)["nodes"]) == 2
+
+
+def test_written_back_steps_end_their_sentences():
+    clean, _ = flow.normalize({"nodes": [{"id": "a", "do": "Open the cart", "done_when": "Products shows", "branches": [{"to": "b", "when": "it is empty"}]}, {"id": "b", "do": "Report"}]})
+    assert flow.to_instruction(clean).split("\n")[0] == "1. Open the cart. If it is empty, go to step 2. Done when: Products shows."
+

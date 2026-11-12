@@ -130,7 +130,8 @@ def to_instruction(flow: dict, preamble: str = "") -> str:
     """The flow written back as the skill's numbered steps, so the text and the flow always say the same thing."""
     lines = [preamble.strip()] if preamble.strip() else []
     for x in flow.get("nodes") or []:
-        line = f"{x['n']}. {x['do']}"
+        do = x["do"].rstrip()
+        line = f"{x['n']}. {do}" + ("" if do.endswith((".", "!", "?")) else ".")
         if x.get("kind") == "wait" and not _WAITS.search(x["do"]):
             line += " Wait until it is ready."
         for b in x.get("branches") or []:
