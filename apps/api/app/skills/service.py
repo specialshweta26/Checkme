@@ -89,6 +89,13 @@ def _iso(value) -> str:
     return value.isoformat() if value else ""
 
 
+def _flow_of(row: AgentSkill) -> dict:
+    """The skill as a flow of nodes, for the app's canvas and for runs (app/skills/flow.py)."""
+    from app.skills import flow as skill_flow
+
+    return skill_flow.build({"instruction": row.instruction or "", "name": row.name})
+
+
 def serialize_skill(row: AgentSkill, full: bool = False) -> dict:
     """A skill for the API and agent tools. Screenshots are never inlined (see ``frame_bytes``)."""
     frames = list(getattr(row, "frames", None) or [])
@@ -106,6 +113,7 @@ def serialize_skill(row: AgentSkill, full: bool = False) -> dict:
         "updated_at": _iso(getattr(row, "updated_at", None)),
         "revision": int(getattr(row, "revision", None) or 1),
         "step_count": len(row.steps or []),
+        "flow": _flow_of(row),
         "frame_count": len(frames),
         "has_transcript": bool(getattr(row, "transcript", None)),
     }
@@ -675,6 +683,7 @@ You get a timeline of what the user did on their own computer (which app they op
 The recording is whatever they actually did: Finder, Excel, a desktop app, or a site they opened themselves. Describe only those actions and screens. Do not invent steps, and do not substitute a browser homepage or any site that is not in the timeline or screenshots.
 Spoken instructions explain intent: prefer them over raw coordinates. Generalize: name the goal, the inputs that will change between runs (as {placeholders}), the steps in order (which app or site, what to open, what to look for, what to click or type), and how to tell it worked.
 On the user's own computer prefer open_path, launch_app, list_dir, and computer_act; use browser tools only for websites they opened. Describe targets by visible label or purpose, not pixel coordinates. Never include passwords, one-time codes, card numbers or other secrets; write {password} etc. instead.
+Write the steps as a flow: one numbered step per line, each a single action or check, in order, and end each step with "Done when: <what the screen shows once it worked>" (a message, a heading, a value in a field, a file name). A step that waits for something to be ready (refresh until a download appears) is one step whose Done when is that thing.
 Reply with JSON: {"name": "<short skill name, max 60 chars>", "instruction": "<the skill, plain text with numbered steps, max 2500 chars>"}"""
 
 # The Responses API only allows json_object output when the *input* mentions JSON (instructions don't count).

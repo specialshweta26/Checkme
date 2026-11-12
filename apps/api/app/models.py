@@ -777,6 +777,8 @@ class TaskSkillState(Base):
     step_count: Mapped[int] = mapped_column(Integer, default=0)
     notes: Mapped[list] = mapped_column(JSONB, default=list)  # {at, text, by}
     artifacts: Mapped[list] = mapped_column(JSONB, default=list)  # {at, label, value, by}
+    # The run through the skill's flow (app/skills/flow.py): its nodes, each pending or passed, and the current one.
+    flow: Mapped[dict] = mapped_column(JSONB, default=dict)
     result: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)

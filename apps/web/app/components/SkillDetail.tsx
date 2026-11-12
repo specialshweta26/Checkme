@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
+import SkillFlow from "./SkillFlow";
 import {
   AgentSkill,
   deleteSkill,
@@ -202,6 +203,12 @@ export function SkillDetail({
               )}
             </div>
             {error ? <p className="error">{error}</p> : null}
+            {skill.flow?.nodes?.length ? (
+              <details open>
+                <summary>Flow ({skill.flow.nodes.length} steps)</summary>
+                <SkillFlow flow={skill.flow} />
+              </details>
+            ) : null}
             {steps.length ? (
               <details open={!skill.instruction}>
                 <summary>Recorded steps ({steps.length})</summary>

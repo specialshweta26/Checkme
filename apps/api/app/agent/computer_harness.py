@@ -417,12 +417,37 @@ async def run_computer(ctx, tool_name: str, args: dict | None = None, *, force_c
     sent = with_tab if with_tab is not None else args
     out = browser_guard.after(ctx, tool_name, sent, result)
     note_popups(ctx, out)
+    note_observed(ctx, out)
     if tool_name in browser_guard.ACT_TOOLS:
         out = await _after_failed_step(ctx, tool_name, sent, out, plain)
     return out
 
 
 MAX_POPUPS = 20
+MAX_OBSERVED = 16
+OBSERVED_CHARS = 30000
+
+
+def note_observed(ctx, result: Any) -> None:
+    """Keep what the computer showed this turn (page text, title, address, pop-ups, downloads), so a skill step's
+    evidence can be checked against it."""
+    if ctx is None or not isinstance(result, dict):
+        return
+    bits = [str(result.get(k) or "") for k in ("title", "url", "text")]
+    bits += [str(d.get("message") or "") for d in result.get("dialogs") or [] if isinstance(d, dict)]
+    bits += [str(d.get("filename") or "") for d in result.get("downloads") or [] if isinstance(d, dict)]
+    blob = "\n".join(b for b in bits if b).strip()
+    if not blob:
+        return
+    seen = getattr(ctx, "_observed", None)
+    if seen is None:
+        seen = []
+        try:
+            ctx._observed = seen
+        except AttributeError:
+            return
+    seen.append(blob[:OBSERVED_CHARS])
+    del seen[:-MAX_OBSERVED]
 
 
 def note_popups(ctx, result: Any) -> None:
