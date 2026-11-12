@@ -93,3 +93,10 @@ def test_a_removal_passes_with_gone_once_the_words_left_the_page():
     assert not flow.advance(run, 2, "gone: Sony vaio", [before, after])["ok"]  # never there
     assert not flow.advance(run, 2, "gone: MacBook Pro", [after])["ok"]  # nothing earlier to compare with
 
+
+def test_evidence_must_be_on_screen_after_the_step_not_from_before_it():
+    run = flow.advance(_run(), 1, "Products", ["Products"])["run"]
+    reads = ["Products MacBook Pro 1100 Delete", "Products Total", "Products Total", "Products Total"]
+    assert not flow.advance(run, 2, "MacBook Pro 1100 Delete", reads)["ok"]  # only before the delete
+    assert flow.advance(run, 2, "gone: MacBook Pro", reads)["ok"]
+
