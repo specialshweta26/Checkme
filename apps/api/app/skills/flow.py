@@ -19,7 +19,11 @@ MIN_EVIDENCE = 3
 RECENT_READS = 3  # positive evidence must be on screen after the step: one of the latest reads, not any earlier one
 _STEP_START = re.compile(r"(?:(?<=\s)|^)(?:step\s*)?(\d{1,2})[.)]\s+", re.I)
 _DONE_WHEN = re.compile(r"\b(?:done when|it worked when|success(?: is)? when|check)\s*:\s*", re.I)
-_WAITS = re.compile(r"\b(until|till|wait (?:for|until)|keep refreshing|refresh .* (?:until|till)|once it (?:appears|shows))\b", re.I)
+_WAITS = re.compile(
+    r"\b(until|till|wait (?:for|until)|keep refreshing|refresh .* (?:until|till)|once it (?:appears|shows)|takes? (?:some )?time"
+    r"|when [^.]{0,80}\bappears?|click (?:on )?refresh)\b",
+    re.I,
+)
 
 
 def _now() -> str:
@@ -257,7 +261,10 @@ def prompt_lines(run: dict) -> list[str]:
     if here.get("done_when"):
         lines.append(f"     Done when: {here['done_when']}")
     if here.get("kind") == "wait":
-        lines.append("     This step waits for something to be ready: use browser_poll (it refreshes for you), don't go back to earlier steps.")
+        lines.append(
+            "     This step waits for something to be ready: use browser_poll(click=<the refresh control>, until=<words of what "
+            "appears, such as download>, max_s=300). It refreshes for you for up to 5 minutes; don't go back to earlier steps."
+        )
     for b in here.get("branches") or []:
         lines.append(f"     If {b['when']}: go to step {b['to'][1:]} (pass this step with skill_progress(..., next_step={b['to'][1:]})).")
     upcoming = [x for x in nodes if x.get("status") not in {"passed", "skipped"} and x["id"] != here["id"]]

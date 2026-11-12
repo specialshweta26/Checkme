@@ -52,3 +52,9 @@ def test_generate_and_export_count_once():
     page = {"elements": [{"ref": "e1", "name": "Generate Report"}, {"ref": "e2", "name": "Export CSV"}, {"ref": "e3", "name": "Request Status"}]}
     labels = fast_browser.once_labels([{"kind": "click", "ref": r} for r in ("e1", "e2", "e3")], page)
     assert labels == ["Generate Report", "Export CSV"]
+
+
+def test_a_download_counts_once_but_each_row_has_its_own():
+    page = {"elements": [{"ref": "e1", "name": "download icon"}, {"ref": "e2", "name": "Request Status"}]}
+    assert fast_browser.once_labels([{"kind": "click", "ref": "e1"}, {"kind": "click", "ref": "e2"}], page) == ["download icon"]
+

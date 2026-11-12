@@ -100,9 +100,53 @@
         .sort((a, b) => (b[1] - a[1]) || (a[2] - b[2])).map((row) => row[0])
     : byView;
   // A field with no name of its own: its label through aria, or the short text of the box around it ("Select State").
+  // A button that is only an icon (download, edit, delete in an Action column) has no text: name it by what its icon
+  // says, from tooltips, an SVG title, a material-icon word, an icon class (fa-download), a <use> link or an image file.
+  const ICON_SKIP = new Set(['fa', 'fas', 'far', 'fab', 'fal', 'fad', 'solid', 'regular', 'light', 'brands', 'fw', 'lg', 'sm', 'xs', '2x', '3x',
+    'mdi', 'bi', 'icon', 'icons', 'glyphicon', 'anticon', 'ti', 'la', 'las', 'lar', 'lni', 'ri', 'feather', 'svg-inline--fa', 'inline',
+    'btn', 'button', 'action', 'actions', 'small', 'large', 'pointer', 'clickable', 'ng-star-inserted', 'notranslate', 'spin', 'outline', 'outlined']);
+  const iconWords = (s) => String(s || '').split(/[-_]+/).filter((w) => w && !['icon', 'ico', 'img', 'svg'].includes(w.toLowerCase())).join(' ').trim().slice(0, 40);
+  const oneLine = (s) => String(s || '').split(' ').filter(Boolean).join(' ').trim().slice(0, 60);
+  const iconName = (el) => {
+    const nodes = [el].concat(Array.from(el.querySelectorAll('*')).slice(0, 12));
+    const tips = ['aria-label', 'title', 'data-tooltip', 'data-original-title', 'data-bs-original-title', 'data-title', 'mattooltip',
+      'ng-reflect-message', 'ng-reflect-mat-tooltip', 'ngbtooltip', 'ptooltip', 'tooltip', 'data-tip', 'data-icon', 'alt'];
+    for (const n of nodes) {
+      for (const a of tips) {
+        const v = n.getAttribute && n.getAttribute(a);
+        if (v && v.trim() && v.trim().length < 60) return oneLine(v) + ' icon';
+      }
+      if (n.tagName && n.tagName.toLowerCase() === 'title' && (n.textContent || '').trim()) return oneLine(n.textContent) + ' icon';
+    }
+    for (const n of nodes) {
+      const cls = String((n.className && (n.className.baseVal !== undefined ? n.className.baseVal : n.className)) || '').toLowerCase();
+      const tag = String(n.tagName || '').toLowerCase();
+      if (tag === 'mat-icon' || /(^| )(material-icons|material-symbols)/.test(cls)) {
+        const t = (n.textContent || '').trim();
+        if (t && t.length < 40) return iconWords(t) + ' icon';
+      }
+      if (tag === 'use') {
+        const href = n.getAttribute('href') || n.getAttribute('xlink:href') || '';
+        const w = href.split('#').pop();
+        if (w) return iconWords(w.replace(/^(icon|i|ico)-/, '')) + ' icon';
+      }
+      if (tag === 'img' && n.getAttribute('src')) {
+        const f = String(n.getAttribute('src')).split('/').pop().split('?')[0].split('.')[0];
+        if (f && f.length < 40 && !/^data:/.test(f)) return iconWords(f) + ' icon';
+      }
+    }
+    for (const n of nodes) {
+      const cls = String((n.className && (n.className.baseVal !== undefined ? n.className.baseVal : n.className)) || '').toLowerCase();
+      for (const tok of cls.split(' ')) {
+        const m = tok.trim().match(/^(?:fa|fas|far|mdi|bi|icon|glyphicon|anticon|ti|la|lni|ri|feather|ion|ico|pi|uil)-(.+)$/);
+        if (m && !ICON_SKIP.has(m[1]) && !ICON_SKIP.has(tok.trim())) return iconWords(m[1]) + ' icon';
+      }
+    }
+    return '';
+  };
   const contextName = (el) => {
     if (!['INPUT', 'TEXTAREA'].includes(el.tagName) && el.getAttribute('role') !== 'combobox') {
-      return String(el.getAttribute('alt') || el.getAttribute('title') || el.id || '').slice(0, 80);
+      return String(el.getAttribute('alt') || el.getAttribute('title') || iconName(el) || el.id || '').slice(0, 80);
     }
     const by = (el.getAttribute('aria-labelledby') || '').split(/\s+/).map((id) => { const n = id && el.ownerDocument.getElementById(id); return n ? n.textContent : ''; }).join(' ').trim();
     if (by) return by.slice(0, 80);
