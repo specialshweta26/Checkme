@@ -3164,3 +3164,19 @@ button.provider:disabled { opacity: .6; cursor: default; }
 .skill-flow.compact .skill-node-box { padding: 5px 10px; min-width: 0; }
 .skill-flow.compact .skill-node-title { font-size: 13px; }
 .skill-flow.compact .skill-node-link { height: 8px; }
+.skill-node-sub.branch { color: var(--warn); }
+.skill-node.skipped .skill-node-box { opacity: 0.5; border-style: dotted; }
+
+/* Flow editor (components/FlowEditor.tsx) */
+.flow-editor { display: grid; gap: 10px; margin: 8px 0; }
+.flow-edit-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.flow-edit-step { display: grid; gap: 6px; padding: 10px; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--panel); }
+.flow-edit-step.wait { border-style: dashed; }
+.flow-edit-head { display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: center; }
+.flow-edit-branch { display: grid; grid-template-columns: auto 1fr auto minmax(120px, 0.8fr) auto; gap: 6px; align-items: center; }
+.flow-edit-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+@media (max-width: 640px) {
+  .flow-edit-head { grid-template-columns: auto 1fr; }
+  .flow-edit-head select { grid-column: 1 / -1; }
+  .flow-edit-branch { grid-template-columns: 1fr; }
+}

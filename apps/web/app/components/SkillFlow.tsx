@@ -12,6 +12,8 @@ export type FlowNode = {
   done_when?: string;
   evidence?: string;
   next?: string[];
+  do?: string;
+  branches?: { to: string; when: string }[];
 };
 
 export type Flow = { current?: string | null; nodes: FlowNode[] };
@@ -30,7 +32,7 @@ export default function SkillFlow({ flow, compact = false }: { flow?: Flow | nul
       ) : null}
       <ol className="skill-flow-nodes">
         {nodes.map((node, i) => {
-          const state = node.status === "passed" ? "passed" : flow?.current === node.id ? "current" : running ? "pending" : "idle";
+          const state = node.status === "passed" ? "passed" : node.status === "skipped" ? "skipped" : flow?.current === node.id ? "current" : running ? "pending" : "idle";
           return (
             <li key={node.id} className={`skill-node ${state}${node.kind === "wait" ? " wait" : ""}`}>
               <div className="skill-node-box" title={node.done_when ? `Done when: ${node.done_when}` : undefined}>
@@ -42,6 +44,12 @@ export default function SkillFlow({ flow, compact = false }: { flow?: Flow | nul
                   {!compact && node.done_when ? <span className="skill-node-sub muted">Done when: {node.done_when}</span> : null}
                   {state === "passed" && node.evidence ? <span className="skill-node-sub ok">Seen: {node.evidence}</span> : null}
                   {state === "current" ? <span className="skill-node-sub now">Now</span> : null}
+                  {node.status === "skipped" ? <span className="skill-node-sub muted">Skipped by a branch</span> : null}
+                  {(node.branches || []).map((b) => (
+                    <span key={b.to + b.when} className="skill-node-sub branch">
+                      ↳ If {b.when}: go to step {Number(String(b.to).replace(/^n/, "")) || b.to}
+                    </span>
+                  ))}
                 </span>
               </div>
               {i < nodes.length - 1 ? <span className="skill-node-link" aria-hidden /> : null}

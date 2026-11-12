@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import SkillFlow from "./SkillFlow";
+import FlowEditor from "./FlowEditor";
 import {
   AgentSkill,
   deleteSkill,
@@ -44,6 +45,7 @@ export function SkillDetail({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [editingFlow, setEditingFlow] = useState(false);
 
   async function load(keepEdits: boolean) {
     try {
@@ -87,7 +89,10 @@ export function SkillDetail({
     setBusy(true);
     setError("");
     try {
-      const row = await updateSkill(skill.id, { name: name.trim() || skill.name, instruction });
+      // Only send the text when it changed: saving the text rebuilds the flow from it, which would drop an edited flow.
+      const body: { name: string; instruction?: string } = { name: name.trim() || skill.name };
+      if (instruction !== (skill.instruction || "")) body.instruction = instruction;
+      const row = await updateSkill(skill.id, body);
       setSkill({ ...skill, ...row });
       setDirty(false);
       onChanged();
@@ -206,7 +211,40 @@ export function SkillDetail({
             {skill.flow?.nodes?.length ? (
               <details open>
                 <summary>Flow ({skill.flow.nodes.length} steps)</summary>
-                <SkillFlow flow={skill.flow} />
+                {editingFlow ? (
+                  <FlowEditor
+                    flow={skill.flow}
+                    busy={busy}
+                    onCancel={() => setEditingFlow(false)}
+                    onSave={async (flow) => {
+                      setBusy(true);
+                      setError("");
+                      try {
+                        const row = await updateSkill(skill.id, { flow });
+                        setSkill({ ...skill, ...row });
+                        setInstruction(row.instruction || "");
+                        setDirty(false);
+                        setEditingFlow(false);
+                        onChanged();
+                      } finally {
+                        setBusy(false);
+                      }
+                    }}
+                  />
+                ) : (
+                  <>
+                    <SkillFlow flow={skill.flow} />
+                    <button
+                      type="button"
+                      className="btn secondary"
+                      disabled={busy || skillBusy(skill) || dirty}
+                      title={dirty ? "Save or undo your text changes first" : ""}
+                      onClick={() => setEditingFlow(true)}
+                    >
+                      Edit flow
+                    </button>
+                  </>
+                )}
               </details>
             ) : null}
             {steps.length ? (

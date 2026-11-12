@@ -144,6 +144,7 @@ async def rewrite_skill(skill_id: uuid.UUID, user: User = Depends(current_user),
 class SkillPatch(BaseModel):
     name: str | None = None
     instruction: str | None = None
+    flow: dict | None = None
 
 
 @router.patch("/{skill_id}")
@@ -160,6 +161,7 @@ async def patch_skill(
             skill_id=str(skill_id),
             new_name=body.name or "",
             instruction=body.instruction,
+            flow=body.flow,
         )
     except service.SkillError as vis_exc:
         raise _err(vis_exc) from vis_exc

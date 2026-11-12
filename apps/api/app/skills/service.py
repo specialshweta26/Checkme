@@ -93,7 +93,7 @@ def _flow_of(row: AgentSkill) -> dict:
     """The skill as a flow of nodes, for the app's canvas and for runs (app/skills/flow.py)."""
     from app.skills import flow as skill_flow
 
-    return skill_flow.build({"instruction": row.instruction or "", "name": row.name})
+    return skill_flow.build({"instruction": row.instruction or "", "name": row.name, "flow": getattr(row, "flow", None) or {}})
 
 
 def serialize_skill(row: AgentSkill, full: bool = False) -> dict:
@@ -168,6 +168,7 @@ async def update_skill(
     instruction: str | None = None,
     new_name: str = "",
     agent_id: uuid.UUID | None = None,
+    flow: dict | None = None,
 ) -> AgentSkill:
     row = await get_skill(db, user, skill_id, name, agent_id)
     if row is None:
@@ -177,8 +178,18 @@ async def update_skill(
         if not title:
             raise SkillError("Skill name is required.")
         row.name = title[:160]
-    if instruction is not None:
+    if flow is not None:
+        from app.skills import flow as skill_flow
+
+        clean, errors = skill_flow.normalize(flow)
+        if errors:
+            raise SkillError(" ".join(errors[:3]))
+        # The text and the flow say the same thing: the steps are written back from the flow.
+        row.instruction = skill_flow.to_instruction(clean, skill_flow.preamble_of(row.instruction or ""))
+        row.flow = clean
+    elif instruction is not None:
         row.instruction = instruction
+        row.flow = {}  # edited as text: the flow comes from the new steps
     try:
         from app.memory_engine.procedures import add_version
 

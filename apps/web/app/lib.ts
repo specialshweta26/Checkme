@@ -305,7 +305,7 @@ export async function getSkill(id: string) {
   return data as AgentSkill;
 }
 
-export async function updateSkill(id: string, body: { name?: string; instruction?: string }) {
+export async function updateSkill(id: string, body: { name?: string; instruction?: string; flow?: { nodes: unknown[] } }) {
   return agentAction(`/api/skills/${encodeURIComponent(id)}`, "PATCH", body) as Promise<AgentSkill>;
 }
 

@@ -750,6 +750,8 @@ class AgentSkill(Base):
     auto_named: Mapped[bool] = mapped_column(Boolean, default=False)
     revision: Mapped[int] = mapped_column(Integer, default=1)
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # A flow edited in the app (app/skills/flow.py). Empty: the flow comes from the instruction's numbered steps.
+    flow: Mapped[dict] = mapped_column(JSONB, default=dict)
 
 
 class TaskSkillState(Base):
@@ -971,6 +973,7 @@ class AgentSkillVersion(Base):
     kind: Mapped[str] = mapped_column(String(20), default="saved")
     steps: Mapped[list] = mapped_column(JSONB, default=list)
     instruction: Mapped[str] = mapped_column(Text, default="")
+    flow: Mapped[dict] = mapped_column(JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 

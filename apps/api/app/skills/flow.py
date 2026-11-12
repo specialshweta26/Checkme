@@ -62,13 +62,89 @@ def _node(n: int, body: str, nxt: str | None) -> dict:
 
 
 def build(skill: dict) -> dict:
-    """The skill's flow: {start, nodes}. Numbered steps become a chain; a skill with none is one node."""
+    """The skill's flow: {start, nodes}. A flow edited in the app wins; otherwise numbered steps become a chain, and a
+    skill with none is one node."""
+    saved = skill.get("flow") if isinstance(skill.get("flow"), dict) else None
+    if saved and saved.get("edited") and saved.get("nodes"):
+        clean, errors = normalize(saved)
+        if not errors:
+            return clean
     steps = split_numbered(skill.get("instruction") or "")
     if not steps:
         body = " ".join(str(skill.get("instruction") or skill.get("name") or "Do the task").split())
         steps = [body[:600]]
     nodes = [_node(i + 1, body, f"n{i + 2}" if i + 1 < len(steps) else None) for i, body in enumerate(steps)]
     return {"start": nodes[0]["id"], "nodes": nodes}
+
+
+# ---------------------------------------------------------------- editing
+
+
+MAX_TEXT = 600
+
+
+def normalize(flow: dict) -> tuple[dict, list[str]]:
+    """An edited flow, cleaned and checked. Nodes are numbered in their order. Each step goes on to the next one unless
+    it is the last; a branch ("if <when>, go to step N") may only jump forward, because a passed step never runs again,
+    so a loop back can't happen. Returns (flow, errors)."""
+    errors: list[str] = []
+    raw = [x for x in (flow or {}).get("nodes") or [] if isinstance(x, dict)]
+    if not raw:
+        return {"start": None, "nodes": []}, ["A flow needs at least one step."]
+    if len(raw) > MAX_NODES:
+        errors.append(f"A flow can have at most {MAX_NODES} steps.")
+        raw = raw[:MAX_NODES]
+    old_ids = [str(x.get("id") or "") for x in raw]
+    if len(set(old_ids)) != len(old_ids) or not all(old_ids):
+        # Ids are only how branches point at steps; without unique ones, refer to steps by position.
+        old_ids = [f"p{i}" for i in range(len(raw))]
+    new_id = {old: f"n{i + 1}" for i, old in enumerate(old_ids)}
+    nodes = []
+    for i, x in enumerate(raw):
+        do = " ".join(str(x.get("do") or x.get("title") or "").split())[:MAX_TEXT]
+        title = " ".join(str(x.get("title") or "").split())[:90] or re.split(r"(?<=[.!?])\s", do, maxsplit=1)[0][:90]
+        if not do:
+            errors.append(f"Step {i + 1} says nothing to do.")
+        nxt = [f"n{i + 2}"] if i + 1 < len(raw) else []
+        branches = []
+        for b in x.get("branches") or []:
+            if not isinstance(b, dict):
+                continue
+            to = new_id.get(str(b.get("to") or ""))
+            when = " ".join(str(b.get("when") or "").split())[:200]
+            if not to or not when:
+                errors.append(f"Step {i + 1} has a branch without a condition or a step to go to.")
+                continue
+            if int(to[1:]) <= i + 1:
+                errors.append(f"Step {i + 1}'s branch goes back to step {to[1:]}: a passed step never runs again, so branches only go forward.")
+                continue
+            branches.append({"to": to, "when": when})
+        kind = "wait" if str(x.get("kind") or "") == "wait" else "step"
+        nodes.append({"id": f"n{i + 1}", "n": i + 1, "title": title, "do": do,
+                      "done_when": " ".join(str(x.get("done_when") or "").split())[:300], "kind": kind,
+                      "next": nxt, "branches": branches})  # fmt: skip
+    return {"start": "n1", "nodes": nodes, "edited": True}, errors
+
+
+def to_instruction(flow: dict, preamble: str = "") -> str:
+    """The flow written back as the skill's numbered steps, so the text and the flow always say the same thing."""
+    lines = [preamble.strip()] if preamble.strip() else []
+    for x in flow.get("nodes") or []:
+        line = f"{x['n']}. {x['do']}"
+        if x.get("kind") == "wait" and not _WAITS.search(x["do"]):
+            line += " Wait until it is ready."
+        for b in x.get("branches") or []:
+            line += f" If {b['when']}, go to step {b['to'][1:]}."
+        if x.get("done_when"):
+            line += f" Done when: {x['done_when']}."
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def preamble_of(instruction: str) -> str:
+    """Text before step 1, kept when the flow is written back."""
+    m = _STEP_START.search(str(instruction or ""))
+    return str(instruction or "")[: m.start()].strip() if m and m.group(1) == "1" else ""
 
 
 # ---------------------------------------------------------------- a run through the flow
@@ -113,7 +189,7 @@ def evidence_seen(evidence: str, observed: list[str]) -> bool:
     return len(pages) >= 2 and want not in pages[-1] and any(want in page for page in pages[:-1])
 
 
-def advance(run: dict, n: int, evidence: str, observed: list[str] | None, *, checked: bool = True) -> dict[str, Any]:
+def advance(run: dict, n: int, evidence: str, observed: list[str] | None, *, checked: bool = True, go_to: int = 0) -> dict[str, Any]:
     """Pass node ``n`` (its number) and move to the next one. Returns {"ok", "run", "message"}.
 
     Refused: a node already passed (it never repeats), a node that isn't the current one, or evidence that wasn't seen.
@@ -137,12 +213,22 @@ def advance(run: dict, n: int, evidence: str, observed: list[str] | None, *, che
             f"Not passed: '{str(evidence)[:120]}' isn't on the screen now (the latest page reads). Read the page again "
             f"and check step {n} really worked{_hint(here)}, then give words that are on it."
         )}  # fmt: skip
+    nxt = (here.get("next") or [None])[0]
+    branches = here.get("branches") or []
+    if go_to:
+        allowed = {b["to"] for b in branches} | ({nxt} if nxt else set())
+        if f"n{int(go_to)}" not in allowed:
+            options = ", ".join(f"step {b['to'][1:]} if {b['when']}" for b in branches) or "none"
+            return {"ok": False, "reason": "branch", "run": run, "message": f"Step {n} can't go to step {go_to}. Its branches: {options}; otherwise step {nxt[1:] if nxt else '-'}."}
+        nxt = f"n{int(go_to)}"
+    jumped = {x["id"] for x in run.get("nodes") or [] if nxt and here["n"] < x["n"] < int(nxt[1:])}
     nodes = []
     for x in run.get("nodes") or []:
         if x["id"] == here["id"]:
             x = {**x, "status": "passed", "evidence": str(evidence)[:300], "at": _now(), "checked": bool(checked)}
+        elif x["id"] in jumped and x.get("status") != "passed":
+            x = {**x, "status": "skipped"}
         nodes.append(x)
-    nxt = (here.get("next") or [None])[0]
     out = {**run, "nodes": nodes, "current": nxt}
     after = node(out, nxt)
     msg = f"Step {n} passed. Next is step {after['n']}: {after['title']}" if after else "That was the last step: finish and report."
@@ -171,7 +257,9 @@ def prompt_lines(run: dict) -> list[str]:
         lines.append(f"     Done when: {here['done_when']}")
     if here.get("kind") == "wait":
         lines.append("     This step waits for something to be ready: use browser_poll (it refreshes for you), don't go back to earlier steps.")
-    upcoming = [x for x in nodes if x.get("status") != "passed" and x["id"] != here["id"]]
+    for b in here.get("branches") or []:
+        lines.append(f"     If {b['when']}: go to step {b['to'][1:]} (pass this step with skill_progress(..., next_step={b['to'][1:]})).")
+    upcoming = [x for x in nodes if x.get("status") not in {"passed", "skipped"} and x["id"] != here["id"]]
     for x in upcoming[:3]:
         lines.append(f"  · {x['n']}. {x['title']}")
     if len(upcoming) > 3:

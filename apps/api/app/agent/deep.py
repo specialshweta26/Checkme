@@ -1561,6 +1561,7 @@ class SkillProgressInput(BaseModel):
         "They are checked against what the computer showed; without a match the step doesn't pass.",
     )
     note: str = Field(default="", description="One line on what this step did or found.")
+    next_step: int = Field(default=0, description="Only when the step has branches: the step to go to next, as its branch says. 0 = the usual next step.")
     artifact_label: str = Field(default="", description="Name of something produced (link, file, id, quote). Optional.")
     artifact_value: str = Field(default="", description="Its value. Optional.")
     done: bool = Field(default=False, description="True when the whole skill is finished.")
@@ -1982,7 +1983,8 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
             await ctx.progress.emit(f"Using skill: {data['name']}", kind="skill", tool="get_skill")
         return dumps(data, 16000)
 
-    async def skill_progress(step: int, evidence: str = "", note: str = "", artifact_label: str = "", artifact_value: str = "", done: bool = False) -> str:
+    async def skill_progress(step: int, evidence: str = "", note: str = "", artifact_label: str = "", artifact_value: str = "", done: bool = False,
+                             next_step: int = 0) -> str:  # fmt: skip
         """Pass a step of the skill this task follows. step: the number of the step that just worked. evidence: words from the page, pop-up or file that show it worked; they are checked against what the computer showed, and the step only passes if they match. A passed step never runs again, and steps pass in order. Saved at once, so the task resumes here after a restart or handover."""
         from app.skills import task_state as ts
 
@@ -1995,7 +1997,7 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
         # A step done without the computer (writing a reply, a calculation) has nothing on screen to check.
         checked = bool(observed)
         passed = await ts.pass_step(ctx.task_state["id"], step, evidence, observed, checked=checked,
-                                    note=note, artifact=artifact, by=by)  # fmt: skip
+                                    note=note, artifact=artifact, by=by, go_to=next_step)  # fmt: skip
         if not passed["ok"]:
             log.info("skill_progress refused step=%s reason=%s observed=%d evidence_chars=%d", step, passed.get("reason"), len(observed), len(evidence or ""))
             return dumps({"saved": False, "error": passed["message"], "state": ts.serialize(passed.get("state"))}, 4000)
