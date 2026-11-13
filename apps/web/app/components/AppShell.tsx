@@ -103,6 +103,40 @@ function IconComputer() {
   );
 }
 
+function IconSun() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <circle cx="12" cy="12" r="4" stroke="currentColor" strokeWidth="1.8" />
+      <path d="M12 3v2.2M12 18.8V21M3 12h2.2M18.8 12H21M5.6 5.6l1.6 1.6M16.8 16.8l1.6 1.6M18.4 5.6l-1.6 1.6M7.2 16.8l-1.6 1.6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function IconMoon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <path d="M16.5 13.5A6.5 6.5 0 0 1 10 4.2 7 7 0 1 0 19.8 14a6.5 6.5 0 0 1-3.3-.5Z" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+const THEME_KEY = "lumio.theme";
+
+function ThemeToggle({ theme, onToggle }: { theme: "dark" | "light"; onToggle: () => void }) {
+  const bright = theme === "light";
+  return (
+    <button
+      className="theme-toggle"
+      type="button"
+      aria-label={bright ? "Switch to dark mode" : "Switch to bright mode"}
+      title={bright ? "Dark mode" : "Bright mode"}
+      onClick={onToggle}
+    >
+      {bright ? <IconMoon /> : <IconSun />}
+    </button>
+  );
+}
+
 function NotifyBell({
   count,
   items,
@@ -221,6 +255,7 @@ export function AppShell({
   const [alerts, setAlerts] = useState<InboxAlert[]>([]);
   const [alertsOpen, setAlertsOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
+  const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [toast, setToast] = useState("");
   const last = useRef(-1);
   const seenGen = useRef(0);
@@ -231,9 +266,22 @@ export function AppShell({
   }, []);
 
   useEffect(() => {
-    document.body.classList.add("app-dark");
-    return () => document.body.classList.remove("app-dark");
+    const saved = window.localStorage.getItem(THEME_KEY);
+    if (saved === "light" || saved === "dark") setTheme(saved);
   }, []);
+
+  useEffect(() => {
+    document.body.classList.toggle("app-dark", theme === "dark");
+    return () => document.body.classList.remove("app-dark");
+  }, [theme]);
+
+  function toggleTheme() {
+    setTheme((current) => {
+      const next = current === "dark" ? "light" : "dark";
+      window.localStorage.setItem(THEME_KEY, next);
+      return next;
+    });
+  }
 
   useEffect(() => {
     if (conversations) return;
@@ -395,7 +443,10 @@ export function AppShell({
               <small>Workspace</small>
             </div>
           </a>
-          <NotifyBell count={badge} items={alerts} toast={toast} open={alertsOpen} onToggle={toggleAlerts} />
+          <div className="side-brand-actions">
+            <ThemeToggle theme={theme} onToggle={toggleTheme} />
+            <NotifyBell count={badge} items={alerts} toast={toast} open={alertsOpen} onToggle={toggleAlerts} />
+          </div>
         </div>
         <nav className="side-nav">
           <a className={`side-link${current === "today" ? " on" : ""}`} href="/today" onClick={(e) => { e.preventDefault(); visit("/today"); }}>
@@ -494,6 +545,7 @@ export function AppShell({
             </span>
           </button>
           <div className="topbar-actions">
+            <ThemeToggle theme={theme} onToggle={toggleTheme} />
             {onToggleComputer ? (
               <button
                 type="button"
