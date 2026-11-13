@@ -68,9 +68,28 @@ def _err(exc: Exception) -> HTTPException:
     return HTTPException(400, str(exc)[:300])
 
 
+class IdeasIn(BaseModel):
+    name: str = ""
+    title: str = ""
+
+
 @router.get("")
 async def list_agents(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     return await service.list_workspace(db, user)
+
+
+@router.post("/ideas")
+async def preview_agent_ideas(body: IdeasIn, user: User = Depends(current_user)):
+    """Suggest first tasks and skills from a name and title, before the bot is saved."""
+    from types import SimpleNamespace
+
+    from app.agents.onboarding import generate_onboarding
+
+    name = body.name.strip()[:80]
+    title = body.title.strip()[:80]
+    if len(name) + len(title) < 2:
+        raise HTTPException(400, "Add a name or a title first.")
+    return await generate_onboarding(SimpleNamespace(name=name or "New agent", title=title, instructions=""))
 
 
 @router.get("/{agent_id}/memory")

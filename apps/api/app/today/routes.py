@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends
 from sqlalchemy import func, select
@@ -19,6 +19,17 @@ from app.tasks.service import list_tasks
 from app.today.board import assemble
 
 router = APIRouter(prefix="/today", tags=["today"])
+
+
+def _job_row(job: AgentJob, session_agent: dict) -> dict:
+    data = serialize_job(job)
+    if not data.get("agent_id") and job.session_id:
+        agent_id = session_agent.get(job.session_id)
+        if agent_id:
+            data["agent_id"] = str(agent_id)
+    data["scheduled_task_id"] = str(job.scheduled_task_id) if job.scheduled_task_id else None
+    data["prompt"] = job.prompt or ""
+    return data
 
 
 def _reply_row(message: ChatMessage, agent_id) -> dict:
@@ -92,7 +103,10 @@ async def _live_turns(db: AsyncSession, user: User) -> list[dict]:
         alive = None
         if progress_id and valid_progress_id(progress_id):
             alive = await turn_alive(user.id, progress_id)
-        if alive is False:
+        created = message.created_at
+        if created is not None and created < datetime.now(timezone.utc) - timedelta(hours=6):
+            continue
+        if alive is not True and (created is None or created < datetime.now(timezone.utc) - timedelta(minutes=20)):
             continue
         live.append(
             {
@@ -123,6 +137,15 @@ async def today(user: User = Depends(current_user), db: AsyncSession = Depends(g
             .limit(60)
         )
     ).scalars().all()
+    missing_sessions = [job.session_id for job in jobs if job.session_id and not job.agent_id]
+    session_agent: dict = {}
+    if missing_sessions:
+        rows = (
+            await db.execute(
+                select(ChatSession.id, ChatSession.agent_id).where(ChatSession.id.in_(missing_sessions))
+            )
+        ).all()
+        session_agent = {sid: aid for sid, aid in rows if aid}
     names, slugs = _connector_labels(await mail_connectors(db, user))
     alerts = await open_alerts(db, user.id)
     payload = assemble(
@@ -131,14 +154,7 @@ async def today(user: User = Depends(current_user), db: AsyncSession = Depends(g
         name=user.display_name or "",
         email=user.email or "",
         agents=[serialize_agent(row) for row in agents],
-        jobs=[
-            {
-                **serialize_job(job),
-                "scheduled_task_id": str(job.scheduled_task_id) if job.scheduled_task_id else None,
-                "prompt": job.prompt or "",
-            }
-            for job in jobs
-        ],
+        jobs=[_job_row(job, session_agent) for job in jobs],
         tasks=await list_tasks(db, user),
         replies=await _latest_replies(db, user),
         alerts=[

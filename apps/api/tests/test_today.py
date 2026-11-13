@@ -54,6 +54,21 @@ def test_today_splits_replies_work_finished_and_routines():
                 "title": "Yesterday",
                 "finished_at": "2026-11-12T11:40:00+00:00",
             },
+            {
+                "id": "j-stale",
+                "status": "running",
+                "title": "Build grocery webapp MVP",
+                "agent_name": "Lumio",
+                "started_at": "2026-10-28T12:00:00+00:00",
+            },
+            {
+                "id": "j-anon",
+                "status": "waiting_approval",
+                "title": "Push the branch",
+                "agent_name": "",
+                "pending": [{"title": "Push the branch", "preview": "{'repo': 'Checkme', 'branch': 'agent/port'}"}],
+                "created_at": "2026-11-13T08:00:00+00:00",
+            },
         ],
         tasks=[
             {
@@ -117,6 +132,13 @@ def test_today_splits_replies_work_finished_and_routines():
 
     work_agents = {row["agent_name"] for row in board["working"]}
     assert work_agents == {"Chief", "Inbox Triage"}
+    assert "Build grocery webapp MVP" not in {row["detail"] for row in board["working"]}
+    assert all(row["agent_name"] != "Lumio" and row["title"] != "Lumio" for row in board["needs_you"] + board["working"])
+    anon = next(row for row in board["needs_you"] if row["id"] == "job:j-anon")
+    assert anon["agent_name"] == "Chief"
+    assert "Checkme" not in anon["detail"]
+    assert "Push the branch" in anon["detail"]
+    assert any(row["detail"] == "Finished · Morning brief" and row["agent_name"] == "Chief" for row in board["needs_you"])
 
     done_titles = [row["title"] for row in board["done_today"]]
     assert "Check with the other agents and tell me" in done_titles
