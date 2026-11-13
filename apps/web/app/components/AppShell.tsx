@@ -21,7 +21,23 @@ import { AgentsNav } from "./AgentsNav";
 import { BrandMark } from "./BrandMark";
 import { AgentAvatar } from "./AgentAvatar";
 
-type Nav = "chat" | "inbox" | "tasks" | "connectors" | "runs" | "memory" | "usage" | "account";
+type Nav = "today" | "chat" | "inbox" | "tasks" | "connectors" | "runs" | "memory" | "usage" | "account";
+
+function IconToday() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <path d="M4 10.5 12 4l8 6.5V20a1 1 0 0 1-1 1h-5.2v-6.2H10.2V21H5a1 1 0 0 1-1-1v-9.5Z" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function IconTalk() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <path d="M6 16.5 4 20l4.2-1.4A8 8 0 1 0 6 16.5Z" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
+    </svg>
+  );
+}
 
 function IconInbox() {
   return (
@@ -298,7 +314,7 @@ export function AppShell({
   }
 
   const rows = conversations || own;
-  const titles: Record<Nav, string> = { chat: "Chat", inbox: "Inbox", tasks: "Tasks", connectors: "Connectors", runs: "Saved runs", memory: "What I know", usage: "Usage", account: "Your data" };
+  const titles: Record<Nav, string> = { today: "Today", chat: "Chat", inbox: "Inbox", tasks: "Tasks", connectors: "Connectors", runs: "Saved runs", memory: "What I know", usage: "Usage", account: "Your data" };
   const agentId = activeAgentId || scope.agent || null;
   const groupId = activeGroupId || scope.group || null;
 
@@ -363,7 +379,7 @@ export function AppShell({
   }
 
   return (
-    <div className="shell">
+    <div className={`shell${current === "today" ? " today-mode" : ""}`}>
       <div className={`scrim${open ? " show" : ""}`} onClick={() => setOpen(false)} />
       <aside className={`sidebar${open ? " open" : ""}`}>
         <div className="side-brand-row">
@@ -377,6 +393,12 @@ export function AppShell({
           <NotifyBell count={badge} items={alerts} toast={toast} open={alertsOpen} onToggle={toggleAlerts} />
         </div>
         <nav className="side-nav">
+          <a className={`side-link${current === "today" ? " on" : ""}`} href="/today" onClick={(e) => { e.preventDefault(); visit("/today"); }}>
+            <IconToday /> Today
+          </a>
+          <a className="side-link" href="/chat" onClick={(e) => { e.preventDefault(); visit(chatUrl()); }}>
+            <IconTalk /> Talk to Chief
+          </a>
           <a className={`side-link${current === "inbox" ? " on" : ""}`} href="/inbox" onClick={(e) => { e.preventDefault(); visit("/inbox"); }}>
             <IconInbox /> Inbox
             {pending > 0 ? <span className="nav-count">{pending > 9 ? "9+" : pending}</span> : null}
