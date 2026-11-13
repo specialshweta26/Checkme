@@ -448,7 +448,16 @@ export function AppShell({
         <header className="topbar">
           <button className="ghost topbar-who" type="button" onClick={() => setOpen(true)} aria-label="Open menu">
             {headlineColor ? (
-              <AgentAvatar name={headline || "?"} color={headlineColor} avatar={headlineAvatar} className="agent-avatar tiny" />
+              <AgentAvatar
+                name={headline || "?"}
+                color={headlineColor}
+                avatar={headlineAvatar}
+                working={Boolean(
+                  (activeAgentId && busyScopes?.includes(`a.${activeAgentId}`)) ||
+                  (activeGroupId && busyScopes?.includes(`g.${activeGroupId}`)),
+                )}
+                className="agent-avatar tiny"
+              />
             ) : (
               <BrandMark size={22} />
             )}

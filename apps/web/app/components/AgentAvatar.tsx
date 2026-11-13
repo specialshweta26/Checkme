@@ -5,18 +5,22 @@ export function AgentAvatar({
   name,
   color,
   avatar,
+  working = false,
   className = "agent-avatar",
 }: {
   name: string;
   color?: string;
   avatar?: string;
+  /** Bob and glow while this agent is in the middle of a turn. */
+  working?: boolean;
   className?: string;
 }) {
   const mascot = mascotFor(avatar);
   if (mascot) {
-    // One of the twelve agent mascots, tinted to the agent's color.
+    // The artwork is the character only. Color tints it; working adds the live mascot motion.
+    const style = { "--mascot": color || "#f97316" } as CSSProperties;
     return (
-      <span className={`${className} mascot`} aria-hidden="true">
+      <span className={`${className} mascot${working ? " working" : ""}`} style={style} aria-hidden="true">
         <img src={mascot.src} alt="" draggable={false} style={{ filter: mascotFilter(color) }} />
       </span>
     );

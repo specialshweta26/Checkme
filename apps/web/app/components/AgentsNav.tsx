@@ -414,6 +414,7 @@ export function AgentsNav({
             agent={agent}
             href={chatHref({ agent: agent.id })}
             active={activeAgentId === agent.id && !activeGroupId}
+            working={busyScopes.includes(`a.${agent.id}`)}
             preview={busyScopes.includes(`a.${agent.id}`) ? "Working…" : previewFor(threads, agent.id, null) || agent.preview || agent.title || "New chat"}
             stay={pathname === "/chat"}
             onOpen={() => {
@@ -443,7 +444,7 @@ export function AgentsNav({
                 window.location.assign(chatHref({ group: group.id }));
               }}
             >
-              <GroupStack members={group.members} />
+              <GroupStack members={group.members} working={busyScopes.includes(`g.${group.id}`)} />
               <span className="agent-copy">
                 <strong>{group.name}</strong>
                 <small>{busyScopes.includes(`g.${group.id}`) ? "Working…" : previewFor(threads, null, group.id) || group.outcome || group.preview || group.members.map((m) => m.name).join(", ") || "Group"}</small>
@@ -834,6 +835,7 @@ function AgentRow({
   href,
   active,
   preview,
+  working = false,
   stay,
   onOpen,
   onOpenMenu,
@@ -842,6 +844,7 @@ function AgentRow({
   href: string;
   active: boolean;
   preview: string;
+  working?: boolean;
   stay?: boolean;
   onOpen: () => void;
   onOpenMenu: (x: number, y: number) => void;
@@ -865,7 +868,7 @@ function AgentRow({
           window.location.assign(href);
         }}
       >
-        <AgentAvatar name={agent.name} color={agent.color} avatar={agent.avatar} />
+        <AgentAvatar name={agent.name} color={agent.color} avatar={agent.avatar} working={working} />
         <span className="agent-copy">
           <strong>
             {agent.pinned ? <span className="agent-pin" aria-hidden /> : null}
@@ -1201,12 +1204,12 @@ function previewFor(threads: ChatSessionRow[], agentId: string | null, groupId: 
   return (row?.title || "").trim();
 }
 
-function GroupStack({ members }: { members: WorkspaceAgent[] }) {
+function GroupStack({ members, working = false }: { members: WorkspaceAgent[]; working?: boolean }) {
   const shown = useMemo(() => members.slice(0, 3), [members]);
   return (
-    <span className="group-stack" aria-hidden>
+    <span className={`group-stack${working ? " working" : ""}`} aria-hidden>
       {shown.map((m) => (
-        <AgentAvatar key={m.id} name={m.name} color={m.color} avatar={m.avatar} className="agent-avatar tiny" />
+        <AgentAvatar key={m.id} name={m.name} color={m.color} avatar={m.avatar} working={working} className="agent-avatar tiny" />
       ))}
     </span>
   );

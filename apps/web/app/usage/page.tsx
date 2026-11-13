@@ -123,7 +123,7 @@ export default function UsagePage() {
                     write.
                   </span>
                   {data.drafts && data.drafts.length ? (
-                    <table className="usage-table">
+                    <div className="table-scroll"><table className="usage-table">
                       <thead>
                         <tr>
                           <th>Week of</th>
@@ -142,7 +142,7 @@ export default function UsagePage() {
                           </tr>
                         ))}
                       </tbody>
-                    </table>
+                    </table></div>
                   ) : (
                     <span className="faint">No replies sent from the inbox yet. This fills in as you send.</span>
                   )}
@@ -155,7 +155,7 @@ export default function UsagePage() {
                   {features.length === 0 ? (
                     <span className="muted">Nothing recorded yet. Usage appears here as you use the assistant.</span>
                   ) : (
-                    <table className="usage-table">
+                    <div className="table-scroll"><table className="usage-table">
                       <thead>
                         <tr>
                           <th>Feature</th>
@@ -182,7 +182,7 @@ export default function UsagePage() {
                           </tr>
                         ))}
                       </tbody>
-                    </table>
+                    </table></div>
                   )}
                   {!data.priced ? <span className="faint">Costs appear when model prices are set on the server (MODEL_PRICES).</span> : null}
                 </div>
