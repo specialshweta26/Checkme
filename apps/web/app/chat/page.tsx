@@ -28,6 +28,22 @@ function scopeStore(agentId?: string | null, groupId?: string | null) {
   return key ? `${STORE}.${key}` : STORE;
 }
 
+/** A task typed on Today. Cleared once, so opening that agent's chat sends it into the current thread. */
+function takePendingTask(agentId?: string | null) {
+  if (!agentId || typeof window === "undefined") return "";
+  const raw = window.sessionStorage.getItem("lumio.pendingTask") || "";
+  if (!raw) return "";
+  try {
+    const task = JSON.parse(raw) as { agentId?: string; text?: string };
+    if (task.agentId !== agentId) return "";
+    window.sessionStorage.removeItem("lumio.pendingTask");
+    return (task.text || "").trim();
+  } catch {
+    window.sessionStorage.removeItem("lumio.pendingTask");
+    return "";
+  }
+}
+
 function newProgressId() {
   const rand = Math.random().toString(36).slice(2, 12);
   return `turn_${Date.now().toString(36)}${rand}`;
@@ -365,11 +381,15 @@ export default function ChatPage() {
     end.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, pending, busyScopes]);
 
-  async function send(message: string, confirmations: any[] = [], opts: { resumeRequestId?: string } = {}) {
-    const key = scopeKey(agentId, groupId);
+  async function send(
+    message: string,
+    confirmations: any[] = [],
+    opts: { resumeRequestId?: string; agentId?: string | null; sessionId?: string | null; messages?: Msg[] } = {},
+  ) {
+    const sendAgent = opts.agentId !== undefined ? opts.agentId : agentId;
+    const sendGroup = opts.agentId !== undefined ? null : groupId;
+    const key = scopeKey(sendAgent, sendGroup);
     if ((!message.trim() && !uploads.length) || !key) return;
-    const sendAgent = agentId;
-    const sendGroup = groupId;
     // A message while a turn runs interrupts and redirects it (the server stops the old turn and hands its
     // progress to the new one). Drop the old request here so only the newest turn updates this chat.
     const previous = turnsRef.current[key];
@@ -380,7 +400,12 @@ export default function ChatPage() {
     }
     const gen = (previous?.gen || 0) + 1;
     const controller = new AbortController();
-    let scopedSession = sessionInScopeRow(sessions.find((s) => s.id === sessionId), sendAgent, sendGroup) ? sessionId : null;
+    let scopedSession =
+      opts.sessionId !== undefined
+        ? opts.sessionId
+        : sessionInScopeRow(sessions.find((s) => s.id === sessionId), sendAgent, sendGroup)
+          ? sessionId
+          : null;
     if (!scopedSession && previous?.sessionId) scopedSession = previous.sessionId;
     if (!scopedSession && previous?.progressId) {
       // The first turn of a new chat is still running: redirect within its session, not a new one.
@@ -394,7 +419,7 @@ export default function ChatPage() {
     }
     const pendingFiles = uploads;
     const userTurn: Msg = { role: "user", content: message || "Attached files", meta: pendingFiles.length ? { uploads: pendingFiles } : undefined };
-    const nextMessages = [...messages, userTurn];
+    const nextMessages = [...(opts.messages ?? messages), userTurn];
     setWatching(true);
     inflightRef.current.add(key);
     setBusyScopes((keys) => (keys.includes(key) ? keys : [...keys, key]));
@@ -769,20 +794,27 @@ export default function ChatPage() {
       viewsRef.current[wanted] = view;
       if (scopeRef.current === wanted) showView(view);
     };
+    let opened: Msg[] = [];
+    let openedSession: string | null = null;
     if (pick) {
       const data = await loadSession(pick);
-      if (!data) {
+      if (data) {
+        opened = (data.messages || [])
+          .filter((m: Msg) => m.role === "user" || m.role === "assistant")
+          .map((m: Msg) => ({ role: m.role, content: m.content || "", meta: m.meta }));
+        openedSession = pick;
+        apply({ sessionId: pick, messages: opened, pending: pendingFor(opened) });
+        resumeProgress(wanted, pick, opened);
+      } else {
         apply({ sessionId: null, messages: [], pending: [] });
-        return;
       }
-      const nextMessages = (data.messages || [])
-        .filter((m: Msg) => m.role === "user" || m.role === "assistant")
-        .map((m: Msg) => ({ role: m.role, content: m.content || "", meta: m.meta }));
-      apply({ sessionId: pick, messages: nextMessages, pending: pendingFor(nextMessages) });
-      resumeProgress(wanted, pick, nextMessages);
-      return;
+    } else {
+      apply({ sessionId: null, messages: [], pending: [] });
     }
-    apply({ sessionId: null, messages: [], pending: [] });
+    const pendingTask = takePendingTask(nextAgent);
+    if (pendingTask) {
+      void send(pendingTask, [], { agentId: nextAgent, sessionId: openedSession, messages: opened });
+    }
   }
 
   return (
@@ -833,7 +865,8 @@ export default function ChatPage() {
           return;
         }
         if (wantAgent && next.agents.some((a) => a.id === wantAgent)) {
-          if (agentId !== wantAgent || groupId) {
+          const pending = typeof window !== "undefined" && window.sessionStorage.getItem("lumio.pendingTask");
+          if (agentId !== wantAgent || groupId || pending) {
             setGroupId(null);
             setAgentId(wantAgent);
             rememberScope(wantAgent, null);

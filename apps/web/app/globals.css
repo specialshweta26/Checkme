@@ -3276,3 +3276,165 @@ button.provider:disabled { opacity: .6; cursor: default; }
   .flow-edit-head select { grid-column: 1 / -1; }
   .flow-edit-branch { grid-template-columns: 1fr; }
 }
+
+.shell.today-mode {
+  color-scheme: dark;
+  --bg: #0e0f12;
+  --sidebar: #141518;
+  --panel: #17181c;
+  --lift: rgba(255, 255, 255, 0.06);
+  --line: rgba(255, 255, 255, 0.08);
+  --line-strong: rgba(255, 255, 255, 0.14);
+  --text: #f4f5f7;
+  --muted: #a4a9b3;
+  --faint: #7b808a;
+  --accent-soft: rgba(255, 255, 255, 0.06);
+  background: #0e0f12;
+  color: #f4f5f7;
+}
+.shell.today-mode .main { background: #0e0f12; }
+.shell.today-mode .sidebar { background: #141518; }
+.today {
+  min-height: 100dvh;
+  padding: 28px 32px 48px;
+  color: #f4f5f7;
+}
+.today-head h1 {
+  margin: 2px 0 8px;
+  font-size: clamp(32px, 4vw, 44px);
+  line-height: 1.1;
+}
+.today-date, .today-counts {
+  margin: 0;
+  color: #9aa0aa;
+  font-size: 14px;
+}
+.today-counts { display: flex; flex-wrap: wrap; gap: 8px 16px; }
+.today-counts span { display: inline-flex; align-items: center; gap: 6px; }
+.today-counts span::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 99px;
+  background: #6ee7a8;
+}
+.today-counts span:nth-child(2)::before { background: #f5c16c; }
+.today-counts span:nth-child(3)::before { background: #93c5fd; }
+.today-composer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 22px 0 18px;
+  padding: 8px 8px 8px 14px;
+  border-radius: 999px;
+  background: #1b1d22;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+.today-agent select, .today-composer input {
+  border: 0;
+  background: transparent;
+  color: #f4f5f7;
+  outline: none;
+}
+.today-agent select {
+  max-width: 180px;
+  padding: 8px 4px;
+  font-weight: 600;
+}
+.today-composer input { flex: 1; min-width: 0; padding: 8px 4px; }
+.today-composer input::placeholder { color: #7d838d; }
+.today-composer button {
+  width: 36px;
+  height: 36px;
+  border: 0;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  background: #3b82f6;
+  color: #fff;
+  flex: none;
+}
+.today-composer button:disabled { opacity: 0.45; }
+.today-error { color: #f0a8b0; margin: 0 0 12px; }
+.today-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+.today-card {
+  min-height: 220px;
+  padding: 16px 16px 8px;
+  border-radius: 18px;
+  background: #17181c;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+.today-card header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.today-card h2 {
+  margin: 0;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #c5c9d1;
+}
+.today-count {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 99px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #d5d8de;
+  font-size: 11px;
+  font-weight: 700;
+  display: grid;
+  place-items: center;
+}
+.today-mark { flex: none; color: #9aa0aa; }
+.today-mark.live { color: #4ade80; }
+.today-mark.spark { color: #d8b4fe; }
+.today-card ul { list-style: none; margin: 0; padding: 0; }
+.today-card li a {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 4px;
+  border-radius: 12px;
+  color: inherit;
+}
+.today-card li a:hover { background: rgba(255, 255, 255, 0.04); }
+.today-card li strong, .today-card li small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.today-card li strong { font-size: 14px; font-weight: 600; }
+.today-card li small, .today-card time, .today-empty {
+  color: #8d939d;
+  font-size: 12.5px;
+}
+.today-card time { white-space: nowrap; }
+.today-empty { margin: 28px 8px; }
+.agent-avatar.today-face { width: 34px; height: 34px; flex: none; }
+.sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  border: 0;
+}
+@media (max-width: 860px) {
+  .today { padding: 18px 16px calc(28px + env(safe-area-inset-bottom)); }
+  .today-grid { grid-template-columns: 1fr; }
+  .today-composer { border-radius: 18px; }
+}
