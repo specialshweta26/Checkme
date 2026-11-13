@@ -105,16 +105,20 @@ def _named(agents: dict[str, dict], agent_id, fallback: str = "") -> dict:
     }
 
 
-def _who(agents: list[dict], by_agent: dict[str, dict], agent_id, agent_name: str = "", default_id: str | None = None) -> dict:
-    """Use the real bot. Unassigned work belongs to the default bot, never a made-up Lumio."""
+def _who(agents: list[dict], by_agent: dict[str, dict], agent_id, agent_name: str = "", default_id: str | None = None) -> dict | None:
+    """A living bot, or None when the bot was deleted. Nameless work stays with the default bot."""
     if agent_id and str(agent_id) in by_agent:
         return _named(by_agent, agent_id)
     label = (agent_name or "").strip()
-    if label and label.lower() != "lumio":
+    if label:
+        if label.lower() == "lumio":
+            return None
         for row in agents:
             if (row.get("name") or "").strip().lower() == label.lower():
                 return _named(by_agent, row.get("id"), label)
-        return _named(by_agent, None, label)
+        return None
+    if not default_id or str(default_id) not in by_agent:
+        return None
     return _named(by_agent, default_id)
 
 
@@ -176,6 +180,8 @@ def assemble(
         if job.get("status") not in NEEDS_JOB:
             continue
         who = _who(agents, by_agent, job.get("agent_id"), job.get("agent_name") or "", default_id)
+        if who is None:
+            continue
         question = job.get("question") if isinstance(job.get("question"), dict) else {}
         pending = job.get("pending") if isinstance(job.get("pending"), list) else []
         ask = str((question or {}).get("question") or "").strip()
@@ -233,7 +239,9 @@ def assemble(
             continue
         if any(item.get("agent_id") == agent_id and item.get("kind") in ("job", "reply") for item in needs):
             continue
-        who = _named(by_agent, agent_id)
+        who = _who(agents, by_agent, agent_id, "", None)
+        if who is None:
+            continue
         if ask:
             detail = f"Has a question for you · {clip(ask, 140)}"
         elif pending and isinstance(pending[0], dict):
@@ -268,7 +276,7 @@ def assemble(
 
     for row in live or []:
         who = _who(agents, by_agent, row.get("agent_id"), row.get("agent_name") or "", default_id)
-        if not _recent(row.get("created_at"), now, hours=6):
+        if who is None or not _recent(row.get("created_at"), now, hours=6):
             continue
         add_work(
             f"live:{who['agent_id'] or row.get('id')}",
@@ -290,6 +298,8 @@ def assemble(
         if not _recent(job.get("started_at") or job.get("created_at"), now, hours=18):
             continue
         who = _who(agents, by_agent, job.get("agent_id"), job.get("agent_name") or "", default_id)
+        if who is None:
+            continue
         add_work(
             f"job:{job.get('id')}",
             {
@@ -308,6 +318,8 @@ def assemble(
         if task.get("status") != "running":
             continue
         who = _who(agents, by_agent, task.get("agent_id"), task.get("agent_name") or "", default_id)
+        if who is None:
+            continue
         if not who["agent_color"]:
             who["agent_color"] = task.get("agent_color") or ""
         add_work(
@@ -334,6 +346,8 @@ def assemble(
         if job.get("status") not in DONE_JOB or not _same_day(job.get("finished_at"), now, tz):
             continue
         who = _who(agents, by_agent, job.get("agent_id"), job.get("agent_name") or "", default_id)
+        if who is None:
+            continue
         done.append(
             {
                 "id": f"job:{job.get('id')}",
@@ -354,6 +368,8 @@ def assemble(
         if task.get("status") == "running":
             continue
         who = _who(agents, by_agent, task.get("agent_id"), task.get("agent_name") or "", default_id)
+        if who is None:
+            continue
         if not who["agent_color"]:
             who["agent_color"] = task.get("agent_color") or ""
         title = clip(str(task.get("title") or task.get("last_result") or "Finished routine"), 140)
@@ -390,6 +406,8 @@ def assemble(
         if not task.get("next_run_at") and not task.get("schedule_label"):
             continue
         who = _who(agents, by_agent, task.get("agent_id"), task.get("agent_name") or "", default_id)
+        if who is None:
+            continue
         if not who["agent_color"]:
             who["agent_color"] = task.get("agent_color") or ""
         coming.append(

@@ -15,6 +15,8 @@ from app.models import (
     AgentGroup,
     AgentGroupMember,
     AgentToolkit,
+    AgentJob,
+    AgentSkill,
     Automation,
     ChatMessage,
     ChatSession,
@@ -435,10 +437,10 @@ async def update_agent(db: AsyncSession, user: User, agent_id: uuid.UUID, body: 
 async def delete_agent(db: AsyncSession, user: User, agent_id: uuid.UUID) -> None:
     """Remove a custom agent and the memory and routines that belong to it.
 
-    Chat sessions stay, with their original ``agent_id``, so transcripts are not
-    copied onto Chief. The default agent cannot be deleted. The remote Letta
-    agent is deleted when it is not Chief's shared id; a Letta outage does not
-    block the local delete. Database foreign keys cascade the same rows.
+    The default agent cannot be deleted. The remote Letta agent is deleted when
+    it is not Chief's shared id; a Letta outage does not block the local delete.
+    Chat sessions, jobs, and skills for this bot are removed too, so a deleted
+    bot does not stay in Today or in Recent.
     """
     row = await get_agent(db, user, agent_id)
     if row.kind == "default":
@@ -446,11 +448,70 @@ async def delete_agent(db: AsyncSession, user: User, agent_id: uuid.UUID) -> Non
     from app.agent.memory import forget_letta_agent
 
     await forget_letta_agent(row, user)
+    await _delete_agent_history(db, user.id, row.id)
     await db.execute(sql_delete(MemoryBlock).where(MemoryBlock.agent_id == row.id))
     await db.execute(sql_delete(MemoryPassage).where(MemoryPassage.agent_id == row.id))
     await db.execute(sql_delete(ScheduledTask).where(ScheduledTask.agent_id == row.id))
     await db.execute(sql_delete(Automation).where(Automation.agent_id == row.id))
     await db.delete(row)
+    await db.commit()
+
+
+async def _delete_agent_history(db: AsyncSession, user_id, agent_id) -> None:
+    sessions = (
+        await db.execute(
+            select(ChatSession.id).where(
+                ChatSession.user_id == user_id,
+                ChatSession.agent_id == agent_id,
+                ChatSession.group_id.is_(None),
+            )
+        )
+    ).scalars().all()
+    if sessions:
+        await db.execute(sql_delete(ChatMessage).where(ChatMessage.session_id.in_(sessions)))
+        await db.execute(sql_delete(ChatSession).where(ChatSession.id.in_(sessions)))
+    await db.execute(sql_delete(AgentJob).where(AgentJob.user_id == user_id, AgentJob.agent_id == agent_id))
+    await db.execute(sql_delete(AgentSkill).where(AgentSkill.user_id == user_id, AgentSkill.agent_id == agent_id))
+
+
+async def purge_deleted_agent_history(db: AsyncSession, user: User) -> None:
+    """Drop chats and jobs left behind by bots that were deleted earlier."""
+    living = (
+        await db.execute(select(WorkspaceAgent.id, WorkspaceAgent.name).where(WorkspaceAgent.user_id == user.id))
+    ).all()
+    ids = {row[0] for row in living}
+    names = {(row[1] or "").strip().lower() for row in living}
+    orphan_sessions = (
+        await db.execute(
+            select(ChatSession.id).where(
+                ChatSession.user_id == user.id,
+                ChatSession.group_id.is_(None),
+                ChatSession.agent_id.isnot(None),
+                ChatSession.agent_id.not_in(ids) if ids else ChatSession.agent_id.isnot(None),
+            )
+        )
+    ).scalars().all()
+    if orphan_sessions:
+        await db.execute(sql_delete(ChatMessage).where(ChatMessage.session_id.in_(orphan_sessions)))
+        await db.execute(sql_delete(ChatSession).where(ChatSession.id.in_(orphan_sessions)))
+    jobs = (
+        await db.execute(select(AgentJob).where(AgentJob.user_id == user.id, AgentJob.parent_id.is_(None)))
+    ).scalars().all()
+    for job in jobs:
+        if job.agent_id and job.agent_id in ids:
+            continue
+        label = str((job.meta or {}).get("agent_name") or "").strip().lower()
+        if job.agent_id and job.agent_id not in ids:
+            await db.delete(job)
+        elif label and label not in names:
+            await db.delete(job)
+    await db.execute(
+        sql_delete(AgentSkill).where(
+            AgentSkill.user_id == user.id,
+            AgentSkill.agent_id.isnot(None),
+            AgentSkill.agent_id.not_in(ids) if ids else AgentSkill.agent_id.isnot(None),
+        )
+    )
     await db.commit()
 
 

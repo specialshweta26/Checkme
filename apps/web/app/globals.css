@@ -3341,6 +3341,32 @@ body.app-dark .topbar-icon.live::after { box-shadow: 0 0 0 2px #141518; }
 body.app-dark input,
 body.app-dark textarea,
 body.app-dark select { color: #f4f5f7; }
+body.app-dark .agent-ctx,
+body.app-dark .agent-ctx-flyout,
+body.app-dark .agents-menu,
+body.app-dark .screen-rail,
+body.app-dark .notify-panel,
+body.app-dark .inbox-confirm,
+body.app-dark .composer-hint button,
+body.app-dark .inbox-copy input,
+body.app-dark .screen-control-btn,
+body.app-dark .screen-input-bar input {
+  background: #1b1d22;
+  color: #f4f5f7;
+  border-color: rgba(255, 255, 255, 0.14);
+}
+body.app-dark .agent-ctx button,
+body.app-dark .agent-ctx-parent,
+body.app-dark .agents-menu button,
+body.app-dark .screen-bot,
+body.app-dark .screen-state,
+body.app-dark .screen-caption {
+  color: #f4f5f7;
+}
+body.app-dark .screen-placeholder { color: #c5cad3; }
+body.app-dark .agent-ctx button.danger { color: #fb7185; background: transparent; }
+body.app-dark .screen-control-btn.primary { background: #3b82f6; color: #fff; border-color: #3b82f6; }
+body.app-dark .screen-control-btn.screen-mic.on { background: #b42318; color: #fff; border-color: #b42318; }
 body.app-dark .agent-form-scrim,
 body.app-dark .sheet { background: rgba(0, 0, 0, 0.55); }
 .shell.today-mode .main { background: #0e0f12; }

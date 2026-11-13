@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents.service import serialize_agent
+from app.agents.service import purge_deleted_agent_history, serialize_agent
 from app.db import get_db
 from app.deps import current_user
 from app.inbox.alerts import LABELS, open_alerts
@@ -122,6 +122,7 @@ async def _live_turns(db: AsyncSession, user: User) -> list[dict]:
 
 @router.get("")
 async def today(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    await purge_deleted_agent_history(db, user)
     agents = (
         await db.execute(
             select(WorkspaceAgent)
