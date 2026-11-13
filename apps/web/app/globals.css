@@ -103,13 +103,11 @@ h1, h2, .display {
 .auth-mark {
   width: 34px;
   height: 34px;
-  border-radius: 12px;
-  background: #6959e8;
   display: grid;
   place-items: center;
   flex: none;
 }
-.auth-mark .brand-mark { display: block; filter: brightness(0) invert(1); }
+.auth-mark .brand-mark { display: block; width: 34px; height: 34px; object-fit: contain; }
 .auth-hero-copy { position: relative; z-index: 1; margin: 45px 0 auto; }
 .auth-hero-copy h1 {
   font-family: var(--font-ui);
@@ -165,13 +163,11 @@ h1, h2, .display {
 .auth-quote-avatar {
   height: 34px;
   width: 34px;
-  border-radius: 12px;
-  background: #eeeaff;
-  color: #6252df;
   display: grid;
   place-items: center;
-  font-size: 19px;
+  flex: none;
 }
+.auth-quote-avatar .brand-mark { width: 34px; height: 34px; object-fit: contain; }
 .auth-online {
   margin-left: auto;
   width: 8px;
@@ -243,7 +239,7 @@ h1, h2, .display {
 .brand-copy { display: grid; line-height: 1.15; }
 .brand-copy strong { font-size: 15px; }
 .brand-copy span { font-size: 11px; color: var(--faint); font-weight: 500; letter-spacing: 0.04em; text-transform: uppercase; }
-.brand-mark { display: block; flex: none; }
+.brand-mark { display: block; flex: none; object-fit: contain; }
 
 .shell { display: grid; grid-template-columns: var(--sidebar-w) 1fr; min-height: 100dvh; }
 .sidebar {
@@ -2802,12 +2798,10 @@ body.lumio-desktop .screen-rail.overlay.fullscreen {
 .site-mark {
   width: 32px;
   height: 32px;
-  border-radius: 11px;
-  background: linear-gradient(160deg, #7b8cff, #2f6bff);
   display: grid;
   place-items: center;
 }
-.site-mark .brand-mark { filter: brightness(0) invert(1); }
+.site-mark .brand-mark { width: 32px; height: 32px; object-fit: contain; }
 .site-links {
   display: flex;
   align-items: center;
