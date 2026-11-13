@@ -998,16 +998,18 @@ export default function ChatPage() {
                   {m.content && m.content !== "Attached files" ? <div className="bubble">{m.content}</div> : null}
                 </div>
               ) : (
-                <div key={i} className={`turn assistant${m.meta?.agent_name ? " speaker" : ""}`}>
+                <div key={i} className={`turn assistant${m.meta?.agent_name || !activeGroup ? " speaker" : ""}`}>
                   {(() => {
-                    const responseColor = String(m.meta?.agent_color || activeAgent?.color || "#f97316");
+                    const responseColor = String(m.meta?.agent_color || activeAgent?.color || screenColor || "#f97316");
+                    const responseName = String(m.meta?.agent_name || (activeGroup ? "" : screenName));
+                    const responseAvatar = String(m.meta?.agent_avatar || (activeGroup ? "" : screenAvatar));
                     const tileStyle = { "--agent-response-color": responseColor } as CSSProperties;
                     return (
                       <>
-                  {m.meta?.agent_name ? (
+                  {responseName ? (
                     <div className="agent-chip">
-                      <AgentAvatar name={String(m.meta.agent_name)} color={responseColor} avatar={m.meta.agent_avatar} className="agent-avatar tiny" />
-                      {m.meta.agent_name}
+                      <AgentAvatar name={responseName} color={responseColor} avatar={responseAvatar} className="agent-avatar tiny" />
+                      {responseName}
                     </div>
                   ) : null}
                     <div className="group-bubble" style={tileStyle}>
