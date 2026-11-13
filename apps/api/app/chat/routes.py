@@ -202,6 +202,9 @@ async def _settle_dead_turns(user, rows: list) -> int:
 
 @router.get("/sessions")
 async def sessions(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    from app.agents.service import purge_deleted_agent_history
+
+    await purge_deleted_agent_history(db, user)
     rows = (
         await db.execute(
             select(ChatSession).where(ChatSession.user_id == user.id).order_by(ChatSession.updated_at.desc()).limit(30)

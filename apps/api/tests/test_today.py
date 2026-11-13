@@ -69,6 +69,13 @@ def test_today_splits_replies_work_finished_and_routines():
                 "pending": [{"title": "Push the branch", "preview": "{'repo': 'Checkme', 'branch': 'agent/port'}"}],
                 "created_at": "2026-11-13T08:00:00+00:00",
             },
+            {
+                "id": "j-gone",
+                "status": "done",
+                "title": "Old bot task",
+                "agent_name": "Retired Bot",
+                "finished_at": "2026-11-13T09:00:00+00:00",
+            },
         ],
         tasks=[
             {
@@ -138,6 +145,8 @@ def test_today_splits_replies_work_finished_and_routines():
     assert anon["agent_name"] == "Chief"
     assert "Checkme" not in anon["detail"]
     assert "Push the branch" in anon["detail"]
+    assert "Retired Bot" not in {row["agent_name"] for row in board["needs_you"] + board["done_today"] + board["working"]}
+    assert "Old bot task" not in {row["title"] for row in board["done_today"]}
     assert any(row["detail"] == "Finished · Morning brief" and row["agent_name"] == "Chief" for row in board["needs_you"])
 
     done_titles = [row["title"] for row in board["done_today"]]
