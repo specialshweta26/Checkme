@@ -761,11 +761,14 @@ async fn run_browser(slot: &Mutex<Option<browser::Chrome>>, tool: &str, args: &V
             let q = args.get("query").and_then(Value::as_str).unwrap_or("");
             chrome.search(q).await
         }
-        "browser_handoff" => chrome.snapshot().await.map(|mut data| {
-            data["handoff"] = json!(true);
-            data["note"] = json!("The Chrome window on this computer is yours. Finish the step there, then tell Lumio to continue.");
-            data
-        }),
+        "browser_handoff" => {
+            chrome.show().await;
+            chrome.snapshot().await.map(|mut data| {
+                data["handoff"] = json!(true);
+                data["note"] = json!("The Chrome window on this computer is yours. Finish the step there, then tell Lumio to continue.");
+                data
+            })
+        }
         "browser_page_log" => chrome.page_log().await,
         "browser_tabs" => chrome.tabs().await,
         "browser_new_tab" => chrome.new_tab(args.get("url").and_then(Value::as_str).unwrap_or("")).await,

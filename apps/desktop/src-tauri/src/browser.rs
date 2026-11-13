@@ -286,27 +286,58 @@ pub async fn launch(start_url: &str) -> Result<Chrome, String> {
         .into_iter()
         .next()
         .ok_or_else(|| "Install Google Chrome (or Edge) to use this computer's browser.".to_string())?;
-    let mut cmd = Command::new(&bin);
-    cmd.arg(format!("--remote-debugging-port={port}"))
-        .arg(format!("--user-data-dir={}", profile_dir().display()))
-        .arg("--no-first-run")
-        .arg("--no-default-browser-check")
-        .arg("--disable-sync")
-        .arg("--disable-blink-features=AutomationControlled")
-        // Keep pages running while the window is behind other windows. Otherwise macOS reports the page as hidden,
-        // Chrome pauses it, and scrolling never loads more (an infinite-scroll page stayed at 10 items).
-        .args(BACKGROUND_FLAGS)
-        .arg("--window-size=1280,800")
-        .arg(start_url)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .kill_on_drop(false);
-    let mut child = cmd.spawn().map_err(|e| format!("could not start Chrome: {e}"))?;
+    let args = chrome_args(port, start_url);
+    let child = spawn_chrome(&bin, &args).await?;
     if let Err(err) = wait_debug(&probe, port).await {
-        child.kill().await.ok();
+        if let Some(mut child) = child {
+            child.kill().await.ok();
+        }
         return Err(err);
     }
-    Ok(Chrome { _child: Some(child), port, http, tab: std::sync::Mutex::new(None) })
+    Ok(Chrome { _child: child, port, http, tab: std::sync::Mutex::new(None) })
+}
+
+fn chrome_args(port: u16, start_url: &str) -> Vec<String> {
+    let mut args = vec![
+        format!("--remote-debugging-port={port}"),
+        format!("--user-data-dir={}", profile_dir().display()),
+        "--no-first-run".into(),
+        "--no-default-browser-check".into(),
+        "--disable-sync".into(),
+        "--disable-blink-features=AutomationControlled".into(),
+        // Keep pages running while the window is behind other windows. Otherwise macOS reports the page as hidden,
+        // Chrome pauses it, and scrolling never loads more (an infinite-scroll page stayed at 10 items).
+        "--window-size=1280,800".into(),
+        start_url.to_string(),
+    ];
+    args.splice(6..6, BACKGROUND_FLAGS.into_iter().map(str::to_string));
+    args
+}
+
+/// The .app that contains this browser binary, when it lives in one.
+#[cfg(target_os = "macos")]
+fn app_bundle(bin: &std::path::Path) -> Option<PathBuf> {
+    bin.ancestors().find(|dir| dir.extension().and_then(|ext| ext.to_str()) == Some("app")).map(PathBuf::from)
+}
+
+/// Start Chrome without taking the screen. Clicks and screenshots go through the debugger, so the window can stay behind
+/// whatever the user is doing. On macOS, `open -g` does not bring that app forward. A direct spawn is the fallback, and
+/// on Windows and Linux the window may show once; later steps do not pull it forward again.
+async fn spawn_chrome(bin: &std::path::Path, args: &[String]) -> Result<Option<Child>, String> {
+    #[cfg(target_os = "macos")]
+    if let Some(app) = app_bundle(bin) {
+        let mut cmd = Command::new("/usr/bin/open");
+        cmd.arg("-na").arg(&app).arg("-g").arg("--args").args(args);
+        cmd.stdout(Stdio::null()).stderr(Stdio::null());
+        let status = cmd.status().await.map_err(|e| format!("could not start Chrome: {e}"))?;
+        if !status.success() {
+            return Err(format!("could not start Chrome ({status})"));
+        }
+        return Ok(None);
+    }
+    let mut cmd = Command::new(bin);
+    cmd.args(args).stdout(Stdio::null()).stderr(Stdio::null()).kill_on_drop(false);
+    Ok(Some(cmd.spawn().map_err(|e| format!("could not start Chrome: {e}"))?))
 }
 
 impl Chrome {
@@ -355,11 +386,30 @@ impl Chrome {
     }
 
     pub async fn switch_tab(&self, id: &str) -> Result<Value, String> {
-        let _ = self.http.get(format!("http://127.0.0.1:{}/json/activate/{id}", self.port)).send().await;
+        // Selecting a tab only changes which page the debugger drives. It does not bring the window forward.
         self.use_tab(Some(id));
         let mut data = self.snapshot().await?;
         data["tab"] = json!(id);
         Ok(data)
+    }
+
+    /// Bring Lumio's browser window forward. Only for a handoff, when the user has to sign in or solve a check.
+    pub async fn show(&self) {
+        let chosen = self.tab.lock().ok().and_then(|current| current.clone());
+        let id = match chosen {
+            Some(id) => Some(id),
+            None => self.pages().await.ok().and_then(|pages| {
+                pages.into_iter().find_map(|page| {
+                    if page.get("type").and_then(Value::as_str) != Some("page") {
+                        return None;
+                    }
+                    page.get("id").and_then(Value::as_str).map(str::to_string)
+                })
+            }),
+        };
+        if let Some(id) = id {
+            let _ = self.http.get(format!("http://127.0.0.1:{}/json/activate/{id}", self.port)).send().await;
+        }
     }
 
     pub async fn close_tab(&self, id: &str) -> Result<Value, String> {
@@ -820,11 +870,7 @@ impl Chrome {
     pub async fn act(&self, actions: &[Value]) -> Result<Value, String> {
         let mut warnings: Vec<String> = vec![];
         self.eval(WATCH_JS).await.ok();
-        // A real mouse needs the page in front; several chats can be working in their own tabs.
-        let front = self.tab.lock().ok().and_then(|current| current.clone());
-        if let Some(id) = front {
-            let _ = self.http.get(format!("http://127.0.0.1:{}/json/activate/{id}", self.port)).send().await;
-        }
+        // Clicks go through the debugger, so the window stays where the user left it.
         for (index, step) in actions.iter().enumerate() {
             let kind = step.get("kind").and_then(Value::as_str).unwrap_or("click");
             let check_effect = matches!(kind, "click" | "dblclick" | "hover" | "check" | "uncheck");
