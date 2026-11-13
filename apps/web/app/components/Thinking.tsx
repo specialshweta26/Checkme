@@ -1,5 +1,7 @@
 "use client";
 
+import { AgentAvatar } from "./AgentAvatar";
+
 /**
  * Live status for an in-flight chat turn.
  *
@@ -15,6 +17,9 @@ export function Thinking({
   draft = "",
   stopping = false,
   stalled = false,
+  name = "",
+  color = "",
+  avatar = "",
 }: {
   steps?: string[];
   hint?: string;
@@ -22,6 +27,9 @@ export function Thinking({
   stopping?: boolean;
   /** No update for a while (or the connection dropped): say so, so the row never looks stuck. */
   stalled?: boolean;
+  name?: string;
+  color?: string;
+  avatar?: string;
 }) {
   const clean = steps.filter((s) => s && s !== "Done");
   const brief = hint.replace(/\s+/g, " ").trim();
@@ -39,7 +47,11 @@ export function Thinking({
       ) : null}
       {draft.trim() ? <div className="think-draft">{draft}</div> : null}
       <div className="think">
-        <span className="think-orb" />
+        {avatar ? (
+          <AgentAvatar name={name || "Lumio"} color={color} avatar={avatar} working className="agent-avatar think-mascot" />
+        ) : (
+          <span className="think-orb" />
+        )}
         <span className="think-copy" key={current}>
           {stopping ? "Stopping…" : current}
         </span>

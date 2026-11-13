@@ -34,7 +34,7 @@ export default function Login() {
           </div>
           <div className="auth-quote">
             <div className="auth-quote-top">
-              <span className="auth-quote-avatar">✦</span>
+              <span className="auth-quote-avatar"><BrandMark size={34} /></span>
               <span>Lumio assistant</span>
               <span className="auth-online" aria-hidden />
             </div>

@@ -7,7 +7,7 @@ export const metadata: Metadata = {
     "Sign in, use Lumio in the browser, or download for Mac and Windows. A private assistant for mail, calendar, and the computer in front of you.",
   applicationName: "Lumio",
   appleWebApp: { capable: true, title: "Lumio", statusBarStyle: "default" },
-  icons: { icon: "/icon.svg", apple: "/icon.svg" },
+  icons: { icon: "/agents/01-wave.png", apple: "/agents/01-wave.png" },
 };
 
 export const viewport: Viewport = {

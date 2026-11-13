@@ -854,13 +854,13 @@ export default function ChatPage() {
       <div className="chat">
         <div className="chat-head">
           {activeGroup ? (
-            <span className="group-stack chat-head-face" aria-hidden>
+            <span className={`group-stack chat-head-face${busyHere ? " working" : ""}`} aria-hidden>
               {activeGroup.members.slice(0, 3).map((m) => (
-                <AgentAvatar key={m.id} name={m.name} color={m.color} avatar={m.avatar} className="agent-avatar tiny" />
+                <AgentAvatar key={m.id} name={m.name} color={m.color} avatar={m.avatar} working={busyHere} className="agent-avatar tiny" />
               ))}
             </span>
           ) : (
-            <AgentAvatar name={screenName} color={screenColor} avatar={screenAvatar} className="agent-avatar chat-head-face" />
+            <AgentAvatar name={screenName} color={screenColor} avatar={screenAvatar} working={busyHere} className="agent-avatar chat-head-face" />
           )}
           <div className="chat-head-copy">
             <strong>{screenName}</strong>
@@ -1087,6 +1087,9 @@ export default function ChatPage() {
                 draft={progress[currentKey]?.draft}
                 stopping={stopping.includes(currentKey)}
                 stalled={Boolean(stalled[currentKey])}
+                name={screenName}
+                color={screenColor}
+                avatar={screenAvatar}
               /> : null}
             <div ref={end} />
           </div>
