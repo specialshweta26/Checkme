@@ -1,0 +1,8 @@
+{
+  "name": "checkme-pptx",
+  "private": true,
+  "description": "pptxgenjs runtime for designed decks on the website and the desktop app",
+  "dependencies": {
+    "pptxgenjs": "3.12.0"
+  }
+}
