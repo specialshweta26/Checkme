@@ -34,14 +34,10 @@ def test_a_document_keeps_its_parts():
     assert doc.tables[0].cell(1, 1).text == "d"
 
 
-def test_a_presentation_keeps_slides_and_notes():
-    from pptx import Presentation
-
-    data = files.build_pptx({"slides": [{"title": "Plan", "bullets": ["One", "Two"], "notes": "Say this"}]})
-    slide = Presentation(io.BytesIO(data)).slides[0]
-    assert slide.shapes.title.text == "Plan"
-    assert [p.text for p in slide.placeholders[1].text_frame.paragraphs] == ["One", "Two"]
-    assert slide.notes_slide.notes_text_frame.text == "Say this"
+async def test_powerpoint_is_not_built_as_title_and_bullets():
+    out = await files.create(SimpleNamespace(), "pptx", "deck", {"slides": [{"title": "Plan", "bullets": ["One"]}]})
+    assert out["ok"] is False
+    assert "create_presentation" in out["error"]
 
 
 def test_file_names_are_safe():

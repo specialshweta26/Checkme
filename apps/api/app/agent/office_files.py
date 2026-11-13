@@ -1,4 +1,7 @@
-"""Excel, Word and PowerPoint files made on the server and attached to the chat, so no office app is needed."""
+"""Excel and Word files made on the server and attached to the chat, so no office app is needed.
+
+PowerPoint decks are built by app.agent.presentations (create_presentation), not here.
+"""
 
 from __future__ import annotations
 
@@ -7,12 +10,10 @@ import re
 from typing import Any
 
 MAX_ROWS = 20_000
-MAX_SLIDES = 200
 _CELL_RANGE = re.compile(r"^[A-Za-z]{1,3}\d+:[A-Za-z]{1,3}\d+$")
 _MEDIA = {
     "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
 }
 
 
@@ -94,32 +95,7 @@ def build_docx(spec: dict) -> bytes:
     return out.getvalue()
 
 
-def build_pptx(spec: dict) -> bytes:
-    from pptx import Presentation
-
-    slides = spec.get("slides")
-    if not isinstance(slides, list) or not slides:
-        raise SpecError("pptx needs slides: [{title, bullets}]")
-    if len(slides) > MAX_SLIDES:
-        raise SpecError(f"at most {MAX_SLIDES} slides")
-    deck = Presentation()
-    layout = deck.slide_layouts[1]
-    for item in slides:
-        slide = deck.slides.add_slide(layout)
-        slide.shapes.title.text = str(item.get("title") or "")
-        frame = slide.placeholders[1].text_frame
-        bullets = [str(b) for b in item.get("bullets") or []]
-        frame.text = bullets[0] if bullets else ""
-        for bullet in bullets[1:]:
-            frame.add_paragraph().text = bullet
-        if item.get("notes"):
-            slide.notes_slide.notes_text_frame.text = str(item["notes"])
-    out = io.BytesIO()
-    deck.save(out)
-    return out.getvalue()
-
-
-_BUILDERS = {"xlsx": build_xlsx, "docx": build_docx, "pptx": build_pptx}
+_BUILDERS = {"xlsx": build_xlsx, "docx": build_docx}
 
 
 def file_name(filename: str, kind: str) -> str:
@@ -132,8 +108,10 @@ async def create(ctx: Any, kind: str, filename: str, spec: dict) -> dict:
     from connector_core import BinaryResult
 
     kind = str(kind or "").lower().lstrip(".")
+    if kind == "pptx":
+        return {"ok": False, "error": "PowerPoint decks use create_presentation, which designs the slides."}
     if kind not in _BUILDERS:
-        return {"ok": False, "error": "kind must be xlsx, docx or pptx"}
+        return {"ok": False, "error": "kind must be xlsx or docx"}
     try:
         data = _BUILDERS[kind](spec if isinstance(spec, dict) else {})
     except (SpecError, TypeError, ValueError, AttributeError) as exc:

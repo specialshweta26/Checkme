@@ -617,11 +617,36 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         return _dumps(await computer.office_app(ctx, app, action, document, cells, text, title, notes, path, format))
 
     async def create_office_file(kind: str, filename: str, spec: dict[str, Any]) -> str:
-        """Create an Excel, Word or PowerPoint file and attach it to this chat; no app needs to be installed, and it works on the website too. kind: xlsx, docx or pptx. xlsx spec: {"sheets": [{"name": "Sales", "rows": [["Item", "Amount"], ["Tea", 40], ["Total", "=SUM(B2:B2)"]], "chart": {"type": "bar", "title": "Amounts", "labels": "A2:A4", "values": "B2:B4"}}]} (chart type bar, line or pie; formulas calculate when the file is opened). docx spec: {"blocks": [{"type": "heading", "text": "...", "level": 1}, {"type": "paragraph", "text": "..."}, {"type": "bullets", "items": ["..."]}, {"type": "table", "rows": [["..."]]}]}. pptx spec: {"slides": [{"title": "...", "bullets": ["..."], "notes": "..."}]}."""
+        """Create an Excel or Word file and attach it to this chat. No office app needs to be installed. Works on the website and in the desktop app. kind: xlsx or docx. For a slide deck, use create_presentation. xlsx spec: {"sheets": [{"name": "Sales", "rows": [["Item", "Amount"], ["Tea", 40], ["Total", "=SUM(B2:B2)"]], "chart": {"type": "bar", "title": "Amounts", "labels": "A2:A4", "values": "B2:B4"}}]} (chart type bar, line or pie; formulas calculate when the file is opened). docx spec: {"blocks": [{"type": "heading", "text": "...", "level": 1}, {"type": "paragraph", "text": "..."}, {"type": "bullets", "items": ["..."]}, {"type": "table", "rows": [["..."]]}]}."""
         from app.agent.office_files import create
 
         ctx.used_tools.append("create_office_file")
         return _dumps(await create(ctx, kind, filename, spec))
+
+    async def create_presentation(filename: str, script: str) -> str:
+        """Build a designed PowerPoint deck and attach it. Use this for every slide deck, on the website and in the desktop app. PowerPoint and Node are not required on the user's machine. Do not use create_office_file for pptx.
+
+        script is JavaScript. pptxgen and OUT are already defined. Do not require() anything.
+
+        const pres = new pptxgen();
+        pres.layout = "LAYOUT_WIDE";
+        const slide = pres.addSlide();
+        slide.background = { color: "1E2761" };
+        slide.addText("Title", { x: 0.7, y: 1.8, w: 10, h: 1.2, fontSize: 40, fontFace: "Calibri", bold: true, color: "FFFFFF", margin: 0 });
+        slide.addShape(pres.ShapeType.roundRect, { x: 0.7, y: 4.4, w: 3.4, h: 1.3, fill: { color: "CADCFC" }, rectRadius: 0.08 });
+        slide.addText("12 farms", { x: 0.7, y: 4.6, w: 3.4, h: 0.9, fontSize: 28, fontFace: "Calibri", bold: true, color: "1E2761", align: "center", margin: 0 });
+        slide.addNotes("What to say.");
+        await pres.writeFile({ fileName: OUT });
+
+        Set pres.layout before addSlide. LAYOUT_WIDE is 13.333 by 7.5 inches. Hex colors are 6 digits with no # and no alpha. Build a fresh options object for every call. Shadow offset must be >= 0. Lists use bullet: true, never a typed bullet character. Speaker notes go in slide.addNotes, once, as plain text.
+
+        Design the deck for this topic. One palette, one color dominant. Dark title and closing slides, light content slides. Every slide needs a shape, card, stat, chart, or image — a title plus bullets on white is a failed slide, and the tool will say so. Vary the layouts (title, two columns, stat callouts, 2x2 cards, comparison, timeline, chart). Fonts: Calibri or Arial for body, Cambria for titles. Titles 36-44pt, body 14-16pt. Keep 0.5in margins and 0.3-0.5in between blocks. Left-align body text. Do not add a bar or stripe along an edge. Charts stay native: showTitle, showValue, chartColors from the palette. On a stacked bar, dataLabelPosition is ctr, inEnd, or inBase.
+
+        Palettes you can start from: Midnight 1E2761 / CADCFC / FFFFFF, Forest 2C5F2D / 97BC62 / F5F5F5, Coral F96167 / F9E795 / 2F3C7E, Ocean 065A82 / 1C7293 / 21295C, Charcoal 36454F / F2F2F2 / 212121. Pick the one that fits the topic."""
+        from app.agent.presentations import create
+
+        ctx.used_tools.append("create_presentation")
+        return _dumps(await create(ctx, filename, script))
 
     async def launch_app(name: str) -> str:
         """Open an app on the computer (Finder, Chrome, Excel, VS Code, …). In the desktop app this is the user's machine."""
@@ -895,6 +920,7 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         StructuredTool.from_function(coroutine=computer_notify, name="computer_notify", description=computer_notify.__doc__),
         StructuredTool.from_function(coroutine=office_app, name="office_app", description=office_app.__doc__),
         StructuredTool.from_function(coroutine=create_office_file, name="create_office_file", description=create_office_file.__doc__),
+        StructuredTool.from_function(coroutine=create_presentation, name="create_presentation", description=create_presentation.__doc__),
         StructuredTool.from_function(coroutine=clipboard_read, name="clipboard_read", description=clipboard_read.__doc__),
         StructuredTool.from_function(coroutine=clipboard_write, name="clipboard_write", description=clipboard_write.__doc__),
         StructuredTool.from_function(coroutine=browser_page_log, name="browser_page_log", description=browser_page_log.__doc__),

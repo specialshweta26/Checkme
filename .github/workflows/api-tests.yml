@@ -25,6 +25,13 @@ jobs:
       # Same Python as apps/api/Dockerfile, so tests match production.
       - name: Install dependencies
         run: uv sync --frozen --python 3.12
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/api/pptx/package-lock.json
+      - name: Install the presentation builder
+        run: npm ci --prefix pptx --omit=dev
       - name: Run tests
         run: uv run --frozen python -m pytest -q
       # The Docker image installs this package with pip, so build it the same way here. A packaging problem then
