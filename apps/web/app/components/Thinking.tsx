@@ -38,36 +38,40 @@ export function Thinking({
   const trail = clean.slice(-4, -1);
   return (
     <div className="turn assistant" aria-live="polite" aria-label={`Lumio is working: ${current}`}>
-      {trail.length ? (
-        <ul className="think-trail">
-          {trail.map((s, i) => (
-            <li key={`${i}-${s}`}>{s}</li>
-          ))}
-        </ul>
-      ) : null}
       {draft.trim() ? <div className="think-draft">{draft}</div> : null}
-      <div className="think">
+      <div className="think-card">
         {avatar ? (
           <AgentAvatar name={name || "Lumio"} color={color} avatar={avatar} working className="agent-avatar think-mascot" />
         ) : (
           <span className="think-orb" />
         )}
-        <span className="think-copy" key={current}>
-          {stopping ? "Stopping…" : current}
-        </span>
+        <div className="think-card-copy">
+          {trail.length ? (
+            <ul className="think-trail">
+              {trail.map((s, i) => (
+                <li key={`${i}-${s}`}>{s}</li>
+              ))}
+            </ul>
+          ) : null}
+          <div className="think">
+            <span className="think-copy" key={current}>
+              {stopping ? "Stopping…" : current}
+            </span>
+          </div>
+          {clean.length || draft.trim() ? null : (
+            <div className="think-bars">
+              <div className="bar w1" />
+              <div className="bar w2" />
+              <div className="bar w3" />
+            </div>
+          )}
+        </div>
       </div>
       {stalled && !stopping ? (
         <p className="think-stalled" role="status">
           No update for a while. It may still be working. Use Stop in the message box, or send a new message to redirect it.
         </p>
       ) : null}
-      {clean.length || draft.trim() ? null : (
-        <div className="think-bars">
-          <div className="bar w1" />
-          <div className="bar w2" />
-          <div className="bar w3" />
-        </div>
-      )}
     </div>
   );
 }
