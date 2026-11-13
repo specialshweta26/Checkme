@@ -231,6 +231,11 @@ export function AppShell({
   }, []);
 
   useEffect(() => {
+    document.body.classList.add("app-dark");
+    return () => document.body.classList.remove("app-dark");
+  }, []);
+
+  useEffect(() => {
     if (conversations) return;
     listSessions().then(setOwn);
   }, [conversations]);
@@ -379,7 +384,7 @@ export function AppShell({
   }
 
   return (
-    <div className={`shell${current === "today" ? " today-mode" : ""}`}>
+    <div className="shell today-mode">
       <div className={`scrim${open ? " show" : ""}`} onClick={() => setOpen(false)} />
       <aside className={`sidebar${open ? " open" : ""}`}>
         <div className="side-brand-row">

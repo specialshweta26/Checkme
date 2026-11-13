@@ -2031,6 +2031,22 @@ body.lumio-desktop .screen-rail.overlay.fullscreen {
 }
 .agent-form.wide { width: min(540px, 100%); }
 .agent-form h3 { margin: 0; }
+.agent-ideas { display: grid; gap: 8px; }
+.agent-ideas p { margin: 4px 0 0; font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--faint); }
+.agent-idea {
+  display: grid;
+  gap: 2px;
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+.agent-idea.on { border-color: rgba(59, 130, 246, 0.7); background: rgba(59, 130, 246, 0.12); }
+.agent-idea strong, .agent-idea small { display: block; }
+.agent-idea small { color: var(--muted); font-size: 12px; line-height: 1.4; }
 .agent-form label, .agent-form fieldset { display: grid; gap: 6px; font-size: 13px; color: var(--muted); }
 .agent-form input, .agent-form textarea, .agent-form select {
   width: 100%;
@@ -3277,6 +3293,7 @@ button.provider:disabled { opacity: .6; cursor: default; }
   .flow-edit-branch { grid-template-columns: 1fr; }
 }
 
+body.app-dark,
 .shell.today-mode {
   color-scheme: dark;
   --bg: #0e0f12;
@@ -3289,9 +3306,43 @@ button.provider:disabled { opacity: .6; cursor: default; }
   --muted: #a4a9b3;
   --faint: #7b808a;
   --accent-soft: rgba(255, 255, 255, 0.06);
+  --surface-glass: rgba(20, 21, 24, 0.92);
   background: #0e0f12;
   color: #f4f5f7;
 }
+body.app-dark .bubble,
+body.app-dark .group-bubble,
+body.app-dark .composer,
+body.app-dark .hero-card,
+body.app-dark .user-file,
+body.app-dark .attach-chip,
+body.app-dark .think-card,
+body.app-dark .connect-card,
+body.app-dark .connect-card-head,
+body.app-dark .agent-form,
+body.app-dark .email-full,
+body.app-dark .notify-panel,
+body.app-dark .ctx-menu,
+body.app-dark .profile-menu {
+  background: #1b1d22;
+  color: #f4f5f7;
+  border-color: rgba(255, 255, 255, 0.08);
+  box-shadow: none;
+}
+body.app-dark .hero-card:hover { background: #24262c; border-color: rgba(255, 255, 255, 0.16); }
+body.app-dark .composer:focus-within { border-color: rgba(255, 255, 255, 0.2); box-shadow: none; }
+body.app-dark .send { background: #3b82f6; color: #fff; }
+body.app-dark .prose,
+body.app-dark .prose p,
+body.app-dark .group-bubble .prose strong { color: #f4f5f7; }
+body.app-dark .group-stack .agent-avatar { box-shadow: 0 0 0 2px #141518; }
+body.app-dark .chat-computer-btn.live::after,
+body.app-dark .topbar-icon.live::after { box-shadow: 0 0 0 2px #141518; }
+body.app-dark input,
+body.app-dark textarea,
+body.app-dark select { color: #f4f5f7; }
+body.app-dark .agent-form-scrim,
+body.app-dark .sheet { background: rgba(0, 0, 0, 0.55); }
 .shell.today-mode .main { background: #0e0f12; }
 .shell.today-mode .sidebar { background: #141518; }
 .today {
@@ -3362,7 +3413,10 @@ button.provider:disabled { opacity: .6; cursor: default; }
   gap: 14px;
 }
 .today-card {
+  display: flex;
+  flex-direction: column;
   min-height: 220px;
+  max-height: 420px;
   padding: 16px 16px 8px;
   border-radius: 18px;
   background: #17181c;
@@ -3398,7 +3452,13 @@ button.provider:disabled { opacity: .6; cursor: default; }
 .today-mark { flex: none; color: #9aa0aa; }
 .today-mark.live { color: #4ade80; }
 .today-mark.spark { color: #d8b4fe; }
-.today-card ul { list-style: none; margin: 0; padding: 0; }
+.today-card ul {
+  list-style: none;
+  margin: 0;
+  padding: 0 4px 8px 0;
+  overflow: auto;
+  min-height: 0;
+}
 .today-card li a {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;

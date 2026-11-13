@@ -185,6 +185,9 @@ export function AgentsNav({
   const [marketApps, setMarketApps] = useState<{ slug: string; name: string; logo?: string; connected?: boolean }[]>([]);
   const [catalogReady, setCatalogReady] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [ideas, setIdeas] = useState<{ tasks: { title: string; prompt: string }[]; skills: { title: string; prompt: string }[] } | null>(null);
+  const [ideasBusy, setIdeasBusy] = useState(false);
+  const [pickedIdea, setPickedIdea] = useState("");
   const pathname = usePathname();
 
   async function refresh() {
@@ -261,7 +264,37 @@ export function AgentsNav({
     setMenu(false);
     setSaving(false);
     setCatalogReady(false);
+    setIdeas(null);
+    setIdeasBusy(false);
+    setPickedIdea("");
   }
+
+  useEffect(() => {
+    if (form !== "agent") return;
+    const nextName = name.trim();
+    const nextTitle = title.trim();
+    if (nextTitle.length < 2 && nextName.length < 2) {
+      setIdeas(null);
+      setIdeasBusy(false);
+      return;
+    }
+    setIdeasBusy(true);
+    const handle = window.setTimeout(() => {
+      fetch("/api/agents/ideas", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: nextName, title: nextTitle }),
+      })
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data) => {
+          setIdeas(data ? { tasks: data.tasks || [], skills: data.skills || [] } : null);
+        })
+        .catch(() => setIdeas(null))
+        .finally(() => setIdeasBusy(false));
+    }, 700);
+    return () => window.clearTimeout(handle);
+  }, [form, name, title]);
 
   function openEdit(agent: WorkspaceAgent) {
     setEditingId(agent.id);
@@ -321,9 +354,13 @@ export function AgentsNav({
     setSaving(true);
     setError("");
     try {
-      const row = await createAgent({ name, color, avatar });
+      const row = await createAgent({ name, title, color, avatar });
+      const firstIdea = pickedIdea;
       resetForm();
       await refresh();
+      if (firstIdea) {
+        window.sessionStorage.setItem("lumio.pendingTask", JSON.stringify({ agentId: row.id, text: firstIdea }));
+      }
       onSelectAgent?.(row.id);
     } catch (err: any) {
       setError(err.message || "Could not create agent");
@@ -728,6 +765,33 @@ export function AgentsNav({
                       </select>
                     </label>
                     <p className="muted">One owner per stage. Write normally, @ a bot to hand a request, or @everyone for updates.</p>
+                  </>
+                ) : form === "agent" ? (
+                  <>
+                    <label>
+                      Title
+                      <input value={title} onChange={(e) => setTitle(e.target.value)} maxLength={80} placeholder="Sales analyst, inbox triage, recruiter" />
+                    </label>
+                    <div className="agent-ideas">
+                      <p>Ideas from this title</p>
+                      {ideasBusy ? <p className="muted">Looking for skills and first tasks…</p> : null}
+                      {!ideasBusy && !ideas?.tasks.length && !ideas?.skills.length ? (
+                        <p className="muted">Add a title and Lumio will suggest skills and ways to start.</p>
+                      ) : null}
+                      {(ideas?.tasks || []).map((task) => (
+                        <button key={task.title} type="button" className={`agent-idea${pickedIdea === task.prompt ? " on" : ""}`} onClick={() => setPickedIdea(pickedIdea === task.prompt ? "" : task.prompt)}>
+                          <strong>{task.title}</strong>
+                          <small>{task.prompt}</small>
+                        </button>
+                      ))}
+                      {ideas?.skills.length ? <p>Skills this bot could learn</p> : null}
+                      {(ideas?.skills || []).map((skill) => (
+                        <button key={skill.title} type="button" className={`agent-idea${pickedIdea === skill.prompt ? " on" : ""}`} onClick={() => setPickedIdea(pickedIdea === skill.prompt ? "" : skill.prompt)}>
+                          <strong>{skill.title}</strong>
+                          <small>{skill.prompt}</small>
+                        </button>
+                      ))}
+                    </div>
                   </>
                 ) : (
                   <>

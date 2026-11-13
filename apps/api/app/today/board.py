@@ -93,13 +93,46 @@ def _agent_map(agents: list[dict]) -> dict[str, dict]:
 
 def _named(agents: dict[str, dict], agent_id, fallback: str = "") -> dict:
     row = agents.get(str(agent_id or "")) or {}
+    fallback_name = (fallback or "").strip()
+    if fallback_name.lower() == "lumio":
+        fallback_name = ""
     return {
-        "agent_id": str(agent_id) if agent_id else (row.get("id") or None),
-        "agent_name": row.get("name") or fallback or "Lumio",
+        "agent_id": str(row.get("id") or agent_id or "") or None,
+        "agent_name": row.get("name") or fallback_name or "Agent",
         "agent_color": row.get("color") or "",
         "agent_avatar": row.get("avatar") or "",
         "agent_title": row.get("title") or "",
     }
+
+
+def _who(agents: list[dict], by_agent: dict[str, dict], agent_id, agent_name: str = "", default_id: str | None = None) -> dict:
+    """Use the real bot. Unassigned work belongs to the default bot, never a made-up Lumio."""
+    if agent_id and str(agent_id) in by_agent:
+        return _named(by_agent, agent_id)
+    label = (agent_name or "").strip()
+    if label and label.lower() != "lumio":
+        for row in agents:
+            if (row.get("name") or "").strip().lower() == label.lower():
+                return _named(by_agent, row.get("id"), label)
+        return _named(by_agent, None, label)
+    return _named(by_agent, default_id)
+
+
+def _recent(value, now: datetime, *, hours: int) -> bool:
+    dt = _parse(value)
+    if dt is None:
+        return False
+    return (now - dt).total_seconds() <= hours * 3600
+
+
+def _approval_line(pending) -> str:
+    if not pending or not isinstance(pending[0], dict):
+        return ""
+    title = str(pending[0].get("title") or "").strip()
+    preview = str(pending[0].get("preview") or "").strip()
+    if preview[:1] in "{[" or preview.startswith("{'"):
+        preview = ""
+    return title or preview
 
 
 def _mail_owner(agents: list[dict], default_id: str | None) -> dict:
@@ -142,13 +175,11 @@ def assemble(
     for job in jobs:
         if job.get("status") not in NEEDS_JOB:
             continue
-        who = _named(by_agent, job.get("agent_id"))
+        who = _who(agents, by_agent, job.get("agent_id"), job.get("agent_name") or "", default_id)
         question = job.get("question") if isinstance(job.get("question"), dict) else {}
         pending = job.get("pending") if isinstance(job.get("pending"), list) else []
         ask = str((question or {}).get("question") or "").strip()
-        card = ""
-        if pending and isinstance(pending[0], dict):
-            card = str(pending[0].get("preview") or pending[0].get("title") or "").strip()
+        card = _approval_line(pending)
         if ask:
             detail = f"Has a question for you · {clip(ask, 140)}"
         elif card:
@@ -236,7 +267,9 @@ def assemble(
         working.append(item)
 
     for row in live or []:
-        who = _named(by_agent, row.get("agent_id"))
+        who = _who(agents, by_agent, row.get("agent_id"), row.get("agent_name") or "", default_id)
+        if not _recent(row.get("created_at"), now, hours=6):
+            continue
         add_work(
             f"live:{who['agent_id'] or row.get('id')}",
             {
@@ -254,7 +287,9 @@ def assemble(
     for job in jobs:
         if job.get("status") not in WORKING:
             continue
-        who = _named(by_agent, job.get("agent_id"))
+        if not _recent(job.get("started_at") or job.get("created_at"), now, hours=18):
+            continue
+        who = _who(agents, by_agent, job.get("agent_id"), job.get("agent_name") or "", default_id)
         add_work(
             f"job:{job.get('id')}",
             {
@@ -272,7 +307,7 @@ def assemble(
     for task in tasks:
         if task.get("status") != "running":
             continue
-        who = _named(by_agent, task.get("agent_id"), task.get("agent_name") or "")
+        who = _who(agents, by_agent, task.get("agent_id"), task.get("agent_name") or "", default_id)
         if not who["agent_color"]:
             who["agent_color"] = task.get("agent_color") or ""
         add_work(
@@ -298,7 +333,7 @@ def assemble(
     for job in jobs:
         if job.get("status") not in DONE_JOB or not _same_day(job.get("finished_at"), now, tz):
             continue
-        who = _named(by_agent, job.get("agent_id"))
+        who = _who(agents, by_agent, job.get("agent_id"), job.get("agent_name") or "", default_id)
         done.append(
             {
                 "id": f"job:{job.get('id')}",
@@ -318,7 +353,7 @@ def assemble(
             continue
         if task.get("status") == "running":
             continue
-        who = _named(by_agent, task.get("agent_id"), task.get("agent_name") or "")
+        who = _who(agents, by_agent, task.get("agent_id"), task.get("agent_name") or "", default_id)
         if not who["agent_color"]:
             who["agent_color"] = task.get("agent_color") or ""
         title = clip(str(task.get("title") or task.get("last_result") or "Finished routine"), 140)
@@ -335,6 +370,18 @@ def assemble(
             }
         )
     done.sort(key=lambda item: _parse(item.get("at")) or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+    for item in done:
+        add_need(
+            f"done:{item['id']}",
+            {
+                **item,
+                "id": f"done:{item['id']}",
+                "kind": "done",
+                "title": item["agent_name"],
+                "detail": f"Finished · {item['title']}",
+            },
+        )
+    needs.sort(key=lambda item: _parse(item.get("at")) or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
 
     coming: list[dict] = []
     for task in tasks:
@@ -342,7 +389,7 @@ def assemble(
             continue
         if not task.get("next_run_at") and not task.get("schedule_label"):
             continue
-        who = _named(by_agent, task.get("agent_id"), task.get("agent_name") or "")
+        who = _who(agents, by_agent, task.get("agent_id"), task.get("agent_name") or "", default_id)
         if not who["agent_color"]:
             who["agent_color"] = task.get("agent_color") or ""
         coming.append(
@@ -387,8 +434,8 @@ def assemble(
             "done_today": len(done),
             "coming_up": len(coming),
         },
-        "needs_you": needs[:8],
-        "working": working[:8],
-        "done_today": done[:8],
-        "coming_up": coming[:12],
+        "needs_you": needs[:24],
+        "working": working[:12],
+        "done_today": done[:24],
+        "coming_up": coming[:24],
     }
