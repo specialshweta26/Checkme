@@ -2785,8 +2785,15 @@ body.lumio-desktop .screen-rail.overlay.fullscreen {
   gap: 20px;
 }
 .site-nav {
-  padding: 22px 0 8px;
+  width: 100%;
+  margin: 0;
+  padding: 12px max(20px, calc((100% - 1120px) / 2));
+  background: #fff;
+  color: #111827;
+  border-bottom: 1px solid rgba(24, 34, 58, 0.08);
 }
+.site-nav .site-links { color: #3d4663; }
+.site-nav .site-nav-cta { background: #111827; color: #fff; }
 .site-brand {
   display: inline-flex;
   align-items: center;
