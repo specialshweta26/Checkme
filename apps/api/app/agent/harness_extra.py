@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from typing import Any
 
 from langchain_core.tools import StructuredTool
@@ -439,7 +441,8 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
     async def browser_logins() -> str:
         """Sites the user saved a sign-in for (site, label, username hint; never the password). In browser_task on one of
         these sites, write {{login_username}} and {{login_password}} for the sign-in fields: code types the values. To add
-        one, the user uses the Saved runs page in the app; never ask for a password in chat."""
+        one, the user uses Profile > Vault in the app, where they also choose which agents may use it; never ask for a
+        password in chat."""
         ctx.used_tools.append("browser_logins")
         user_id = getattr(getattr(ctx, "user", None), "id", None)
         if user_id is None:
@@ -447,7 +450,11 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         from app.browser_runs import logins
 
         rows = await logins.list_logins(user_id)
-        return _dumps({"ok": True, "sites": [{"host": r["host"], "label": r["label"], "username_hint": r["username_hint"]} for r in rows]})
+        mine = [r for r in rows if logins.allowed(SimpleNamespace(agent_ids=r["agent_ids"]), getattr(getattr(ctx, "agent", None), "id", None))]
+        out = {"ok": True, "sites": [{"host": r["host"], "label": r["label"], "username_hint": r["username_hint"]} for r in mine]}
+        if len(mine) < len(rows):
+            out["note"] = "Other saved sign-ins exist but were not given to you; those sites are closed to you. The user can allow you in Profile > Vault."
+        return _dumps(out)
 
     async def browser_download(url: str = "", ref: str = "", filename: str = "") -> str:
         """Download a file from the site directly with the browser's signed-in cookies (no click-through), given its URL (a link href) or the ref of its link/button. Returns the saved file with extracted_text and download_url, like browser_act download."""

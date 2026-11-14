@@ -10,7 +10,7 @@ import { EmailThreadButton, mailRefsFromMeta } from "../components/EmailThread";
 import { Markdown } from "../components/Markdown";
 import { dismissFocusCard, focusCardDismissed, FocusOnboarding } from "../components/FocusCard";
 import { AgentAvatar } from "../components/AgentAvatar";
-import { RoutinesButton } from "../components/Routines";
+import { AboutButton, RoutinesButton } from "../components/Routines";
 import { JobTimeline } from "../components/JobTimeline";
 import SkillFlow from "../components/SkillFlow";
 import { Thinking } from "../components/Thinking";
@@ -922,6 +922,7 @@ export default function ChatPage() {
             {screenMeta ? <span className="muted">{screenMeta}</span> : null}
           </div>
           <RoutinesButton className="chat-task-btn" agentId={activeGroup ? null : agentId} agentName={screenName} />
+          <AboutButton className="chat-task-btn" agentId={activeGroup ? null : agentId} agentName={screenName} />
           <button
             type="button"
             className={`chat-computer-btn${screenOpen ? " on" : ""}${watching || controlling || computer?.live ? " live" : ""}`}

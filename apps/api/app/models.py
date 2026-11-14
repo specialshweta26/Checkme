@@ -90,6 +90,9 @@ class SiteLogin(Base):
     label: Mapped[str] = mapped_column(String(200), default="")
     username_enc: Mapped[str] = mapped_column(Text, default="")
     password_enc: Mapped[str] = mapped_column(Text, default="")
+    # The agents allowed to use this sign-in, as id strings (app/browser_runs/logins.py "Access"). None until it is
+    # first worked out from the agents' skills; [] means no agent may use it.
+    agent_ids: Mapped[list | None] = mapped_column(JSONB, nullable=True, default=None)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)

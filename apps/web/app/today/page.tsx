@@ -4,6 +4,7 @@ import { FormEvent, useEffect, useState } from "react";
 import { AppShell } from "../components/AppShell";
 import { AgentAvatar } from "../components/AgentAvatar";
 import { chatHref, getMe, relativeTime, rememberScope, type Me } from "../lib";
+import { AgentSelect } from "../components/Select";
 
 type AgentOption = { id: string; name: string; title?: string; color?: string; avatar?: string };
 
@@ -52,6 +53,7 @@ export default function TodayPage() {
   const [agentId, setAgentId] = useState("");
   const [text, setText] = useState("");
   const [error, setError] = useState("");
+  const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
     getMe().then((user) => {
@@ -80,6 +82,7 @@ export default function TodayPage() {
       if (stop) return;
       setError("");
       setBoard(data);
+      setLoaded(true);
       setAgentId((current) => current || data.default_agent_id || data.agents?.[0]?.id || "");
     }
     load();
@@ -105,12 +108,9 @@ export default function TodayPage() {
   return (
     <AppShell me={me} current="today">
       <div className="today">
-        <header className="today-head">
+        <header className={`today-head${loaded ? " ready" : ""}`}>
           <p className="today-date">{board.date_label}</p>
-          <h1>
-            {board.greeting}
-            {board.name ? `, ${board.name}` : ""}
-          </h1>
+          {loaded ? <Greeting greeting={board.greeting} name={board.name} /> : <h1 className="today-greeting-placeholder" aria-hidden>&nbsp;</h1>}
           <p className="today-counts">
             <span>{counts.working} working</span>
             <span>{counts.needs_you} need you</span>
@@ -119,16 +119,9 @@ export default function TodayPage() {
         </header>
 
         <form className="today-composer" onSubmit={giveTask}>
-          <label className="today-agent">
-            <span className="sr">Bot</span>
-            <select value={agentId} onChange={(e) => setAgentId(e.target.value)} aria-label="Bot">
-              {board.agents.map((agent) => (
-                <option key={agent.id} value={agent.id}>
-                  {agent.name}
-                </option>
-              ))}
-            </select>
-          </label>
+          <div className="today-agent">
+            <AgentSelect value={agentId} onChange={setAgentId} label="Bot" variant="bare" />
+          </div>
           <input
             value={text}
             onChange={(e) => setText(e.target.value)}
@@ -263,5 +256,27 @@ function Arrow() {
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
       <path d="M12 18V6M6.5 11.5 12 6l5.5 5.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
+  );
+}
+
+/** "Good morning, Gaurav": the words rise in one after another and the name settles with a soft shimmer. It plays
+ * once, when Today opens; the board's 15-second refresh doesn't replay it. Still under prefers-reduced-motion. */
+function Greeting({ greeting, name }: { greeting: string; name: string }) {
+  const words = greeting.split(" ");
+  return (
+    <h1 className="today-greeting" aria-label={name ? `${greeting}, ${name}` : greeting}>
+      {words.map((w, i) => (
+        <span key={i} className="greet-word" style={{ ["--i" as string]: i }} aria-hidden>
+          {w}
+          {i < words.length - 1 || name ? (i === words.length - 1 ? "," : "") : ""}
+          {i < words.length - 1 || name ? " " : ""}
+        </span>
+      ))}
+      {name ? (
+        <span className="greet-word greet-name" style={{ ["--i" as string]: words.length }} aria-hidden>
+          {name}
+        </span>
+      ) : null}
+    </h1>
   );
 }

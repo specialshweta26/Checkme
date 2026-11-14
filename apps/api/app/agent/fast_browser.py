@@ -1272,13 +1272,14 @@ def round_budget(goal: str, max_steps: int = 0) -> tuple[int, bool]:
     return (max(default, LONG_ROUNDS) if long else default), long
 
 
-async def add_saved_login(user_id, host: str, vals: dict[str, str]) -> bool:
-    """Add the saved sign-in for this site to a run's values (the caller's own values win). True if one was added."""
+async def add_saved_login(user_id, host: str, vals: dict[str, str], agent_id=None) -> bool:
+    """Add the saved sign-in for this site to a run's values (the caller's own values win), if this agent may use it.
+    True if one was added."""
     if not host:
         return False
     from app.browser_runs import logins
 
-    saved = await logins.values_for(user_id, host)
+    saved = await logins.values_for(user_id, host, agent_id)
     for key, value in saved.items():
         vals.setdefault(key, value)
     return bool(saved)
@@ -1478,6 +1479,12 @@ async def _run_task(ctx, goal: str, url: str, values: dict | None, max_steps: in
     ``save=False`` (healing a saved run) keeps the run unsaved and returns its steps as ``_recorded``."""
     vals = {str(k): str(v) for k, v in (values or {}).items() if v is not None}
     goal = str(goal or "").strip()
+    if url:
+        from app.browser_runs import logins
+
+        refused = await logins.gate(getattr(getattr(ctx, "user", None), "id", None), getattr(ctx, "agent", None), url)
+        if refused is not None:
+            return refused
     started = time.monotonic()
     log_steps: list[dict] = []
     limit, long_goal = round_budget(goal, max_steps)
@@ -1490,7 +1497,7 @@ async def _run_task(ctx, goal: str, url: str, values: dict | None, max_steps: in
             if not target_host:
                 state = await _snapshot(ctx)
                 target_host = host_of(str(state.get("url") or ""))
-            await add_saved_login(user_id, target_host, vals)
+            await add_saved_login(user_id, target_host, vals, getattr(getattr(ctx, "agent", None), "id", None))
         # 1. A saved run of the same task: replay it with no model calls.
         if setting("browser_replay", True) and use_saved and user_id is not None:
             if not target_host:
@@ -1890,8 +1897,13 @@ async def replay_named(ctx, name: str = "", url: str = "", skill_id: str = "", v
     if blocked:
         return {"ok": False, "trace": trace.get("name"), "stopped_before": blocked,
                 "hint": f"This saved run clicks '{blocked}' (a final action), so it was not run. If the user asked for it in chat, call again with allow_final_action; otherwise ask them first."}  # fmt: skip
+    from app.browser_runs import logins
+
+    refused = await logins.gate(user_id, getattr(ctx, "agent", None), str(trace.get("start_url") or "") or f"https://{trace.get('host') or ''}")
+    if refused is not None:
+        return refused
     if setting("browser_saved_logins", True):
-        await add_saved_login(user_id, str(trace.get("host") or host_of(str(trace.get("start_url") or ""))), vals)
+        await add_saved_login(user_id, str(trace.get("host") or host_of(str(trace.get("start_url") or ""))), vals, getattr(getattr(ctx, "agent", None), "id", None))
     filled = await add_filled_variables(ctx, trace, vals, name)
     started = time.monotonic()
     rep = await replay(ctx, trace, vals, heal=setting("browser_heal", True), allow_final=allow_final_action, start_step=start_step)

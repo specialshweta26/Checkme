@@ -149,7 +149,7 @@ def routing_prompt(group, owner, teammates: list, mentions: dict | None = None, 
         "Bots talk to each other in this thread through ask_teammate or work_together so the user does not paste notes.",
         "Each ask_teammate reply posts as that bot's own bubble. Never paste or summarize a teammate's reply into yours.",
         "Conversations and learned memory stay separate per bot — do not read a teammate's private memory.",
-        "Every bot shares one cloud computer, files, browser, and logins. Each bot has its own screen.",
+        "Every bot shares one cloud computer, files and browser; each bot has its own screen. A site with a saved sign-in is open only to the bots the user gave that sign-in in the Vault.",
         "Only one computer-use task may run at a time. If the computer is busy, wait or hand off.",
         f"Proposed roles from each bot's own profile: {roles}. Use only that — never invent brands or data.",
     ]

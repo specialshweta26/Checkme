@@ -106,9 +106,9 @@ async def get_agent_onboarding(agent_id: uuid.UUID, user: User = Depends(current
         agent = await service.get_agent(db, user, agent_id)
     except service.AgentError as exc:
         raise HTTPException(404, str(exc)) from exc
-    from app.agents.onboarding import generate_onboarding
+    from app.agents.onboarding import onboarding_for
 
-    return await generate_onboarding(agent)
+    return await onboarding_for(agent)
 
 
 @router.post("")
@@ -117,6 +117,9 @@ async def create_agent(body: AgentIn, user: User = Depends(current_user), db: As
         row = await service.create_agent(db, user, body.model_dump())
     except service.AgentError as exc:
         raise _err(exc) from exc
+    from app.agents.onboarding import warm
+
+    warm(row)  # its first-chat ideas are ready by the time the chat opens
     return service.serialize_agent(row)
 
 

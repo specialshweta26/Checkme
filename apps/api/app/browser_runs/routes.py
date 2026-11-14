@@ -22,6 +22,11 @@ class LoginIn(BaseModel):
     username: str
     password: str = ""
     label: str = ""
+    agent_ids: list[str] | None = None
+
+
+class AccessIn(BaseModel):
+    agent_ids: list[str]
 
 
 login_router = APIRouter(prefix="/browser/logins", tags=["browser"])
@@ -56,9 +61,21 @@ async def list_logins(user: User = Depends(current_user)) -> list[dict]:
 @login_router.post("")
 async def save_login(body: LoginIn, user: User = Depends(current_user)) -> dict:
     try:
-        return await logins.save_login(user.id, body.host, body.username, body.password, body.label)
+        return await logins.save_login(user.id, body.host, body.username, body.password, body.label, body.agent_ids)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from None
+
+
+@login_router.put("/{login_id}/agents")
+async def set_login_agents(login_id: str, body: AccessIn, user: User = Depends(current_user)) -> dict:
+    """Which agents may use this sign-in (and open its site in the shared browser)."""
+    try:
+        out = await logins.set_access(user.id, login_id, body.agent_ids)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+    if out is None:
+        raise HTTPException(404, "no such saved sign-in")
+    return out
 
 
 @login_router.delete("/{login_id}")

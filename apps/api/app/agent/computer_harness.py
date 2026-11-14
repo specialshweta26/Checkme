@@ -395,12 +395,35 @@ def deep_link_fallback(tool_name: str, args: dict | None, result: Any) -> Any:
     return result
 
 
+# Commands that drive the user's own browser (its cookies are shared by every agent): checked against the Vault.
+VAULT_GATED = frozenset({"browser_navigate", "browser_snapshot", "browser_act", "browser_collect", "browser_download", "browser_page_log",
+                         "browser_handoff", "switch_tab", "new_tab"})  # fmt: skip
+
+
+async def _vault_gate(ctx, url: str) -> dict | None:
+    """Keep an agent off a site whose saved sign-in it wasn't given (app/browser_runs/logins.py "Access")."""
+    if not url or not str(url).startswith(("http://", "https://")) and "." not in str(url):
+        return None
+    from app.browser_runs import logins
+
+    return await logins.gate(getattr(getattr(ctx, "user", None), "id", None), getattr(ctx, "agent", None), str(url))
+
+
 async def run_computer(ctx, tool_name: str, args: dict | None = None, *, force_cloud: bool = False) -> Any:
     if tool_name in browser_guard.ACT_TOOLS:
         args = browser_guard.normalize(args)
     refused = browser_guard.before(ctx, tool_name, args)
     if refused is not None:
         return refused
+    if tool_name in VAULT_GATED:
+        refused = await _vault_gate(ctx, str((args or {}).get("url") or ""))
+        if refused is not None:
+            return refused
+        return await _run_computer_checked(ctx, tool_name, args, force_cloud=force_cloud, gated=True)
+    return await _run_computer_checked(ctx, tool_name, args, force_cloud=force_cloud)
+
+
+async def _run_computer_checked(ctx, tool_name: str, args: dict | None, *, force_cloud: bool = False, gated: bool = False) -> Any:
     where = "desktop" if browser_local(ctx) else "cloud"
 
     async def plain(tool: str, tool_args: dict) -> Any:
@@ -415,6 +438,11 @@ async def run_computer(ctx, tool_name: str, args: dict | None = None, *, force_c
         with_tab = await browser_tabs.tab_for(ctx, tool_name, args, where, plain)
         result = await _run_computer(ctx, tool_name, with_tab if with_tab is not None else args, force_cloud=force_cloud)
     sent = with_tab if with_tab is not None else args
+    if gated and isinstance(result, dict):
+        # A click or redirect can land on such a site too: then nothing from the page goes back to the agent.
+        landed = await _vault_gate(ctx, str(result.get("url") or ""))
+        if landed is not None:
+            return landed
     out = browser_guard.after(ctx, tool_name, sent, result)
     note_popups(ctx, out)
     note_observed(ctx, out)

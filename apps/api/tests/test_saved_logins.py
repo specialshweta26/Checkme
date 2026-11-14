@@ -29,7 +29,7 @@ def test_hosts_and_hints():
 
 
 async def test_browser_task_types_a_saved_login_the_planner_never_sees(monkeypatch):
-    async def saved(user_id, host):
+    async def saved(user_id, host, agent_id=None):
         assert host == "portal.example.com"
         return {logins.USERNAME: "ops@example.com", logins.PASSWORD: "s3cret-pass"}
 
@@ -74,7 +74,7 @@ async def test_browser_task_types_a_saved_login_the_planner_never_sees(monkeypat
 
 
 async def test_caller_values_win_over_a_saved_login(monkeypatch):
-    async def saved(user_id, host):
+    async def saved(user_id, host, agent_id=None):
         return {logins.USERNAME: "saved", logins.PASSWORD: "saved-pass"}
 
     monkeypatch.setattr(logins, "values_for", saved)
@@ -96,7 +96,7 @@ def client(monkeypatch):
     async def list_logins(user_id):
         return [{"id": "l1", "host": "example.com", "label": "Example", "username_hint": "g•••@example.com"}]
 
-    async def save_login(user_id, host, username, password, label=""):
+    async def save_login(user_id, host, username, password, label="", agent_ids=None):
         calls.append((host, username, bool(password), label))
         if not host:
             raise ValueError("give the site address, for example portal.example.com")
@@ -155,18 +155,30 @@ async def db_user(monkeypatch):
 @needs_db
 async def test_logins_are_encrypted_scoped_and_matched_by_site(db_user):
     uid, factory = db_user
-    row = await logins.save_login(uid, "https://www.portal.example.com/login", "ops@example.com", "s3cret-pass", "Portal")
+    from app.models import WorkspaceAgent
+
+    raaz, marki = uuid.uuid4(), uuid.uuid4()
+    async with factory() as db:
+        db.add_all([WorkspaceAgent(id=raaz, user_id=uid, name="Raaz"), WorkspaceAgent(id=marki, user_id=uid, name="Marki")])
+        await db.commit()
+    row = await logins.save_login(uid, "https://www.portal.example.com/login", "ops@example.com", "s3cret-pass", "Portal", [str(raaz)])
+    assert row["agent_ids"] == [str(raaz)]
+    # Only the agent given the sign-in gets it; another agent, or a run with no agent, gets nothing.
+    assert await logins.values_for(uid, "https://portal.example.com/x", marki) == {}
+    assert await logins.values_for(uid, "https://portal.example.com/x") == {}
+    with pytest.raises(ValueError):
+        await logins.save_login(uid, "portal.example.com", "ops@example.com", "", "Portal", [str(uuid.uuid4())])
     assert row["host"] == "portal.example.com" and row["username_hint"] == "o•••@example.com"
     async with factory() as db:
         raw = (await db.execute(text("SELECT username_enc, password_enc FROM site_logins WHERE user_id = :u"), {"u": uid})).one()
     assert "s3cret-pass" not in raw[1] and "ops@example.com" not in raw[0]
-    assert await logins.values_for(uid, "https://portal.example.com/x") == {"login_username": "ops@example.com", "login_password": "s3cret-pass"}
-    assert await logins.values_for(uid, "https://sso.portal.example.com/") != {}
-    assert await logins.values_for(uid, "https://example.com/") == {}
-    assert await logins.values_for(uuid.uuid4(), "https://portal.example.com/") == {}
+    assert await logins.values_for(uid, "https://portal.example.com/x", raaz) == {"login_username": "ops@example.com", "login_password": "s3cret-pass"}
+    assert await logins.values_for(uid, "https://sso.portal.example.com/", raaz) != {}
+    assert await logins.values_for(uid, "https://example.com/", raaz) == {}
+    assert await logins.values_for(uuid.uuid4(), "https://portal.example.com/", raaz) == {}
     # A new username with an empty password keeps the saved password.
     await logins.save_login(uid, "portal.example.com", "ops2@example.com", "")
-    assert (await logins.values_for(uid, "portal.example.com"))["login_password"] == "s3cret-pass"
+    assert (await logins.values_for(uid, "portal.example.com", raaz))["login_password"] == "s3cret-pass"
     with pytest.raises(ValueError):
         await logins.save_login(uid, "new.example.com", "x", "")
     listed = await logins.list_logins(uid)

@@ -160,3 +160,15 @@ def _no_vision_by_default(monkeypatch):
     from app.config import get_settings
 
     monkeypatch.setattr(get_settings(), "browser_vision", False)
+
+
+@pytest.fixture(autouse=True)
+def no_vault_rules(monkeypatch):
+    """The Vault gate (app/browser_runs/logins.py) reads the database on every browser command; tests that need
+    sign-in rules set their own."""
+    from app.browser_runs import logins
+
+    async def none(user_id):
+        return []
+
+    monkeypatch.setattr(logins, "rules", none)

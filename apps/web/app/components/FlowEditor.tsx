@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import type { Flow, FlowNode } from "./SkillFlow";
+import { Select } from "./Select";
 
 type Branch = { to: string; when: string };
 type Draft = { key: string; title: string; do: string; done_when: string; kind: string; branches: Branch[] };
@@ -92,10 +93,15 @@ export default function FlowEditor({
                   aria-label={`Step ${i + 1} title`}
                   onChange={(e) => change(i, { title: e.target.value })}
                 />
-                <select className="input" value={s.kind} aria-label={`Step ${i + 1} type`} onChange={(e) => change(i, { kind: e.target.value })}>
-                  <option value="step">Step</option>
-                  <option value="wait">Wait until ready</option>
-                </select>
+                <Select
+                  value={s.kind}
+                  label={`Step ${i + 1} type`}
+                  onChange={(v) => change(i, { kind: v })}
+                  options={[
+                    { value: "step", label: "Step" },
+                    { value: "wait", label: "Wait until ready" },
+                  ]}
+                />
               </div>
               <textarea
                 rows={2}
@@ -122,18 +128,12 @@ export default function FlowEditor({
                     onChange={(e) => change(i, { branches: s.branches.map((x, m) => (m === k ? { ...x, when: e.target.value } : x)) })}
                   />
                   <span className="muted">go to</span>
-                  <select
-                    className="input"
+                  <Select
                     value={b.to}
-                    aria-label={`Step ${i + 1} branch target`}
-                    onChange={(e) => change(i, { branches: s.branches.map((x, m) => (m === k ? { ...x, to: e.target.value } : x)) })}
-                  >
-                    {later.map((t, m) => (
-                      <option key={t.key} value={t.key}>
-                        Step {i + 2 + m}: {(t.title || t.do).slice(0, 40)}
-                      </option>
-                    ))}
-                  </select>
+                    label={`Step ${i + 1} branch target`}
+                    onChange={(v) => change(i, { branches: s.branches.map((x, m) => (m === k ? { ...x, to: v } : x)) })}
+                    options={later.map((t, m) => ({ value: t.key, label: `Step ${i + 2 + m}: ${(t.title || t.do).slice(0, 40)}` }))}
+                  />
                   <button type="button" className="btn secondary small" onClick={() => change(i, { branches: s.branches.filter((_, m) => m !== k) })}>
                     Remove
                   </button>

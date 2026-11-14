@@ -23,6 +23,7 @@ import {
   type Me,
   type WorkspaceAgent,
 } from "../lib";
+import { AgentSelect } from "../components/Select";
 
 // Skills library (docs/SKILLS.md): add Claude-format skills (a folder with SKILL.md) from a GitHub library or a file,
 // and export any skill as a .zip that Claude, Claude Code or another Lumio can use.
@@ -175,17 +176,10 @@ export default function SkillsPage() {
                 you teaching each one. Any skill can also be exported for Claude or Claude Code.
               </p>
             </div>
-            <label className="skills-target">
+            <div className="skills-target">
               <span>Add skills to</span>
-              <select value={target} onChange={(e) => setTarget(e.target.value)}>
-                <option value="">All agents</option>
-                {agents.map((a) => (
-                  <option key={a.id} value={a.id}>
-                    {a.name}
-                  </option>
-                ))}
-              </select>
-            </label>
+              <AgentSelect value={target} onChange={setTarget} label="Add skills to" allLabel="All agents" agents={agents} />
+            </div>
           </div>
 
           <div className="tasks-toolbar">

@@ -17,6 +17,7 @@ import {
   type RoutineSummary,
   type WorkspaceAgent,
 } from "../lib";
+import { AgentSelect, Select } from "../components/Select";
 
 // Routines (docs/ROUTINES.md): every agent's scheduled work, how its runs went, and each failure in full.
 // URL: ?agent=<id>&tab=routines|history&status=succeeded|failed|needs_approval&days=7|30|90
@@ -164,16 +165,10 @@ export default function RoutinesPage() {
               </p>
             </div>
             <div className="routines-hero-actions">
-              <label className="skills-target">
+              <div className="skills-target">
                 <span>Period</span>
-                <select value={days} onChange={(e) => setDays(Number(e.target.value))}>
-                  {PERIODS.map((d) => (
-                    <option key={d} value={d}>
-                      Last {d} days
-                    </option>
-                  ))}
-                </select>
-              </label>
+                <Select value={String(days)} onChange={(v) => setDays(Number(v))} label="Period" options={PERIODS.map((d) => ({ value: String(d), label: `Last ${d} days` }))} />
+              </div>
               <button className="btn" type="button" onClick={() => setAdding((v) => !v)}>
                 New routine
               </button>
@@ -182,16 +177,10 @@ export default function RoutinesPage() {
 
           {adding ? (
             <form className="task-card routine-new" onSubmit={add}>
-              <label className="skills-target">
+              <div className="skills-target">
                 <span>Agent</span>
-                <select value={newFor} onChange={(e) => setNewFor(e.target.value)}>
-                  {agents.map((a) => (
-                    <option key={a.id} value={a.id}>
-                      {a.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
+                <AgentSelect value={newFor} onChange={setNewFor} label="Agent" agents={agents} />
+              </div>
               <label className="routine-new-text">
                 <span>What and when</span>
                 <input autoFocus placeholder="e.g. every Monday at 9am, summarise last week's sales emails" value={prompt} onChange={(e) => setPrompt(e.target.value)} />

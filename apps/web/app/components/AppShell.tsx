@@ -20,7 +20,8 @@ import {
   THEME_KEY,
 } from "../lib";
 import { AgentsNav } from "./AgentsNav";
-import { AgentRoutinesDrawer, RoutinesContext } from "./Routines";
+import { AgentRoutinesPanel, PanelContext, type PanelKind } from "./Routines";
+import { AgentAboutPanel } from "./AgentAbout";
 import { IconArtifact, IconData, IconGauge, IconKnow, IconRoutines, IconRuns, IconSkills, IconVault } from "./ProfileIcons";
 import { BrandMark } from "./BrandMark";
 import { AgentAvatar } from "./AgentAvatar";
@@ -39,6 +40,15 @@ const PROFILE_MENU: [Nav, string, string, (p: { size?: number }) => ReactElement
   ["account", "/account", "Your data", IconData],
 ];
 const PROFILE_PAGES: Nav[] = ["profile", "memory", "routines", "skills", "artifacts", "runs", "vault", "usage", "account"];
+
+function IconSidebar() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" aria-hidden>
+      <rect x="3.5" y="4.5" width="17" height="15" rx="2.5" />
+      <path d="M9.5 4.5v15" />
+    </svg>
+  );
+}
 
 function IconToday() {
   return (
@@ -252,18 +262,55 @@ export function AppShell({
   const [alerts, setAlerts] = useState<InboxAlert[]>([]);
   const [alertsOpen, setAlertsOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
-  // Routines (docs/ROUTINES.md): the clock opens the current agent's own routines.
-  const [agentNames, setAgentNames] = useState<Record<string, string>>({});
-  const [routinesFor, setRoutinesFor] = useState<string | null>(null);
+  // The right-hand panel (docs/DESIGN.md "Side panel"): an agent's Routines (the clock) or About (ⓘ, or right-click
+  // an agent on desktop). On desktop it is a column of its own, so the chat narrows instead of being covered.
+  const [roster, setRoster] = useState<WorkspaceRoster>({ agents: [], groups: [] });
+  const [panel, setPanel] = useState<{ kind: PanelKind | "edit" | "connectors"; agentId: string } | null>(null);
+  // Desktop: the sidebar can shrink to a rail of icons (remembered on this device).
+  const [collapsed, setCollapsed] = useState(false);
   useEffect(() => {
-    loadWorkspace()
-      .then((w) => setAgentNames(Object.fromEntries((w.agents || []).map((a) => [a.id, a.name]))))
-      .catch(() => undefined);
+    try {
+      setCollapsed(window.localStorage.getItem("lumio.sidebar") === "rail");
+    } catch {
+      /* private mode: start expanded */
+    }
   }, []);
-  function openRoutines(agentId: string) {
-    setOpen(false);
-    setRoutinesFor(agentId);
+  function toggleSidebar() {
+    setCollapsed((v) => {
+      try {
+        window.localStorage.setItem("lumio.sidebar", v ? "full" : "rail");
+      } catch {
+        /* ignore */
+      }
+      return !v;
+    });
   }
+  useEffect(() => {
+    loadWorkspace().then(setRoster).catch(() => undefined);
+  }, []);
+  useEffect(() => {
+    if (!panel) return;
+    const close = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !document.querySelector(".select-menu, .sheet")) setPanel(null);
+    };
+    window.addEventListener("keydown", close);
+    return () => window.removeEventListener("keydown", close);
+  }, [panel]);
+  // The panel is about the agent on screen: switching agent moves it along (a group has no About, so it closes).
+  useEffect(() => {
+    setPanel((cur) => {
+      if (!cur) return cur;
+      if (activeGroupId) return null;
+      if (activeAgentId && cur.agentId !== activeAgentId) return { kind: cur.kind === "edit" || cur.kind === "connectors" ? "about" : cur.kind, agentId: activeAgentId };
+      return cur;
+    });
+  }, [activeAgentId, activeGroupId]);
+  function openPanel(kind: PanelKind, agentId: string) {
+    setOpen(false);
+    setPanel((cur) => (cur && cur.kind === kind && cur.agentId === agentId ? null : { kind, agentId }));
+  }
+  const agentNames: Record<string, string> = Object.fromEntries(roster.agents.map((a) => [a.id, a.name]));
+  const panelAgent = panel ? roster.agents.find((a) => a.id === panel.agentId) : undefined;
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [toast, setToast] = useState("");
   const last = useRef(-1);
@@ -399,6 +446,7 @@ export function AppShell({
   }
 
   function goAgent(id: string) {
+    setPanel((cur) => (cur && cur.agentId !== id ? { kind: cur.kind === "edit" || cur.kind === "connectors" ? "about" : cur.kind, agentId: id } : cur));
     rememberScope(id, null);
     setScope({ agent: id, group: "" });
     if (onSelectAgent && current === "chat") {
@@ -441,7 +489,46 @@ export function AppShell({
   }
 
   return (
-    <div className="shell today-mode">
+    <div className={`shell today-mode${panel ? " with-panel" : ""}${collapsed ? " collapsed" : ""}`}>
+      {collapsed ? (
+        <nav className="side-rail" aria-label="Workspace">
+          <button type="button" className="rail-btn" aria-label="Expand sidebar" title="Expand sidebar" onClick={toggleSidebar}>
+            <IconSidebar />
+          </button>
+          <a className={`rail-btn${current === "today" ? " on" : ""}`} href="/today" aria-label="Today" title="Today">
+            <IconToday />
+          </a>
+          <a className="rail-btn" href={chatUrl()} aria-label="Talk to Chief" title="Talk to Chief" onClick={(e) => { e.preventDefault(); visit(chatUrl()); }}>
+            <IconTalk />
+          </a>
+          <a className={`rail-btn${current === "inbox" ? " on" : ""}`} href="/inbox" aria-label="Inbox" title="Inbox">
+            <IconInbox />
+            {pending > 0 ? <span className="rail-dot" aria-hidden /> : null}
+          </a>
+          <span className="rail-sep" aria-hidden />
+          <div className="rail-agents">
+            {roster.agents.filter((a) => !a.archived).map((a) => (
+              <button
+                key={a.id}
+                type="button"
+                className={`rail-agent${agentId === a.id && !groupId && current === "chat" ? " on" : ""}${a.unread ? " unread" : ""}`}
+                aria-label={a.name}
+                title={a.name}
+                onClick={() => goAgent(a.id)}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  openPanel("about", a.id);
+                }}
+              >
+                <AgentAvatar name={a.name} color={a.color} avatar={a.avatar} className="agent-avatar tiny" />
+              </button>
+            ))}
+          </div>
+          <a className={`rail-btn rail-profile${PROFILE_PAGES.includes(current) ? " on" : ""}`} href="/profile" aria-label="Profile" title="Profile">
+            <span className="avatar">{me ? initials(me.name, me.email) : "…"}</span>
+          </a>
+        </nav>
+      ) : null}
       <div className={`scrim${open ? " show" : ""}`} onClick={() => setOpen(false)} />
       <aside className={`sidebar${open ? " open" : ""}`}>
         <div className="side-brand-row">
@@ -453,6 +540,9 @@ export function AppShell({
             </div>
           </a>
           <div className="side-brand-actions">
+            <button type="button" className="sidebar-collapse" aria-label="Collapse sidebar" title="Collapse sidebar" onClick={toggleSidebar}>
+              <IconSidebar />
+            </button>
             <ThemeToggle theme={theme} onToggle={toggleTheme} />
             <NotifyBell count={badge} items={alerts} toast={toast} open={alertsOpen} onToggle={toggleAlerts} />
           </div>
@@ -476,7 +566,13 @@ export function AppShell({
           busyScopes={busyScopes}
           onSelectAgent={goAgent}
           onSelectGroup={goGroup}
-          onRoster={onRoster}
+          onRoster={(next) => {
+            setRoster(next);
+            onRoster?.(next);
+          }}
+          onAbout={(id) => openPanel("about", id)}
+          panel={panel}
+          onFormPanel={(kind, id) => setPanel(kind ? { kind, agentId: id } : (cur) => (cur ? { ...cur, kind: "about" } : cur))}
           onConversationCleared={onConversationCleared}
         />
         <div className="side-label">Recent</div>
@@ -581,10 +677,10 @@ export function AppShell({
             {activeAgentId && !activeGroupId ? (
               <button
                 type="button"
-                className={`topbar-icon${routinesFor === activeAgentId ? " on" : ""}`}
+                className={`topbar-icon${panel?.kind === "routines" && panel.agentId === activeAgentId ? " on" : ""}`}
                 aria-label={`${agentNames[activeAgentId] || "This agent"}'s routines`}
                 title={`${agentNames[activeAgentId] || "This agent"}'s routines`}
-                onClick={() => openRoutines(activeAgentId)}
+                onClick={() => openPanel("routines", activeAgentId)}
               >
                 <IconClock />
               </button>
@@ -596,14 +692,52 @@ export function AppShell({
             <NotifyBell count={badge} items={alerts} toast={toast} open={alertsOpen} onToggle={toggleAlerts} />
           </div>
         </header>
-        <RoutinesContext.Provider value={{ open: openRoutines }}>{children}</RoutinesContext.Provider>
+        <PanelContext.Provider value={{ open: openPanel, current: panel }}>{children}</PanelContext.Provider>
       </div>
-      {routinesFor ? (
-        <AgentRoutinesDrawer
-          agentId={routinesFor}
-          agentName={agentNames[routinesFor] || (routinesFor === activeAgentId ? headline || "This agent" : "This agent")}
-          onClose={() => setRoutinesFor(null)}
-        />
+      {panel ? (
+        <>
+          <div className="side-panel-scrim" onClick={() => setPanel(null)} />
+          <aside className="side-panel" aria-label={`${panel.kind === "routines" ? "Routines" : panel.kind === "edit" ? "Edit profile" : panel.kind === "connectors" ? "Connectors" : "About"}: ${agentNames[panel.agentId] || "agent"}`}>
+            <header className="side-panel-head">
+              {panel.kind === "edit" || panel.kind === "connectors" ? (
+                <div className="side-panel-back">
+                  <button type="button" className="icon-btn" aria-label="Back to About" onClick={() => setPanel({ ...panel, kind: "about" })}>
+                    ‹
+                  </button>
+                  <strong>{panel.kind === "edit" ? "Edit profile" : "Connectors"}</strong>
+                  <span className="faint">{agentNames[panel.agentId] || ""}</span>
+                </div>
+              ) : (
+              <div className="side-panel-tabs" role="tablist" aria-label="Panel">
+                <button type="button" role="tab" aria-selected={panel.kind === "about"} className={panel.kind === "about" ? "on" : ""} onClick={() => setPanel({ ...panel, kind: "about" })}>
+                  About
+                </button>
+                <button type="button" role="tab" aria-selected={panel.kind === "routines"} className={panel.kind === "routines" ? "on" : ""} onClick={() => setPanel({ ...panel, kind: "routines" })}>
+                  Routines
+                </button>
+              </div>
+              )}
+              <button className="icon-btn" type="button" aria-label="Close panel" onClick={() => setPanel(null)}>
+                ×
+              </button>
+            </header>
+            <div className="side-panel-body">
+              {panel.kind === "edit" || panel.kind === "connectors" ? (
+                // AgentsNav renders its edit and connectors forms here (components/AgentsNav.tsx).
+                <div id="side-panel-slot" className="side-panel-slot" />
+              ) : panel.kind === "routines" ? (
+                <>
+                  <h2 className="side-panel-title">{agentNames[panel.agentId] || (panel.agentId === activeAgentId ? headline : "") || "This agent"}</h2>
+                  <AgentRoutinesPanel agentId={panel.agentId} agentName={agentNames[panel.agentId] || "This agent"} />
+                </>
+              ) : panelAgent ? (
+                <AgentAboutPanel agent={panelAgent} groups={roster.groups} onRoutines={() => setPanel({ ...panel, kind: "routines" })} />
+              ) : (
+                <p className="muted">Loading…</p>
+              )}
+            </div>
+          </aside>
+        </>
       ) : null}
     </div>
   );
