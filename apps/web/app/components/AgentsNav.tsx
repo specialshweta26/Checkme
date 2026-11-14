@@ -32,6 +32,8 @@ import {
 import { SkillDetail, SkillStatusChip } from "./SkillDetail";
 import { AgentAvatar } from "./AgentAvatar";
 import { MASCOTS, mascotFilter, mascotFor, randomMascot } from "./mascots";
+import { AgentSelect } from "./Select";
+import { AGENT_ACTION_EVENT, type AgentAction } from "./AgentAbout";
 
 type Ctx = { kind: "agent" | "group"; id: string; x: number; y: number };
 
@@ -143,6 +145,9 @@ export function AgentsNav({
   onSelectGroup,
   onRoster,
   onConversationCleared,
+  onAbout,
+  panel,
+  onFormPanel,
 }: {
   activeAgentId?: string | null;
   activeGroupId?: string | null;
@@ -152,6 +157,11 @@ export function AgentsNav({
   onSelectGroup?: (id: string) => void;
   onRoster?: (roster: WorkspaceRoster) => void;
   onConversationCleared?: (agentId: string) => void;
+  /** Desktop: right-clicking an agent opens its About panel instead of the floating menu (phones keep ⋯). */
+  onAbout?: (agentId: string) => void;
+  /** The right-hand panel AppShell shows; when given, Edit profile and Connectors open in it instead of a dialog. */
+  panel?: { kind: string; agentId: string } | null;
+  onFormPanel?: (kind: "edit" | "connectors" | null, agentId: string) => void;
 }) {
   const [roster, setRoster] = useState<WorkspaceRoster>({ agents: [], groups: [] });
   const [menu, setMenu] = useState(false);
@@ -185,9 +195,6 @@ export function AgentsNav({
   const [marketApps, setMarketApps] = useState<{ slug: string; name: string; logo?: string; connected?: boolean }[]>([]);
   const [catalogReady, setCatalogReady] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [ideas, setIdeas] = useState<{ tasks: { title: string; prompt: string }[]; skills: { title: string; prompt: string }[] } | null>(null);
-  const [ideasBusy, setIdeasBusy] = useState(false);
-  const [pickedIdea, setPickedIdea] = useState("");
   const pathname = usePathname();
 
   async function refresh() {
@@ -244,6 +251,11 @@ export function AgentsNav({
   const archivedAgents = agents.filter((a) => a.archived);
 
   function resetForm() {
+    if ((form === "edit" || form === "connectors") && editingId && onFormPanel) onFormPanel(null, editingId);
+    clearForm();
+  }
+
+  function clearForm() {
     setForm(null);
     setName("");
     setTitle("");
@@ -264,37 +276,7 @@ export function AgentsNav({
     setMenu(false);
     setSaving(false);
     setCatalogReady(false);
-    setIdeas(null);
-    setIdeasBusy(false);
-    setPickedIdea("");
   }
-
-  useEffect(() => {
-    if (form !== "agent") return;
-    const nextName = name.trim();
-    const nextTitle = title.trim();
-    if (nextTitle.length < 2 && nextName.length < 2) {
-      setIdeas(null);
-      setIdeasBusy(false);
-      return;
-    }
-    setIdeasBusy(true);
-    const handle = window.setTimeout(() => {
-      fetch("/api/agents/ideas", {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: nextName, title: nextTitle }),
-      })
-        .then((res) => (res.ok ? res.json() : null))
-        .then((data) => {
-          setIdeas(data ? { tasks: data.tasks || [], skills: data.skills || [] } : null);
-        })
-        .catch(() => setIdeas(null))
-        .finally(() => setIdeasBusy(false));
-    }, 700);
-    return () => window.clearTimeout(handle);
-  }, [form, name, title]);
 
   function openEdit(agent: WorkspaceAgent) {
     setEditingId(agent.id);
@@ -305,6 +287,7 @@ export function AgentsNav({
     setAvatar(mascotFor(agent.avatar)?.id ?? MASCOTS[0].id);
     setColor(agent.color || "#10b981");
     setForm("edit");
+    onFormPanel?.("edit", agent.id);
     setCtx(null);
     listSkills(agent.id)
       .then((data) => setSkills(data.skills || []))
@@ -321,6 +304,7 @@ export function AgentsNav({
   function openConnectors(agent: WorkspaceAgent) {
     setEditingId(agent.id);
     setForm("connectors");
+    onFormPanel?.("connectors", agent.id);
     setCtx(null);
     const jobs: Promise<void>[] = [];
     if (!connectors.length) {
@@ -354,13 +338,11 @@ export function AgentsNav({
     setSaving(true);
     setError("");
     try {
+      // Its first-chat ideas (tasks, skills it could learn) are made from the title as it's created and shown in its
+      // chat (FocusOnboarding), not here.
       const row = await createAgent({ name, title, color, avatar });
-      const firstIdea = pickedIdea;
       resetForm();
       await refresh();
-      if (firstIdea) {
-        window.sessionStorage.setItem("lumio.pendingTask", JSON.stringify({ agentId: row.id, text: firstIdea }));
-      }
       onSelectAgent?.(row.id);
     } catch (err: any) {
       setError(err.message || "Could not create agent");
@@ -413,6 +395,79 @@ export function AgentsNav({
     setCtx({ kind, id, x: at.x, y: at.y });
   }
 
+  function openAgentMenu(id: string, x: number, y: number, fromButton?: boolean) {
+    const desktop = typeof window !== "undefined" && window.matchMedia("(min-width: 861px)").matches;
+    if (onAbout && desktop && !fromButton) {
+      setCtx(null);
+      onAbout(id);
+      return;
+    }
+    onContext("agent", id, x, y);
+  }
+
+  // The About panel's buttons (components/AgentAbout.tsx) run the same actions as this menu.
+  useEffect(() => {
+    async function run(e: Event) {
+      const { agentId, action, groupId } = ((e as CustomEvent).detail || {}) as { agentId: string; action: AgentAction; groupId?: string };
+      const agent = roster.agents.find((a) => a.id === agentId);
+      if (!agent) return;
+      try {
+        if (action === "pin") await patchAgent(agent.id, { pinned: !agent.pinned });
+        else if (action === "unread") await patchAgent(agent.id, { unread: true });
+        else if (action === "archive") await patchAgent(agent.id, { archived: !agent.archived });
+        else if (action === "edit") openEdit(agent);
+        else if (action === "connectors") openConnectors(agent);
+        else if (action === "move" && groupId) {
+          await moveAgentToGroup(agent.id, groupId);
+          await refresh();
+        } else if (action === "duplicate") {
+          const row = await duplicateAgent(agent.id);
+          await refresh();
+          onSelectAgent?.(row.id);
+        } else if (action === "clear") {
+          await clearAgentChat(agent.id);
+          onConversationCleared?.(agent.id);
+          await refresh();
+        } else if (action === "delete" && agent.kind !== "default") {
+          await deleteAgent(agent.id);
+          const next = await loadWorkspace();
+          setRoster(next);
+          onRoster?.(next);
+          if (activeAgentId === agent.id) onSelectAgent?.(next.default_agent_id || next.agents[0]?.id || "");
+        }
+      } catch (err: any) {
+        setError(err?.message || "That didn't work");
+      }
+    }
+    window.addEventListener(AGENT_ACTION_EVENT, run);
+    return () => window.removeEventListener(AGENT_ACTION_EVENT, run);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [roster, activeAgentId]);
+
+  // Edit profile and Connectors live in the side panel: find its slot once the panel shows them, and drop the form
+  // when the panel moves on (closed, another tab, another agent).
+  const inPanel = Boolean(onFormPanel) && (form === "edit" || form === "connectors");
+  const [slot, setSlot] = useState<HTMLElement | null>(null);
+  useEffect(() => {
+    if (!inPanel) {
+      setSlot(null);
+      return;
+    }
+    if (!panel || panel.kind !== form || panel.agentId !== editingId) {
+      if (slot) clearForm();
+      return;
+    }
+    let frame = 0;
+    const find = () => {
+      const el = document.getElementById("side-panel-slot");
+      if (el) setSlot(el);
+      else frame = window.requestAnimationFrame(find);
+    };
+    find();
+    return () => window.cancelAnimationFrame(frame);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inPanel, panel?.kind, panel?.agentId, form, editingId]);
+
   const formOpen = form !== null;
   const ctxAgent = ctx?.kind === "agent" ? agents.find((a) => a.id === ctx.id) : null;
 
@@ -458,7 +513,7 @@ export function AgentsNav({
               if (agent.unread) void patchAgent(agent.id, { unread: false });
               onSelectAgent?.(agent.id);
             }}
-            onOpenMenu={(x, y) => onContext("agent", agent.id, x, y)}
+            onOpenMenu={(x, y, fromButton) => openAgentMenu(agent.id, x, y, fromButton)}
           />
         ))}
         {groups.map((group) => (
@@ -504,7 +559,7 @@ export function AgentsNav({
                 preview="Archived"
                 stay={pathname === "/chat"}
                 onOpen={() => onSelectAgent?.(agent.id)}
-                onOpenMenu={(x, y) => onContext("agent", agent.id, x, y)}
+                onOpenMenu={(x, y, fromButton) => openAgentMenu(agent.id, x, y, fromButton)}
               />
             ))
           : null}
@@ -640,15 +695,15 @@ export function AgentsNav({
             document.body,
           )
         : null}
-      {formOpen
+      {formOpen && (!inPanel || slot)
         ? createPortal(
-        <div className="agent-form-scrim" onClick={resetForm}>
+        <div className={inPanel ? "agent-form-dock" : "agent-form-scrim"} onClick={inPanel ? undefined : resetForm}>
           <form
-            className={`agent-form${form === "connectors" ? " wide" : ""}`}
+            className={`agent-form${form === "connectors" ? " wide" : ""}${inPanel ? " in-panel" : ""}`}
             onClick={(e) => e.stopPropagation()}
             onSubmit={form === "connectors" ? (e) => e.preventDefault() : form === "group" ? onCreateGroup : form === "edit" ? onEditAgent : onCreateAgent}
           >
-            <h3>{form === "group" ? "New group" : form === "edit" ? "Edit profile" : form === "connectors" ? "Connectors" : "Create new bot"}</h3>
+            {inPanel ? null : <h3>{form === "group" ? "New group" : form === "edit" ? "Edit profile" : form === "connectors" ? "Connectors" : "Create new bot"}</h3>}
             {error ? <p className="err">{error}</p> : null}
             {form === "connectors" && editingId ? (
               <ConnectorPicker
@@ -751,19 +806,10 @@ export function AgentsNav({
                         <p className="muted">Create at least two agents first.</p>
                       )}
                     </fieldset>
-                    <label>
-                      Kickoff owner
-                      <select value={ownerId || picked[0] || ""} onChange={(e) => setOwnerId(e.target.value)}>
-                        {picked.map((id) => {
-                          const agent = agents.find((a) => a.id === id);
-                          return (
-                            <option key={id} value={id}>
-                              {agent?.name || id}
-                            </option>
-                          );
-                        })}
-                      </select>
-                    </label>
+                    <div className="field-group">
+                      <span>Kickoff owner</span>
+                      <AgentSelect value={ownerId || picked[0] || ""} onChange={setOwnerId} label="Kickoff owner" only={picked} agents={agents} />
+                    </div>
                     <p className="muted">One owner per stage. Write normally, @ a bot to hand a request, or @everyone for updates.</p>
                   </>
                 ) : form === "agent" ? (
@@ -772,26 +818,7 @@ export function AgentsNav({
                       Title
                       <input value={title} onChange={(e) => setTitle(e.target.value)} maxLength={80} placeholder="Sales analyst, inbox triage, recruiter" />
                     </label>
-                    <div className="agent-ideas">
-                      <p>Ideas from this title</p>
-                      {ideasBusy ? <p className="muted">Looking for skills and first tasks…</p> : null}
-                      {!ideasBusy && !ideas?.tasks.length && !ideas?.skills.length ? (
-                        <p className="muted">Add a title and Lumio will suggest skills and ways to start.</p>
-                      ) : null}
-                      {(ideas?.tasks || []).map((task) => (
-                        <button key={task.title} type="button" className={`agent-idea${pickedIdea === task.prompt ? " on" : ""}`} onClick={() => setPickedIdea(pickedIdea === task.prompt ? "" : task.prompt)}>
-                          <strong>{task.title}</strong>
-                          <small>{task.prompt}</small>
-                        </button>
-                      ))}
-                      {ideas?.skills.length ? <p>Skills this bot could learn</p> : null}
-                      {(ideas?.skills || []).map((skill) => (
-                        <button key={skill.title} type="button" className={`agent-idea${pickedIdea === skill.prompt ? " on" : ""}`} onClick={() => setPickedIdea(pickedIdea === skill.prompt ? "" : skill.prompt)}>
-                          <strong>{skill.title}</strong>
-                          <small>{skill.prompt}</small>
-                        </button>
-                      ))}
-                    </div>
+                    <p className="muted agent-title-hint">Its chat opens with first tasks and skills suggested from this title.</p>
                   </>
                 ) : (
                   <>
@@ -854,7 +881,7 @@ export function AgentsNav({
             </div>
           </form>
         </div>,
-            document.body,
+            inPanel && slot ? slot : document.body,
           )
         : null}
     </div>
@@ -869,7 +896,7 @@ function HoldRow({
 }: {
   className: string;
   label: string;
-  onOpenMenu: (x: number, y: number) => void;
+  onOpenMenu: (x: number, y: number, fromButton?: boolean) => void;
   children: ReactNode;
 }) {
   const hold = useHoldMenu(onOpenMenu);
@@ -885,7 +912,7 @@ function HoldRow({
           e.preventDefault();
           e.stopPropagation();
           const box = e.currentTarget.getBoundingClientRect();
-          onOpenMenu(box.right - 8, box.bottom + 4);
+          onOpenMenu(box.right - 8, box.bottom + 4, true);
         }}
       >
         ···
@@ -911,7 +938,7 @@ function AgentRow({
   working?: boolean;
   stay?: boolean;
   onOpen: () => void;
-  onOpenMenu: (x: number, y: number) => void;
+  onOpenMenu: (x: number, y: number, fromButton?: boolean) => void;
 }) {
   return (
     <HoldRow

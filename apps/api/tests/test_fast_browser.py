@@ -325,7 +325,7 @@ HOME = {"ok": True, "url": "https://acme.test/home", "title": "Home", "text": "W
 def no_saved_logins(monkeypatch):
     from app.browser_runs import logins
 
-    async def none(user_id, host):
+    async def none(user_id, host, agent_id=None):
         return {}
 
     monkeypatch.setattr(logins, "values_for", none)

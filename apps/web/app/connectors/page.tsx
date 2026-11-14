@@ -18,6 +18,7 @@ import {
   type WhatsAppStatus,
   type WorkspaceAgent,
 } from "../lib";
+import { Select } from "../components/Select";
 
 type Connector = {
   id: string;
@@ -396,11 +397,16 @@ export default function ConnectorsPage() {
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
                 />
-                <select value={authType} onChange={(e) => setAuthType(e.target.value)}>
-                  <option value="oauth">OAuth (MCP spec)</option>
-                  <option value="bearer">Bearer token</option>
-                  <option value="none">No auth</option>
-                </select>
+                <Select
+                  value={authType}
+                  onChange={setAuthType}
+                  label="Sign-in method"
+                  options={[
+                    { value: "oauth", label: "OAuth (MCP spec)" },
+                    { value: "bearer", label: "Bearer token" },
+                    { value: "none", label: "No auth" },
+                  ]}
+                />
                 {authType === "bearer" ? (
                   <input type="text" placeholder="Token" value={token} onChange={(e) => setToken(e.target.value)} />
                 ) : null}

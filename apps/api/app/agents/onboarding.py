@@ -79,3 +79,70 @@ def _suggestions(value, limit: int) -> list[dict[str, str]]:
         if title and prompt:
             out.append({"title": title, "prompt": prompt})
     return out
+
+
+# ---------------------------------------------------------------- ready as soon as the agent exists
+
+import asyncio
+import hashlib
+import logging
+
+log = logging.getLogger(__name__)
+CACHE_SECONDS = 7 * 24 * 3600
+_PENDING: dict[str, asyncio.Future] = {}
+_KEEP: set[asyncio.Task] = set()
+
+
+def cache_key(agent) -> str:
+    """Per agent and per identity: renaming it or changing its title or instructions gets fresh ideas."""
+    who = "|".join(str(getattr(agent, k, "") or "") for k in ("name", "title", "instructions"))
+    return f"agent:onboarding:{getattr(agent, 'id', '')}:{hashlib.sha1(who.encode()).hexdigest()[:16]}"
+
+
+async def onboarding_for(agent) -> dict:
+    """The agent's first-chat ideas, made once and kept (so its chat shows them at once, and the same ones each
+    time). A fallback (the model was unavailable) is not kept, so the next visit tries again."""
+    from app.cache import get_redis
+
+    key = cache_key(agent)
+    try:
+        hit = await get_redis().get(key)
+        if hit:
+            return json.loads(hit)
+    except Exception:  # noqa: BLE001 - no cache: generate as before
+        log.info("onboarding cache unavailable", exc_info=False)
+    if key in _PENDING:  # being made already (by the warm-up started at creation)
+        return await asyncio.shield(_PENDING[key])
+    fut = asyncio.get_running_loop().create_future()
+    _PENDING[key] = fut
+    try:
+        data = await generate_onboarding(agent)
+        if data.get("tasks") or data.get("skills"):
+            try:
+                await get_redis().set(key, json.dumps(data), ex=CACHE_SECONDS)
+            except Exception:  # noqa: BLE001
+                pass
+        fut.set_result(data)
+        return data
+    except Exception as exc:  # noqa: BLE001
+        fut.set_exception(exc)
+        raise
+    finally:
+        _PENDING.pop(key, None)
+
+
+def warm(agent) -> None:
+    """Start making a new agent's ideas now, while the app opens its chat."""
+    from types import SimpleNamespace
+
+    snap = SimpleNamespace(**{k: getattr(agent, k, "") for k in ("id", "name", "title", "instructions")})
+    task = asyncio.create_task(_warm(snap))
+    _KEEP.add(task)
+    task.add_done_callback(_KEEP.discard)
+
+
+async def _warm(agent) -> None:
+    try:
+        await onboarding_for(agent)
+    except Exception:  # noqa: BLE001 - the chat will ask again
+        log.info("onboarding warm-up failed", exc_info=True)

@@ -1,7 +1,6 @@
 "use client";
 
 import { createContext, useContext, useEffect, useState, type FormEvent } from "react";
-import { createPortal } from "react-dom";
 import {
   chatHref,
   createRoutine,
@@ -18,12 +17,13 @@ import {
 // Routines (docs/ROUTINES.md): scheduled tasks, one agent at a time from the clock button or an agent card, and every
 // agent on the Routines page. Results open the same conversation on web and desktop.
 
-/** Shared by AppShell (which owns the drawer) and pages inside it, like the chat header. */
-export const RoutinesContext = createContext<{ open: (agentId: string) => void } | null>(null);
+/** The right-hand panel AppShell owns (an agent's Routines or About), opened from pages inside it like the chat header. */
+export type PanelKind = "routines" | "about";
+export const PanelContext = createContext<{ open: (kind: PanelKind, agentId: string) => void; current: { kind: string; agentId: string } | null } | null>(null);
 
 /** The clock button for one agent: opens that agent's routines; with no agent, links to every routine. */
 export function RoutinesButton({ agentId, agentName, className }: { agentId?: string | null; agentName?: string; className: string }) {
-  const ctx = useContext(RoutinesContext);
+  const ctx = useContext(PanelContext);
   const icon = (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
       <circle cx="12" cy="12" r="8" stroke="currentColor" strokeWidth="1.8" />
@@ -39,7 +39,14 @@ export function RoutinesButton({ agentId, agentName, className }: { agentId?: st
   }
   const label = `${agentName || "This agent"}'s routines`;
   return (
-    <button type="button" className={className} aria-label={label} title={label} onClick={() => ctx.open(agentId)}>
+    <button
+      type="button"
+      className={`${className}${ctx.current?.kind === "routines" && ctx.current.agentId === agentId ? " on" : ""}`}
+      aria-label={label}
+      title={label}
+      aria-pressed={ctx.current?.kind === "routines" && ctx.current.agentId === agentId}
+      onClick={() => ctx.open("routines", agentId)}
+    >
       {icon}
     </button>
   );
@@ -187,8 +194,23 @@ export function RunRow({ run, showAgent = true, startOpen = false }: { run: Rout
   );
 }
 
-/** The clock button's panel for one agent: its routines, its last 30 days, and a box to add one. */
-export function AgentRoutinesDrawer({ agentId, agentName, onClose, onChanged }: { agentId: string; agentName: string; onClose: () => void; onChanged?: () => void }) {
+/** The ⓘ button: opens the agent's About panel (its profile and every option the agent menu has). */
+export function AboutButton({ agentId, agentName, className }: { agentId?: string | null; agentName?: string; className: string }) {
+  const ctx = useContext(PanelContext);
+  if (!agentId || !ctx) return null;
+  const on = ctx.current?.kind === "about" && ctx.current.agentId === agentId;
+  return (
+    <button type="button" className={`${className}${on ? " on" : ""}`} aria-label={`About ${agentName || "this agent"}`} title={`About ${agentName || "this agent"}`} aria-pressed={on} onClick={() => ctx.open("about", agentId)}>
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden>
+        <circle cx="12" cy="12" r="8.5" />
+        <path d="M12 11v5.2M12 7.8v.2" />
+      </svg>
+    </button>
+  );
+}
+
+/** The routines panel for one agent: its routines, its last 30 days, and a box to add one. */
+export function AgentRoutinesPanel({ agentId, agentName }: { agentId: string; agentName: string }) {
   const [tasks, setTasks] = useState<Routine[] | null>(null);
   const [stats, setStats] = useState<RoutineSummary | null>(null);
   const [prompt, setPrompt] = useState("");
@@ -200,7 +222,6 @@ export function AgentRoutinesDrawer({ agentId, agentName, onClose, onChanged }: 
       const [list, sum] = await Promise.all([listRoutines(agentId), routineSummary(agentId, 30)]);
       setTasks(list.tasks);
       setStats(sum);
-      onChanged?.();
     } catch (e: any) {
       setError(e.message);
       setTasks([]);
@@ -210,9 +231,6 @@ export function AgentRoutinesDrawer({ agentId, agentName, onClose, onChanged }: 
   useEffect(() => {
     setTasks(null);
     void refresh();
-    const close = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", close);
-    return () => window.removeEventListener("keydown", close);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentId]);
 
@@ -234,18 +252,8 @@ export function AgentRoutinesDrawer({ agentId, agentName, onClose, onChanged }: 
 
   const live = (tasks || []).filter((t) => t.status !== "completed");
   const done = (tasks || []).filter((t) => t.status === "completed");
-  const view = (
-    <div className="routines-drawer-wrap" onClick={onClose}>
-      <aside className="routines-drawer" role="dialog" aria-modal="true" aria-label={`${agentName}'s routines`} onClick={(e) => e.stopPropagation()}>
-        <header>
-          <div>
-            <span className="eyebrow">Routines</span>
-            <h2>{agentName}</h2>
-          </div>
-          <button className="icon-btn" type="button" aria-label="Close" onClick={onClose}>
-            ×
-          </button>
-        </header>
+  return (
+    <>
         {stats ? (
           <div className="drawer-stats">
             <div>
@@ -285,8 +293,6 @@ export function AgentRoutinesDrawer({ agentId, agentName, onClose, onChanged }: 
             </details>
           ) : null}
         </div>
-      </aside>
-    </div>
+    </>
   );
-  return typeof document === "undefined" ? null : createPortal(view, document.body);
 }

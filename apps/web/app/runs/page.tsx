@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { AppShell } from "../components/AppShell";
 import { apiError, getMe, type Me } from "../lib";
+import { Select } from "../components/Select";
 
 // Saved browser runs (docs/BROWSING.md "Healing saved runs"): a finished browser task or a taught skill's
 // recording, replayed without a model call per step. Exact steps replay by selector; AI steps are sentences the
@@ -481,14 +482,12 @@ export default function SavedRunsPage() {
                                 {(["yes", "no"] as const).map((branch) => (
                                   <label key={branch} className="run-branch">
                                     {branch} →
-                                    <select
-                                      className="field"
+                                    <Select
                                       value={String(row[branch] ?? 0)}
-                                      onChange={(e) => setDraft((rows) => rows.map((r, j) => (j === i ? { ...r, [branch]: Number(e.target.value) } : r)))}
-                                    >
-                                      <option value="0">End</option>
-                                      {draft.map((_, n) => (n === i ? null : <option key={n} value={n + 1}>{`Step ${n + 1}`}</option>))}
-                                    </select>
+                                      label={`If ${branch}, go to`}
+                                      onChange={(v) => setDraft((rows) => rows.map((r, j) => (j === i ? { ...r, [branch]: Number(v) } : r)))}
+                                      options={[{ value: "0", label: "End" }, ...draft.flatMap((_, n) => (n === i ? [] : [{ value: String(n + 1), label: `Step ${n + 1}` }]))]}
+                                    />
                                   </label>
                                 ))}
                               </span>

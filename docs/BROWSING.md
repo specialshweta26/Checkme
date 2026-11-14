@@ -190,7 +190,7 @@ most 200 steps), keeps the old steps for one undo, and drops a pending fix (it w
 Why: a scheduled or saved run stopped at every sign-in page and waited for the user (`browser_handoff`), so nothing
 could run unattended, and users were tempted to paste passwords into chat.
 
-The user adds a site's username and password under **Saved sign-ins** on the Saved runs page
+The user adds a site's username and password in **Profile > Vault**
 (`POST /api/browser/logins {host, username, password, label}`; `GET` lists site, label and a username hint such as
 `o•••@example.com`; `DELETE /api/browser/logins/{id}`). Values never pass through chat or a model, and the API never
 returns them. Both are encrypted with the app key (`site_logins.username_enc` / `password_enc`, one row per user and
@@ -202,6 +202,16 @@ When `browser_task` or `browser_replay` runs on a site with a saved sign-in (or 
 saved runs are scrubbed, so a saved run keeps the names and fills them again next time. Values the caller passes win.
 `browser_logins` tells the agent which sites have one; the prompt says never to ask for a password in chat. One-time
 codes and CAPTCHAs still go to the user.
+
+**Which agents may use a sign-in.** Each sign-in lists the agents it was given to (Profile > Vault > the agent chip on
+each row, or when adding one). Only those agents get its values, see it in `browser_logins`, and may open its site at
+all. The cloud browser's cookies are shared by every agent, so withholding only the password isn't enough: once one
+agent signs in, the site stays signed in for every tab. Every browser command is therefore checked before it runs
+(its address) and after (where the page landed): an agent that wasn't given the site's sign-in is refused, and nothing
+from the page comes back to it (`gate` in `app/browser_runs/logins.py`, called from `run_computer` in
+`app/agent/computer_harness.py`, `browser_task` and `browser_replay`). Sign-ins saved before this start with the agents
+whose own skills mention the site; others get nothing until the user allows them. Saved runs started from the Saved
+runs page run as the agent whose skill they came from. Tests: `tests/test_vault_access.py`.
 
 ## Long tasks
 

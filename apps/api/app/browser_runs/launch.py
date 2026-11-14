@@ -80,6 +80,22 @@ def job_prompt(trace: dict, rows: list[dict[str, str]], source: str) -> str:
     return "\n".join(lines)
 
 
+async def run_agent(db: AsyncSession, user, trace: dict):
+    """The agent a saved run belongs to: the owner of the skill it was recorded from. Its Vault access applies."""
+    import uuid as _uuid
+
+    from app.models import AgentSkill, WorkspaceAgent
+
+    try:
+        skill = await db.get(AgentSkill, _uuid.UUID(str(trace.get("skill_id") or "")))
+    except (TypeError, ValueError):
+        return None
+    if skill is None or skill.user_id != user.id or not skill.agent_id:
+        return None
+    agent = await db.get(WorkspaceAgent, skill.agent_id)
+    return agent if agent is not None and agent.user_id == user.id and not getattr(agent, "archived", False) else None
+
+
 async def queue_run(db: AsyncSession, user, trace: dict, rows: list[dict[str, str]], source: str) -> dict:
     """One background job that runs the saved run for each row. Returns {job_id, session_id, rows}."""
     from app.agents import service as agents_service
@@ -87,7 +103,7 @@ async def queue_run(db: AsyncSession, user, trace: dict, rows: list[dict[str, st
     from app.jobs.worker import wake
     from app.models import ChatSession
 
-    agent = await agents_service.ensure_default_agent(db, user)
+    agent = await run_agent(db, user, trace) or await agents_service.ensure_default_agent(db, user)
     title = f"Saved run · {trace.get('name') or trace.get('goal') or 'browser'}"[:200]
     session = ChatSession(user_id=user.id, title=title, state={"browser_trace_id": trace["id"], "source": source}, agent_id=agent.id)
     db.add(session)

@@ -85,7 +85,7 @@ function EmailThreadPanel({ refData, label }: { refData: MailThreadRef; label: s
 
   return (
     <div className="email-thread">
-      <button className="rephrase-btn" type="button" onClick={toggle}>
+      <button className="btn secondary small" type="button" onClick={toggle}>
         {open ? "Hide full email" : label}
       </button>
       {open ? (

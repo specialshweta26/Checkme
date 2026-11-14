@@ -514,7 +514,7 @@ export default function InboxPage() {
                     </label>
                   </div>
                   <footer className="inbox-actions">
-                    <label className="rephrase-btn attach-btn">
+                    <label className="btn secondary small attach-btn">
                       Attach
                       <input
                         type="file"
@@ -535,7 +535,7 @@ export default function InboxPage() {
                       />
                     </label>
                     <button
-                      className="rephrase-btn"
+                      className="btn secondary small"
                       type="button"
                       title="Keep what the draft says and change how it says it: shorter, more formal, or your own instruction"
                       disabled={working}
@@ -544,7 +544,7 @@ export default function InboxPage() {
                       {busy === `${mail.id}:/rephrase` ? "Rephrasing…" : "✦ Rephrase"}
                     </button>
                     <button
-                      className="rephrase-btn"
+                      className="btn secondary small"
                       type="button"
                       title="Read the thread again and redo the summary and draft with what your assistant knows now"
                       disabled={working}
@@ -556,7 +556,7 @@ export default function InboxPage() {
                       {busy === `${mail.id}:/redraft` ? "Redrafting…" : "↻ Redraft"}
                     </button>
                     <button
-                      className="send-btn"
+                      className="btn small"
                       type="button"
                       disabled={working || !mail.draft.trim()}
                       onClick={() => {
@@ -570,7 +570,7 @@ export default function InboxPage() {
                     >
                       Send
                     </button>
-                    <button className="icon-btn" type="button" disabled={working} onClick={() => act(mail.id, "/delete")}>
+                    <button className="btn secondary small inbox-delete" type="button" disabled={working} onClick={() => act(mail.id, "/delete")}>
                       Delete
                     </button>
                   </footer>

@@ -76,6 +76,31 @@ nothing scales or lifts on hover. All of it is turned off under `prefers-reduced
 - Checkboxes and radios are 16px with `accent-color`; file inputs get a secondary-style button.
 - Fields inside a composite control (the chat composer, the Today composer) are bare; the control shows focus.
 
+### Dropdowns
+- Never a native `<select>`: iOS and macOS draw those as grey system menus whatever the theme. Use `Select` from
+  `apps/web/app/components/Select.tsx`. It's themed, opens as a panel on desktop and a bottom sheet on phones, and
+  supports the keyboard (arrows, Home/End, Enter, Escape, type a letter to jump).
+- Choosing an agent always uses `AgentSelect`: agents in the sidebar's order, each with its own avatar and title.
+  `allLabel` adds an "All agents" choice; `only` limits the list.
+- `variant="bare"` inside composite controls (the Today composer), `field` everywhere else.
+
+### Side panel
+- An agent's **About** and **Routines** open in one panel on the right, from the ⓘ and clock buttons in the chat header
+  (the clock in the top bar on phones), with tabs to switch between them. Escape or × closes it.
+- On desktop it is a column of its own (`.shell.with-panel`, `--panel-w` 400px, 340px below 1180px wide): the chat
+  narrows to fit and is never covered. On phones it is a full-screen sheet over the chat.
+- About shows who the agent is, its skills, routines and Vault sign-ins, and every option the agent menu has. Its
+  buttons ask AgentsNav to run the same actions as the menu (`AGENT_ACTION_EVENT` in `components/AgentAbout.tsx`).
+- Right-clicking an agent on desktop opens its About panel. On phones the ⋯ button and a long press keep the menu.
+- The panel is about the agent on screen: switching agent moves it along, and a group chat closes it.
+- **Edit profile** and **Connectors** open inside the panel too (AgentsNav renders its form into `#side-panel-slot`), with
+  a back arrow to About; Cancel, Save or Done return to About. Creating an agent or a group stays a dialog.
+
+### Sidebar
+- The button beside the bell collapses the sidebar to a 64px rail on desktop: Today, Chief, Inbox, each agent's avatar
+  (right-click for its About panel) and Profile. The choice is remembered on this device (`lumio.sidebar`). Phones keep
+  the slide-in sidebar.
+
 ### Feedback
 - Errors: `.err` text in `--danger-text`; notices: `.notice` on `--accent-soft`.
 - Status chips (jobs, skills, flow nodes): running = accent, waiting = warn, done = ok, failed = danger, all on
@@ -100,7 +125,8 @@ dark themes alike, so it reads as the secure place.
   and notes or IDs, filterable by kind, each with Copy and a link back to the chat or task it came from.
 - **Vault** holds the sign-ins agents use on sites without a connector (`/api/browser/logins`). It used to be a
   section at the bottom of Saved runs. Passwords are encrypted before they are stored (`app.security.encrypt`), are
-  never shown again and are left out of the data export.
+  never shown again and are left out of the data export. Each sign-in shows which agents may use it; only they can
+  open its site (docs/BROWSING.md "Saved sign-ins"). A sign-in no agent may use shows "No agent can use it" in amber.
 
 ### Sign-in
 - Uses the same tokens as the app and follows the saved theme (`lumio.theme`, dark when nothing is saved).
