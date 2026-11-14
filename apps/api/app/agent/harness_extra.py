@@ -822,6 +822,8 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         if row is None:
             listed = await skills.list_skills(ctx.db, ctx.user, _agent_id())
             return _dumps({"error": "Unknown skill.", "skills": listed})
+        if row.kind == "imported":
+            _untrusted(ctx)  # someone else's instructions (app/skills/claude_format.py)
         return _dumps(skills.serialize_skill(row))
 
     async def skill_create(name: str, instruction: str = "") -> str:

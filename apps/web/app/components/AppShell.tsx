@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactElement, type ReactNode } from "react";
 import {
   chatHref,
   deleteSession,
   initials,
   isLumioDesktop,
   listSessions,
+  loadWorkspace,
   markInboxSeen,
   rememberScope,
   rememberedScope,
@@ -19,10 +20,25 @@ import {
   THEME_KEY,
 } from "../lib";
 import { AgentsNav } from "./AgentsNav";
+import { AgentRoutinesDrawer, RoutinesContext } from "./Routines";
+import { IconArtifact, IconData, IconGauge, IconKnow, IconRoutines, IconRuns, IconSkills, IconVault } from "./ProfileIcons";
 import { BrandMark } from "./BrandMark";
 import { AgentAvatar } from "./AgentAvatar";
 
-type Nav = "today" | "chat" | "inbox" | "tasks" | "connectors" | "runs" | "memory" | "usage" | "account";
+type Nav = "today" | "chat" | "inbox" | "tasks" | "connectors" | "runs" | "memory" | "usage" | "account" | "profile" | "artifacts" | "vault" | "skills" | "routines";
+
+// Everything kept for the user lives under Profile (docs/DESIGN.md "Profile"), not in the sidebar.
+const PROFILE_MENU: [Nav, string, string, (p: { size?: number }) => ReactElement][] = [
+  ["memory", "/memory", "What I know", IconKnow],
+  ["routines", "/routines", "Routines", IconRoutines],
+  ["skills", "/skills", "Skills", IconSkills],
+  ["artifacts", "/artifacts", "Artifacts", IconArtifact],
+  ["runs", "/runs", "Saved runs", IconRuns],
+  ["vault", "/vault", "Vault", IconVault],
+  ["usage", "/usage", "Usage and cost", IconGauge],
+  ["account", "/account", "Your data", IconData],
+];
+const PROFILE_PAGES: Nav[] = ["profile", "memory", "routines", "skills", "artifacts", "runs", "vault", "usage", "account"];
 
 function IconToday() {
   return (
@@ -72,25 +88,6 @@ function IconPlug() {
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
       <path d="M9 7v4M15 7v4M8 11h8v3a4 4 0 0 1-8 0v-3Z" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
       <path d="M12 18v2" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function IconMemory() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
-      <path d="M12 4a6 6 0 0 0-3.5 10.9V18h7v-3.1A6 6 0 0 0 12 4Z" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
-      <path d="M9.5 21h5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function IconReplay() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
-      <path d="M4 12a8 8 0 1 0 2.4-5.7" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-      <path d="M4 4v4h4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="m10.5 9 4 3-4 3V9Z" fill="currentColor" />
     </svg>
   );
 }
@@ -255,6 +252,18 @@ export function AppShell({
   const [alerts, setAlerts] = useState<InboxAlert[]>([]);
   const [alertsOpen, setAlertsOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
+  // Routines (docs/ROUTINES.md): the clock opens the current agent's own routines.
+  const [agentNames, setAgentNames] = useState<Record<string, string>>({});
+  const [routinesFor, setRoutinesFor] = useState<string | null>(null);
+  useEffect(() => {
+    loadWorkspace()
+      .then((w) => setAgentNames(Object.fromEntries((w.agents || []).map((a) => [a.id, a.name]))))
+      .catch(() => undefined);
+  }, []);
+  function openRoutines(agentId: string) {
+    setOpen(false);
+    setRoutinesFor(agentId);
+  }
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [toast, setToast] = useState("");
   const last = useRef(-1);
@@ -367,7 +376,7 @@ export function AppShell({
   }
 
   const rows = conversations || own;
-  const titles: Record<Nav, string> = { today: "Today", chat: "Chat", inbox: "Inbox", tasks: "Tasks", connectors: "Connectors", runs: "Saved runs", memory: "What I know", usage: "Usage", account: "Your data" };
+  const titles: Record<Nav, string> = { today: "Today", chat: "Chat", inbox: "Inbox", tasks: "Tasks", connectors: "Connectors", runs: "Saved runs", memory: "What I know", usage: "Usage", account: "Your data", profile: "Profile", artifacts: "Artifacts", vault: "Vault", skills: "Skills", routines: "Routines" };
   const agentId = activeAgentId || scope.agent || null;
   const groupId = activeGroupId || scope.group || null;
 
@@ -490,32 +499,44 @@ export function AppShell({
           ))}
         </div>
         <div className="side-user">
-          <a className={`side-bottom-link${current === "memory" ? " on" : ""}`} href="/memory" onClick={(e) => { e.preventDefault(); visit("/memory"); }}>
-            <IconMemory /> What I know
-          </a>
-          <a className={`side-bottom-link${current === "runs" ? " on" : ""}`} href="/runs" onClick={(e) => { e.preventDefault(); visit("/runs"); }}>
-            <IconReplay /> Saved runs
-          </a>
           <a className={`side-bottom-link${current === "connectors" ? " on" : ""}`} href="/connectors" onClick={(e) => { e.preventDefault(); visit("/connectors"); }}>
             <IconPlug /> Connectors
           </a>
           <div className="profile-wrap">
-            <button className={`profile-button${profileOpen ? " on" : ""}`} type="button" aria-label="Profile" aria-expanded={profileOpen} onClick={() => setProfileOpen((value) => !value)}>
+            <button
+              className={`profile-button${profileOpen || PROFILE_PAGES.includes(current) ? " on" : ""}`}
+              type="button"
+              aria-label="Profile"
+              aria-haspopup="menu"
+              aria-expanded={profileOpen}
+              onClick={() => setProfileOpen((value) => !value)}
+            >
               <span className="avatar">{me ? initials(me.name, me.email) : "…"}</span>
               <span>Profile</span>
             </button>
             {profileOpen ? (
-              <div className="profile-menu">
-                <strong>{me?.name || "Workspace"}</strong>
-                <span>{me?.email || "Loading…"}</span>
-                <a className="profile-link" href="/usage" onClick={(e) => { e.preventDefault(); visit("/usage"); }}>
-                  Usage and cost
+              <div className="profile-menu" role="menu">
+                <a className="pm-head" role="menuitem" href="/profile" onClick={(e) => { e.preventDefault(); visit("/profile"); }}>
+                  <span className="avatar">{me ? initials(me.name, me.email) : "…"}</span>
+                  <span className="pm-who">
+                    <strong>{me?.name || "Workspace"}</strong>
+                    <span>{me?.email || "Loading…"}</span>
+                  </span>
                 </a>
-                <a className="profile-link" href="/account" onClick={(e) => { e.preventDefault(); visit("/account"); }}>
-                  Your data (download or delete)
-                </a>
+                <div className="pm-label">Your workspace</div>
+                {PROFILE_MENU.slice(0, 6).map(([nav, href, label, Icon]) => (
+                  <a key={href} role="menuitem" className={`pm-item${current === nav ? " on" : ""}`} href={href} onClick={(e) => { e.preventDefault(); visit(href); }}>
+                    <Icon size={16} /> {label}
+                  </a>
+                ))}
+                <div className="pm-label">Account</div>
+                {PROFILE_MENU.slice(6).map(([nav, href, label, Icon]) => (
+                  <a key={href} role="menuitem" className={`pm-item${current === nav ? " on" : ""}`} href={href} onClick={(e) => { e.preventDefault(); visit(href); }}>
+                    <Icon size={16} /> {label}
+                  </a>
+                ))}
                 <form action="/api/auth/logout" method="post">
-                  <button className="logout" type="submit">Sign out</button>
+                  <button className="logout" type="submit" role="menuitem">Sign out</button>
                 </form>
               </div>
             ) : null}
@@ -557,14 +578,33 @@ export function AppShell({
                 <IconComputer />
               </button>
             ) : null}
-            <a className={`topbar-icon${current === "tasks" ? " on" : ""}`} href="/tasks" aria-label="Tasks" title="Tasks" aria-current={current === "tasks" ? "page" : undefined}>
-              <IconClock />
-            </a>
+            {activeAgentId && !activeGroupId ? (
+              <button
+                type="button"
+                className={`topbar-icon${routinesFor === activeAgentId ? " on" : ""}`}
+                aria-label={`${agentNames[activeAgentId] || "This agent"}'s routines`}
+                title={`${agentNames[activeAgentId] || "This agent"}'s routines`}
+                onClick={() => openRoutines(activeAgentId)}
+              >
+                <IconClock />
+              </button>
+            ) : (
+              <a className={`topbar-icon${current === "routines" ? " on" : ""}`} href="/routines" aria-label="Routines" title="Routines" aria-current={current === "routines" ? "page" : undefined}>
+                <IconClock />
+              </a>
+            )}
             <NotifyBell count={badge} items={alerts} toast={toast} open={alertsOpen} onToggle={toggleAlerts} />
           </div>
         </header>
-        {children}
+        <RoutinesContext.Provider value={{ open: openRoutines }}>{children}</RoutinesContext.Provider>
       </div>
+      {routinesFor ? (
+        <AgentRoutinesDrawer
+          agentId={routinesFor}
+          agentName={agentNames[routinesFor] || (routinesFor === activeAgentId ? headline || "This agent" : "This agent")}
+          onClose={() => setRoutinesFor(null)}
+        />
+      ) : null}
     </div>
   );
 }

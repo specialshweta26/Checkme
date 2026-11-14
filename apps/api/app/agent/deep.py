@@ -1550,6 +1550,7 @@ class SaveSkillInput(BaseModel):
 class GetSkillInput(BaseModel):
     skill_id: str = Field(default="", description="Skill id from your skill index or list_my_skills.")
     name: str = Field(default="", description="Skill name, when you do not have the id.")
+    file: str = Field(default="", description="Path of one supporting file of an imported skill (e.g. REFERENCE.md), to read it instead of the skill.")
 
 
 class SkillProgressInput(BaseModel):
@@ -1963,9 +1964,9 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
             12000,
         )
 
-    async def get_skill(skill_id: str = "", name: str = "") -> str:
-        """Load one of your skills in full (instructions, recorded steps, narration transcript) by id or name, before following it."""
-        from app.skills.service import get_skill as _get, serialize_skill
+    async def get_skill(skill_id: str = "", name: str = "", file: str = "") -> str:
+        """Load one of your skills in full (instructions, recorded steps, narration transcript) by id or name, before following it. For an imported skill, pass file to read one of its supporting files."""
+        from app.skills.service import get_skill as _get, serialize_skill, skill_file
 
         ctx.used_tools.append("get_skill")
         if ctx.db is None:
@@ -1973,8 +1974,19 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
         row = await _get(ctx.db, ctx.user, skill_id, name, getattr(ctx.agent, "id", None))
         if row is None:
             return dumps({"error": "Unknown skill. Call list_my_skills for ids."})
+        if row.kind == "imported":
+            note_untrusted(ctx)  # someone else's instructions: unattended runs now ask before destructive actions
+        if file:
+            found = skill_file(row, file)
+            if found is None:
+                return dumps({"error": f"No file {file!r} in this skill.", "files": [f.get("path") for f in row.files or []]})
+            return dumps({"skill": row.name, "path": found["path"], "text": found.get("text") or ""}, 16000)
         data = serialize_skill(row, full=True)
         data.pop("frames", None)
+        if row.kind == "imported":
+            from app.skills.claude_format import prompt_note
+
+            data["note"] = prompt_note(data)
         if not any(str(s.get("id")) == data["id"] for s in ctx.active_skills):
             ctx.active_skills.append({"id": data["id"], "name": data["name"], "match": {"by": "loaded"}})
         if ctx.task_key and (ctx.task_state is None or str(ctx.task_state.get("skill_id")) != data["id"]):
@@ -3631,6 +3643,8 @@ async def _run_deep_agent(
         from app.skills.profile import is_meta_question
 
         ctx.active_skills = [{"id": s.get("id"), "name": s.get("name"), "match": s.get("match")} for s in matched_skills]
+        if any(s.get("kind") == "imported" for s in matched_skills):
+            note_untrusted(ctx)  # an imported skill's text goes into this turn's prompt
         ctx.task_key = task_key or ts.task_key_for(
             session_id=session_id, agent_id=getattr(workspace_agent, "id", None), job_id=getattr(job, "id", None)
         )

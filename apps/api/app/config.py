@@ -233,6 +233,9 @@ class Settings(BaseSettings):
     # Optional: pin the Composio GitHub auth config used for Connect GitHub (docs/GITHUB.md). Leave empty to use the
     # first enabled GitHub auth config (Composio creates a managed one if none exists).
     composio_github_auth_config_id: str = ""
+    # Optional GitHub token (no scopes needed) for browsing skill libraries: raises the anonymous limit of 60 reads
+    # an hour per server to 5,000 (app/skills/library.py).
+    skills_github_token: str = ""
 
     # WhatsApp channel (Meta WhatsApp Business Cloud API, docs/WHATSAPP.md). The channel is off unless the phone
     # number id, access token, app secret and verify token are all set.

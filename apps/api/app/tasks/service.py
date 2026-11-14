@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.deep import run_deep_agent
 from app.agents.service import AgentError, ensure_default_agent, get_agent
-from app.models import ChatMessage, ChatSession, ScheduledTask, User, WorkspaceAgent
+from app.models import AgentJob, ChatMessage, ChatSession, ScheduledRun, ScheduledTask, User, WorkspaceAgent
 from app.routing.describe import mentioned_connectors
 from app.routing.select import user_connectors
 from app.security import random_token
@@ -26,6 +26,7 @@ def serialize(task: ScheduledTask, tz: str, *, agent_name: str = "", agent_color
         "agent_id": str(task.agent_id) if task.agent_id else None,
         "agent_name": agent_name or "",
         "agent_color": agent_color or "",
+        "chat_session_id": str(task.chat_session_id) if task.chat_session_id else None,
         "title": task.title,
         "instruction": task.instruction,
         "prompt": task.prompt,
@@ -271,6 +272,8 @@ async def execute_task(db: AsyncSession, user: User, task: ScheduledTask, *, fro
         await db.flush()
         task.chat_session_id = sess.id
     request_id = random_token(12)
+    started = datetime.now(timezone.utc)
+    trigger = "schedule" if from_scheduler else "manual"
     try:
         result = await run_deep_agent(
             db, user, sess.id, request_id, [], instruction, auto_confirm=True, workspace_agent=agent
@@ -298,6 +301,11 @@ async def execute_task(db: AsyncSession, user: User, task: ScheduledTask, *, fro
                 request_id=request_id,
             )
         )
+        record_run(
+            db, task, agent, sess, trigger=trigger, started=started,
+            status="needs_approval" if held else "succeeded", result=text,
+            job_id=(held or {}).get("job", {}).get("id"),
+        )  # fmt: skip
         if from_scheduler:
             advance(task, user.timezone or "Asia/Kolkata")
         elif task.schedule_kind == "once":
@@ -337,8 +345,156 @@ async def execute_task(db: AsyncSession, user: User, task: ScheduledTask, *, fro
                 request_id=request_id,
             ))
             agent.unread = True
+        record_run(
+            db, task, locals().get("agent"), locals().get("sess"), trigger=trigger, started=started,
+            status="failed", result=task.last_result, error=task.last_error,
+        )  # fmt: skip
         await db.commit()
         raise
+
+
+# ---------------------------------------------------------------- run history (Routines dashboard)
+
+RUN_STATUSES = ("succeeded", "failed", "needs_approval")
+
+
+def record_run(db, task, agent, sess, *, trigger: str, started: datetime, status: str, result: str = "", error: str = "", job_id=None) -> None:
+    """Keep one row per run, and surface the result wherever the user looks: the agent is marked unread and the run's
+    conversation moves to the top, so web and desktop open the same, newest conversation (app/chat/page.tsx)."""
+    now = datetime.now(timezone.utc)
+    db.add(
+        ScheduledRun(
+            user_id=task.user_id,
+            task_id=task.id,
+            agent_id=getattr(agent, "id", None),
+            session_id=getattr(sess, "id", None),
+            job_id=uuid.UUID(str(job_id)) if job_id else None,
+            status=status if status in RUN_STATUSES else "failed",
+            trigger=trigger,
+            started_at=started,
+            finished_at=now,
+            result=clip(result or "", 4000),
+            error=(error or "")[:2000],
+        )
+    )
+    if sess is not None:
+        sess.updated_at = now
+    if agent is not None:
+        agent.unread = True
+
+
+async def backfill_runs(db: AsyncSession, user: User) -> None:
+    """Tasks that ran before run history existed get one row from their last run, so the dashboard isn't empty."""
+    from sqlalchemy import exists
+
+    stmt = select(ScheduledTask).where(
+        ScheduledTask.user_id == user.id,
+        ScheduledTask.last_run_at.is_not(None),
+        ~exists().where(ScheduledRun.task_id == ScheduledTask.id),
+    )
+    rows = (await db.execute(stmt)).scalars().all()
+    for task in rows:
+        db.add(
+            ScheduledRun(
+                user_id=user.id,
+                task_id=task.id,
+                agent_id=task.agent_id,
+                session_id=task.chat_session_id,
+                status="failed" if task.last_error else "succeeded",
+                trigger="earlier",
+                started_at=task.last_run_at,
+                finished_at=task.last_run_at,
+                result=clip(task.last_result or "", 4000),
+                error=(task.last_error or "")[:2000],
+            )
+        )
+    if rows:
+        await db.commit()
+
+
+def _outcome(run: ScheduledRun, job_status: str | None, job_error: str | None) -> tuple[str, str]:
+    """A run parked for approval takes its job's outcome once the job ends."""
+    if run.status == "needs_approval" and job_status:
+        if job_status == "done":
+            return "succeeded", run.error
+        if job_status in ("failed", "cancelled"):
+            return "failed", job_error or f"The approved work was {job_status}."
+    return run.status, run.error
+
+
+async def list_runs(
+    db: AsyncSession, user: User, *, agent_id=None, task_id=None, status: str = "", days: int = 30, limit: int = 100
+) -> list[dict]:
+    await backfill_runs(db, user)
+    tz = user.timezone or "Asia/Kolkata"
+    since = datetime.now(timezone.utc) - timedelta(days=max(1, min(int(days or 30), 365)))
+    stmt = (
+        select(ScheduledRun, ScheduledTask.title, WorkspaceAgent.name, WorkspaceAgent.color, AgentJob.status, AgentJob.error)
+        .join(ScheduledTask, ScheduledTask.id == ScheduledRun.task_id)
+        .outerjoin(WorkspaceAgent, WorkspaceAgent.id == ScheduledRun.agent_id)
+        .outerjoin(AgentJob, AgentJob.id == ScheduledRun.job_id)
+        .where(ScheduledRun.user_id == user.id, ScheduledRun.started_at >= since)
+        .order_by(ScheduledRun.started_at.desc())
+    )
+    if agent_id:
+        stmt = stmt.where(ScheduledRun.agent_id == agent_id)
+    if task_id:
+        stmt = stmt.where(ScheduledRun.task_id == task_id)
+    out = []
+    for run, title, name, color, job_status, job_error in (await db.execute(stmt.limit(2000))).all():
+        state, error = _outcome(run, job_status, job_error)
+        if status and state != status:
+            continue
+        out.append(
+            {
+                "id": str(run.id),
+                "task_id": str(run.task_id),
+                "task_title": title,
+                "agent_id": str(run.agent_id) if run.agent_id else None,
+                "agent_name": name or "",
+                "agent_color": color or "",
+                "session_id": str(run.session_id) if run.session_id else None,
+                "job_id": str(run.job_id) if run.job_id else None,
+                "status": state,
+                "trigger": run.trigger,
+                "started_at": run.started_at.isoformat(),
+                "started_label": format_local(run.started_at, tz),
+                "duration_ms": int((run.finished_at - run.started_at).total_seconds() * 1000) if run.finished_at else None,
+                "result": run.result,
+                "error": error,
+            }
+        )
+        if len(out) >= max(1, min(int(limit or 100), 500)):
+            break
+    return out
+
+
+async def summary(db: AsyncSession, user: User, *, agent_id=None, days: int = 30) -> dict:
+    """Counts for the Routines dashboard: runs by outcome, routines by state, and the same per agent."""
+    runs = await list_runs(db, user, agent_id=agent_id, days=days, limit=500)
+    tasks = await list_tasks(db, user, agent_id=agent_id)
+    totals = {k: 0 for k in RUN_STATUSES}
+    per: dict[str, dict] = {}
+    for t in tasks:
+        row = per.setdefault(t["agent_id"] or "", {"agent_id": t["agent_id"], "agent_name": t["agent_name"], "agent_color": t["agent_color"], "routines": 0, "active": 0, **{k: 0 for k in RUN_STATUSES}})
+        row["routines"] += 1
+        row["active"] += t["status"] in ("active", "running")
+    for r in runs:
+        totals[r["status"]] = totals.get(r["status"], 0) + 1
+        row = per.setdefault(r["agent_id"] or "", {"agent_id": r["agent_id"], "agent_name": r["agent_name"], "agent_color": r["agent_color"], "routines": 0, "active": 0, **{k: 0 for k in RUN_STATUSES}})
+        row[r["status"]] = row.get(r["status"], 0) + 1
+    finished = totals["succeeded"] + totals["failed"]
+    return {
+        "days": days,
+        "runs": len(runs),
+        **totals,
+        "success_rate": round(100 * totals["succeeded"] / finished) if finished else None,
+        "routines": len(tasks),
+        "active": sum(1 for t in tasks if t["status"] in ("active", "running")),
+        "paused": sum(1 for t in tasks if t["status"] == "paused"),
+        "last_failure": next((r for r in runs if r["status"] == "failed"), None),
+        "agents": sorted(per.values(), key=lambda a: (a["agent_name"] or "").lower()),
+    }
 
 
 def local_next(task: ScheduledTask, tz: str):

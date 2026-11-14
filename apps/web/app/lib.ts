@@ -81,7 +81,79 @@ export type AgentSkill = {
   notes?: string[];
   frames?: { index: number; t?: number }[];
   flow?: import("./components/SkillFlow").Flow;
+  description?: string;
+  source?: SkillSource;
+  files?: { path: string; size: number }[];
+  revision?: number;
 };
+
+// Claude-format skills (apps/api/app/skills/claude_format.py, library.py; docs/SKILLS.md).
+export type SkillSource = {
+  type?: "github" | "upload";
+  label?: string;
+  url?: string;
+  repo_url?: string;
+  path?: string;
+  ref?: string;
+  sha?: string;
+  name?: string;
+  license?: string;
+  imported_at?: string;
+  filename?: string;
+  skipped?: { path: string; why: string }[];
+};
+export type LibrarySource = { id: string; name: string; url: string; about: string };
+export type LibrarySkill = {
+  path: string;
+  folder: string;
+  name: string;
+  title: string;
+  description: string;
+  license: string;
+  category?: string;
+  files: number;
+  size: number;
+  has_scripts: boolean;
+  error?: string;
+};
+export type LibraryCatalog = {
+  source: { owner: string; repo: string; ref: string; sha: string; path: string; url: string; label: string };
+  skills: LibrarySkill[];
+  more: number;
+  truncated: boolean;
+};
+export type ImportResult = {
+  imported: { skill: AgentSkill; created: boolean; skipped: { path: string; why: string }[] }[];
+  errors: { path: string; error: string }[];
+};
+
+async function skillCall<T>(path: string, init: RequestInit, fallback: string): Promise<T> {
+  const res = await fetch(path, { credentials: "include", ...init });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(apiError(data, fallback));
+  return data as T;
+}
+
+export const skillLibrarySources = () => skillCall<{ sources: LibrarySource[] }>("/api/skills/library/sources", {}, "Couldn't load libraries");
+export const skillLibrary = (url: string) => skillCall<LibraryCatalog>(`/api/skills/library?url=${encodeURIComponent(url)}`, {}, "Couldn't read that library");
+export const importLibrarySkills = (body: { url: string; paths: string[]; ref?: string; agent_id?: string | null }) =>
+  skillCall<ImportResult>("/api/skills/import", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }, "Couldn't import");
+export function uploadSkill(file: File, agentId?: string | null) {
+  const form = new FormData();
+  form.append("file", file);
+  if (agentId) form.append("agent_id", agentId);
+  return skillCall<ImportResult>("/api/skills/import/upload", { method: "POST", body: form }, "Couldn't import that file");
+}
+export const skillUpdateFromSource = (id: string, check = false) =>
+  skillCall<{ update: boolean; updated?: boolean; sha: string; skill: AgentSkill }>(`/api/skills/${id}/update${check ? "?check=true" : ""}`, { method: "POST" }, "Couldn't reach the library");
+export const skillFileText = (id: string, path: string) =>
+  skillCall<{ path: string; size: number; text: string }>(`/api/skills/${id}/file?path=${encodeURIComponent(path)}`, {}, "Couldn't open that file");
+export const skillExportUrl = (id: string) => `/api/skills/${id}/export`;
+/** Matches a library row to a skill already imported from it (same repository folder). */
+export function importedFrom(skills: AgentSkill[], repoUrl: string, path: string) {
+  const repo = repoUrl.toLowerCase();
+  return skills.filter((s) => s.source?.type === "github" && (s.source.repo_url || "").toLowerCase() === repo && (s.source.path || "") === path);
+}
 
 export function skillBusy(skill: Pick<AgentSkill, "status"> | null | undefined) {
   return skill?.status === "recording" || skill?.status === "writing";
@@ -695,3 +767,82 @@ export async function whatsappUnlink(id: string) {
   if (!res.ok) throw new Error(apiError(data, "Could not disconnect WhatsApp"));
   return true;
 }
+
+// Routines: scheduled tasks per agent, their run history and the dashboard (apps/api/app/tasks; docs/ROUTINES.md).
+export type Routine = {
+  id: string;
+  agent_id?: string | null;
+  agent_name?: string;
+  agent_color?: string;
+  chat_session_id?: string | null;
+  title: string;
+  instruction: string;
+  prompt: string;
+  schedule_kind: string;
+  schedule_label: string;
+  next_run_at?: string | null;
+  next_run_label: string;
+  last_run_at?: string | null;
+  last_run_label: string;
+  last_result: string;
+  last_error: string;
+  status: string;
+  connected_apps: string[];
+  run_count: number;
+};
+export type RoutineRunStatus = "succeeded" | "failed" | "needs_approval";
+export type RoutineRun = {
+  id: string;
+  task_id: string;
+  task_title: string;
+  agent_id?: string | null;
+  agent_name: string;
+  agent_color: string;
+  session_id?: string | null;
+  job_id?: string | null;
+  status: RoutineRunStatus;
+  trigger: "schedule" | "manual" | "earlier";
+  started_at: string;
+  started_label: string;
+  duration_ms: number | null;
+  result: string;
+  error: string;
+};
+export type RoutineAgentStats = { agent_id: string | null; agent_name: string; agent_color: string; routines: number; active: number; succeeded: number; failed: number; needs_approval: number };
+export type RoutineSummary = {
+  days: number;
+  runs: number;
+  succeeded: number;
+  failed: number;
+  needs_approval: number;
+  success_rate: number | null;
+  routines: number;
+  active: number;
+  paused: number;
+  last_failure: RoutineRun | null;
+  agents: RoutineAgentStats[];
+};
+
+const qs = (params: Record<string, string | number | null | undefined>) => {
+  const q = new URLSearchParams();
+  Object.entries(params).forEach(([k, v]) => {
+    if (v !== null && v !== undefined && v !== "") q.set(k, String(v));
+  });
+  const text = q.toString();
+  return text ? `?${text}` : "";
+};
+
+export const listRoutines = (agentId?: string | null) => skillCall<{ tasks: Routine[] }>(`/api/tasks${qs({ agent_id: agentId })}`, {}, "Couldn't load routines");
+export const routineSummary = (agentId?: string | null, days = 30) => skillCall<RoutineSummary>(`/api/tasks/summary${qs({ agent_id: agentId, days })}`, {}, "Couldn't load the dashboard");
+export const routineRuns = (opts: { agentId?: string | null; status?: string; days?: number; taskId?: string; limit?: number } = {}) =>
+  skillCall<{ runs: RoutineRun[] }>(
+    `/api/tasks/runs${qs({ agent_id: opts.agentId, status: opts.status, days: opts.days ?? 30, task_id: opts.taskId, limit: opts.limit })}`,
+    {},
+    "Couldn't load run history",
+  );
+export const createRoutine = (prompt: string, agentId?: string | null) =>
+  skillCall<Routine>("/api/tasks", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt, agent_id: agentId || undefined }) }, "Couldn't schedule that");
+export const routineRunNow = (id: string) => skillCall<Routine>(`/api/tasks/${id}/run`, { method: "POST" }, "Couldn't run it");
+export const routineSetStatus = (id: string, status: "active" | "paused") =>
+  skillCall<Routine>(`/api/tasks/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status }) }, "Couldn't change it");
+export const routineDelete = (id: string) => skillCall<{ ok: boolean }>(`/api/tasks/${id}`, { method: "DELETE" }, "Couldn't delete it");

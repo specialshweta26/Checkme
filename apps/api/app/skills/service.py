@@ -93,7 +93,7 @@ def _flow_of(row: AgentSkill) -> dict:
     """The skill as a flow of nodes, for the app's canvas and for runs (app/skills/flow.py)."""
     from app.skills import flow as skill_flow
 
-    return skill_flow.build({"instruction": row.instruction or "", "name": row.name, "flow": getattr(row, "flow", None) or {}})
+    return skill_flow.build({"instruction": row.instruction or "", "name": row.name, "kind": getattr(row, "kind", ""), "flow": getattr(row, "flow", None) or {}})
 
 
 def serialize_skill(row: AgentSkill, full: bool = False) -> dict:
@@ -116,12 +116,23 @@ def serialize_skill(row: AgentSkill, full: bool = False) -> dict:
         "flow": _flow_of(row),
         "frame_count": len(frames),
         "has_transcript": bool(getattr(row, "transcript", None)),
+        "description": getattr(row, "description", None) or "",
+        "source": public_source(getattr(row, "source", None) or {}),
+        "files": [{"path": f.get("path"), "size": f.get("size", 0)} for f in (getattr(row, "files", None) or []) if isinstance(f, dict)],
     }
     if full:
         out["transcript"] = list(getattr(row, "transcript", None) or [])
         out["notes"] = list(getattr(row, "notes", None) or [])
         out["frames"] = [{"index": i, "t": f.get("t", 0)} for i, f in enumerate(frames) if isinstance(f, dict)]
     return out
+
+
+def public_source(source: dict) -> dict:
+    """Where an imported skill came from, for the app and the agent (no internal keys)."""
+    if not source:
+        return {}
+    keep = ("type", "label", "url", "repo_url", "path", "ref", "sha", "name", "license", "imported_at", "filename", "skipped")
+    return {k: source[k] for k in keep if k in source}
 
 
 async def list_skills(db: AsyncSession, user: User, agent_id: uuid.UUID | None = None) -> list[dict]:
@@ -281,6 +292,92 @@ async def save_skill(
     await db.commit()
     await db.refresh(row)
     return row
+
+
+# --- Claude-format skills: import, update from source, files (app/skills/claude_format.py, docs/SKILLS.md) -------
+
+
+async def import_skill(db: AsyncSession, user: User, item: dict, agent_id: uuid.UUID | None = None) -> tuple[AgentSkill, bool]:
+    """Store one parsed Claude skill for an agent (or all agents when ``agent_id`` is None). Importing the same skill
+    again (same repository folder, or same uploaded name) updates it to a new revision instead of adding a copy; a name
+    the user gave it is kept. Returns (row, created)."""
+    from app.skills import claude_format as cf
+
+    parsed, source = item["parsed"], dict(item.get("source") or {})
+    if agent_id:
+        agent = await db.get(WorkspaceAgent, agent_id)
+        if agent is None or agent.user_id != user.id:
+            raise SkillError("Unknown agent")
+    source.setdefault("type", "upload")
+    source.setdefault("key", f"upload:{cf.slugify(parsed['name'])}")
+    source.update(
+        {
+            "name": cf.slugify(parsed["name"]),
+            "license": parsed.get("license") or "",
+            "meta": parsed.get("meta") or {},
+            "imported_at": _now().isoformat(),
+            "skipped": list(item.get("skipped") or [])[:50],
+        }
+    )
+    stmt = select(AgentSkill).where(AgentSkill.user_id == user.id, AgentSkill.source["key"].astext == source["key"])
+    stmt = stmt.where(AgentSkill.agent_id == agent_id) if agent_id else stmt.where(AgentSkill.agent_id.is_(None))
+    row = (await db.execute(stmt.order_by(AgentSkill.created_at.desc()))).scalars().first()
+    created = row is None
+    if created:
+        row = AgentSkill(user_id=user.id, agent_id=agent_id, name=cf.humanize(parsed["name"]), kind="imported", steps=[], revision=1, status="ready")
+        db.add(row)
+    elif row.name == cf.humanize((row.source or {}).get("name") or ""):
+        row.name = cf.humanize(parsed["name"])  # follow a rename upstream unless the user renamed it here
+    row.kind = "imported"
+    row.description = parsed.get("description") or ""
+    row.instruction = parsed["body"]
+    row.flow = {}
+    row.files = list(item.get("files") or [])
+    row.source = source
+    row.status, row.error = "ready", ""
+    row.updated_at = _now()
+    await db.flush()
+    try:
+        from app.memory_engine.procedures import add_version
+
+        add_version(db, row, bump=not created)
+    except Exception:  # noqa: BLE001 - the import still saves when versioning is unavailable
+        log.info("skill version skipped", exc_info=True)
+    await db.commit()
+    await db.refresh(row)
+    return row, created
+
+
+async def update_from_source(db: AsyncSession, user: User, skill_id: str, check_only: bool = False) -> dict:
+    """Compare an imported skill with its library's branch head and, unless ``check_only``, re-import it."""
+    from app.skills import library
+
+    row = await get_skill(db, user, skill_id)
+    if row is None:
+        raise SkillError("Unknown skill.")
+    source = row.source or {}
+    if source.get("type") != "github":
+        raise SkillError("Only skills imported from GitHub can be updated from their source.")
+    try:
+        head = await library.latest_sha(source)
+        if head == source.get("sha"):
+            return {"update": False, "sha": head, "skill": serialize_skill(row)}
+        if check_only:
+            return {"update": True, "sha": head, "skill": serialize_skill(row)}
+        item = await library.fetch_skill(source.get("repo_url") or "", source.get("path") or "", source.get("ref") or "")
+    except library.LibraryError as exc:
+        raise SkillError(str(exc)) from None
+    row, _ = await import_skill(db, user, item, row.agent_id)
+    return {"update": True, "updated": True, "sha": head, "skill": serialize_skill(row)}
+
+
+def skill_file(row: AgentSkill, path: str) -> dict | None:
+    """One supporting file of an imported skill: {path, size, text}, or None."""
+    want = str(path or "").strip().lstrip("./")
+    for f in getattr(row, "files", None) or []:
+        if isinstance(f, dict) and f.get("path") == want:
+            return f
+    return None
 
 
 # --- Taught skills: saved while recording -------------------------------------------------------------

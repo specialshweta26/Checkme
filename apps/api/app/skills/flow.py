@@ -73,7 +73,11 @@ def build(skill: dict) -> dict:
         clean, errors = normalize(saved)
         if not errors:
             return clean
-    steps = split_numbered(skill.get("instruction") or "")
+    # A Claude-format skill is a guide, not a procedure: its numbered lists are examples, not the task's steps, so it
+    # runs as one step ("follow the guide") until the user edits a flow for it.
+    steps = [] if skill.get("kind") == "imported" else split_numbered(skill.get("instruction") or "")
+    if skill.get("kind") == "imported":
+        steps = [f"Do the task following the imported skill “{skill.get('name') or 'skill'}” and its instructions."]
     if not steps:
         body = " ".join(str(skill.get("instruction") or skill.get("name") or "Do the task").split())
         steps = [body[:600]]
