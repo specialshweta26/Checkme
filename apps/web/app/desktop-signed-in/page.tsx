@@ -2,10 +2,12 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { applySavedTheme } from "../lib";
 
 // Shown in the system browser after a sign-in that the Lumio desktop app started (docs/LLD.md "Desktop sign-in").
 export default function DesktopSignedIn() {
   const [failed, setFailed] = useState(false);
+  useEffect(() => applySavedTheme(), []);
   useEffect(() => {
     setFailed(new URLSearchParams(window.location.search).get("error") === "handoff");
   }, []);

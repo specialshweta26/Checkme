@@ -4,11 +4,14 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { BrandMark } from "../components/BrandMark";
 import { AuthProviders } from "../components/AuthProviders";
-import { errorFromQuery, getMe } from "../lib";
+import { applySavedTheme, devLoginAvailable, errorFromQuery, getMe } from "../lib";
 
 export default function Login() {
   const [error, setError] = useState("");
   const [deleted, setDeleted] = useState(false);
+  const [devLogin, setDevLogin] = useState(false);
+
+  useEffect(() => applySavedTheme(), []);
 
   useEffect(() => {
     setError(errorFromQuery(window.location.search));
@@ -16,6 +19,7 @@ export default function Login() {
     getMe().then((me) => {
       if (me) window.location.replace("/chat");
     });
+    devLoginAvailable().then(setDevLogin);
   }, []);
 
   return (
@@ -24,43 +28,50 @@ export default function Login() {
         <section className="auth-visual" aria-label="Lumio">
           <Link className="auth-brand" href="/">
             <span className="auth-mark">
-              <BrandMark size={22} />
+              <BrandMark size={32} />
             </span>
-            lumio
+            Lumio
           </Link>
           <div className="auth-hero-copy">
-            <h1>Your personal assistant, ready when you are.</h1>
-            <p>Bring your day into focus. Lumio helps you think, plan, and get things done—one conversation at a time.</p>
+            <h1>Your assistant for the work that fills your day.</h1>
+            <p>Lumio reads your inbox, runs your routines and works across the apps you connect, with your approval before anything goes out.</p>
+            <ul className="auth-points">
+              <li>Agents with their own skills, memory and schedule</li>
+              <li>Approvals before any email, message or payment is sent</li>
+              <li>Your data stays in your workspace, exportable at any time</li>
+            </ul>
           </div>
-          <div className="auth-quote">
-            <div className="auth-quote-top">
-              <span className="auth-quote-avatar"><BrandMark size={34} /></span>
-              <span>Lumio assistant</span>
-              <span className="auth-online" aria-hidden />
-            </div>
-            <p>“Good to see you. What would you like to work on today?”</p>
-          </div>
-          <p className="auth-foot">A little more clarity, every day.</p>
-          <div className="auth-orbit" aria-hidden />
+          <p className="auth-foot">Private to your accounts. Nothing is shared between workspaces.</p>
         </section>
         <section className="auth-action">
           <div className="auth-form">
             <div className="auth-eyebrow">Welcome back</div>
             <h2>Sign in to Lumio</h2>
-            <p className="auth-intro">Your personal assistant is just a sign-in away.</p>
-            {deleted ? <p className="att-summary">Your account and all its data were deleted.</p> : null}
+            <p className="auth-intro">Use the work or personal account you connect your mail and calendar with.</p>
+            {deleted ? <p className="notice">Your account and all its data were deleted.</p> : null}
             <AuthProviders error={error} />
+            {devLogin ? (
+              <>
+                <div className="auth-divider" role="separator">
+                  Local development
+                </div>
+                <form className="dev-login" method="post" action="/api/auth/dev/login">
+                  <button className="btn secondary large block" type="submit">
+                    Continue with local demo account
+                  </button>
+                  <p>Shown only when this server runs on your machine with DEV_LOGIN on. It never appears in production.</p>
+                </form>
+              </>
+            ) : null}
             <p className="auth-alt">
-              Prefer the browser first? <Link href="/chat">Open the web app</Link>
-              {" · "}
-              <Link href="/download">Download for Mac or Windows</Link>
+              <Link href="/download">Download Lumio for Mac or Windows</Link>
             </p>
             <details className="trouble">
-              <summary>Having trouble?</summary>
+              <summary>Having trouble signing in?</summary>
               <p>
                 Google: if the Cloud app is in Testing, add your account under Auth Platform → Audience → Test users.
-                Outlook: Azure Application (client) ID must be a full GUID. Supported account types must include personal
-                Microsoft accounts.
+                Outlook: the Azure Application (client) ID must be a full GUID, and supported account types must include
+                personal Microsoft accounts.
               </p>
             </details>
             <p className="trust">By signing in, you agree this is a private workspace for your accounts.</p>
