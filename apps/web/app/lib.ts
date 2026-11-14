@@ -321,6 +321,34 @@ export function skillFrameUrl(id: string, index: number) {
   return `/api/skills/${encodeURIComponent(id)}/frames/${index}`;
 }
 
+/** The theme the app shell saved ("lumio.theme"); dark when nothing is saved, as in AppShell. */
+export const THEME_KEY = "lumio.theme";
+export function savedTheme(): "dark" | "light" {
+  try {
+    return window.localStorage.getItem(THEME_KEY) === "light" ? "light" : "dark";
+  } catch {
+    return "dark";
+  }
+}
+
+/** Pages outside the app shell (sign-in) wear the same theme: toggles body.app-dark and undoes it on unmount. */
+export function applySavedTheme() {
+  document.body.classList.toggle("app-dark", savedTheme() === "dark");
+  return () => document.body.classList.remove("app-dark");
+}
+
+/** Whether the API offers the local demo sign-in (DEV_LOGIN on a localhost PUBLIC_WEB_URL only). */
+export async function devLoginAvailable(): Promise<boolean> {
+  try {
+    const res = await fetch("/api/auth/status", { credentials: "include" });
+    if (!res.ok) return false;
+    const data = await res.json();
+    return data?.dev_login === true;
+  } catch {
+    return false;
+  }
+}
+
 export function isLumioDesktop() {
   return typeof window !== "undefined" && Boolean((window as { __lumioDesktop?: boolean }).__lumioDesktop);
 }

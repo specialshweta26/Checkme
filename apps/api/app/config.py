@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     )
 
     public_web_url: str = "http://localhost:3000"
+    # Local development only: a one-click "Local demo account" sign-in (POST /api/auth/dev/login) so the app can be
+    # used and changed without Google or Microsoft. It has no password, and the API refuses it unless PUBLIC_WEB_URL
+    # is a local address, so it can never be switched on in production by accident (docs/DESIGN.md "Sign-in").
+    dev_login: bool = False
     microsoft_mail_push: bool = True  # new Outlook mail wakes the inbox check; needs an https public_web_url
 
     openai_api_key: str = ""
@@ -281,6 +285,14 @@ class Settings(BaseSettings):
         if self.public_web_url:
             self.public_web_url = self.public_web_url.rstrip("/")
         return self
+
+    @property
+    def dev_login_enabled(self) -> bool:
+        from urllib.parse import urlparse
+
+        host = (urlparse(self.public_web_url).hostname or "").lower()
+        local = host in {"localhost", "127.0.0.1", "::1"} or host.endswith(".localhost")
+        return bool(self.dev_login) and local
 
     @property
     def secure_cookies(self) -> bool:

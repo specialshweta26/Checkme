@@ -1197,14 +1197,14 @@ export default function ChatPage() {
               onChange={(e) => setText(e.target.value)}
               placeholder={
                 activeGroup
-                  ? "Write normally, @ a bot, or @everyone…"
+                  ? "Write, @ a bot or @everyone…"
                   : busyHere
                     ? "Type to redirect…"
                     : pending.length
                     ? "Reply to your agent…"
                     : uploads.length
                     ? "Ask about this file…"
-                    : "Ask about sales, mail, or schedule work…"
+                    : "Ask anything or schedule work…"
               }
               rows={1}
               onKeyDown={(e) => {

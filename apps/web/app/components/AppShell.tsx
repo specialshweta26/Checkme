@@ -16,6 +16,7 @@ import {
   type InboxAlert,
   type Me,
   type WorkspaceRoster,
+  THEME_KEY,
 } from "../lib";
 import { AgentsNav } from "./AgentsNav";
 import { BrandMark } from "./BrandMark";
@@ -120,7 +121,6 @@ function IconMoon() {
   );
 }
 
-const THEME_KEY = "lumio.theme";
 
 function ThemeToggle({ theme, onToggle }: { theme: "dark" | "light"; onToggle: () => void }) {
   const bright = theme === "light";

@@ -75,6 +75,8 @@ python3 -c "from cryptography.fernet import Fernet; print('TOKEN_ENCRYPTION_KEY=
 docker compose up --build
 ```
 
+To sign in without Google or Microsoft while you work on the app, set `DEV_LOGIN=true` in `.env`: the sign-in page then shows **Continue with local demo account** (`demo@lumio.local`, no password). The API refuses it unless `PUBLIC_WEB_URL` is a local address, so it never exists on Render.
+
 Open [http://localhost:3000](http://localhost:3000). API is `localhost:8001` inside Compose (`8000` in the container). Optional Letta memory: `docker compose --profile letta up`.
 
 API tests (from `apps/api`):
@@ -100,6 +102,7 @@ API tests (from `apps/api`):
 - **Continue with Google** → built-in `gmail` connector (Gmail + Calendar + Meet).
 - **Continue with Microsoft** → built-in `outlook` connector (Graph mail + Calendar + Teams).
 - **Connectors** → link the other mailbox, or add an MCP URL.
+- **Continue with local demo account** → local development only (`DEV_LOGIN=true` and a localhost `PUBLIC_WEB_URL`).
 
 Refresh tokens are stored encrypted per account (`TOKEN_ENCRYPTION_KEY`). The web app does not put provider tokens in the browser.
 

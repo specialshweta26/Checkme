@@ -68,8 +68,36 @@ async def oauth_status():
     return {
         "google": bool(s.google_client_id),
         "microsoft": bool(s.microsoft_client_id),
+        "dev_login": s.dev_login_enabled,
         "public_web_url": s.public_web_url,
     }
+
+
+DEV_EMAIL = "demo@lumio.local"
+
+
+@router.post("/dev/login")
+async def dev_login(request: Request, db: AsyncSession = Depends(get_db)):
+    """Local development only: sign in as the local demo account, creating it the first time. There is no password;
+    it answers 404 unless DEV_LOGIN is on and PUBLIC_WEB_URL is a local address (Settings.dev_login_enabled)."""
+    if not get_settings().dev_login_enabled:
+        raise HTTPException(404, "Not Found")
+    user = (
+        await db.execute(select(User).where(User.primary_provider == "dev", User.email == DEV_EMAIL).limit(1))
+    ).scalar_one_or_none()
+    if user is None:
+        user = User(email=DEV_EMAIL, display_name="Demo user", primary_provider="dev", timezone="Asia/Kolkata")
+        db.add(user)
+        await db.flush()
+    from app.connectors.platform import ensure_platform_connectors
+
+    await ensure_platform_connectors(db, user)
+    sess = AuthSession(user_id=user.id, expires_at=session_expiry(), user_agent=request.headers.get("user-agent", "")[:300])
+    db.add(sess)
+    await db.commit()
+    resp = RedirectResponse(_web("/chat"), status_code=303)
+    _session_cookie(resp, issue_session_jwt(user.id, sess.id, sess.expires_at))
+    return resp
 
 
 @router.get("/{provider}/login")
