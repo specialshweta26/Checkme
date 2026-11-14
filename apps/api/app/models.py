@@ -499,6 +499,29 @@ class ScheduledTask(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
 
+class ScheduledRun(Base):
+    """One run of a scheduled task (app/tasks/service.py execute_task): the Routines dashboard and its failure list.
+
+    ``status``: succeeded | failed | needs_approval (the run parked a background job for an approval; the job's own
+    status then decides the outcome). ``trigger``: schedule | manual | earlier (rebuilt from a task's last run).
+    """
+
+    __tablename__ = "scheduled_runs"
+    __table_args__ = (Index("ix_scheduled_runs_user_started", "user_id", "started_at"),)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    task_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("scheduled_tasks.id", ondelete="CASCADE"), index=True)
+    agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    session_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    job_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    status: Mapped[str] = mapped_column(String(20), default="succeeded")
+    trigger: Mapped[str] = mapped_column(String(20), default="schedule")
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    result: Mapped[str] = mapped_column(Text, default="")
+    error: Mapped[str] = mapped_column(Text, default="")
+
+
 class AgentJob(Base):
     """A background agent run (coding work, delegated sub-tasks, scheduled runs). See app/jobs."""
 
@@ -752,6 +775,11 @@ class AgentSkill(Base):
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # A flow edited in the app (app/skills/flow.py). Empty: the flow comes from the instruction's numbered steps.
     flow: Mapped[dict] = mapped_column(JSONB, default=dict)
+    # Claude-format skills (app/skills/claude_format.py): when to use it, where it came from (pinned commit), and its
+    # supporting text files [{path, size, text}]. Empty for saved and taught skills.
+    description: Mapped[str] = mapped_column(Text, default="")
+    source: Mapped[dict] = mapped_column(JSONB, default=dict)
+    files: Mapped[list] = mapped_column(JSONB, default=list)
 
 
 class TaskSkillState(Base):

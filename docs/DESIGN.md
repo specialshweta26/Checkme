@@ -83,6 +83,25 @@ nothing scales or lifts on hover. All of it is turned off under `prefers-reduced
 - Toasts invert the theme (`--text` on `--bg`) so they read on any background.
 - Empty states: dashed border, one sentence and at most one primary action.
 
+### Profile
+Everything the workspace keeps for the user sits under **Profile**, not in the sidebar. The sidebar footer keeps
+Connectors and the Profile button; the Profile menu has two groups:
+- **Your workspace:** What I know (`/memory`), Routines (`/routines`, see [ROUTINES.md](ROUTINES.md)), Skills (`/skills`, see
+  [SKILLS.md](SKILLS.md)), Artifacts (`/artifacts`),
+  Saved runs (`/runs`), Vault (`/vault`).
+- **Account:** Usage and cost (`/usage`), Your data (`/account`), then Sign out.
+
+The menu header opens the **Profile** page (`/profile`): who is signed in and with which provider, five counts (people,
+facts, artifacts, saved runs, vault sign-ins), a card for each workspace area and a compact row for the account
+pages. Each area has its own icon tone (`--accent`, `--violet`, `--ok`); the Vault is the one dark card, in light and
+dark themes alike, so it reads as the secure place.
+
+- **Artifacts** lists what agents produced while following a skill (`GET /api/skills/artifacts`): links, files,
+  and notes or IDs, filterable by kind, each with Copy and a link back to the chat or task it came from.
+- **Vault** holds the sign-ins agents use on sites without a connector (`/api/browser/logins`). It used to be a
+  section at the bottom of Saved runs. Passwords are encrypted before they are stored (`app.security.encrypt`), are
+  never shown again and are left out of the data export.
+
 ### Sign-in
 - Uses the same tokens as the app and follows the saved theme (`lumio.theme`, dark when nothing is saved).
 - Google and Microsoft are 48px secondary-style buttons.

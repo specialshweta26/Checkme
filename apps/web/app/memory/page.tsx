@@ -235,6 +235,7 @@ export default function MemoryPage() {
         <div className="tasks-page">
           <div className="page-hero">
             <div>
+              <span className="eyebrow">Profile</span>
               <h1>What I know</h1>
               <p className="muted">
                 What your assistant uses when it drafts replies, summarises mail and prepares you for meetings. Add what it should know, correct

@@ -11,7 +11,10 @@ import {
   getSkill,
   rewriteSkill,
   skillBusy,
+  skillExportUrl,
+  skillFileText,
   skillFrameUrl,
+  skillUpdateFromSource,
   updateSkill,
 } from "../lib";
 
@@ -146,7 +149,7 @@ export function SkillDetail({
         {skill ? (
           <>
             <p className="muted">
-              {skill.kind === "taught" ? "Taught by demonstration" : "Saved workflow"}
+              {skill.kind === "taught" ? "Taught by demonstration" : skill.kind === "imported" ? "Imported skill" : "Saved workflow"}
               {skill.duration_ms ? ` · ${clock(skill.duration_ms / 1000)} recorded` : ""}
               {skill.step_count ? ` · ${steps.length} steps` : ""} <SkillStatusChip skill={skill} />
             </p>
@@ -160,6 +163,7 @@ export function SkillDetail({
                 </button>
               </div>
             ) : null}
+            <SkillSourceBox skill={skill} onUpdated={() => { void load(false); onChanged(); }} />
             <label>
               Name
               <input
@@ -293,4 +297,92 @@ export function SkillDetail({
     </div>
   );
   return typeof document === "undefined" ? view : createPortal(view, document.body);
+}
+
+/** Where an imported skill came from, its supporting files, and update / export (docs/SKILLS.md). */
+function SkillSourceBox({ skill, onUpdated }: { skill: AgentSkill; onUpdated: () => void }) {
+  const [file, setFile] = useState<{ path: string; text: string } | null>(null);
+  const [state, setState] = useState("");
+  const source = skill.source || {};
+  const files = skill.files || [];
+
+  async function openFile(path: string) {
+    if (file?.path === path) {
+      setFile(null);
+      return;
+    }
+    try {
+      const data = await skillFileText(skill.id, path);
+      setFile({ path, text: data.text });
+    } catch (e: any) {
+      setState(e.message);
+    }
+  }
+
+  async function update() {
+    setState("Checking…");
+    try {
+      const check = await skillUpdateFromSource(skill.id, true);
+      if (!check.update) {
+        setState("Up to date with its library.");
+        return;
+      }
+      if (!window.confirm("A newer version is in the library. Update? Edits you made to the instructions here will be replaced.")) {
+        setState("A newer version is available.");
+        return;
+      }
+      await skillUpdateFromSource(skill.id);
+      setState("Updated to the latest version.");
+      onUpdated();
+    } catch (e: any) {
+      setState(e.message);
+    }
+  }
+
+  return (
+    <div className="skill-source">
+      {skill.description ? (
+        <p>
+          <span className="faint">Use when: </span>
+          {skill.description}
+        </p>
+      ) : null}
+      {source.label ? (
+        <p className="faint">
+          From{" "}
+          {source.url ? (
+            <a href={source.url} target="_blank" rel="noopener noreferrer">
+              {source.label}
+            </a>
+          ) : (
+            source.label
+          )}
+          {source.sha ? <> at <code>{source.sha.slice(0, 7)}</code></> : null}
+          {source.license ? ` · ${source.license}` : ""}
+        </p>
+      ) : null}
+      {files.length ? (
+        <div className="skill-files">
+          {files.map((f) => (
+            <button key={f.path} type="button" className={`app-pill${file?.path === f.path ? " on" : ""}`} onClick={() => openFile(f.path)}>
+              {f.path}
+            </button>
+          ))}
+        </div>
+      ) : null}
+      {file ? <pre className="skill-file-text">{file.text}</pre> : null}
+      {source.skipped?.length ? <p className="faint">Left out {source.skipped.length} file{source.skipped.length === 1 ? "" : "s"} that weren't text or were too large.</p> : null}
+      <div className="row">
+        {source.type === "github" ? (
+          <button className="btn secondary small" type="button" onClick={update}>
+            Check for update
+          </button>
+        ) : null}
+        <a className="btn secondary small" href={skillExportUrl(skill.id)} download>
+          Export as SKILL.md
+        </a>
+        {state ? <span className="faint">{state}</span> : null}
+      </div>
+    </div>
+  );
 }

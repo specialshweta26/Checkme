@@ -10,6 +10,7 @@ import { EmailThreadButton, mailRefsFromMeta } from "../components/EmailThread";
 import { Markdown } from "../components/Markdown";
 import { dismissFocusCard, focusCardDismissed, FocusOnboarding } from "../components/FocusCard";
 import { AgentAvatar } from "../components/AgentAvatar";
+import { RoutinesButton } from "../components/Routines";
 import { JobTimeline } from "../components/JobTimeline";
 import SkillFlow from "../components/SkillFlow";
 import { Thinking } from "../components/Thinking";
@@ -26,6 +27,28 @@ function scopeKey(agentId?: string | null, groupId?: string | null) {
 function scopeStore(agentId?: string | null, groupId?: string | null) {
   const key = scopeKey(agentId, groupId);
   return key ? `${STORE}.${key}` : STORE;
+}
+
+// The conversation last opened for an agent or group on this device, and when. Stored as "<id>@<ms>"; older values
+// are a bare id. When another conversation in that scope has had activity since (a scheduled run's result, or a
+// message sent from another device), that one opens instead, so web and desktop land on the same conversation.
+function rememberSession(agentId: string | null | undefined, groupId: string | null | undefined, id: string) {
+  window.localStorage.setItem(scopeStore(agentId, groupId), `${id}@${Date.now()}`);
+}
+
+function rememberedSession(agentId?: string | null, groupId?: string | null): { id: string; at: number } | null {
+  const raw = typeof window !== "undefined" ? window.localStorage.getItem(scopeStore(agentId, groupId)) : null;
+  if (!raw) return null;
+  const [id, at] = raw.split("@");
+  return { id, at: Number(at) || 0 };
+}
+
+/** Which conversation to open: the remembered one, unless a newer one in the scope has had activity since. */
+function chooseSession(scoped: ChatSessionRow[], stored: { id: string; at: number } | null, hinted?: string | null) {
+  const newest = scoped[0];
+  const kept = stored ? scoped.find((s) => s.id === stored.id) : undefined;
+  if (stored && kept && newest && newest.id !== kept.id && Date.parse(newest.updated_at) > stored.at) return newest.id;
+  return kept?.id || newest?.id || hinted || null;
 }
 
 /** A task typed on Today. Cleared once, so opening that agent's chat sends it into the current thread. */
@@ -285,7 +308,7 @@ export default function ChatPage() {
     setGroupId(nextGroup);
     setAgentId(nextAgent);
     rememberScope(nextAgent, nextGroup);
-    window.localStorage.setItem(scopeStore(nextAgent, nextGroup), id);
+    rememberSession(nextAgent, nextGroup, id);
     if (typeof window !== "undefined") {
       window.history.replaceState(null, "", chatHref({ agent: nextAgent, group: nextGroup, conversation: id }));
     }
@@ -527,7 +550,7 @@ export default function ChatPage() {
       const nextPending: Confirm[] = data.pending_confirms || [];
       const doneView: AgentView = { sessionId: data.session_id || sessionId, messages: doneMessages, pending: nextPending };
       viewsRef.current[key] = doneView;
-      if (data.session_id) window.localStorage.setItem(scopeStore(sendAgent, sendGroup), data.session_id);
+      if (data.session_id) rememberSession(sendAgent, sendGroup, data.session_id);
       if (scopeRef.current === key) {
         showView(doneView);
         if (nextPending.some((p) => p.kind === "handoff" || p.preview?.kind === "handoff")) {
@@ -550,7 +573,7 @@ export default function ChatPage() {
           .map((m: Msg) => ({ role: m.role, content: m.content || "", meta: m.meta }));
         const view: AgentView = { sessionId: recovered.sessionId, messages: msgs, pending: pendingFor(msgs) };
         viewsRef.current[key] = view;
-        window.localStorage.setItem(scopeStore(sendAgent, sendGroup), recovered.sessionId);
+        rememberSession(sendAgent, sendGroup, recovered.sessionId);
         if (scopeRef.current === key) showView(view);
         await refreshSessions().catch(() => null);
       } else {
@@ -655,7 +678,7 @@ export default function ChatPage() {
     }
     if (stoppedSession) {
       const [agentPart, groupPart] = [turn?.agentId ?? agentId, groupId];
-      window.localStorage.setItem(scopeStore(agentPart, groupPart), stoppedSession);
+      rememberSession(agentPart, groupPart, stoppedSession);
       await reloadSession(stoppedSession);
       await refreshSessions().catch(() => null);
     }
@@ -785,11 +808,10 @@ export default function ChatPage() {
       return;
     }
     const scoped = rows.filter((s) => sessionInScopeRow(s, nextAgent, nextGroup));
-    const stored = typeof window !== "undefined" ? window.localStorage.getItem(scopeStore(nextAgent, nextGroup)) : null;
     const hinted = nextGroup
       ? nextRoster.groups.find((g) => g.id === nextGroup)?.session_id
       : nextRoster.agents.find((a) => a.id === nextAgent)?.session_id;
-    const pick = (stored && scoped.some((s) => s.id === stored) ? stored : null) || scoped[0]?.id || hinted || null;
+    const pick = chooseSession(scoped, rememberedSession(nextAgent, nextGroup), hinted);
     const apply = (view: AgentView) => {
       viewsRef.current[wanted] = view;
       if (scopeRef.current === wanted) showView(view);
@@ -899,12 +921,7 @@ export default function ChatPage() {
             <strong>{screenName}</strong>
             {screenMeta ? <span className="muted">{screenMeta}</span> : null}
           </div>
-          <a className="chat-task-btn" href="/tasks" aria-label="Tasks" title="Tasks">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
-              <circle cx="12" cy="12" r="8" stroke="currentColor" strokeWidth="1.8" />
-              <path d="M12 8v4.5l3 2" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-            </svg>
-          </a>
+          <RoutinesButton className="chat-task-btn" agentId={activeGroup ? null : agentId} agentName={screenName} />
           <button
             type="button"
             className={`chat-computer-btn${screenOpen ? " on" : ""}${watching || controlling || computer?.live ? " live" : ""}`}
@@ -1000,7 +1017,7 @@ export default function ChatPage() {
                         <strong>Check connected systems</strong>
                         <span>Promises, waits, or any tool already linked to this workspace.</span>
                       </button>
-                      <a className="hero-card" href="/tasks">
+                      <a className="hero-card" href={agentId && !activeGroup ? `/routines?agent=${agentId}` : "/routines"}>
                         <span className="mark" />
                         <strong>Schedule a send</strong>
                         <span>Work that should run at a time you choose, then go out.</span>

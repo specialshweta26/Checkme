@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_db
 from app.deps import current_user
 from app.models import User
-from app.tasks.service import create_from_prompt, delete_task, execute_task, get_owned, list_tasks, set_status
+from app.tasks.service import create_from_prompt, delete_task, execute_task, get_owned, list_runs, list_tasks, set_status, summary
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
@@ -34,6 +34,28 @@ async def list_scheduled(
         return {"tasks": await list_tasks(db, user, status=status, agent_id=agent_id)}
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+
+
+@router.get("/runs")
+async def scheduled_runs(
+    agent_id: uuid.UUID | None = None,
+    task_id: uuid.UUID | None = None,
+    status: str = "",
+    days: int = 30,
+    limit: int = 100,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Run history, newest first. status: succeeded | failed | needs_approval."""
+    return {"runs": await list_runs(db, user, agent_id=agent_id, task_id=task_id, status=status, days=days, limit=limit)}
+
+
+@router.get("/summary")
+async def scheduled_summary(
+    agent_id: uuid.UUID | None = None, days: int = 30, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)
+):
+    """The Routines dashboard: runs by outcome over ``days``, routines by state, per agent."""
+    return await summary(db, user, agent_id=agent_id, days=days)
 
 
 @router.post("")

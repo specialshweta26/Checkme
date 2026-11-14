@@ -985,14 +985,17 @@ function SkillEditor({
   return (
     <fieldset>
       <legend>Skills</legend>
-      <p className="muted">Save a workflow, or click Teach a task and do the work on this computer. Lumio records it and writes a skill. Optional: narrate with the microphone.</p>
+      <p className="muted">
+        Save a workflow, or click Teach a task and do the work on this computer. Lumio records it and writes a skill. Optional: narrate with the
+        microphone. Or <a href="/skills">add ready-made skills</a> from a library.
+      </p>
       {skills.length ? (
         <ul className="skill-list clickable">
           {skills.map((skill) => (
             <li key={skill.id}>
               <button type="button" className="skill-row" onClick={() => setOpenSkill(skill.id)} aria-label={`Open skill ${skill.name}`}>
                 <strong>{skill.name}</strong>
-                <span className="muted">{skill.kind === "taught" ? "taught" : "saved"}{skill.step_count ? ` · ${skill.step_count} steps` : ""}</span>
+                <span className="muted">{skill.kind === "taught" ? "taught" : skill.kind === "imported" ? "imported" : "saved"}{skill.step_count ? ` · ${skill.step_count} steps` : ""}</span>
                 <SkillStatusChip skill={skill} />
               </button>
             </li>

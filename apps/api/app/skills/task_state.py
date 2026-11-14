@@ -168,6 +168,27 @@ def serialize(state: dict | None) -> dict | None:
     }
 
 
+def artifact_feed(states: list[dict], limit: int = 200) -> list[dict]:
+    """Everything the user's tasks produced (links, files, ids, quotes), newest first, for the Artifacts page.
+
+    A handover copies a child's artifacts onto its parent, so the same item can sit on two rows: keep the first."""
+    seen: set[tuple[str, str]] = set()
+    out: list[dict] = []
+    for state in states:
+        for item in state.get("artifacts") or []:
+            label, value = str(item.get("label") or ""), str(item.get("value") or "")
+            if (label, value) in seen or not (label or value):
+                continue
+            seen.add((label, value))
+            out.append({
+                "at": _iso(item.get("at")), "label": label, "value": value, "by": str(item.get("by") or ""),
+                "skill_name": state.get("skill_name") or "", "status": state.get("status") or "",
+                "session_id": state.get("session_id"), "job_id": state.get("job_id"), "agent_id": state.get("agent_id"),
+            })  # fmt: skip
+    out.sort(key=lambda a: a["at"], reverse=True)
+    return out[:limit]
+
+
 def flow_view(run: dict | None) -> dict | None:
     """The run's nodes for the app's flow canvas: number, title, kind, status, and which one is current."""
     if not run or not run.get("nodes"):
@@ -191,7 +212,7 @@ async def confirm_skills(query: str, candidates: list[dict], llm=None) -> list[d
     """LLM check that routed skills really fit this request. Keeps the candidates if the check fails."""
     if not candidates:
         return []
-    menu = [{"id": str(c.get("id")), "name": c.get("name"), "use_when": (c.get("instruction") or "")[:300]} for c in candidates]
+    menu = [{"id": str(c.get("id")), "name": c.get("name"), "use_when": (c.get("description") or c.get("instruction") or "")[:300]} for c in candidates]
     messages = [
         {"role": "system", "content": "You decide which saved skills (step-by-step workflows) apply to a user's request."},
         {

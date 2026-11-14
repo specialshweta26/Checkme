@@ -44,7 +44,11 @@ def is_meta_question(query: str) -> bool:
 
 
 def one_liner(skill: dict) -> str:
-    """When to use a skill, in one line: the first sentence of its instruction (or its first step)."""
+    """When to use a skill, in one line: its description (Claude-format skills), else the first sentence of its
+    instruction (or its first step)."""
+    described = " ".join(str(skill.get("description") or "").split())
+    if described:
+        return described[:LINE_CHARS] if len(described) <= LINE_CHARS else described[: LINE_CHARS - 1].rsplit(" ", 1)[0] + "…"
     text = " ".join(str(skill.get("instruction") or "").split())
     text = re.sub(r"^(repeat this demonstrated workflow on the computer\.\s*recheck the screen[^.]*\.\s*)", "", text, flags=re.I)
     text = re.sub(r"^(goal|purpose|use (this )?when)\s*:\s*", "", text, flags=re.I)
@@ -74,7 +78,11 @@ def keyword_scores(skills: list[dict], query: str) -> list[tuple[float, dict]]:
     out = []
     for skill in skills:
         name = _words(skill.get("name") or "")
-        body = _words(f"{skill.get('instruction') or ''} {' '.join(str(t.get('text') or '') for t in skill.get('transcript') or [] if isinstance(t, dict))}")
+        # An imported guide can run to many pages that mention everything; match it on what it says it is for.
+        text = str(skill.get("instruction") or "")
+        if skill.get("kind") == "imported" and skill.get("description"):
+            text = text[:600]
+        body = _words(f"{skill.get('description') or ''} {text} {' '.join(str(t.get('text') or '') for t in skill.get('transcript') or [] if isinstance(t, dict))}")
         score = sum(2 for w in q if w in name) + sum(1 for w in q if w in body and w not in name)
         out.append((float(score), skill))
     return out
@@ -90,6 +98,8 @@ def _cos(a: list[float], b: list[float]) -> float:
 
 
 def skill_text(skill: dict) -> str:
+    if skill.get("description"):
+        return f"{skill.get('name') or ''}: {str(skill['description'])[:600]}"
     return f"{skill.get('name') or ''}: {str(skill.get('instruction') or '')[:600]}"
 
 
@@ -131,7 +141,7 @@ def capabilities_block(agent, skills: list | None, matched: list | None = None, 
             "or which skills you have from it (name each with its one-line use). Load a full skill with get_skill before running it."
         )
         for skill in rows[:INDEX_LIMIT]:
-            kind = "taught" if skill.get("kind") == "taught" else "saved"
+            kind = skill.get("kind") if skill.get("kind") in ("taught", "imported") else "saved"
             state = ""
             if (skill.get("status") or "ready") == "writing":
                 state = ", write-up in progress"
@@ -151,5 +161,10 @@ def capabilities_block(agent, skills: list | None, matched: list | None = None, 
         )
         for skill in picked:
             body = str(skill.get("instruction") or "").strip()[:BODY_CHARS] or "(no write-up yet; call get_skill for its recorded steps)"
+            if skill.get("kind") == "imported":
+                from app.skills.claude_format import prompt_note
+
+                cut = len(str(skill.get("instruction") or "")) > BODY_CHARS
+                body = prompt_note(skill) + ("\nThe instructions below are cut short: load the whole skill with get_skill." if cut else "") + "\n" + body
             lines.append(f"### Skill: {skill['name']} (id {skill.get('id')})\n{body}")
     return "\n".join(lines) + "\n"

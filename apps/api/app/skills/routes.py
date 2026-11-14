@@ -113,6 +113,139 @@ async def task_states(session_id: str = "", job_id: str = "", user: User = Depen
     return {"states": [task_state.serialize(r) for r in rows]}
 
 
+@router.get("/artifacts")
+async def artifacts(user: User = Depends(current_user)):
+    """What the user's tasks produced while following skills (links, files, ids, quotes), newest first."""
+    from app.skills import task_state
+
+    rows = await task_state.STORE.list_for(user.id, limit=200)
+    return {"artifacts": task_state.artifact_feed(rows)}
+
+
+# --- Claude-format skills: libraries, import, export (docs/SKILLS.md) ---------------------------------------------
+
+MAX_IMPORT = 20
+
+
+class ImportIn(BaseModel):
+    url: str
+    paths: list[str] = []
+    ref: str = ""
+    agent_id: uuid.UUID | None = None
+
+
+def _imported(row, created: bool, skipped: list) -> dict:
+    return {"skill": service.serialize_skill(row), "created": created, "skipped": skipped}
+
+
+@router.get("/library/sources")
+async def library_sources(user: User = Depends(current_user)):
+    """Skill libraries to start from (any public GitHub repository with SKILL.md folders works too)."""
+    from app.skills import library
+
+    return {"sources": library.FEATURED}
+
+
+@router.get("/library")
+async def library_catalog(url: str, user: User = Depends(current_user)):
+    """The Claude-format skills in a GitHub repository or folder, pinned to its current commit."""
+    from app.skills import library
+
+    try:
+        return await library.catalog(url)
+    except library.LibraryError as exc:
+        raise HTTPException(400, str(exc)) from None
+
+
+@router.post("/import")
+async def import_from_library(body: ImportIn, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Import skills from a GitHub repository: each path is a skill folder (\"\" for one at the top)."""
+    from app.skills import claude_format as cf, library
+
+    paths = list(dict.fromkeys(body.paths or [""]))
+    if len(paths) > MAX_IMPORT:
+        raise HTTPException(400, f"Import at most {MAX_IMPORT} skills at a time.")
+    done, errors = [], []
+    for path in paths:
+        try:
+            item = await library.fetch_skill(body.url, path, body.ref)
+            row, created = await service.import_skill(db, user, item, body.agent_id)
+            done.append(_imported(row, created, item["skipped"]))
+        except (library.LibraryError, cf.SkillFormatError, service.SkillError) as exc:
+            await db.rollback()
+            errors.append({"path": path, "error": str(exc)})
+    if not done and errors:
+        raise HTTPException(400, errors[0]["error"])
+    return {"imported": done, "errors": errors}
+
+
+@router.post("/import/upload")
+async def import_upload(
+    file: UploadFile = File(...),
+    agent_id: str = Form(""),
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Import a SKILL.md file, or a .zip holding one or more skill folders."""
+    from app.skills import claude_format as cf
+
+    try:
+        aid = uuid.UUID(agent_id) if agent_id else None
+    except ValueError:
+        raise HTTPException(400, "Unknown agent") from None
+    data = await file.read(cf.MAX_UPLOAD + 1)
+    try:
+        found = cf.from_upload(file.filename or "", data)
+    except cf.SkillFormatError as exc:
+        raise HTTPException(400, str(exc)) from None
+    done, errors = [], []
+    for item in found:
+        label = f"{file.filename}/{item['root']}".rstrip("/") if item["root"] else (file.filename or "upload")
+        key = f"upload:{cf.slugify(item['parsed']['name'])}"
+        item["source"] = {"type": "upload", "key": key, "label": f"an uploaded file ({label})", "filename": file.filename or ""}
+        try:
+            row, created = await service.import_skill(db, user, item, aid)
+            done.append(_imported(row, created, item["skipped"]))
+        except service.SkillError as exc:
+            await db.rollback()
+            errors.append({"path": item["root"], "error": str(exc)})
+    if not done and errors:
+        raise HTTPException(400, errors[0]["error"])
+    return {"imported": done, "errors": errors}
+
+
+@router.get("/{skill_id}/export")
+async def export_skill(skill_id: uuid.UUID, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Any skill as a Claude-format .zip (SKILL.md plus supporting files), for Claude, Claude Code or another Lumio."""
+    from app.skills import claude_format as cf
+
+    row = await service.get_skill(db, user, str(skill_id))
+    if row is None:
+        raise HTTPException(404, "Unknown skill.")
+    data = service.serialize_skill(row)
+    data["source"] = row.source or {}
+    filename, body = cf.export_zip(data, list(row.files or []))
+    return Response(content=body, media_type="application/zip", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+@router.get("/{skill_id}/file")
+async def read_skill_file(skill_id: uuid.UUID, path: str, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    row = await service.get_skill(db, user, str(skill_id))
+    found = service.skill_file(row, path) if row is not None else None
+    if found is None:
+        raise HTTPException(404, "No such file in this skill.")
+    return {"path": found["path"], "size": found.get("size", 0), "text": found.get("text") or ""}
+
+
+@router.post("/{skill_id}/update")
+async def update_skill_from_source(skill_id: uuid.UUID, check: bool = False, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Check an imported skill against its library (check=true), or re-import the latest version."""
+    try:
+        return await service.update_from_source(db, user, str(skill_id), check_only=check)
+    except service.SkillError as exc:
+        raise _err(exc) from exc
+
+
 @router.get("/{skill_id}")
 async def read_skill(skill_id: uuid.UUID, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     """One skill in full: instructions, steps, narration transcript, notes and screenshot indexes."""
