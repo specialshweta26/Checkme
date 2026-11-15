@@ -16,7 +16,7 @@ from pathlib import Path
 
 HOST = "127.0.0.1"
 PORT = 18765
-VERSION = "45"
+VERSION = "46"
 _HOME = Path(os.environ.get("CHECKME_BROWSER_HOME") or "/tmp")
 SHOT = "/tmp/checkme-browser.png"
 PROFILE = str(_HOME / "profile")
@@ -169,6 +169,18 @@ _tabs: dict = {}
 _active_tab = ""
 _tab_seq = 0
 _tab_refs: dict = {}
+# Agent browsers (docs/AGENT_BROWSERS.md). An agent set to its own browser sends "space" with each command. Each space
+# is a separate Chrome profile under _HOME/spaces/<space> with its own cookies and sign-ins; "" is the shared browser.
+# A space only ever sees its own tabs. At most MAX_SPACES stay open; the least recently used one is closed (its
+# profile stays on disk, so its sign-ins come back when it reopens).
+_spaces: dict = {}  # space -> persistent context
+_space_used: dict = {}  # space -> last use (monotonic)
+_space_tab: dict = {}  # space -> the tab it used last
+_tab_space: dict = {}  # tab id -> space
+_space_fresh: set = set()  # spaces started on an empty profile, reported once so the API restores saved cookies
+_launch_version = ""
+MAX_SPACES = 3
+_SPACE_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 try:  # the API imports the package module; on the computer the same file sits next to this one
     from app.connectors.block_detect import detect_block
@@ -1284,11 +1296,12 @@ def _verify_step(page, loc, step: dict, target: dict) -> None:
         raise RuntimeError("mismatch: the field did not keep the typed value")
 
 
-def _fetch_file(url: str, name_hint: str = "") -> dict:
+def _fetch_file(url: str, name_hint: str = "", space: str = "") -> dict:
     """Fetch a file with the browser's own cookies (no click, no download dialog) and save it to DOWNLOAD_DIR."""
-    if _browser_context is None:
+    ctx = _space_context(space) if space else _browser_context
+    if ctx is None:
         raise RuntimeError("no browser context")
-    resp = _browser_context.request.get(url, timeout=60000, max_redirects=10)
+    resp = ctx.request.get(url, timeout=60000, max_redirects=10)
     if not resp.ok:
         raise RuntimeError(f"HTTP {resp.status}")
     headers = {str(k).lower(): str(v) for k, v in (resp.headers or {}).items()}
@@ -2592,6 +2605,8 @@ def _page_alive(page) -> bool:
 def _drop_browser() -> None:
     """Forget a browser that has gone away, so the next command starts a new one. The profile on disk keeps sign-ins."""
     global _browser_page, _browser_context, _pw, _active_tab
+    for space in list(_spaces):
+        _close_space(space)
     for stop in (lambda: _browser_context.close(), lambda: _pw.stop()):
         try:
             stop()
@@ -2599,6 +2614,8 @@ def _drop_browser() -> None:
             pass
     _browser_page = _browser_context = _pw = None
     _tabs.clear()
+    _tab_space.clear()
+    _space_tab.clear()
     _active_tab = ""
 
 
@@ -2608,6 +2625,7 @@ def _drop_dead_tabs() -> None:
     for tid, page in list(_tabs.items()):
         if not _page_alive(page):
             _tabs.pop(tid, None)
+            _tab_space.pop(tid, None)
             _tab_refs.pop(id(page), None)
             _page_watch.pop(id(page), None)
             if id(page) in _crashed:
@@ -2618,6 +2636,124 @@ def _drop_dead_tabs() -> None:
                     pass
     if _active_tab not in _tabs:
         _active_tab = ""
+
+
+def _launch(profile: str):
+    """A persistent Chrome on ``profile`` with the same options for the shared browser and every agent browser."""
+    opts = launch_options(browser_headed(), CONFIG, _launch_version)
+    if "channel" not in opts:
+        opts["channel"] = "chrome"
+    try:
+        ctx = _pw.chromium.launch_persistent_context(profile, **opts)
+    except Exception:
+        opts.pop("channel", None)  # Google Chrome not installed: the bundled Chromium still works
+        ctx = _pw.chromium.launch_persistent_context(profile, **opts)
+    harden_context(ctx)
+    # Queue only: these fire while Playwright's driver loop is running (goto, screenshot, first paint).
+    ctx.on("page", _on_new_page)
+    ctx.on("download", _on_download)
+    return ctx
+
+
+def space_of(cmd: dict) -> str:
+    """The agent browser a command is for ("" = the shared browser). Names are checked: they become folder names."""
+    raw = str((cmd or {}).get("space") or "").strip()
+    if not raw:
+        return ""
+    if not _SPACE_RE.match(raw):
+        raise RuntimeError("bad browser space name")
+    return raw
+
+
+def space_dir(space: str) -> Path:
+    return _HOME / "spaces" / space
+
+
+def _context_space(ctx) -> str:
+    for name, c in _spaces.items():
+        if c is ctx:
+            return name
+    return ""
+
+
+def _forget_tab(tid: str) -> None:
+    global _active_tab, _browser_page
+    page = _tabs.pop(tid, None)
+    space = _tab_space.pop(tid, "")
+    if _space_tab.get(space) == tid:
+        _space_tab.pop(space, None)
+    if page is not None:
+        _tab_refs.pop(id(page), None)
+        _page_watch.pop(id(page), None)
+    if _active_tab == tid:
+        shared = [t for t in _tabs if not _tab_space.get(t)]
+        _active_tab = shared[-1] if shared else (next(reversed(_tabs), "") if _tabs else "")
+        _browser_page = _tabs.get(_active_tab)
+
+
+def _close_space(space: str) -> None:
+    """Close one agent browser. Its profile stays on disk."""
+    ctx = _spaces.pop(space, None)
+    _space_used.pop(space, None)
+    for tid in [t for t, s in _tab_space.items() if s == space]:
+        _forget_tab(tid)
+    _space_tab.pop(space, None)
+    if ctx is not None:
+        try:
+            ctx.close()
+        except Exception:
+            pass
+
+
+def _space_context(space: str):
+    """This agent's browser, started on first use with its own profile. Opening one more than MAX_SPACES closes the
+    one used longest ago."""
+    _ensure_page()  # Playwright and the shared browser first: the live screen always has the shared browser
+    ctx = _spaces.get(space)
+    if ctx is None:
+        while len(_spaces) >= MAX_SPACES and _space_used:
+            _close_space(min(_space_used, key=_space_used.get))
+        path = space_dir(space)
+        mark = path / ".checkme-created"
+        fresh = not path.exists() or not any(path.iterdir()) or mark.exists()
+        path.mkdir(parents=True, exist_ok=True)
+        if fresh:
+            try:
+                mark.write_text("1")
+            except Exception:
+                pass
+        ctx = _launch(str(path))
+        _spaces[space] = ctx
+        if fresh:
+            _space_fresh.add(space)
+        pages = [pg for pg in (getattr(ctx, "pages", None) or []) if _page_alive(pg)]
+        _space_tab[space] = _register_tab(pages[0] if pages else ctx.new_page(), activate=False)
+    _space_used[space] = time.monotonic()
+    return ctx
+
+
+def _new_page(space: str):
+    """A new page in this space's browser (the shared one for ""). An agent browser that has died is restarted once."""
+    if not space:
+        return _browser_context.new_page()
+    try:
+        return _space_context(space).new_page()
+    except Exception:
+        _close_space(space)
+        return _space_context(space).new_page()
+
+
+def _current_tab(space: str) -> str:
+    """The tab a command without one uses: the screen's tab when it belongs to this space, else the space's last tab."""
+    if space:
+        _space_context(space)
+    for tid in (_active_tab, _space_tab.get(space, "")):
+        if tid and tid in _tabs and _tab_space.get(tid, "") == space and _page_alive(_tabs[tid]):
+            return tid
+    mine = [t for t in _tabs if _tab_space.get(t, "") == space and _page_alive(_tabs[t])]
+    if mine:
+        return mine[-1]
+    return _register_tab(_new_page(space), activate=False)
 
 
 def _ensure_page():
@@ -2657,22 +2793,11 @@ def _ensure_page():
             pass
     prepare_thread_for_sync_playwright()
     _pw = sync_playwright().start()
-    headed = browser_headed()
-    version = "" if headed else _browser_version(_pw, CONFIG)
-    opts = launch_options(headed, CONFIG, version)
-    if "channel" not in opts:
-        opts["channel"] = "chrome"
-    try:
-        _browser_context = _pw.chromium.launch_persistent_context(PROFILE, **opts)
-    except Exception:
-        opts.pop("channel", None)  # Google Chrome not installed: the bundled Chromium still works
-        _browser_context = _pw.chromium.launch_persistent_context(PROFILE, **opts)
-    harden_context(_browser_context)
+    global _launch_version
+    _launch_version = "" if browser_headed() else _browser_version(_pw, CONFIG)
+    _browser_context = _launch(PROFILE)
     _browser_page = _browser_context.pages[0] if _browser_context.pages else _browser_context.new_page()
     _register_tab(_browser_page, activate=True)
-    # Queue only: these fire while Playwright's driver loop is running (goto, screenshot, first paint).
-    _browser_context.on("page", _on_new_page)
-    _browser_context.on("download", _on_download)
     if _needs_desktop(_browser_page):
         _paint_desktop(_browser_page)
     drain_browser_events()
@@ -2725,37 +2850,42 @@ def wait_out_challenge(page, max_s: float | None = None) -> dict | None:
     return block
 
 
-def _export_state() -> dict:
-    """Cookies of this browser profile, so a new computer can start as a returning visitor."""
+def _export_state(cmd: dict | None = None) -> dict:
+    """Cookies of this browser profile (or of one agent's browser), so a new computer can start as a returning visitor."""
     _ensure_page()
+    space = space_of(cmd or {})
+    ctx = _space_context(space) if space else _browser_context
     try:
-        cookies = _browser_context.cookies()
+        cookies = ctx.cookies()
     except Exception as exc:
         return {"ok": False, "error": str(exc)[:200]}
-    fresh = Path(FRESH_MARK).exists()
-    return {"ok": True, "cookies": cookies, "count": len(cookies), "fresh_profile": fresh}
+    fresh = (space_dir(space) / ".checkme-created").exists() if space else Path(FRESH_MARK).exists()
+    return {"ok": True, "cookies": cookies, "count": len(cookies), "fresh_profile": fresh, "space": space}
 
 
 def _import_state(cmd: dict) -> dict:
     _ensure_page()
+    space = space_of(cmd)
+    ctx = _space_context(space) if space else _browser_context
     cookies = [c for c in (cmd.get("cookies") or []) if isinstance(c, dict) and c.get("name") and c.get("domain")]
     added = 0
     for i in range(0, len(cookies), 50):
         try:
-            _browser_context.add_cookies(cookies[i : i + 50])
+            ctx.add_cookies(cookies[i : i + 50])
             added += len(cookies[i : i + 50])
         except Exception:
             for c in cookies[i : i + 50]:
                 try:
-                    _browser_context.add_cookies([c])
+                    ctx.add_cookies([c])
                     added += 1
                 except Exception:
                     continue
+    _space_fresh.discard(space)
     try:
-        Path(FRESH_MARK).unlink()
+        (space_dir(space) / ".checkme-created").unlink() if space else Path(FRESH_MARK).unlink()
     except Exception:
         pass
-    return {"ok": True, "imported": added}
+    return {"ok": True, "imported": added, "space": space}
 
 
 def _remote_fetch(cmd: dict) -> dict:
@@ -2874,23 +3004,23 @@ def _register_tab(page, activate: bool) -> str:
     _tab_seq += 1
     tid = f"t{_tab_seq}"
     _tabs[tid] = page
+    try:
+        space = _context_space(page.context)
+    except Exception:
+        space = ""
+    if space:
+        _tab_space[tid] = space
     _watch_page(page)
 
     def _closed(*_):
-        global _active_tab, _browser_page
-        _tabs.pop(tid, None)
-        _tab_refs.pop(id(page), None)
-        _page_watch.pop(id(page), None)
-        if _active_tab == tid:
-            _active_tab = next(reversed(_tabs), "") if _tabs else ""
-            _browser_page = _tabs.get(_active_tab)
+        _forget_tab(tid)
 
     try:
         page.on("close", _closed)
         page.on("crash", lambda *_: _crashed.add(id(page)))
     except Exception:
         pass
-    if activate or not _active_tab:
+    if activate or (not _active_tab and not space):
         _active_tab = tid
     return tid
 
@@ -2907,9 +3037,12 @@ def _activate(tid: str):
     return page
 
 
-def _tab_list() -> list:
+def _tab_list(space: str = "") -> list:
+    """The tabs of one browser: the shared one, or one agent's."""
     rows = []
     for tid, pg in list(_tabs.items()):
+        if _tab_space.get(tid, "") != space:
+            continue
         try:
             title = pg.title()
         except Exception:
@@ -2922,29 +3055,48 @@ def _page_for(cmd: dict):
     """The tab a command targets: cmd["tab"] when given (without switching the screen), else the active tab."""
     global _elements, _elements_url
     _ensure_page()
-    tid = str(cmd.get("tab") or "").strip() or _active_tab
-    if tid not in _tabs:
-        raise RuntimeError(f"no tab {tid}; open tabs: {', '.join(_tabs) or 'none'} (use browser_tabs)")
+    space = space_of(cmd)
+    tid = str(cmd.get("tab") or "").strip() or _current_tab(space)
+    if tid not in _tabs or _tab_space.get(tid, "") != space:
+        # Another browser's tab is reported as missing, the same as a closed one: the API then picks one of its own.
+        mine = ", ".join(row["tab"] for row in _tab_list(space)) or "none"
+        raise RuntimeError(f"no tab {tid}; open tabs: {mine} (use browser_tabs)")
     page = _tabs[tid]
+    _space_tab[space] = tid
+    if space:
+        _space_used[space] = time.monotonic()
     _elements, _elements_url = _tab_refs.get(id(page), ([], ""))
     return tid, page
 
 
 def _with_tab(data: dict, tid: str) -> dict:
     data["tab"] = tid
-    data["tabs"] = len(_tabs)
+    space = _tab_space.get(tid, "")
+    data["tabs"] = sum(1 for t in _tabs if _tab_space.get(t, "") == space)
     return data
 
 
 def _tab_command(command: str, cmd: dict) -> dict:
     _ensure_page()
+    space = space_of(cmd)
+    if space:
+        _space_context(space)
+
+    def listing(**extra) -> dict:
+        active = _active_tab if _tab_space.get(_active_tab, "") == space else ""
+        return {"ok": True, **extra, "active": active, "tabs": _tab_list(space)}
+
+    def own(tid: str) -> bool:
+        return tid in _tabs and _tab_space.get(tid, "") == space
+
     if command == "tabs":
-        return {"ok": True, "active": _active_tab, "tabs": _tab_list()}
+        return listing()
     if command == "new_tab":
         if len(_tabs) >= MAX_TABS:
             raise RuntimeError(f"at most {MAX_TABS} tabs; close one with browser_close_tab first")
-        page = _browser_context.new_page()
+        page = _new_page(space)
         tid = _register_tab(page, activate=False)
+        _space_tab[space] = tid
         if not cmd.get("background"):
             _activate(tid)
         url = str(cmd.get("url") or "").strip()
@@ -2955,28 +3107,28 @@ def _tab_command(command: str, cmd: dict) -> dict:
             else:
                 page.wait_for_timeout(int(cmd.get("wait_ms") or 1200))
             return _with_tab(_snapshot(page), tid)
-        return {"ok": True, "tab": tid, "active": _active_tab, "tabs": _tab_list()}
+        return listing(tab=tid)
     if command == "switch_tab":
         tid = str(cmd.get("tab") or "").strip()
-        if tid not in _tabs:
-            raise RuntimeError(f"no tab {tid}; open tabs: {', '.join(_tabs) or 'none'}")
+        if not own(tid):
+            raise RuntimeError(f"no tab {tid}; open tabs: {', '.join(r['tab'] for r in _tab_list(space)) or 'none'}")
         page = _activate(tid)
+        _space_tab[space] = tid
         return _with_tab(_snapshot(page), tid)
     if command == "close_tab":
-        tid = str(cmd.get("tab") or "").strip() or _active_tab
-        if tid not in _tabs:
-            raise RuntimeError(f"no tab {tid}; open tabs: {', '.join(_tabs) or 'none'}")
-        if len(_tabs) == 1:
+        tid = str(cmd.get("tab") or "").strip() or _current_tab(space)
+        if not own(tid):
+            raise RuntimeError(f"no tab {tid}; open tabs: {', '.join(r['tab'] for r in _tab_list(space)) or 'none'}")
+        if sum(1 for t in _tabs if _tab_space.get(t, "") == space) == 1:
             # Keep one tab so the screen and the browser stay alive.
             _tabs[tid].goto("about:blank")
-            return {"ok": True, "closed": tid, "note": "last tab cleared instead of closed", "tabs": _tab_list()}
+            return listing(closed=tid, note="last tab cleared instead of closed")
         page = _tabs[tid]
         page.close()
-        _tabs.pop(tid, None)
-        _tab_refs.pop(id(page), None)
-        if _active_tab == tid or _active_tab not in _tabs:
+        _forget_tab(tid)
+        if _active_tab not in _tabs:
             _activate(next(reversed(_tabs)))
-        return {"ok": True, "closed": tid, "active": _active_tab, "tabs": _tab_list()}
+        return listing(closed=tid)
     raise RuntimeError(f"unknown tab command {command}")
 
 
@@ -2985,12 +3137,22 @@ TAB_COMMANDS = {"tabs", "new_tab", "switch_tab", "close_tab"}
 
 
 def handle(cmd: dict) -> dict:
+    out = _handle(cmd)
+    space = str((cmd or {}).get("space") or "")
+    if space and space in _space_fresh and isinstance(out, dict):
+        # This agent's browser started on an empty profile: the API restores its saved cookies (once).
+        _space_fresh.discard(space)
+        out["space_fresh"] = True
+    return out
+
+
+def _handle(cmd: dict) -> dict:
     try:
         command = str(cmd.get("command") or "").strip()
         if command == "serp":
             return _serp(cmd)
         if command == "export_state":
-            return _export_state()
+            return _export_state(cmd)
         if command == "import_state":
             return _import_state(cmd)
         if command == "remote_fetch":
@@ -3001,7 +3163,7 @@ def handle(cmd: dict) -> dict:
             url = str(cmd.get("url") or "").strip()
             if not url.lower().startswith(("http://", "https://")):
                 raise RuntimeError("fetch_download needs an http(s) url")
-            row = _fetch_file(url, str(cmd.get("filename") or ""))
+            row = _fetch_file(url, str(cmd.get("filename") or ""), space_of(cmd))
             return {"ok": True, "download": row, "downloads": [row]}
         if command == "rec_start":
             return _rec_start()

@@ -395,7 +395,7 @@ def deep_link_fallback(tool_name: str, args: dict | None, result: Any) -> Any:
     return result
 
 
-# Commands that drive the user's own browser (its cookies are shared by every agent): checked against the Vault.
+# Commands that drive a browser (the shared one, or the agent's own, docs/AGENT_BROWSERS.md): checked against the Vault.
 VAULT_GATED = frozenset({"browser_navigate", "browser_snapshot", "browser_act", "browser_collect", "browser_download", "browser_page_log",
                          "browser_handoff", "switch_tab", "new_tab"})  # fmt: skip
 

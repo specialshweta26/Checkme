@@ -818,17 +818,50 @@ async def _restore_profile(proc, fs=None) -> None:
 
 
 async def _save_profile(proc, fs=None) -> None:
+    """Save the cookies of the browser this run uses: the shared one, or the agent's own (docs/AGENT_BROWSERS.md)."""
+    from app.agent_browsers.service import current as browser_space
     from app.connectors import browser_profile
 
     user = _SCREEN_USER.get() or ""
-    if not browser_profile.due(user):
+    space, agent_id = browser_space()
+    if not browser_profile.due(user, space=space):
         return
     try:
         data = await _browser_rpc(proc, {"command": "export_state"}, 30, fs)
         if isinstance(data, dict) and data.get("ok") and data.get("cookies"):
-            await browser_profile.save(user, data["cookies"])
+            if space:
+                await browser_profile.save_agent(agent_id, user, space, data["cookies"])
+            else:
+                await browser_profile.save(user, data["cookies"])
     except Exception as exc:  # noqa: BLE001
         log.info("computer: cookie save skipped: %s", type(exc).__name__)
+
+
+# Commands about the whole computer (screen, recording, search, remote fetch): they never carry an agent's browser.
+_NOT_PER_AGENT = frozenset({"desktop_act", "control", "status", "wake", "rec_start", "rec_drain", "rec_stop", "serp", "remote_fetch"})
+
+
+def with_space(payload: dict) -> dict:
+    """Add this run's agent browser to a browser command (docs/AGENT_BROWSERS.md)."""
+    from app.agent_browsers.service import current as browser_space
+
+    space = browser_space()[0]
+    if not space or "space" in payload or payload.get("command") in _NOT_PER_AGENT:
+        return payload
+    return {**payload, "space": space}
+
+
+async def _restore_agent_browser(proc, fs, space: str) -> None:
+    """An agent's browser started on an empty profile: put its saved cookies back."""
+    from app.agent_browsers.service import current as browser_space
+    from app.connectors import browser_profile
+
+    agent_id = browser_space()[1]
+    cookies = await browser_profile.load_agent(agent_id, space) if agent_id else []
+    if not cookies:
+        return
+    out = await _browser_rpc(proc, {"command": "import_state", "cookies": cookies, "space": space}, 60, fs)
+    log.info("computer: restored %s cookies for an agent browser", (out or {}).get("imported"))
 
 
 _SAVE_TASKS: set = set()
@@ -843,13 +876,15 @@ def _save_after_sign_in(proc, fs, data: Any) -> None:
         return
     if not any(isinstance(t, dict) and t.get("secret") for t in data.get("trace") or []):
         return
+    from app.agent_browsers.service import current as browser_space
+
     user = _SCREEN_USER.get() or ""
     if not browser_profile.enabled(user):
         return
 
     async def run() -> None:
         await asyncio.sleep(4.0)  # let the post-login redirect set its cookies
-        browser_profile.save_soon(user)
+        browser_profile.save_soon(user, browser_space()[0])
         await _save_profile(proc, fs)
 
     try:
@@ -878,6 +913,7 @@ def _rpc_error(url: str, message: str) -> dict:
 async def _browser_rpc(proc, payload: dict, timeout: int = 90, fs=None) -> dict:
     """One command to the browser daemon. Never hangs past ``timeout`` (plus queueing) and never raises:
     failures come back as ``ok: false`` with the reason so the agent can retry or switch approach."""
+    payload = with_space(payload)
     url = str(payload.get("url") or "")
     started = time.monotonic()
     try:
@@ -893,6 +929,11 @@ async def _browser_rpc(proc, payload: dict, timeout: int = 90, fs=None) -> dict:
     if not isinstance(out, dict) or (out.get("ok") is False and out.get("fallback") == "computer_act" and not out.get("title")):
         # Transport-level failure (not a page-level "step failed"): re-check the daemon next time.
         forget_daemon_ready()
+    if isinstance(out, dict) and out.pop("space_fresh", False) and payload.get("space"):
+        try:
+            await _restore_agent_browser(proc, fs, str(payload["space"]))
+        except Exception as exc:  # noqa: BLE001 - never block browsing on this
+            log.info("computer: agent browser restore skipped: %s", type(exc).__name__)
     return out
 
 

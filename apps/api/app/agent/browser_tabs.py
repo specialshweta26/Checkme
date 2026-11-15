@@ -21,7 +21,11 @@ IDLE_S = 600
 
 
 def _key(user_id: Any, where: str) -> str:
-    return f"browser:tabs:{user_id}:{where}"
+    """One map of chat -> tab per browser: the shared one, or an agent's own (docs/AGENT_BROWSERS.md)."""
+    from app.agent_browsers.service import current as browser_space
+
+    space = browser_space()[0] if where == "cloud" else ""
+    return f"browser:tabs:{user_id}:{where}" + (f":{space}" if space else "")
 
 
 def _chat(ctx: Any) -> str:

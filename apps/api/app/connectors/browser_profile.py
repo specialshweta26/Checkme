@@ -97,18 +97,71 @@ async def save(user_id: str, cookies: list[Any]) -> bool:
         return False
 
 
-def save_soon(user_id: str) -> None:
+def save_soon(user_id: str, space: str = "") -> None:
     """Drop the throttle so the next save runs (after a sign-in, so a recycled computer stays signed in)."""
-    _last_save.pop(str(user_id), None)
+    _last_save.pop(f"{user_id}:{space}" if space else str(user_id), None)
 
 
-def due(user_id: str, now: float | None = None) -> bool:
-    """Throttle: at most one export per user every SAVE_EVERY_S."""
+def due(user_id: str, now: float | None = None, space: str = "") -> bool:
+    """Throttle: at most one export per user (and per agent browser) every SAVE_EVERY_S."""
     if not enabled(user_id):
         return False
+    key = f"{user_id}:{space}" if space else str(user_id)
     now = time.monotonic() if now is None else now
-    last = _last_save.get(str(user_id))
+    last = _last_save.get(key)
     if last is not None and now - last < SAVE_EVERY_S:
         return False
-    _last_save[str(user_id)] = now
+    _last_save[key] = now
     return True
+
+
+# One agent's own browser (docs/AGENT_BROWSERS.md): same format, stored per agent and tied to its current space.
+
+
+async def load_agent(agent_id: str, space: str) -> list[dict]:
+    if not space or not bool(getattr(get_settings(), "browser_profile_persist", True)):
+        return []
+    try:
+        from app.db import SessionLocal
+        from app.models import AgentBrowserProfile
+        from app.security import decrypt
+
+        async with SessionLocal() as db:
+            row = await db.get(AgentBrowserProfile, uuid.UUID(str(agent_id)))
+            if row is None or row.space != space or not row.state_enc:
+                return []
+            raw = decrypt(row.state_enc)
+        data = json.loads(raw) if raw else {}
+        return trim_cookies(data.get("cookies") or [])
+    except Exception as exc:  # noqa: BLE001
+        log.info("agent browser load skipped: %s", type(exc).__name__)
+        return []
+
+
+async def save_agent(agent_id: str, user_id: str, space: str, cookies: list[Any]) -> bool:
+    if not space or not enabled(user_id):
+        return False
+    rows = trim_cookies(cookies)
+    if not rows:
+        return False
+    try:
+        from app.db import SessionLocal
+        from app.models import AgentBrowserProfile, WorkspaceAgent
+        from app.security import encrypt
+
+        aid = uuid.UUID(str(agent_id))
+        blob = encrypt({"cookies": rows, "v": 1})
+        async with SessionLocal() as db:
+            agent = await db.get(WorkspaceAgent, aid)
+            if agent is None or str(agent.user_id) != str(user_id):
+                return False
+            row = await db.get(AgentBrowserProfile, aid)
+            if row is None:
+                db.add(AgentBrowserProfile(agent_id=aid, user_id=agent.user_id, space=space, state_enc=blob, cookie_count=len(rows)))
+            else:
+                row.space, row.state_enc, row.cookie_count = space, blob, len(rows)
+            await db.commit()
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.info("agent browser save skipped: %s", type(exc).__name__)
+        return False

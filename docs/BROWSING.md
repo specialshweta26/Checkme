@@ -112,6 +112,8 @@ interactive goes to the user (take control) only when the user needs that exact 
 After a successful navigation (at most every 5 minutes per user) the API exports the browser's cookies, encrypts
 them with the app key and stores them in `browser_profiles` (one row per user, ≤ 256 KB, deleted with the user).
 A new computer imports them when its daemon starts. Only cookies: no history, local storage or saved passwords.
+An agent with its own browser has a separate profile and its own saved cookies (`agent_browser_profiles`); see
+docs/AGENT_BROWSERS.md.
 Never shared between users. `BROWSER_PROFILE_PERSIST=0` turns it off. Failures are ignored.
 
 ## Fast browser

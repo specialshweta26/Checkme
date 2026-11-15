@@ -3526,7 +3526,10 @@ async def run_deep_agent(
     token = set_client_kind(kind)
     from app.agent.meter import AGENT
 
+    from app.agent_browsers import service as agent_browsers
+
     agent_token = AGENT.set(workspace_agent.id) if getattr(workspace_agent, "id", None) else None  # per-agent spend
+    browser_token = agent_browsers.use(workspace_agent)  # its own browser, or the shared one (docs/AGENT_BROWSERS.md)
     try:
         if job is None and workspace_agent is not None:
             blocked = await _budget_block(db, workspace_agent)
@@ -3556,6 +3559,7 @@ async def run_deep_agent(
     finally:
         if agent_token is not None:
             AGENT.reset(agent_token)
+        agent_browsers.BROWSER_SPACE.reset(browser_token)
         reset_client_kind(token)
 
 

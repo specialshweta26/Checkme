@@ -83,6 +83,7 @@ def pick_color(index: int) -> str:
 
 
 def serialize_agent(row: WorkspaceAgent) -> dict:
+    from app.agent_browsers.service import serialize as agent_browser
     from app.budgets.service import limits as agent_limits
     from app.handoffs.service import rule as handoff_rule
 
@@ -103,6 +104,7 @@ def serialize_agent(row: WorkspaceAgent) -> dict:
         "lessons": [{"id": str(x.get("id")), "text": str(x.get("text") or "")} for x in (getattr(row, "lessons", None) or []) if isinstance(x, dict)],
         "accepts_from": handoff_rule(row),
         "limits": agent_limits(row),
+        "browser": agent_browser(row),
     }
 
 

@@ -36,6 +36,7 @@ export type WorkspaceAgent = {
   lessons?: { id: string; text: string }[];
   accepts_from?: HandoffRule;
   limits?: AgentLimits;
+  browser?: { mode: "shared" | "own" };
 };
 
 export type AgentGroup = {
@@ -971,6 +972,14 @@ export type ApprovalItem = {
 };
 export type ApprovalQueue = { items: ApprovalItem[]; count: number; counts: Partial<Record<ApprovalKind, number>> };
 const JSON_POST = (body: unknown) => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+// A separate browser per agent (docs/AGENT_BROWSERS.md)
+export type AgentBrowserState = { agent_id: string; mode: "shared" | "own"; saved_cookies: number; saved_at: string | null };
+export const getAgentBrowser = (agentId: string) => skillCall<AgentBrowserState>(`/api/agent-browsers/${agentId}`, {}, "Couldn't load the browser setting");
+export const setAgentBrowser = (agentId: string, mode: AgentBrowserState["mode"]) =>
+  skillCall<AgentBrowserState>(`/api/agent-browsers/${agentId}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode }) }, "Couldn't change the browser");
+export const resetAgentBrowser = (agentId: string) =>
+  skillCall<AgentBrowserState>(`/api/agent-browsers/${agentId}/reset`, { method: "POST" }, "Couldn't sign it out");
+
 // Per-agent budgets and limits (docs/BUDGETS.md)
 export type AgentLimits = { daily_usd?: number; monthly_usd?: number; daily_tokens?: number; task_minutes?: number };
 export type AgentBudget = {
