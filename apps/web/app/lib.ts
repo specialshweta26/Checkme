@@ -35,6 +35,7 @@ export type WorkspaceAgent = {
   updated_at?: string;
   lessons?: { id: string; text: string }[];
   accepts_from?: HandoffRule;
+  limits?: AgentLimits;
 };
 
 export type AgentGroup = {
@@ -970,6 +971,23 @@ export type ApprovalItem = {
 };
 export type ApprovalQueue = { items: ApprovalItem[]; count: number; counts: Partial<Record<ApprovalKind, number>> };
 const JSON_POST = (body: unknown) => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+// Per-agent budgets and limits (docs/BUDGETS.md)
+export type AgentLimits = { daily_usd?: number; monthly_usd?: number; daily_tokens?: number; task_minutes?: number };
+export type AgentBudget = {
+  agent_id: string;
+  limits: AgentLimits;
+  today_usd: number;
+  month_usd: number;
+  today_tokens: number;
+  tokens_month: number;
+  unpriced: boolean;
+  priced: boolean;
+  over: "daily" | "monthly" | "tokens" | null;
+};
+export const getAgentBudget = (agentId: string) => skillCall<AgentBudget>(`/api/budgets/${agentId}`, {}, "Couldn't load limits");
+export const setAgentLimits = (agentId: string, limits: { daily_usd: number | null; monthly_usd: number | null; daily_tokens: number | null; task_minutes: number | null }) =>
+  skillCall<AgentBudget>(`/api/budgets/${agentId}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(limits) }, "Couldn't save the limits");
+
 // Agent-to-agent handoffs (docs/HANDOFFS.md)
 export type HandoffRule = { mode: "anyone" | "selected" | "nobody"; agents: string[] };
 export type HandoffStatus = "sent" | "received" | "done" | "failed" | "cancelled" | "refused";

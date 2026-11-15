@@ -327,6 +327,12 @@ def answer(job: AgentJob, text: str) -> list[JobEvent]:
     text = clip((text or "").strip(), 2000)
     if not text:
         raise JobError("Empty answer.")
+    from app.budgets.service import answer as limit_answer
+
+    job.meta = meta
+    limited = limit_answer(job, q, text)  # a budget / time-limit pause (docs/BUDGETS.md)
+    if limited is not None:
+        return limited
     extra = ""
     wf = str(q.get("waiting_for") or "")
     if wf.startswith("login_") and q.get("needs_code") and text not in (q.get("options") or []):

@@ -32,6 +32,7 @@ from app.tasks.routes import router as tasks_router
 from app.quality.routes import router as quality_router
 from app.approvals.routes import router as approvals_router
 from app.handoffs.routes import router as handoffs_router
+from app.budgets.routes import router as budgets_router
 from app.today.routes import router as today_router
 from app.jobs.routes import router as jobs_router
 
@@ -226,6 +227,7 @@ app.include_router(tasks_router, prefix="/api")
 app.include_router(quality_router, prefix="/api")
 app.include_router(approvals_router, prefix="/api")
 app.include_router(handoffs_router, prefix="/api")
+app.include_router(budgets_router, prefix="/api")
 app.include_router(today_router, prefix="/api")
 app.include_router(automations_router, prefix="/api")
 app.include_router(webhook_router, prefix="/api")

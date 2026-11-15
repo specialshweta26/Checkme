@@ -3524,7 +3524,14 @@ async def run_deep_agent(
     if kind not in {"desktop", "web"}:
         kind = "web"
     token = set_client_kind(kind)
+    from app.agent.meter import AGENT
+
+    agent_token = AGENT.set(workspace_agent.id) if getattr(workspace_agent, "id", None) else None  # per-agent spend
     try:
+        if job is None and workspace_agent is not None:
+            blocked = await _budget_block(db, workspace_agent)
+            if blocked is not None:
+                return blocked
         return await _run_deep_agent(
             db,
             user,
@@ -3547,7 +3554,26 @@ async def run_deep_agent(
             untrusted_input,
         )
     finally:
+        if agent_token is not None:
+            AGENT.reset(agent_token)
         reset_client_kind(token)
+
+
+async def _budget_block(db, agent) -> dict | None:
+    """An agent past its budget (docs/BUDGETS.md) answers with that instead of calling a model."""
+    from app.budgets import service as budgets
+
+    if not budgets.limits(agent):
+        return None
+    try:
+        st = await budgets.status(db, agent)
+    except Exception:  # noqa: BLE001 - a budget lookup must never break chat
+        log.info("budget check failed", exc_info=True)
+        return None
+    if not st["over"]:
+        return None
+    return {"text": budgets.chat_reply(agent, st), "used_tools": [], "attachments": [], "pending_confirms": [], "jobs_started": [],
+            "budget": st}  # fmt: skip
 
 
 async def _run_deep_agent(

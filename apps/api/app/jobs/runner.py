@@ -184,6 +184,9 @@ async def run_job(job_id, session_factory: Callable | None = None, agent_impl: C
             await db.flush()
             job.session_id = sess.id
         meta = job.meta or {}
+        paused = await _over_budget(db, job, agent)
+        if paused:
+            return paused
         query = job_query(job)
         progress = JobProgress(job, session_factory, agent_name=agent.name)
         work_label = "processing a webhook event" if job.kind == "event" else f"working ({job.role})"
@@ -217,12 +220,12 @@ async def run_job(job_id, session_factory: Callable | None = None, agent_impl: C
             task = asyncio.current_task()
             if task is not None and hasattr(task, "uncancel"):
                 task.uncancel()
-            return await _stopped(db, job)
+            return await _stopped(db, job, _limit_reason())
         except Exception as exc:  # noqa: BLE001
             from app.agent import cancel as run_cancel
 
             if isinstance(exc, run_cancel.TurnCancelled) or run_cancel.is_cancelled():
-                return await _stopped(db, job)
+                return await _stopped(db, job, _limit_reason())
             log.exception("job %s failed", job.id)
             await db.rollback()
             await db.refresh(job)
@@ -275,15 +278,53 @@ async def run_job(job_id, session_factory: Callable | None = None, agent_impl: C
         return job.status
 
 
-async def _stopped(db, job: AgentJob) -> str:
-    """The user stopped this job mid-run: keep it cancelled (approvals cleared), never failed."""
+def _limit_reason() -> str:
+    from app.agent import cancel as run_cancel
+
+    run = run_cancel.current.get()
+    reason = str(getattr(run, "reason", "") or "")
+    return reason if reason.startswith("limit:") else ""
+
+
+async def _stopped(db, job: AgentJob, limit: str = "") -> str:
+    """The user stopped this job mid-run: keep it cancelled (approvals cleared), never failed.
+    Stopped by a budget or time limit (docs/BUDGETS.md): pause it with a question instead."""
     await db.rollback()
     await db.refresh(job)
+    if limit and job.status == "running":
+        from app.budgets import service as budgets
+
+        why, _, text = limit[len("limit:"):].partition(":")
+        job.meta = {**(job.meta or {}), "limit_paused": True}
+        for ev in budgets.pause(job, why, text):
+            db.add(ev)
+        if job.parent_id is None:
+            await service.post_to_chat(db, job)
+        await db.commit()
+        return job.status
     if job.status != "cancelled":
         for ev in service.cancel(job):
             db.add(ev)
     await db.commit()
     await _forget_run(job)
+    return job.status
+
+
+async def _over_budget(db, job: AgentJob, agent) -> str | None:
+    """Before a run: an agent past its budget pauses the task and asks (unless the user said run anyway today)."""
+    from app.budgets import service as budgets
+
+    if not budgets.limits(agent) or budgets.may_overspend(job):
+        return None
+    st = await budgets.status(db, agent, fresh=True)
+    if not st["over"]:
+        return None
+    text = f"{budgets.over_text(agent, st)} Run this task anyway today, or leave it for now?"
+    for ev in budgets.pause(job, budgets.BUDGET, text):
+        db.add(ev)
+    if job.parent_id is None:
+        await service.post_to_chat(db, job)
+    await db.commit()
     return job.status
 
 
