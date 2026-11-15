@@ -126,6 +126,7 @@ async def _migrate() -> None:
         await conn.execute(text("ALTER TABLE workspace_agents ADD COLUMN IF NOT EXISTS lessons JSONB DEFAULT '[]'::jsonb"))
         await conn.execute(text("ALTER TABLE workspace_agents ADD COLUMN IF NOT EXISTS accepts_from JSONB DEFAULT '{}'::jsonb"))
         await conn.execute(text("ALTER TABLE workspace_agents ADD COLUMN IF NOT EXISTS limits JSONB DEFAULT '{}'::jsonb"))
+        await conn.execute(text("ALTER TABLE workspace_agents ADD COLUMN IF NOT EXISTS browser JSONB DEFAULT '{}'::jsonb"))
         await conn.execute(text("ALTER TABLE automations ADD COLUMN IF NOT EXISTS every_minutes INTEGER DEFAULT 60"))
         await conn.execute(text("ALTER TABLE automations ADD COLUMN IF NOT EXISTS state JSONB DEFAULT '{}'::jsonb"))
         await conn.execute(text("ALTER TABLE agent_skill_versions ADD COLUMN IF NOT EXISTS flow JSONB DEFAULT '{}'::jsonb"))

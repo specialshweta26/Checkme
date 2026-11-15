@@ -59,6 +59,19 @@ class BrowserProfile(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
 
+class AgentBrowserProfile(Base):
+    """Cookies of one agent's own browser on the cloud computer, encrypted (docs/AGENT_BROWSERS.md). ``space`` is the
+    profile they came from; cookies saved for an older space (before "Sign out of everything") are never restored."""
+
+    __tablename__ = "agent_browser_profiles"
+    agent_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("workspace_agents.id", ondelete="CASCADE"), primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    space: Mapped[str] = mapped_column(String(80), default="")
+    state_enc: Mapped[str] = mapped_column(Text, default="")
+    cookie_count: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
 class BrowserRun(Base):
     """One browser_task run as the user can watch it afterwards (docs/BROWSING.md "Run history"): each step's action,
     the planner's one-line reason, whether it worked, the page, and a small screenshot in storage."""
@@ -275,6 +288,8 @@ class WorkspaceAgent(Base):
     accepts_from: Mapped[dict] = mapped_column(JSONB, default=dict)
     # Budgets and limits (app/budgets/service.py): {"daily_usd": float, "monthly_usd": float, "task_minutes": int}. Empty = none.
     limits: Mapped[dict] = mapped_column(JSONB, default=dict)
+    # Its own browser (app/agent_browsers/service.py): {"mode": "shared" | "own", "epoch": int}. Empty = shared.
+    browser: Mapped[dict] = mapped_column(JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 

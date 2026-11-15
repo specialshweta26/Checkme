@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { AgentAvatar } from "./AgentAvatar";
+import { AgentBrowser } from "./AgentBrowser";
 import { AgentHandoffs } from "./AgentHandoffs";
 import { AgentLimits } from "./AgentLimits";
 import { Select } from "./Select";
@@ -96,6 +97,8 @@ export function AgentAboutPanel({ agent, agents = [], groups, onRoutines }: { ag
       {signIns?.length ? <p className="faint about-note">Can sign in to {signIns.join(", ")}.</p> : null}
 
       <AgentLimits agent={agent} />
+
+      <AgentBrowser agent={agent} />
 
       <AgentHandoffs agent={agent} agents={agents} />
 
