@@ -80,6 +80,7 @@ async def rate(
     ).scalar_one_or_none()  # fmt: skip
     if rating == 0:
         if existing is not None:
+            await _withdraw_lessons(db, existing.id)
             await db.delete(existing)
             await db.commit()
         return {"rating": 0, "request_id": request_id, "agent_id": agent_key or None}
@@ -99,8 +100,24 @@ async def rate(
     row.updated_at = datetime.now(timezone.utc)
     if existing is None:
         db.add(row)
+    if rating > 0 and existing is not None:
+        await _withdraw_lessons(db, existing.id)
     await db.commit()
-    return {"rating": rating, "request_id": request_id, "agent_id": agent_key or None}
+    learn = rating < 0 and bool(row.agent_id) and bool(row.reasons or row.note)
+    if learn:
+        from app.quality import lessons
+
+        lessons.propose_later(row.id)  # the agent drafts a lesson for the user to accept (app/quality/lessons.py)
+    return {"rating": rating, "request_id": request_id, "agent_id": agent_key or None, "lesson": "drafting" if learn else None}
+
+
+async def _withdraw_lessons(db: AsyncSession, feedback_id) -> None:
+    """A rating cleared or turned good: its lesson, if still waiting for review, goes."""
+    from app.models import AgentLesson
+
+    rows = (await db.execute(select(AgentLesson).where(AgentLesson.feedback_id == feedback_id, AgentLesson.status == "proposed"))).scalars().all()
+    for r in rows:
+        await db.delete(r)
 
 
 async def ratings_for(db: AsyncSession, user: User, session_id) -> dict[str, int]:

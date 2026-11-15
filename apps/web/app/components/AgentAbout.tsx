@@ -79,7 +79,18 @@ export function AgentAboutPanel({ agent, groups, onRoutines }: { agent: Workspac
           <strong>{signIns?.length ?? "–"}</strong>
           <span>Vault sign-ins</span>
         </a>
+        <a href={`/quality?agent=${agent.id}`}>
+          <strong>{agent.lessons?.length ?? 0}</strong>
+          <span>Lessons</span>
+        </a>
       </div>
+      {agent.lessons?.length ? (
+        <ul className="about-lessons" aria-label="Lessons it follows">
+          {agent.lessons.slice(-4).map((l) => (
+            <li key={l.id}>{l.text}</li>
+          ))}
+        </ul>
+      ) : null}
       {signIns?.length ? <p className="faint about-note">Can sign in to {signIns.join(", ")}.</p> : null}
 
       <p className="about-label">Agent</p>

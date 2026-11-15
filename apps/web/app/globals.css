@@ -4839,3 +4839,28 @@ button.routine-tile:hover { border-color: var(--line-strong); }
   .quality-reason .quality-bar { grid-column: 1 / -1; grid-row: 2; }
   .quality-chips { margin-left: 0; }
 }
+/* Learning loop: lessons */
+.lessons-review { display: grid; gap: var(--space-3); margin-bottom: var(--space-5); padding: var(--space-4); border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line)); border-radius: var(--radius); background: var(--accent-soft); }
+.lessons-review h2 { display: flex; align-items: center; margin: 0; font-size: var(--text-lg); font-weight: var(--weight-semibold); }
+.lessons-review > p { margin: 0; }
+.lesson-card { display: grid; gap: var(--space-2); padding: var(--space-3); border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface); }
+.lesson-card header { display: flex; align-items: center; gap: var(--space-2); }
+.lesson-card header .faint { font-size: var(--text-xs); }
+.lesson-card textarea { min-height: 0; font-size: var(--text-sm); }
+.lesson-why { margin: 0; font-size: var(--text-xs); }
+.lessons-in-use { display: grid; gap: var(--space-3); margin-bottom: var(--space-6); }
+.lessons-in-use .vault-list-head { margin-bottom: 0; }
+.lesson-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: var(--space-3); padding: var(--space-3) var(--space-4); border-top: 1px solid var(--line); }
+.lesson-row:first-child { border-top: 0; }
+.lesson-text { font-size: var(--text-sm); }
+.lesson-text strong { margin-right: var(--space-1); }
+.lesson-src { font-size: var(--text-xs); white-space: nowrap; }
+.lesson-add { display: grid; grid-template-columns: 200px minmax(0, 1fr) auto; gap: var(--space-2); }
+.about-facts { grid-template-columns: repeat(4, 1fr); }
+.about-lessons { margin: 0; padding: var(--space-3) var(--space-3) var(--space-3) var(--space-6); border-radius: var(--radius-sm); background: var(--surface-sunken); color: var(--muted); font-size: var(--text-xs); line-height: 1.5; }
+@media (max-width: 640px) {
+  .lesson-row { grid-template-columns: auto minmax(0, 1fr); }
+  .lesson-src { grid-column: 2; }
+  .lesson-row .btn { grid-column: 1 / -1; justify-self: start; }
+  .lesson-add { grid-template-columns: 1fr; }
+}

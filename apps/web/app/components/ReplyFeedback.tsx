@@ -38,11 +38,19 @@ export function ReplyFeedback({
     setBusy(true);
     setError("");
     try {
-      await rateReply({ session_id: sessionId, request_id: requestId, rating: next, reasons: why, note: text, agent_id: agentId || "" });
+      const out = await rateReply({ session_id: sessionId, request_id: requestId, rating: next, reasons: why, note: text, agent_id: agentId || "" });
       onRated(next);
       setOpen(false);
-      setThanks(next === 1 ? "Thanks!" : next === -1 ? "Thanks — this helps your agent improve." : "");
-      if (next !== 0) window.setTimeout(() => setThanks(""), 2600);
+      setThanks(
+        next === 1
+          ? "Thanks!"
+          : next === -1
+            ? out.lesson
+              ? "Thanks — a lesson for next time is being drafted. Review it on the Quality page."
+              : "Thanks — this helps your agent improve."
+            : "",
+      );
+      if (next !== 0) window.setTimeout(() => setThanks(""), next === -1 && out.lesson ? 6000 : 2600);
     } catch (e: any) {
       setError(e.message);
     } finally {
@@ -76,7 +84,17 @@ export function ReplyFeedback({
         >
           <Thumb down />
         </button>
-        {thanks ? <span className="reply-thanks">{thanks}</span> : null}
+        {thanks ? (
+          <span className="reply-thanks">
+            {thanks.includes("Quality page") ? (
+              <>
+                Thanks — a lesson for next time is being drafted. <a href="/quality">Review it</a>
+              </>
+            ) : (
+              thanks
+            )}
+          </span>
+        ) : null}
         {error ? <span className="err reply-thanks">{error}</span> : null}
       </div>
       {open ? (

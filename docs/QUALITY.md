@@ -43,3 +43,20 @@ Nothing here calls a model: every number comes from what the user already did.
 A reply is identified by its conversation and turn (`request_id`, now included in every message the API returns) and
 its agent, so each bot in a group chat is rated separately. Ratings are the user's own data: they're in the data
 download and removed with the account.
+
+## Lessons: agents learn from what went wrong
+
+A thumbs-down with a reason or a note makes that agent propose one short lesson, a general rule for next time
+("When summarising the inbox, list which emails need a reply today, with the sender."). It's drafted in the
+background by the small model; without a model, your own note becomes the lesson. Nothing changes until you decide:
+
+- **Quality → Lessons to review**: edit the wording if you like, then **Accept** (the agent follows it from its next
+  reply) or **Dismiss**. Clearing the rating, or changing it to a thumbs-up, withdraws a lesson still waiting.
+- **Quality → Lessons in use**: every accepted lesson, by agent, with **Remove**; and **Add lesson** to write one yourself.
+- **About** (ⓘ in a chat) shows how many lessons the agent follows and the latest ones.
+
+Accepted lessons live on the agent (`workspace_agents.lessons`) and go into its prompt right after its own
+instructions, which are never rewritten (`lessons_prompt` in `apps/api/app/quality/lessons.py`; the newest 12).
+Proposals are rows in `agent_lessons` (proposed, accepted or dismissed). Routes: `GET/POST /api/quality/lessons`,
+`POST /api/quality/lessons/{id}/accept` (optional new text), `POST /api/quality/lessons/{id}/dismiss`,
+`DELETE /api/quality/lessons/{id}`. Tests: `apps/api/tests/test_lessons.py`.

@@ -109,8 +109,11 @@ async def db():
 
 
 @needs_db
-async def test_rate_summarise_export_and_clear(db):
+async def test_rate_summarise_export_and_clear(db, monkeypatch):
     from app.models import User
+    from app.quality import lessons
+
+    monkeypatch.setattr(lessons, "propose_later", lambda feedback_id: None)  # tested in test_lessons.py
 
     factory, uid, other, agent, sid = db
     async with factory() as s:
@@ -120,7 +123,7 @@ async def test_rate_summarise_export_and_clear(db):
             await service.rate(s, stranger, session_id=sid, request_id="r1", rating=-1)
         await service.rate(s, me, session_id=sid, request_id="r0", rating=1)
         out = await service.rate(s, me, session_id=sid, request_id="r1", rating=-1, reasons=["wrong", "made-up-reason"], note="It's 8.4M")
-        assert out == {"rating": -1, "request_id": "r1", "agent_id": str(agent)}
+        assert out == {"rating": -1, "request_id": "r1", "agent_id": str(agent), "lesson": "drafting"}
         # Rating again changes the same row rather than adding one.
         await service.rate(s, me, session_id=sid, request_id="r1", rating=-1, reasons=["wrong"], note="It's 8.4M, see the export")
         ratings = await service.ratings_for(s, me, sid)
