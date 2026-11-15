@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { AgentAvatar } from "./AgentAvatar";
+import { AgentHandoffs } from "./AgentHandoffs";
 import { Select } from "./Select";
 import { listRoutines, listSkills, type AgentGroup, type WorkspaceAgent } from "../lib";
 
@@ -29,7 +30,7 @@ function Item({ icon, label, hint, onClick, danger }: { icon: string; label: str
   );
 }
 
-export function AgentAboutPanel({ agent, groups, onRoutines }: { agent: WorkspaceAgent; groups: AgentGroup[]; onRoutines: () => void }) {
+export function AgentAboutPanel({ agent, agents = [], groups, onRoutines }: { agent: WorkspaceAgent; agents?: WorkspaceAgent[]; groups: AgentGroup[]; onRoutines: () => void }) {
   const [skills, setSkills] = useState<number | null>(null);
   const [routines, setRoutines] = useState<number | null>(null);
   const [signIns, setSignIns] = useState<string[] | null>(null);
@@ -92,6 +93,8 @@ export function AgentAboutPanel({ agent, groups, onRoutines }: { agent: Workspac
         </ul>
       ) : null}
       {signIns?.length ? <p className="faint about-note">Can sign in to {signIns.join(", ")}.</p> : null}
+
+      <AgentHandoffs agent={agent} agents={agents} />
 
       <p className="about-label">Agent</p>
       <div className="about-group">

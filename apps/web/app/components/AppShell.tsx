@@ -764,7 +764,7 @@ export function AppShell({
                   <AgentRoutinesPanel agentId={panel.agentId} agentName={agentNames[panel.agentId] || "This agent"} />
                 </>
               ) : panelAgent ? (
-                <AgentAboutPanel agent={panelAgent} groups={roster.groups} onRoutines={() => setPanel({ ...panel, kind: "routines" })} />
+                <AgentAboutPanel agent={panelAgent} agents={roster.agents} groups={roster.groups} onRoutines={() => setPanel({ ...panel, kind: "routines" })} />
               ) : (
                 <p className="muted">Loading…</p>
               )}

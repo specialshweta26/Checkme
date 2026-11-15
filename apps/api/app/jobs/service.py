@@ -589,9 +589,19 @@ async def after_terminal(db: AsyncSession, job: AgentJob) -> None:
 
     await finish_job(job)  # closes its skill state; a handed-over one writes the result back to the parent task
     if job.parent_id:
+        from app.handoffs import service as handoffs
+
+        receipts = await handoffs.job_finished(db, job)
         parent = await db.get(AgentJob, job.parent_id)
         if parent is None:
             return
+        # The completion event on the parent's timeline: who finished what, and how it went.
+        name = (job.meta or {}).get("agent_name") or job.role
+        db.add(event(parent, "handoff", handoffs.completion_text(job, name), {
+            "child_id": str(job.id), "status": job.status, "agent_name": name,
+            "receipt": handoffs.serialize(receipts[0]) if receipts else None,
+            "reply": clip(job.result if job.status == "done" else (job.error or ""), 600),
+        }))  # fmt: skip
         kids = (await db.execute(select(AgentJob).where(AgentJob.parent_id == parent.id))).scalars().all()
         for ev in resume_parent(parent, list(kids)):
             db.add(ev)

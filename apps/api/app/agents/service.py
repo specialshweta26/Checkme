@@ -83,6 +83,8 @@ def pick_color(index: int) -> str:
 
 
 def serialize_agent(row: WorkspaceAgent) -> dict:
+    from app.handoffs.service import rule as handoff_rule
+
     return {
         "id": str(row.id),
         "name": row.name,
@@ -98,6 +100,7 @@ def serialize_agent(row: WorkspaceAgent) -> dict:
         "archived": bool(getattr(row, "archived", False)),
         "unread": bool(getattr(row, "unread", False)),
         "lessons": [{"id": str(x.get("id")), "text": str(x.get("text") or "")} for x in (getattr(row, "lessons", None) or []) if isinstance(x, dict)],
+        "accepts_from": handoff_rule(row),
     }
 
 
