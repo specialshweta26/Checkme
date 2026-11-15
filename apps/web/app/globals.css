@@ -4776,3 +4776,66 @@ button.routine-tile:hover { border-color: var(--line-strong); }
 @media (max-width: 860px) {
   .sidebar-collapse { display: none; }
 }
+
+/* ------------------------------------------------------------------ Quality (docs/QUALITY.md) */
+.reply-feedback { display: grid; gap: var(--space-2); margin-top: 6px; }
+.reply-feedback-row { display: flex; align-items: center; gap: 2px; }
+.reply-thumb {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--faint);
+  cursor: pointer;
+  opacity: 0.75;
+  transition: opacity var(--motion-fast) var(--ease-standard), background var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard);
+}
+.turn:hover .reply-thumb, .reply-thumb:focus-visible, .reply-thumb.on, .reply-thumb.open { opacity: 1; }
+.reply-thumb:hover { background: var(--lift); color: var(--text); }
+.reply-thumb.on.up { color: var(--ok-text); background: var(--ok-soft); }
+.reply-thumb.on.down, .reply-thumb.open { color: var(--danger-text); background: var(--danger-soft); }
+.reply-thanks { margin-left: var(--space-2); color: var(--faint); font-size: var(--text-xs); }
+.reply-why {
+  display: grid;
+  gap: var(--space-2);
+  max-width: 560px;
+  padding: var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+.reply-why strong { font-size: var(--text-sm); }
+.reply-why-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.reply-why-chips .chip.on { border-color: var(--danger); background: var(--danger-soft); color: var(--danger-text); }
+.reply-why textarea { min-height: 0; }
+.quality-tiles { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.quality-sub { margin-top: 2px; }
+.quality-reasons { display: grid; gap: var(--space-2); margin-bottom: var(--space-5); padding: var(--space-4); border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
+.quality-reasons h2 { margin: 0 0 var(--space-1); font-size: var(--text-md); font-weight: var(--weight-semibold); }
+.quality-reason { display: grid; grid-template-columns: minmax(140px, 220px) 1fr 32px; align-items: center; gap: var(--space-3); font-size: var(--text-sm); }
+.quality-reason strong { text-align: right; font-variant-numeric: tabular-nums; }
+.quality-bar { display: block; height: 8px; border-radius: 8px; background: var(--lift); overflow: hidden; }
+.quality-bar span { display: block; height: 100%; border-radius: 8px; background: var(--danger); }
+.quality-list { display: grid; gap: var(--space-3); }
+.quality-item { display: grid; gap: var(--space-3); padding: var(--space-4); border: 1px solid var(--line); border-left: 3px solid var(--danger); border-radius: var(--radius-sm); background: var(--panel); }
+.quality-item header { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.quality-item header .faint { font-size: var(--text-xs); }
+.quality-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; }
+.quality-note { margin: 0; color: var(--text); font-style: italic; }
+.quality-exchange { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); }
+.quality-exchange > div { display: grid; gap: 4px; padding: var(--space-3); border-radius: var(--radius-xs); background: var(--surface-sunken); min-width: 0; }
+.quality-exchange .faint { font-size: var(--text-xs); }
+.quality-exchange p { margin: 0; font-size: var(--text-sm); white-space: pre-wrap; overflow-wrap: anywhere; }
+.quality-reply { max-height: 160px; overflow: auto; }
+.quality-tools { display: flex; flex-wrap: wrap; gap: 6px; }
+.quality-tools code { padding: 1px 8px; border-radius: var(--radius-pill); background: var(--lift); color: var(--muted); font-size: var(--text-2xs); }
+@media (max-width: 1100px) { .quality-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 640px) {
+  .quality-exchange { grid-template-columns: 1fr; }
+  .quality-reason { grid-template-columns: 1fr 40px; }
+  .quality-reason .quality-bar { grid-column: 1 / -1; grid-row: 2; }
+  .quality-chips { margin-left: 0; }
+}

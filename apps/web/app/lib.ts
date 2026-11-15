@@ -846,3 +846,47 @@ export const routineRunNow = (id: string) => skillCall<Routine>(`/api/tasks/${id
 export const routineSetStatus = (id: string, status: "active" | "paused") =>
   skillCall<Routine>(`/api/tasks/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status }) }, "Couldn't change it");
 export const routineDelete = (id: string) => skillCall<{ ok: boolean }>(`/api/tasks/${id}`, { method: "DELETE" }, "Couldn't delete it");
+
+// Quality loop: ratings on replies and how each agent is doing (apps/api/app/quality; docs/QUALITY.md).
+export type QualityReasonKey = "wrong" | "incomplete" | "not_done" | "unwanted" | "slow" | "tone";
+export const QUALITY_REASONS: { key: QualityReasonKey; label: string }[] = [
+  { key: "wrong", label: "Wrong or made up" },
+  { key: "incomplete", label: "Incomplete" },
+  { key: "not_done", label: "Didn't do what I asked" },
+  { key: "unwanted", label: "Did something I didn't want" },
+  { key: "slow", label: "Too slow" },
+  { key: "tone", label: "Wrong tone or style" },
+];
+export type ReplyRating = {
+  id: string;
+  rating: number;
+  reasons: string[];
+  reason_labels: string[];
+  note: string;
+  prompt: string;
+  reply: string;
+  tools: string[];
+  session_id: string;
+  request_id: string;
+  agent_id: string | null;
+  agent_name: string;
+  agent_color: string;
+  at: string;
+};
+export type QualitySummary = {
+  days: number;
+  up: number;
+  down: number;
+  satisfaction: number | null;
+  routines: { succeeded: number; failed: number; success_rate: number | null };
+  drafts: { unchanged: number; light: number; rewritten: number; sent: number; kept_rate: number | null };
+  reasons: { reason: string; label: string; count: number }[];
+  agents: { agent_id: string | null; agent_name: string; agent_color: string; up: number; down: number; satisfaction: number | null; routine_ok: number; routine_failed: number }[];
+};
+export const rateReply = (body: { session_id: string; request_id: string; rating: number; reasons?: string[]; note?: string; agent_id?: string }) =>
+  skillCall<{ rating: number }>("/api/quality/feedback", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }, "Couldn't save your rating");
+export const sessionRatings = (sessionId: string) => skillCall<{ ratings: Record<string, number> }>(`/api/quality/feedback/session/${sessionId}`, {}, "Couldn't load ratings");
+export const qualitySummary = (days = 30, agentId = "") => skillCall<QualitySummary>(`/api/quality/summary${qs({ days, agent_id: agentId })}`, {}, "Couldn't load quality");
+export const qualityFeedback = (opts: { rating?: number; agentId?: string; days?: number } = {}) =>
+  skillCall<{ feedback: ReplyRating[] }>(`/api/quality/feedback${qs({ rating: opts.rating, agent_id: opts.agentId, days: opts.days ?? 30 })}`, {}, "Couldn't load ratings");
+export const qualityExport = (ids: string[] = [], days = 90) => skillCall<{ cases: unknown[] }>(`/api/quality/export${qs({ ids: ids.join(","), days })}`, {}, "Couldn't export");

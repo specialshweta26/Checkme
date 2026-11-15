@@ -502,6 +502,32 @@ class ScheduledTask(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
 
+class AgentFeedback(Base):
+    """A thumbs up or down on one agent reply (app/quality): the user's own measure of how an agent is doing, and the
+    source of new agent test cases (evals/from_feedback.py). One per (session, turn, agent); rating 0 is never stored."""
+
+    __tablename__ = "agent_feedback"
+    __table_args__ = (
+        UniqueConstraint("user_id", "session_id", "request_id", "agent_key", name="uq_agent_feedback_turn"),
+        Index("ix_agent_feedback_user_created", "user_id", "created_at"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    agent_key: Mapped[str] = mapped_column(String(64), default="")  # agent id, or "" when unknown (unique key part)
+    session_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
+    request_id: Mapped[str] = mapped_column(String(64), default="")
+    rating: Mapped[int] = mapped_column(Integer, default=0)  # 1 = good, -1 = bad
+    reasons: Mapped[list] = mapped_column(JSONB, default=list)
+    note: Mapped[str] = mapped_column(Text, default="")
+    prompt: Mapped[str] = mapped_column(Text, default="")
+    reply: Mapped[str] = mapped_column(Text, default="")
+    tools: Mapped[list] = mapped_column(JSONB, default=list)
+    history: Mapped[list] = mapped_column(JSONB, default=list)  # the turns before, for a test case
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
 class ScheduledRun(Base):
     """One run of a scheduled task (app/tasks/service.py execute_task): the Routines dashboard and its failure list.
 

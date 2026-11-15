@@ -144,3 +144,10 @@ export const IconRoutines = (p: P) => (
     <path d="M12 9.5V13l2.5 1.5M9.5 2.5h5" />
   </Svg>
 );
+
+export const IconQuality = (p: P) => (
+  <Svg {...p}>
+    <path d="M4 19V5M4 19h16" />
+    <path d="m7 15 4-4 3 3 5-6" />
+  </Svg>
+);

@@ -2,7 +2,7 @@
 
 import { useEffect, useState, type ReactNode } from "react";
 import { AppShell } from "../components/AppShell";
-import { IconArrow, IconArtifact, IconData, IconGauge, IconKnow, IconPlugSm, IconRoutines, IconRuns, IconSkills, IconVault } from "../components/ProfileIcons";
+import { IconArrow, IconArtifact, IconData, IconGauge, IconKnow, IconPlugSm, IconQuality, IconRoutines, IconRuns, IconSkills, IconVault } from "../components/ProfileIcons";
 import { getMe, initials, type Me } from "../lib";
 
 // Profile (docs/DESIGN.md "Profile"): who is signed in, and one place for everything the workspace keeps for them:
@@ -132,6 +132,13 @@ export default function ProfilePage() {
             title="Routines"
             body="Work your agents do on a schedule: each agent's routines, how every run went, and what failed and why."
             meta={[show(c.routines, "routine", "routines"), c.failed ? `${c.failed} failed this month` : ""].filter(Boolean).join(" · ")}
+          />
+          <Card
+            href="/quality"
+            tone="violet"
+            icon={<IconQuality size={20} />}
+            title="Quality"
+            body="How your agents are doing: replies you rated, routine runs and inbox drafts. What went wrong becomes a test."
           />
           <Card
             href="/skills"
