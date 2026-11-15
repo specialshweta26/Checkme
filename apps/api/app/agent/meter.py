@@ -24,6 +24,8 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 METER: ContextVar[tuple | None] = ContextVar("usage_meter", default=None)
+# Which agent is doing the work (set by run_deep_agent). Its use is also counted per agent for budgets (app/budgets).
+AGENT: ContextVar = ContextVar("usage_agent", default=None)
 FEATURES = ("chat", "inbox", "memory", "jobs", "other")
 BACKGROUND = ("inbox", "memory")
 FLUSH_EVERY_S = 10
@@ -32,10 +34,30 @@ BUDGET_CACHE_S = 60
 # (user_id, day, feature, model) -> [calls, input, cached, output, units]
 _pending: dict[tuple, list[float]] = defaultdict(lambda: [0, 0, 0, 0, 0.0])
 _budget_cache: dict = {}
+# (agent_id, user_id, day, model) -> [calls, input, cached, output, units]
+_agent_pending: dict[tuple, list[float]] = defaultdict(lambda: [0, 0, 0, 0, 0.0])
 
 
 def _today() -> date:
     return datetime.now(timezone.utc).date()
+
+
+@contextmanager
+def as_agent(agent_id):
+    """Count the use inside this block against ``agent_id`` too (nested blocks win, so a teammate's turn is its own)."""
+    token = AGENT.set(agent_id) if agent_id else None
+    try:
+        yield
+    finally:
+        if token is not None:
+            AGENT.reset(token)
+
+
+def _agent_row(user_id, model: str) -> list[float] | None:
+    agent_id = AGENT.get()
+    if not agent_id or not user_id:
+        return None
+    return _agent_pending[(agent_id, user_id, _today(), str(model or "unknown")[:80])]
 
 
 @contextmanager
@@ -58,6 +80,12 @@ def record_tokens(model: str, input_tokens: int, output_tokens: int, cached_toke
     row[1] += int(input_tokens or 0)
     row[2] += int(cached_tokens or 0)
     row[3] += int(output_tokens or 0)
+    arow = _agent_row(meter[0], model)
+    if arow is not None:
+        arow[0] += 1
+        arow[1] += int(input_tokens or 0)
+        arow[2] += int(cached_tokens or 0)
+        arow[3] += int(output_tokens or 0)
 
 
 def count(kind: str, units: float = 1.0, user_id=None, feature: str | None = None) -> None:
@@ -69,6 +97,10 @@ def count(kind: str, units: float = 1.0, user_id=None, feature: str | None = Non
     row = _pending[(uid, _today(), feature or (meter[1] if meter else "other"), kind[:80])]
     row[0] += 1
     row[4] += float(units)
+    arow = _agent_row(uid, kind)
+    if arow is not None:
+        arow[0] += 1
+        arow[4] += float(units)
 
 
 def pending_for(user_id, day: date | None = None) -> list[tuple]:
@@ -78,8 +110,9 @@ def pending_for(user_id, day: date | None = None) -> list[tuple]:
 
 async def flush(session_factory=None) -> int:
     """Write the buffered counters. Safe to call any time; returns how many rows were upserted."""
+    agents = await _flush_agents(session_factory)
     if not _pending:
-        return 0
+        return agents
     from sqlalchemy.dialects.postgresql import insert as pg_insert
 
     from app.models import UsageDaily
@@ -102,14 +135,83 @@ async def flush(session_factory=None) -> int:
                     "units": UsageDaily.units + stmt.excluded.units,
                 }))
             await db.commit()
-        return len(batch)
+        return len(batch) + agents
     except Exception:  # noqa: BLE001 - put the counts back for the next try rather than lose them
         log.warning("usage flush failed; will retry", exc_info=True)
         for key, vals in batch.items():
             row = _pending[key]
             for i, v in enumerate(vals):
                 row[i] += v
+        return agents
+
+
+async def _flush_agents(session_factory=None) -> int:
+    if not _agent_pending:
         return 0
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    from app.models import AgentUsageDaily
+
+    if session_factory is None:
+        from app.db import SessionLocal as session_factory  # noqa: N813
+    batch = dict(_agent_pending)
+    _agent_pending.clear()
+    try:
+        async with session_factory() as db:
+            for (aid, uid, day, model), (calls, inp, cached, out, units) in batch.items():
+                stmt = pg_insert(AgentUsageDaily).values(agent_id=aid, user_id=uid, day=day, model=model, calls=int(calls),
+                                                         input_tokens=int(inp), cached_tokens=int(cached),
+                                                         output_tokens=int(out), units=float(units))  # fmt: skip
+                await db.execute(stmt.on_conflict_do_update(constraint="uq_agent_usage_daily", set_={
+                    "calls": AgentUsageDaily.calls + stmt.excluded.calls,
+                    "input_tokens": AgentUsageDaily.input_tokens + stmt.excluded.input_tokens,
+                    "cached_tokens": AgentUsageDaily.cached_tokens + stmt.excluded.cached_tokens,
+                    "output_tokens": AgentUsageDaily.output_tokens + stmt.excluded.output_tokens,
+                    "units": AgentUsageDaily.units + stmt.excluded.units,
+                }))  # fmt: skip
+            await db.commit()
+        return len(batch)
+    except Exception:  # noqa: BLE001
+        log.warning("agent usage flush failed; will retry", exc_info=True)
+        for key, vals in batch.items():
+            row = _agent_pending[key]
+            for i, v in enumerate(vals):
+                row[i] += v
+        return 0
+
+
+async def agent_usage(db, agent_id, since: date) -> dict:
+    """This agent's spend since ``since`` (stored plus not yet written): priced cost, tokens, and whether any use was unpriced."""
+    from sqlalchemy import select
+
+    from app.models import AgentUsageDaily
+
+    merged: dict[tuple, list[float]] = defaultdict(lambda: [0, 0, 0, 0, 0.0])
+    for r in (await db.execute(select(AgentUsageDaily).where(AgentUsageDaily.agent_id == agent_id, AgentUsageDaily.day >= since))).scalars():
+        row = merged[(r.day, r.model)]
+        for i, v in enumerate((r.calls, r.input_tokens, r.cached_tokens, r.output_tokens, r.units)):
+            row[i] += v or 0
+    for (aid, _uid, day, model), vals in list(_agent_pending.items()):
+        if str(aid) == str(agent_id) and day >= since:
+            row = merged[(day, model)]
+            for i, v in enumerate(vals):
+                row[i] += v
+    cost, tokens, unpriced, today_cost, today_tokens = 0.0, 0, False, 0.0, 0
+    for (day, model), (_calls, inp, cached, outp, _units) in merged.items():
+        if ":" in model or model == "search":
+            continue
+        tokens += int(inp) + int(outp)
+        if day == _today():
+            today_tokens += int(inp) + int(outp)
+        c = cost_of(model, int(inp), int(cached), int(outp))
+        if c is None:
+            unpriced = unpriced or bool(inp or outp)
+            continue
+        cost += c
+        if day == _today():
+            today_cost += c
+    return {"cost_usd": round(cost, 4), "today_usd": round(today_cost, 4), "tokens": tokens, "today_tokens": today_tokens,
+            "unpriced": unpriced}  # fmt: skip
 
 
 async def flush_loop() -> None:

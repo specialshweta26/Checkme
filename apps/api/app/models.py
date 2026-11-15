@@ -273,6 +273,8 @@ class WorkspaceAgent(Base):
     # Who may hand this agent work (app/handoffs/service.py): {"mode": "anyone" | "selected" | "nobody", "agents": [ids]}.
     # Empty means anyone. The user can always message it.
     accepts_from: Mapped[dict] = mapped_column(JSONB, default=dict)
+    # Budgets and limits (app/budgets/service.py): {"daily_usd": float, "monthly_usd": float, "task_minutes": int}. Empty = none.
+    limits: Mapped[dict] = mapped_column(JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
@@ -723,6 +725,23 @@ class MemoryEntity(Base):
     summary: Mapped[str] = mapped_column(Text, default="")
     card_built_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class AgentUsageDaily(Base):
+    """What one agent used on one day, per model (app/agent/meter.py). Feeds per-agent budgets (app/budgets)."""
+
+    __tablename__ = "agent_usage_daily"
+    __table_args__ = (UniqueConstraint("agent_id", "day", "model", name="uq_agent_usage_daily"),)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)  # no FK: a deleted agent's history is harmless
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    day: Mapped[date] = mapped_column(Date)
+    model: Mapped[str] = mapped_column(String(80))
+    calls: Mapped[int] = mapped_column(Integer, default=0)
+    input_tokens: Mapped[int] = mapped_column(BigInteger, default=0)
+    cached_tokens: Mapped[int] = mapped_column(BigInteger, default=0)
+    output_tokens: Mapped[int] = mapped_column(BigInteger, default=0)
+    units: Mapped[float] = mapped_column(Float, default=0.0)
 
 
 class UsageDaily(Base):

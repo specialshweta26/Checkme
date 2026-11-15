@@ -4865,6 +4865,26 @@ button.routine-tile:hover { border-color: var(--line-strong); }
   .lesson-add { grid-template-columns: 1fr; }
 }
 
+/* ------------------------------------------------------------------ Budgets and limits (docs/BUDGETS.md) */
+.limits { display: grid; gap: var(--space-2); }
+.limits-meters { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: var(--space-2); }
+.limits-meter { display: grid; gap: var(--space-1); padding: var(--space-2) var(--space-3); border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface); }
+.limits-meter > div:first-child { display: grid; gap: 2px; }
+.limits-meter > div:first-child > span { color: var(--faint); font-size: var(--text-2xs); font-weight: var(--weight-bold); letter-spacing: 0.06em; text-transform: uppercase; }
+.limits-meter strong { font-size: var(--text-md); font-variant-numeric: tabular-nums; }
+.limits-meter strong .faint { font-size: var(--text-xs); font-weight: normal; }
+.limits-bar { height: 6px; overflow: hidden; border-radius: var(--radius-pill); background: var(--surface-sunken); }
+.limits-bar > span { display: block; height: 100%; border-radius: inherit; background: var(--accent); }
+.limits-bar.near > span { background: var(--warn); }
+.limits-bar.over > span { background: var(--danger); }
+.limits-over { margin: 0; padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm); background: var(--danger-soft); color: var(--danger); font-size: var(--text-xs); line-height: 1.5; }
+.limits-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-2); align-items: end; }
+.limits-form label { display: grid; gap: var(--space-1); min-width: 0; font-size: var(--text-xs); color: var(--muted); }
+.limits-input { display: flex; align-items: center; gap: var(--space-1); padding: 0 var(--space-2); border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface); color: var(--faint); }
+.limits-input:focus-within { border-color: var(--accent); }
+.limits-input input { width: 100%; min-width: 0; padding: var(--space-2) 0; border: 0; outline: 0; background: none; color: var(--text); font: inherit; font-size: var(--text-sm); }
+.limits-form .btn { grid-column: 1 / -1; justify-self: start; }
+
 /* ------------------------------------------------------------------ Handoffs (docs/HANDOFFS.md) */
 .handoffs { display: grid; gap: var(--space-2); }
 .handoffs-rule { display: grid; gap: var(--space-1); font-size: var(--text-sm); }

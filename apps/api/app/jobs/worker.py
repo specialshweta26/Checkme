@@ -154,6 +154,41 @@ async def _watch_cancel(session_factory: Callable, job_id, run) -> None:
             return
 
 
+async def _watch_limits(session_factory: Callable, job_id, run, every: float | None = None) -> None:
+    """The agent's limits while a task runs (docs/BUDGETS.md): past its time limit or its budget, stop this run so the
+    runner pauses the task with a question."""
+    from app.budgets import service as budgets
+    from app.models import WorkspaceAgent
+
+    started = asyncio.get_running_loop().time()
+    every = every or budgets.WATCH_S
+    while not run.cancelled:
+        await asyncio.sleep(every)
+        try:
+            async with session_factory() as db:
+                job = await db.get(AgentJob, job_id)
+                if job is None or job.status != "running":
+                    return
+                agent = await db.get(WorkspaceAgent, job.agent_id) if job.agent_id else None
+                lim = budgets.limits(agent) if agent is not None else {}
+                if not lim:
+                    continue
+                minutes = (asyncio.get_running_loop().time() - started) / 60
+                if lim.get("task_minutes") and minutes >= lim["task_minutes"]:
+                    text = f"{agent.name} has worked on this for {lim['task_minutes']} minutes, the limit you set. Keep going, or stop it here?"
+                    run.cancel(f"limit:{budgets.TIME_LIMIT}:{text}")
+                    return
+                if not budgets.may_overspend(job):
+                    st = await budgets.status(db, agent)
+                    if st["over"]:
+                        run.cancel(f"limit:{budgets.BUDGET}:{budgets.over_text(agent, st)} Run this task anyway today, or leave it for now?")
+                        return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.debug("limits watch failed: %s", exc)
+
+
 async def _run_one(session_factory: Callable, job_id, user_id=None) -> None:
     from app.agent import cancel as run_cancel
 
@@ -181,6 +216,7 @@ async def _run_one(session_factory: Callable, job_id, user_id=None) -> None:
         run_cancel.current.reset(token)
     run.task = inner
     watch = asyncio.create_task(_watch_cancel(session_factory, job_id, run))
+    limits_watch = asyncio.create_task(_watch_limits(session_factory, job_id, run))
     try:
         try:
             status = await inner
@@ -205,6 +241,7 @@ async def _run_one(session_factory: Callable, job_id, user_id=None) -> None:
         computer.release()
         beat.cancel()
         watch.cancel()
+        limits_watch.cancel()
         run_cancel.unregister(run.key, run)
         wake()  # a parent may have been requeued
 
