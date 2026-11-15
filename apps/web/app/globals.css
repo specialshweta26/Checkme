@@ -4916,3 +4916,30 @@ button.routine-tile:hover { border-color: var(--line-strong); }
 .plan-facts dd { margin: 0; min-width: 0; }
 .plan-chip { display: inline-block; padding: 1px 8px; margin: 0 4px 3px 0; border-radius: var(--radius-pill); background: var(--lift); border: 1px solid var(--line); font-size: 12px; }
 @media (max-width: 560px) { .plan-facts > div { grid-template-columns: 1fr; gap: 2px; } }
+
+/* Approvals (docs/APPROVALS.md): one queue of everything waiting on you. */
+.approvals-filters { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 14px; }
+.approvals-batch { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 10px 14px; margin-bottom: 12px; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); background: var(--panel); }
+.approvals-check { display: inline-flex; align-items: center; gap: 8px; font-size: 13.5px; cursor: pointer; }
+.approvals-check input, .approval-pick { width: 16px; height: 16px; accent-color: var(--accent); }
+.approvals-notice { padding: 9px 12px; border-radius: var(--radius-control); background: var(--ok-soft); color: var(--ok-text); font-size: 13.5px; }
+.approvals-empty { display: grid; gap: 4px; padding: 28px 18px; text-align: center; border: 1px dashed var(--line-strong); border-radius: var(--radius-sm); }
+.approvals-list { display: grid; gap: 10px; }
+.approval-card { display: grid; grid-template-columns: 22px 1fr; gap: 10px; padding: 14px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--panel); }
+.approval-card.picked { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.approval-pick { margin-top: 3px; }
+.approval-main { min-width: 0; display: grid; gap: 6px; }
+.approval-main header { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; }
+.approval-main h3 { margin: 0; font-size: 15px; line-height: 1.35; overflow-wrap: anywhere; }
+.approval-when { margin-left: auto; font-size: 12px; }
+.approval-kind { padding: 1px 8px; border-radius: var(--radius-pill); font-size: 11.5px; font-weight: 600; background: var(--lift); color: var(--muted); }
+.approval-kind.plan { background: var(--violet-soft); color: var(--violet); }
+.approval-kind.action, .approval-kind.chat { background: var(--warn-soft); color: var(--warn-text); }
+.approval-kind.question, .approval-kind.handoff { background: var(--accent-soft); color: var(--accent); }
+.approval-task { margin: 0; font-size: 12.5px; }
+.approval-lines { margin: 0; padding-left: 18px; display: grid; gap: 2px; font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
+.approval-actions { flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+@media (max-width: 560px) {
+  .approval-when { margin-left: 0; width: 100%; }
+  .approvals-batch { top: 0; }
+}
