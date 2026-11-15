@@ -945,3 +945,51 @@ export const checkWatch = (id: number) => skillCall<Watch>(`/api/automations/${i
 export const setWatchEnabled = (id: number, enabled: boolean) =>
   skillCall<Watch>(`/api/automations/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled }) }, "Couldn't change it");
 export const deleteWatch = (id: number) => skillCall<{ ok: boolean }>(`/api/automations/${id}`, { method: "DELETE" }, "Couldn't delete it");
+
+// ---- One approvals queue (docs/APPROVALS.md) ----
+export type ApprovalKind = "plan" | "action" | "question" | "handoff" | "chat";
+export type ApprovalItem = {
+  id: string;
+  kind: ApprovalKind;
+  title: string;
+  lines: string[];
+  agent_id: string | null;
+  agent_name: string;
+  agent_color: string;
+  agent_avatar: string;
+  session_id: string | null;
+  job_id: string | null;
+  job_title?: string;
+  token?: string;
+  message_id?: number;
+  options?: string[];
+  since: string | null;
+  expires_at?: number | null;
+  expired?: boolean;
+};
+export type ApprovalQueue = { items: ApprovalItem[]; count: number; counts: Partial<Record<ApprovalKind, number>> };
+const JSON_POST = (body: unknown) => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+export const listApprovals = () => skillCall<ApprovalQueue>("/api/approvals", {}, "Couldn't load approvals");
+export const approvalsCount = () => skillCall<{ count: number }>("/api/approvals/count", {}, "");
+export const decideApprovals = (decisions: { id: string; kind: ApprovalKind; job_id: string; token?: string; approve: boolean }[]) =>
+  skillCall<{ results: { id: string; ok: boolean; error?: string; status?: string }[]; done: number }>("/api/approvals/decide", JSON_POST({ decisions }), "Couldn't apply that");
+export const answerApproval = (job_id: string, text: string) => skillCall("/api/approvals/answer", JSON_POST({ job_id, text }), "Couldn't send the answer");
+export const dismissChatApproval = (message_id: number, token: string) => skillCall("/api/approvals/dismiss", JSON_POST({ message_id, token }), "Couldn't decline it");
+/** Approve a chat approval the same way the chat does: a plain "Yes" with its token, sent into that chat. */
+export async function approveChatApproval(item: ApprovalItem) {
+  const res = await fetch("/api/chat", {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message: "Yes", mode: "interrupt", session_id: item.session_id, agent_id: item.agent_id, confirmations: [{ token: item.token }] }),
+  });
+  const raw = (await res.text()).trim();
+  let data: any = {};
+  try {
+    data = raw ? JSON.parse(raw) : {};
+  } catch {
+    /* heartbeat-only or non-JSON */
+  }
+  if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : "Couldn't approve it");
+  return String(data.text || "");
+}

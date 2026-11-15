@@ -9,6 +9,7 @@ import {
   listSessions,
   loadWorkspace,
   markInboxSeen,
+  approvalsCount,
   rememberScope,
   rememberedScope,
   relativeTime,
@@ -26,7 +27,7 @@ import { IconArtifact, IconData, IconGauge, IconKnow, IconQuality, IconRoutines,
 import { BrandMark } from "./BrandMark";
 import { AgentAvatar } from "./AgentAvatar";
 
-type Nav = "today" | "chat" | "inbox" | "tasks" | "connectors" | "runs" | "memory" | "usage" | "account" | "profile" | "artifacts" | "vault" | "skills" | "routines" | "quality";
+type Nav = "today" | "chat" | "inbox" | "tasks" | "connectors" | "runs" | "memory" | "usage" | "account" | "profile" | "artifacts" | "vault" | "skills" | "routines" | "quality" | "approvals";
 
 // Everything kept for the user lives under Profile (docs/DESIGN.md "Profile"), not in the sidebar.
 const PROFILE_MENU: [Nav, string, string, (p: { size?: number }) => ReactElement][] = [
@@ -72,6 +73,15 @@ function IconInbox() {
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
       <path d="M4 7.5h16v10H4v-10Z" stroke="currentColor" strokeWidth="1.8" />
       <path d="M4 13h4.2l1.3 2h5l1.3-2H20" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function IconApprovals() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <path d="M12 3.5 5 6.3v5.2c0 4.3 2.9 7.6 7 9 4.1-1.4 7-4.7 7-9V6.3l-7-2.8Z" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
+      <path d="m8.8 12 2.2 2.2 4.2-4.4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }
@@ -260,6 +270,20 @@ export function AppShell({
   const [own, setOwn] = useState<ChatSessionRow[]>([]);
   const [badge, setBadge] = useState(0);
   const [pending, setPending] = useState(0);
+  const [waitingOnYou, setWaitingOnYou] = useState(0);
+  useEffect(() => {
+    // Approvals waiting across all agents (docs/APPROVALS.md): a light count, refreshed every 30s and on focus.
+    let stopped = false;
+    const load = () => approvalsCount().then((r) => !stopped && setWaitingOnYou(r.count || 0)).catch(() => {});
+    load();
+    const t = window.setInterval(load, 30000);
+    window.addEventListener("focus", load);
+    return () => {
+      stopped = true;
+      window.clearInterval(t);
+      window.removeEventListener("focus", load);
+    };
+  }, [current]);
   const [alerts, setAlerts] = useState<InboxAlert[]>([]);
   const [alertsOpen, setAlertsOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
@@ -424,7 +448,7 @@ export function AppShell({
   }
 
   const rows = conversations || own;
-  const titles: Record<Nav, string> = { today: "Today", chat: "Chat", inbox: "Inbox", tasks: "Tasks", connectors: "Connectors", runs: "Saved runs", memory: "What I know", usage: "Usage", account: "Your data", profile: "Profile", artifacts: "Artifacts", vault: "Vault", skills: "Skills", routines: "Routines", quality: "Quality" };
+  const titles: Record<Nav, string> = { today: "Today", chat: "Chat", inbox: "Inbox", tasks: "Tasks", connectors: "Connectors", runs: "Saved runs", memory: "What I know", usage: "Usage", account: "Your data", profile: "Profile", artifacts: "Artifacts", vault: "Vault", skills: "Skills", routines: "Routines", quality: "Quality", approvals: "Approvals" };
   const agentId = activeAgentId || scope.agent || null;
   const groupId = activeGroupId || scope.group || null;
 
@@ -506,6 +530,10 @@ export function AppShell({
             <IconInbox />
             {pending > 0 ? <span className="rail-dot" aria-hidden /> : null}
           </a>
+          <a className={`rail-btn${current === "approvals" ? " on" : ""}`} href="/approvals" aria-label={waitingOnYou ? `Approvals, ${waitingOnYou} waiting` : "Approvals"} title="Approvals">
+            <IconApprovals />
+            {waitingOnYou > 0 ? <span className="rail-dot" aria-hidden /> : null}
+          </a>
           <span className="rail-sep" aria-hidden />
           <div className="rail-agents">
             {roster.agents.filter((a) => !a.archived).map((a) => (
@@ -558,6 +586,10 @@ export function AppShell({
           <a className={`side-link${current === "inbox" ? " on" : ""}`} href="/inbox" onClick={(e) => { e.preventDefault(); visit("/inbox"); }}>
             <IconInbox /> Inbox
             {pending > 0 ? <span className="nav-count">{pending > 9 ? "9+" : pending}</span> : null}
+          </a>
+          <a className={`side-link${current === "approvals" ? " on" : ""}`} href="/approvals" onClick={(e) => { e.preventDefault(); visit("/approvals"); }}>
+            <IconApprovals /> Approvals
+            {waitingOnYou > 0 ? <span className="nav-count">{waitingOnYou > 9 ? "9+" : waitingOnYou}</span> : null}
           </a>
         </nav>
         <AgentsNav
