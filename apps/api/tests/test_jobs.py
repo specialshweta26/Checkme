@@ -344,12 +344,12 @@ async def test_start_background_task_offered_to_every_agent_in_chat(monkeypatch)
 
     seen = {}
 
-    async def fake_start(ctx, task, title="", role="planner"):
-        seen.update(task=task, role=role)
+    async def fake_start(ctx, task, title="", role="planner", steps=None, tools=None, approvals=None):
+        seen.update(task=task, role=role, steps=steps)
         return {"started": True, "job_id": "j1"}
 
     monkeypatch.setattr(deep, "start_coding_job", fake_start)
     ctx, found = tools(agent=chief)
-    await found["start_background_task"].ainvoke({"task": "Compare prices on three sites", "title": "Compare"})
-    assert seen == {"task": "Compare prices on three sites", "role": "worker"}
+    await found["start_background_task"].ainvoke({"task": "Compare prices on three sites", "title": "Compare", "steps": ["Open each site", "Compare"]})
+    assert seen == {"task": "Compare prices on three sites", "role": "worker", "steps": ["Open each site", "Compare"]}
     assert "worker" in jobs_service.ROLES and "worker" in runner.ROLE_BRIEF

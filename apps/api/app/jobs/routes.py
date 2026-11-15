@@ -129,3 +129,24 @@ async def cancel(job_id: str, user: User = Depends(current_user), db: AsyncSessi
     await service.cancel_tree(db, job)
     await db.commit()
     return service.serialize_job(job)
+
+
+class PlanIn(BaseModel):
+    steps: list[str] | None = None
+
+
+@router.post("/{job_id}/plan")
+async def start_plan(job_id: str, body: PlanIn, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Start a planned job (docs/PLANS.md), optionally with the user's edited steps."""
+    from app.jobs import plans
+
+    job = await _owned(db, user, job_id)
+    try:
+        events = plans.approve(job, body.steps)
+    except plans.PlanError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    for ev in events:
+        db.add(ev)
+    await db.commit()
+    wake()
+    return service.serialize_job(job)

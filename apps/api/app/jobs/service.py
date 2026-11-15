@@ -32,7 +32,7 @@ from connector_core.text import clip
 log = logging.getLogger(__name__)
 
 TERMINAL = {"done", "failed", "cancelled"}
-ACTIVE = {"queued", "running", "waiting_approval", "waiting_children", "waiting_input"}
+ACTIVE = {"planned", "queued", "running", "waiting_approval", "waiting_children", "waiting_input"}
 MERGE_OPTIONS = ("Yes, merge it", "No, leave it open")
 MAX_OPTIONS = 5
 ROLES = ("planner", "coder", "reviewer", "worker")
@@ -52,6 +52,12 @@ def _now() -> datetime:
 
 def _iso(value: datetime | None) -> str | None:
     return value.isoformat() if value else None
+
+
+def _plan(job: AgentJob) -> dict | None:
+    from app.jobs.plans import serialize
+
+    return serialize(job)
 
 
 def serialize_job(job: AgentJob, agent_name: str = "") -> dict:
@@ -76,6 +82,7 @@ def serialize_job(job: AgentJob, agent_name: str = "") -> dict:
         "question": meta.get("question") if job.status == "waiting_input" else None,
         "repo": meta.get("repo") or "",
         "prs": list(meta.get("prs") or [])[-5:],
+        "plan": _plan(job),
         "created_at": _iso(job.created_at),
         "started_at": _iso(job.started_at),
         "finished_at": _iso(job.finished_at),
@@ -160,10 +167,12 @@ def new_job(
     )
 
 
-async def create_job(db: AsyncSession, user: User, **kwargs: Any) -> AgentJob:
+async def create_job(db: AsyncSession, user: User, *, announce: bool = True, **kwargs: Any) -> AgentJob:
+    """Build and add a job. ``announce=False`` skips the "Queued" line (a planned job announces its plan instead)."""
     job = new_job(user.id, **kwargs)
     db.add(job)
-    db.add(event(job, "status", f"Queued: {job.title}", {"status": "queued", "role": job.role}))
+    if announce:
+        db.add(event(job, "status", f"Queued: {job.title}", {"status": "queued", "role": job.role}))
     return job
 
 
@@ -570,7 +579,7 @@ async def tree(db: AsyncSession, user: User, root_id, after: int = 0) -> dict:
         "jobs": [serialize_job(j) for j in jobs],
         "events": [serialize_event(e) for e in events],
         "done": bool(jobs) and all(j.status in TERMINAL for j in jobs),
-        "waiting": [serialize_job(j) for j in jobs if j.status in {"waiting_approval", "waiting_input"}],
+        "waiting": [serialize_job(j) for j in jobs if j.status in {"planned", "waiting_approval", "waiting_input"}],
     }
 
 
