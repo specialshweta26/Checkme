@@ -4897,3 +4897,22 @@ button.routine-tile:hover { border-color: var(--line-strong); }
   .watch-form-row { grid-template-columns: 1fr; }
 }
 .side-panel-body > * { flex-shrink: 0; }
+
+/* Plan card (docs/PLANS.md): a background task's plan, waiting for Start. */
+.job-badge.planned, .job-chip.planned { background: var(--violet-soft); color: var(--violet); }
+.plan-card { border: 1px solid var(--line-strong); border-radius: var(--radius-sm); background: var(--panel, var(--lift)); padding: 12px 14px; margin: 4px 0 10px; display: grid; gap: 10px; }
+.plan-card-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.plan-card-head strong { font-size: 14px; }
+.plan-card-head .faint { font-size: 12px; flex: 1; }
+.plan-steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; font-size: 13.5px; }
+.plan-steps li { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.plan-steps li > span:last-child { min-width: 0; overflow-wrap: anywhere; }
+.plan-num { flex: 0 0 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font-size: 11.5px; font-weight: 600; background: var(--accent-soft); color: var(--accent); }
+.plan-steps.editing input { flex: 1; min-width: 0; padding: 6px 9px; border: 1px solid var(--line-strong); border-radius: var(--radius-control); background: var(--bg, transparent); color: var(--text); font: inherit; font-size: 13px; }
+.plan-steps.editing .icon-btn { width: 26px; height: 26px; flex: 0 0 26px; }
+.plan-facts { margin: 0; display: grid; gap: 6px; font-size: 12.5px; border-top: 1px solid var(--line); padding-top: 10px; }
+.plan-facts > div { display: grid; grid-template-columns: 110px 1fr; gap: 8px; }
+.plan-facts dt { color: var(--muted); }
+.plan-facts dd { margin: 0; min-width: 0; }
+.plan-chip { display: inline-block; padding: 1px 8px; margin: 0 4px 3px 0; border-radius: var(--radius-pill); background: var(--lift); border: 1px solid var(--line); font-size: 12px; }
+@media (max-width: 560px) { .plan-facts > div { grid-template-columns: 1fr; gap: 2px; } }

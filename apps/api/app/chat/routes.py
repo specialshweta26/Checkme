@@ -731,6 +731,14 @@ async def _resolve_roster(db, user, agent_id, group_id):
     return chief, None, []
 
 
+def _plan_reply(text: str) -> bool:
+    from app.agent.approval import reply_intent
+    from app.channels.service import STOP_WORDS
+
+    said = (text or "").strip().lower().rstrip(".! ")
+    return said in STOP_WORDS | {"cancel", "cancel it"} or reply_intent(text) in {"approve", "decline"}
+
+
 async def _maybe_start_job(db, user, sess, agent, group, confirms, text, agent_text, history, request_id):
     """Coding agents: a code-change request becomes a background job with a live timeline.
 
@@ -742,6 +750,9 @@ async def _maybe_start_job(db, user, sess, agent, group, confirms, text, agent_t
     if group is not None or confirms:
         return None
     latest = await jobs.latest_chat_job(db, user.id, sess.id, agent.id)
+    if latest is not None and latest.status == "planned" and _plan_reply(text):
+        # A plan card is waiting: a plain yes starts it, a no drops it. Anything else is a normal message.
+        return await _answer_waiting_job(db, user, sess, agent, latest, text, request_id)
     if latest is not None and latest.status in {"waiting_input", "waiting_approval"}:
         # The job asked something and is waiting: this message is the answer, whatever kind of agent this is.
         return await _answer_waiting_job(db, user, sess, agent, latest, text, request_id)
@@ -794,6 +805,17 @@ async def _answer_waiting_job(db, user, sess, agent, job, text, request_id):
         # "stop", or a no to a hand-over, ends the job rather than carrying on with it.
         await jobs.stop_chat_jobs(db, user.id, sess.id, agent_id=agent.id)
         events, reply = [], "⏹ Stopped."
+    elif job.status == "planned":
+        from app.jobs import plans
+
+        intent = reply_intent(text)
+        if intent == "approve":
+            events, reply = plans.approve(job), "Starting the plan. Follow the timeline below."
+        elif intent == "decline":
+            await jobs.stop_chat_jobs(db, user.id, sess.id, agent_id=agent.id)
+            events, reply = [], "Okay, I won’t run that plan."
+        else:  # not reached: only a yes or no is routed here (_plan_reply)
+            events, reply = [], "To run the plan, reply “go ahead” or press Start on the card. To drop it, reply “no”."
     elif job.status == "waiting_input":
         return await _continue_job(db, user, sess, agent, job, text, request_id)
     elif handoff:

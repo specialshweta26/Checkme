@@ -1608,30 +1608,56 @@ class GitCommitInput(BaseModel):
 class StartJobInput(BaseModel):
     task: str = Field(description="Self-contained task: the repo (owner/name), what to change or check, and acceptance criteria.")
     title: str = Field(default="", description="Short title for the timeline.")
+    steps: list[str] = Field(default_factory=list, description="Your plan, shown to the user to approve before it runs: 2-8 short steps in order, in plain words (\"Open each airline site and search Delhi to Goa on 12 Dec\").")
+    tools: list[str] = Field(default_factory=list, description="What you expect to use, in plain words: \"the browser\", \"web search\", \"Gmail\", \"GitHub\".")
+    approvals: list[str] = Field(default_factory=list, description="Actions in the plan that will need the user's yes first (sending, paying, pushing, merging). Empty if none.")
 
 
 class BackgroundTaskInput(BaseModel):
     task: str = Field(description="Self-contained task: the goal, constraints (dates, places, sources, limits) and what to deliver.")
     title: str = Field(default="", description="Short title for the timeline.")
+    steps: list[str] = Field(default_factory=list, description="Your plan, shown to the user to approve before it runs: 2-8 short steps in order, in plain words (\"Open each airline site and search Delhi to Goa on 12 Dec\").")
+    tools: list[str] = Field(default_factory=list, description="What you expect to use, in plain words: \"the browser\", \"web search\", \"Gmail\", \"GitHub\".")
+    approvals: list[str] = Field(default_factory=list, description="Actions in the plan that will need the user's yes first (sending, paying, pushing, merging). Empty if none.")
 
 
-async def start_coding_job(ctx: "RunContext", task: str, title: str = "", role: str = "planner") -> dict:
-    """Queue a background job for this agent in the current chat (chat turns only)."""
+async def start_coding_job(
+    ctx: "RunContext", task: str, title: str = "", role: str = "planner",
+    steps: list[str] | None = None, tools: list[str] | None = None, approvals: list[str] | None = None,
+) -> dict:  # fmt: skip
+    """Queue a background job for this agent in the current chat (chat turns only).
+
+    With steps, the job waits as ``planned`` and the user approves (or edits) the plan first (docs/PLANS.md)."""
+    from app.jobs import plans
     from app.jobs import service as jobs
     from app.jobs.worker import wake
 
     if ctx.db is None or ctx.agent is None:
         return {"error": "Background jobs need a saved agent."}
+    plan_steps = plans.clean_steps(steps) if ctx.job is None else []
     try:
         job = await jobs.create_job(
-            ctx.db, ctx.user, agent=ctx.agent, prompt=task, title=title, role=role, kind="chat", session_id=ctx.session_id
+            ctx.db, ctx.user, agent=ctx.agent, prompt=task, title=title, role=role, kind="chat", session_id=ctx.session_id,
+            announce=not plan_steps,
         )
     except jobs.JobError as exc:
         return {"error": str(exc)}
+    if plan_steps:
+        await ctx.db.flush()
+        cost = await plans.estimate(ctx.db, ctx.user.id)
+        ctx.db.add(plans.propose(job, plan_steps, plans.clean_items(tools), plans.clean_items(approvals), cost))
     await ctx.db.commit()
-    wake()
     info = jobs.serialize_job(job)
     ctx.jobs_started.append(info)
+    if plan_steps:
+        return {
+            "planned": True,
+            "job_id": info["id"],
+            "title": info["title"],
+            "note": "Your plan is shown to the user under this reply; nothing runs until they start it (they can edit the "
+            "steps first). Reply in one short line that the plan is ready to review. Do not do the work in this turn.",
+        }
+    wake()
     return {
         "started": True,
         "job_id": info["id"],
@@ -2395,10 +2421,10 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
             # Coding teammates reached through ask_teammate (group chats) may start jobs too, so long work (and
             # waiting for a sign-in) runs in the background instead of inline.
 
-            async def start_job(task: str, title: str = "") -> str:
-                """Start a background coding job for multi-step work (code changes, fixes, features, reviews, merges, deploys). It runs on the computer without the chat timeout and shows a live timeline (todo list, steps, tests, PR links). If user input is needed, ask in natural language and accept a conversational reply in this chat. Give a self-contained task: repo (owner/name), goal and acceptance criteria. Follow-ups in this chat continue the same job."""
+            async def start_job(task: str, title: str = "", steps: list[str] | None = None, tools: list[str] | None = None, approvals: list[str] | None = None) -> str:
+                """Start a background coding job for multi-step work (code changes, fixes, features, reviews, merges, deploys). It runs on the computer without the chat timeout and shows a live timeline (todo list, steps, tests, PR links). Always pass steps (your plan), tools and approvals: the user sees them as a plan card and starts it, so nothing runs before they agree. If user input is needed, ask in natural language and accept a conversational reply in this chat. Give a self-contained task: repo (owner/name), goal and acceptance criteria. Follow-ups in this chat continue the same job."""
                 ctx.used_tools.append("start_coding_job")
-                return dumps(await start_coding_job(ctx, task, title), 4000)
+                return dumps(await start_coding_job(ctx, task, title, steps=steps, tools=tools, approvals=approvals), 4000)
 
             tools.append(
                 StructuredTool.from_function(
@@ -2407,10 +2433,10 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
             )
     if ctx.job is None and ctx.db is not None and ctx.agent is not None and ctx.teammate_depth == 0:
 
-        async def start_task(task: str, title: str = "") -> str:
-            """Move long work to the background: tasks with many steps or pages (multi-site comparisons, research across many sources, long computer sessions, anything likely to take more than a couple of minutes). It runs without the chat timeout, survives the user closing the chat or the app restarting, and shows a live timeline (plan, steps, results) under this reply. Give a self-contained task: goal, constraints, what to deliver. Quick lookups stay in this turn."""
+        async def start_task(task: str, title: str = "", steps: list[str] | None = None, tools: list[str] | None = None, approvals: list[str] | None = None) -> str:
+            """Move long work to the background: tasks with many steps or pages (multi-site comparisons, research across many sources, long computer sessions, anything likely to take more than a couple of minutes). It runs without the chat timeout, survives the user closing the chat or the app restarting, and shows a live timeline (plan, steps, results) under this reply. Always pass steps (your plan), tools and approvals: the user sees them as a plan card and starts it, so nothing runs before they agree. Give a self-contained task: goal, constraints, what to deliver. Quick lookups stay in this turn."""
             ctx.used_tools.append("start_background_task")
-            return dumps(await start_coding_job(ctx, task, title, role="worker"), 4000)
+            return dumps(await start_coding_job(ctx, task, title, role="worker", steps=steps, tools=tools, approvals=approvals), 4000)
 
         tools.append(
             StructuredTool.from_function(
@@ -2800,7 +2826,8 @@ def system_prompt(
         "browser_navigate returns deep_link_failed, open its fallback_url and use the site's own search form and filters "
         "like a person; do not answer from web search or give up while the site itself still works. "
         "Long work (many pages or sites, or likely more than a couple of minutes) goes to start_background_task when "
-        "it is offered: start it, reply in a line or two, and let the job do the work.\n"
+        "it is offered: pass your plan (steps, tools, approvals), reply in a line that the plan is ready, and let the job "
+        "do the work once the user starts it.\n"
         "Every agent has the computer: when a task needs a website without an API, use it and carry the task through "
         "step by step (navigate, search, click, type, read, repeat) instead of describing how the user could do it. "
         "The computer boots on demand; the first call may take a minute. If a computer tool returns an error, try once "

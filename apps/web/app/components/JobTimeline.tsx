@@ -9,6 +9,7 @@
  * shown as a checklist, and check runs show their results table.
  */
 import { useEffect, useRef, useState } from "react";
+import { PlanCard, type JobPlan } from "./PlanCard";
 
 type JobRow = {
   id: string;
@@ -20,11 +21,13 @@ type JobRow = {
   error?: string;
   pending: { token: string; title: string; preview: any; kind?: string }[];
   question?: { question: string; options: string[] } | null;
+  plan?: JobPlan | null;
 };
 type Todo = { content: string; status: "pending" | "in_progress" | "completed" };
 type JobEvent = { id: number; job_id: string; agent_name: string; kind: string; text: string; data: any; at: string | null };
 
 const STATUS_LABEL: Record<string, string> = {
+  planned: "Plan ready",
   queued: "Queued",
   running: "Working",
   waiting_approval: "Waiting for your reply",
@@ -167,6 +170,19 @@ export function JobTimeline({ jobId, after: startAfter = 0, onSettled }: { jobId
     }, {}),
   ).filter((st: any) => st.status !== "dropped");
 
+  async function startPlan(steps: string[]) {
+    setBusy("plan");
+    setErr("");
+    try {
+      await post(`/api/jobs/${root?.id || jobId}/plan`, { steps });
+      setNudge((n) => n + 1);
+    } catch (e: any) {
+      setErr(e.message || "Could not start");
+    } finally {
+      setBusy("");
+    }
+  }
+
   async function cancel() {
     setBusy("cancel");
     try {
@@ -190,6 +206,7 @@ export function JobTimeline({ jobId, after: startAfter = 0, onSettled }: { jobId
           </button>
         ) : null}
       </div>
+      {status === "planned" && root?.plan ? <PlanCard plan={root.plan} busy={busy} onStart={startPlan} onCancel={cancel} /> : null}
       {jobs.length > 1 ? (
         <div className="job-tree">
           {jobs.map((j) => (
@@ -306,7 +323,7 @@ export function JobTimeline({ jobId, after: startAfter = 0, onSettled }: { jobId
             </li>
           );
         })}
-        {!done && status !== "waiting_approval" && status !== "waiting_input" ? (
+        {!done && status !== "waiting_approval" && status !== "waiting_input" && status !== "planned" ? (
           <li className="job-ev live">
             <span className="think-orb" />
             <span className="job-text muted">{status === "queued" ? "Waiting for the computer…" : "Working…"}</span>
