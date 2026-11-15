@@ -449,6 +449,9 @@ class Automation(Base):
     action: Mapped[str] = mapped_column(Text)
     requires_approval: Mapped[bool] = mapped_column(Boolean, default=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Watches (app/automations/watches.py): how often a page is checked, and what the last check saw.
+    every_minutes: Mapped[int] = mapped_column(Integer, default=60)
+    state: Mapped[dict] = mapped_column(JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 

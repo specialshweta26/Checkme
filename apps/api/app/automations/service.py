@@ -91,7 +91,14 @@ def serialize_automation(row: Automation) -> dict:
         "enabled": row.enabled,
         "agent_id": str(row.agent_id) if row.agent_id else None,
         "url": f"{get_settings().public_web_url}/api/webhooks/{row.id}" if row.trigger_type == "webhook" else None,
+        **({"watch": _watch(row)} if (row.trigger_type or "") in ("page", "inbox") else {}),
     }
+
+
+def _watch(row: Automation) -> dict:
+    from app.automations.watches import describe
+
+    return describe(row)
 
 
 async def list_automations(db: AsyncSession, user: User, agent_id: uuid.UUID | None = None) -> list[dict]:

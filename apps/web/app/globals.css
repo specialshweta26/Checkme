@@ -4864,3 +4864,36 @@ button.routine-tile:hover { border-color: var(--line-strong); }
   .lesson-row .btn { grid-column: 1 / -1; justify-self: start; }
   .lesson-add { grid-template-columns: 1fr; }
 }
+
+/* ------------------------------------------------------------------ Watches (docs/WATCHES.md) */
+.watches { display: grid; gap: var(--space-3); }
+.watches.compact { margin-top: var(--space-3); padding-top: var(--space-3); border-top: 1px solid var(--line); }
+.watches-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
+.watches-head h3 { margin: 0; font-size: var(--text-md); font-weight: var(--weight-semibold); }
+.watches-intro { margin: 0; }
+.watch-form { display: grid; gap: var(--space-3); padding: var(--space-3); border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-sunken); }
+.watch-type { display: flex; gap: var(--space-2); }
+.watch-form-row { display: grid; grid-template-columns: minmax(0, 1fr) 160px; gap: var(--space-2); }
+.watch-note { font-size: var(--text-xs); }
+.watch-list { display: grid; gap: var(--space-2); }
+.watch-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: start; gap: var(--space-3); padding: var(--space-3); border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--panel); }
+.watch-row.off { opacity: 0.7; }
+.watch-icon { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 10px; }
+.watch-icon-page { background: var(--violet-soft); color: var(--violet); }
+.watch-icon-inbox { background: var(--accent-soft); color: var(--accent); }
+.watch-main { display: grid; gap: 2px; min-width: 0; }
+.watch-main strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.watch-what { color: var(--muted); font-size: var(--text-xs); overflow-wrap: anywhere; }
+.watch-status { display: flex; flex-wrap: wrap; gap: 2px var(--space-3); color: var(--faint); font-size: var(--text-xs); }
+.watch-status .bad { color: var(--danger-text); }
+.watch-status .good { color: var(--ok-text); }
+.watch-change { color: var(--text); font-size: var(--text-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.watch-actions { display: flex; flex-wrap: wrap; gap: var(--space-1); justify-content: flex-end; }
+.watches.compact .watch-row { grid-template-columns: auto minmax(0, 1fr); }
+.watches.compact .watch-actions { grid-column: 1 / -1; justify-content: flex-start; }
+@media (max-width: 640px) {
+  .watch-row { grid-template-columns: auto minmax(0, 1fr); }
+  .watch-actions { grid-column: 1 / -1; justify-content: flex-start; }
+  .watch-form-row { grid-template-columns: 1fr; }
+}
+.side-panel-body > * { flex-shrink: 0; }

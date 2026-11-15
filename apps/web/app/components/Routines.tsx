@@ -13,6 +13,7 @@ import {
   type RoutineRun,
   type RoutineSummary,
 } from "../lib";
+import { Watches } from "./Watches";
 
 // Routines (docs/ROUTINES.md): scheduled tasks, one agent at a time from the clock button or an agent card, and every
 // agent on the Routines page. Results open the same conversation on web and desktop.
@@ -284,6 +285,7 @@ export function AgentRoutinesPanel({ agentId, agentName }: { agentId: string; ag
           {live.map((t) => (
             <RoutineRow key={t.id} task={t} compact onChanged={refresh} onError={setError} />
           ))}
+          <Watches agentId={agentId} agentName={agentName} compact />
           {done.length ? (
             <details className="drawer-done">
               <summary>Finished one-off tasks ({done.length})</summary>

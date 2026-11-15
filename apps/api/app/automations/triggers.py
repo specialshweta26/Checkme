@@ -42,14 +42,30 @@ async def create_trigger(
     action: str,
     condition: str = "",
     agent: Any = None,
+    every_minutes: Any = None,
 ) -> dict:
-    """Create a mail or meeting trigger. `trigger` is the sender to match, or the minutes before a meeting."""
+    """Create a mail, meeting or watch trigger. `trigger` is the sender to match, the minutes before a meeting, the
+    page address (page watch) or how many waiting inbox cards is too many (inbox watch)."""
+    from app.automations import watches
+
     if trigger_type == "mail":
         pattern = " ".join((trigger or "").split()).lower()[:200]
         if not pattern:
             raise ValueError("Mail triggers need a sender: an address, @domain, or a name.")
-    else:
+    elif trigger_type == "page":
+        from app.connectors.urlsafety import UnsafeUrl, validate_public_url
+
+        pattern = watches.clean_url(trigger)
+        try:
+            await validate_public_url(pattern)
+        except UnsafeUrl as exc:
+            raise ValueError(f"That page can't be watched: {exc}") from None
+    elif trigger_type == "inbox":
+        pattern = str(watches.threshold(trigger))
+    elif trigger_type == "meeting":
         pattern = str(minutes_before(trigger))
+    else:
+        raise ValueError("trigger_type must be mail, meeting, page or inbox.")
     title = " ".join((name or "").split())[:200]
     action_text = (action or "").strip()[:8000]
     if not title or not action_text:
@@ -65,6 +81,8 @@ async def create_trigger(
         action=action_text,
         requires_approval=True,  # see the module docstring
         enabled=True,
+        every_minutes=watches.every(every_minutes) if trigger_type == "page" else 60,
+        state={},
     )
     db.add(row)
     await db.commit()
