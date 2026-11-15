@@ -7,7 +7,17 @@ export const metadata: Metadata = {
     "Sign in, use Lumio in the browser, or download for Mac and Windows. A private assistant for mail, calendar, and the computer in front of you.",
   applicationName: "Lumio",
   appleWebApp: { capable: true, title: "Lumio", statusBarStyle: "default" },
-  icons: { icon: "/agents/01-wave.png", apple: "/agents/01-wave.png" },
+  // Home-screen and tab icons (made by apps/desktop/scripts/make_icons.py from the Lumio mascot).
+  manifest: "/manifest.json",
+  icons: {
+    icon: [
+      { url: "/icons/favicon.ico", sizes: "any" },
+      { url: "/icons/favicon-32.png", sizes: "32x32", type: "image/png" },
+      { url: "/icons/icon-192.png", sizes: "192x192", type: "image/png" },
+    ],
+    apple: [{ url: "/icons/apple-touch-icon.png", sizes: "180x180", type: "image/png" }],
+    shortcut: "/icons/favicon.ico",
+  },
 };
 
 export const viewport: Viewport = {

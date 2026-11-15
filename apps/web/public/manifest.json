@@ -1,9 +1,31 @@
 {
   "name": "Lumio",
   "short_name": "Lumio",
+  "description": "Your personal assistant for mail, calendar, routines and the apps you connect.",
+  "id": "/chat",
   "start_url": "/chat",
+  "scope": "/",
   "display": "standalone",
   "background_color": "#0b0d12",
   "theme_color": "#0b0d12",
-  "icons": [{ "src": "/agents/01-wave.png", "sizes": "256x256", "type": "image/png", "purpose": "any" }]
+  "icons": [
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
 }
