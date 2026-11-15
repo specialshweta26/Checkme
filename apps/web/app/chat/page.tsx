@@ -11,10 +11,11 @@ import { Markdown } from "../components/Markdown";
 import { dismissFocusCard, focusCardDismissed, FocusOnboarding } from "../components/FocusCard";
 import { AgentAvatar } from "../components/AgentAvatar";
 import { AboutButton, RoutinesButton } from "../components/Routines";
+import { ReplyFeedback } from "../components/ReplyFeedback";
 import { JobTimeline } from "../components/JobTimeline";
 import SkillFlow from "../components/SkillFlow";
 import { Thinking } from "../components/Thinking";
-import { announceWorkspaceChanged, chatHref, deleteSession, getMe, isLumioDesktop, listSessions, loadSession, rememberScope, saveDownload, uploadFiles, startTeaching, stopTeaching, type ChatSessionRow, type Me, type UploadedFile, type WorkspaceRoster } from "../lib";
+import { announceWorkspaceChanged, chatHref, deleteSession, getMe, isLumioDesktop, listSessions, loadSession, rememberScope, saveDownload, uploadFiles, startTeaching, stopTeaching, type ChatSessionRow, type Me, type UploadedFile, type WorkspaceRoster, sessionRatings } from "../lib";
 
 const STORE = "assistant.session";
 
@@ -241,6 +242,19 @@ export default function ChatPage() {
   const [messages, setMessages] = useState<Msg[]>([]);
   const [text, setText] = useState("");
   const [sessionId, setSessionId] = useState<string | null>(null);
+  // Thumbs up / down already given in this conversation: "<request_id>:<agent_id>" -> 1 | -1 (docs/QUALITY.md).
+  const [ratings, setRatings] = useState<Record<string, number>>({});
+  useEffect(() => {
+    setRatings({});
+    if (!sessionId) return;
+    let live = true;
+    sessionRatings(sessionId)
+      .then((d) => live && setRatings(d.ratings || {}))
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, [sessionId]);
   const [sessions, setSessions] = useState<ChatSessionRow[]>([]);
   const [pending, setPending] = useState<Confirm[]>([]);
   const [busyScopes, setBusyScopes] = useState<string[]>([]);
@@ -1103,6 +1117,16 @@ export default function ChatPage() {
                     </div>
                   ) : null}
                   <EmailThreadButton refs={mailRefsFromMeta(m.meta)} />
+                  {sessionId && m.meta?.request_id && !m.meta?.in_progress && !(i === messages.length - 1 && busyHere) ? (
+                    <ReplyFeedback
+                      key={`${m.meta.request_id}:${m.meta.agent_id || ""}`}
+                      sessionId={sessionId}
+                      requestId={String(m.meta.request_id)}
+                      agentId={m.meta.agent_id || null}
+                      rating={ratings[`${m.meta.request_id}:${m.meta.agent_id || agentId || ""}`] || 0}
+                      onRated={(r) => setRatings((cur) => ({ ...cur, [`${m.meta.request_id}:${m.meta.agent_id || agentId || ""}`]: r }))}
+                    />
+                  ) : null}
                   {chatAttachments(m.meta?.attachments).length ? <AttachmentWidget items={chatAttachments(m.meta.attachments)} /> : null}
                   {i === messages.length - 1 && !busyHere && (m.meta?.can_continue || m.meta?.failed) ? (
                     <div className="turn-actions">

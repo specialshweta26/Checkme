@@ -1,0 +1,51 @@
+# To turn this on: copy it to .github/workflows/evals.yml (needs a GitHub token or user that may change workflows)
+# and add the OPENAI_API_KEY repository secret.
+name: Agent quality checks
+
+# Runs the agent test cases (apps/api/evals) against the real model. Each run costs model calls, so it only runs when
+# started by hand (Actions > Agent quality checks > Run workflow). To run it nightly, add under "on":
+#   schedule:
+#     - cron: "30 1 * * *"
+on:
+  workflow_dispatch:
+    inputs:
+      only:
+        description: "Only cases whose name contains this (empty = all)"
+        required: false
+        default: ""
+      repeat:
+        description: "Times to run each case"
+        required: false
+        default: "1"
+
+permissions:
+  contents: read
+
+jobs:
+  evals:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: apps/api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: apps/api/uv.lock
+      - name: Install dependencies
+        run: uv sync --frozen --python 3.12
+      - name: Run the agent quality checks
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ONLY: ${{ inputs.only }}
+          REPEAT: ${{ inputs.repeat }}
+        run: uv run --frozen python -m evals.run "$ONLY" --repeat "${REPEAT:-1}"
+      - name: Keep the results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-quality-results
+          path: apps/api/evals/last_run.json
+          if-no-files-found: ignore

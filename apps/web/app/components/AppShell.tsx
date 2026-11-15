@@ -22,16 +22,17 @@ import {
 import { AgentsNav } from "./AgentsNav";
 import { AgentRoutinesPanel, PanelContext, type PanelKind } from "./Routines";
 import { AgentAboutPanel } from "./AgentAbout";
-import { IconArtifact, IconData, IconGauge, IconKnow, IconRoutines, IconRuns, IconSkills, IconVault } from "./ProfileIcons";
+import { IconArtifact, IconData, IconGauge, IconKnow, IconQuality, IconRoutines, IconRuns, IconSkills, IconVault } from "./ProfileIcons";
 import { BrandMark } from "./BrandMark";
 import { AgentAvatar } from "./AgentAvatar";
 
-type Nav = "today" | "chat" | "inbox" | "tasks" | "connectors" | "runs" | "memory" | "usage" | "account" | "profile" | "artifacts" | "vault" | "skills" | "routines";
+type Nav = "today" | "chat" | "inbox" | "tasks" | "connectors" | "runs" | "memory" | "usage" | "account" | "profile" | "artifacts" | "vault" | "skills" | "routines" | "quality";
 
 // Everything kept for the user lives under Profile (docs/DESIGN.md "Profile"), not in the sidebar.
 const PROFILE_MENU: [Nav, string, string, (p: { size?: number }) => ReactElement][] = [
   ["memory", "/memory", "What I know", IconKnow],
   ["routines", "/routines", "Routines", IconRoutines],
+  ["quality", "/quality", "Quality", IconQuality],
   ["skills", "/skills", "Skills", IconSkills],
   ["artifacts", "/artifacts", "Artifacts", IconArtifact],
   ["runs", "/runs", "Saved runs", IconRuns],
@@ -39,7 +40,7 @@ const PROFILE_MENU: [Nav, string, string, (p: { size?: number }) => ReactElement
   ["usage", "/usage", "Usage and cost", IconGauge],
   ["account", "/account", "Your data", IconData],
 ];
-const PROFILE_PAGES: Nav[] = ["profile", "memory", "routines", "skills", "artifacts", "runs", "vault", "usage", "account"];
+const PROFILE_PAGES: Nav[] = ["profile", "memory", "routines", "quality", "skills", "artifacts", "runs", "vault", "usage", "account"];
 
 function IconSidebar() {
   return (
@@ -423,7 +424,7 @@ export function AppShell({
   }
 
   const rows = conversations || own;
-  const titles: Record<Nav, string> = { today: "Today", chat: "Chat", inbox: "Inbox", tasks: "Tasks", connectors: "Connectors", runs: "Saved runs", memory: "What I know", usage: "Usage", account: "Your data", profile: "Profile", artifacts: "Artifacts", vault: "Vault", skills: "Skills", routines: "Routines" };
+  const titles: Record<Nav, string> = { today: "Today", chat: "Chat", inbox: "Inbox", tasks: "Tasks", connectors: "Connectors", runs: "Saved runs", memory: "What I know", usage: "Usage", account: "Your data", profile: "Profile", artifacts: "Artifacts", vault: "Vault", skills: "Skills", routines: "Routines", quality: "Quality" };
   const agentId = activeAgentId || scope.agent || null;
   const groupId = activeGroupId || scope.group || null;
 
@@ -620,13 +621,13 @@ export function AppShell({
                   </span>
                 </a>
                 <div className="pm-label">Your workspace</div>
-                {PROFILE_MENU.slice(0, 6).map(([nav, href, label, Icon]) => (
+                {PROFILE_MENU.slice(0, 7).map(([nav, href, label, Icon]) => (
                   <a key={href} role="menuitem" className={`pm-item${current === nav ? " on" : ""}`} href={href} onClick={(e) => { e.preventDefault(); visit(href); }}>
                     <Icon size={16} /> {label}
                   </a>
                 ))}
                 <div className="pm-label">Account</div>
-                {PROFILE_MENU.slice(6).map(([nav, href, label, Icon]) => (
+                {PROFILE_MENU.slice(7).map(([nav, href, label, Icon]) => (
                   <a key={href} role="menuitem" className={`pm-item${current === nav ? " on" : ""}`} href={href} onClick={(e) => { e.preventDefault(); visit(href); }}>
                     <Icon size={16} /> {label}
                   </a>

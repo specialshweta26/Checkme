@@ -24,7 +24,13 @@ async def main() -> int:
     parser.add_argument("--repeat", type=int, default=1)
     args = parser.parse_args()
     logging.basicConfig(level=logging.ERROR)
-    chosen = [s for s in scenarios() if args.only.lower() in s.name.lower()]
+    from evals import from_feedback
+
+    every = scenarios() + from_feedback.scenarios()  # feedback cases need their checks filled in first
+    waiting = [c["name"] for c in from_feedback.load_cases() if not from_feedback.ready(c)]
+    if waiting:
+        print(f"{len(waiting)} feedback case(s) skipped until their checks are filled in (evals/feedback_cases.json).")
+    chosen = [s for s in every if args.only.lower() in s.name.lower()]
     results = []
     for s in chosen:
         for _ in range(max(1, args.repeat)):

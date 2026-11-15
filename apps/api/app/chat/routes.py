@@ -246,7 +246,12 @@ async def session_messages(session_id: uuid.UUID, user: User = Depends(current_u
             "agent_id": str(sess.agent_id) if sess.agent_id else None,
             "group_id": str(sess.group_id) if sess.group_id else None,
         },
-        "messages": [{"role": m.role, "content": m.content, "meta": m.meta} for m in rows if m.role in ("user", "assistant")],
+        # Every reply carries its turn id, so it can be rated (app/quality) even when it was saved without one in meta.
+        "messages": [
+            {"role": m.role, "content": m.content, "meta": {**(m.meta or {}), "request_id": (m.meta or {}).get("request_id") or m.request_id or None}}
+            for m in rows
+            if m.role in ("user", "assistant")
+        ],
     }
 
 
