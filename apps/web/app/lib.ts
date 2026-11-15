@@ -912,3 +912,36 @@ export const dismissLesson = (id: string) => skillCall<{ ok: boolean }>(`/api/qu
 export const removeLesson = (id: string) => skillCall<{ ok: boolean }>(`/api/quality/lessons/${id}`, { method: "DELETE" }, "Couldn't remove the lesson");
 export const addLesson = (agentId: string, text: string) =>
   skillCall<AgentLesson>("/api/quality/lessons", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ agent_id: agentId, text }) }, "Couldn't add the lesson");
+
+// Watches: agents wake when a page changes or the inbox fills up (apps/api/app/automations/watches.py).
+export type Watch = {
+  id: number;
+  name: string;
+  trigger: string;
+  trigger_type: "page" | "inbox";
+  condition: string;
+  action: string;
+  enabled: boolean;
+  agent_id: string | null;
+  watch: {
+    every_minutes: number | null;
+    checked_at: string | null;
+    changed_at: string | null;
+    fired: number;
+    error: string;
+    title: string;
+    count: number | null;
+    last_change: { added: string[]; removed: string[] } | null;
+    baseline: boolean | null;
+  };
+};
+export async function listWatches(agentId?: string | null) {
+  const data = await skillCall<{ automations: (Watch & { trigger_type: string })[] }>(`/api/automations${qs({ agent_id: agentId })}`, {}, "Couldn't load watches");
+  return data.automations.filter((a): a is Watch => a.trigger_type === "page" || a.trigger_type === "inbox");
+}
+export const createWatch = (body: { trigger_type: "page" | "inbox"; name: string; trigger: string; action: string; condition?: string; every_minutes?: number; agent_id?: string | null }) =>
+  skillCall<Watch>("/api/automations/watches", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }, "Couldn't create the watch");
+export const checkWatch = (id: number) => skillCall<Watch>(`/api/automations/${id}/check`, { method: "POST" }, "Couldn't check it");
+export const setWatchEnabled = (id: number, enabled: boolean) =>
+  skillCall<Watch>(`/api/automations/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled }) }, "Couldn't change it");
+export const deleteWatch = (id: number) => skillCall<{ ok: boolean }>(`/api/automations/${id}`, { method: "DELETE" }, "Couldn't delete it");

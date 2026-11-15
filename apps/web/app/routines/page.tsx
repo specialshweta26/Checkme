@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { AppShell } from "../components/AppShell";
 import { AgentAvatar } from "../components/AgentAvatar";
 import { RoutineRow, RunRow } from "../components/Routines";
+import { Watches } from "../components/Watches";
 import {
   createRoutine,
   getMe,
@@ -22,7 +23,7 @@ import { AgentSelect, Select } from "../components/Select";
 // Routines (docs/ROUTINES.md): every agent's scheduled work, how its runs went, and each failure in full.
 // URL: ?agent=<id>&tab=routines|history&status=succeeded|failed|needs_approval&days=7|30|90
 
-type Tab = "routines" | "history";
+type Tab = "routines" | "history" | "watches";
 const PERIODS = [7, 30, 90];
 
 function readParams() {
@@ -31,7 +32,7 @@ function readParams() {
   const days = Number(q.get("days"));
   return {
     agent: q.get("agent") || "",
-    tab: (q.get("tab") === "history" ? "history" : "routines") as Tab,
+    tab: (q.get("tab") === "history" ? "history" : q.get("tab") === "watches" ? "watches" : "routines") as Tab,
     status: q.get("status") || "",
     days: PERIODS.includes(days) ? days : 30,
   };
@@ -80,7 +81,7 @@ export default function RoutinesPage() {
     if (!ready) return;
     const q = new URLSearchParams();
     if (agent) q.set("agent", agent);
-    if (tab === "history") q.set("tab", "history");
+    if (tab !== "routines") q.set("tab", tab);
     if (status) q.set("status", status);
     if (days !== 30) q.set("days", String(days));
     const text = q.toString();
@@ -259,6 +260,9 @@ export default function RoutinesPage() {
               <button role="tab" aria-selected={tab === "history"} className={`pill${tab === "history" ? " on" : ""}`} onClick={() => setTab("history")}>
                 Run history <span className="pill-count">{s?.runs ?? 0}</span>
               </button>
+              <button role="tab" aria-selected={tab === "watches"} className={`pill${tab === "watches" ? " on" : ""}`} onClick={() => setTab("watches")}>
+                Watches
+              </button>
             </div>
             {tab === "history" ? (
               <div className="tasks-tabs" role="tablist" aria-label="Outcome">
@@ -276,7 +280,9 @@ export default function RoutinesPage() {
             ) : null}
           </div>
 
-          {tab === "routines" ? (
+          {tab === "watches" ? (
+            <Watches agentId={agent || null} agentName={agents.find((a) => a.id === agent)?.name} agents={agents} />
+          ) : tab === "routines" ? (
             tasks === null ? (
               <p className="muted">Loading…</p>
             ) : tasks.length === 0 ? (

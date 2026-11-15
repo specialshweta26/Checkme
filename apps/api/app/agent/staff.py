@@ -346,7 +346,7 @@ async def create_automation(db, user, args: dict, agent=None) -> dict:
             "secret": hook["secret"],
             "note": "Copy the secret now; it is shown only once. Send it in the X-Checkme-Secret header. The event name must match X-Event-Type. Include a stable Idempotency-Key to avoid duplicate runs.",
         }
-    if trigger_type in {"mail", "meeting"}:
+    if trigger_type in {"mail", "meeting", "page", "inbox"}:
         from app.automations.triggers import create_trigger
 
         try:
@@ -354,17 +354,21 @@ async def create_automation(db, user, args: dict, agent=None) -> dict:
                 db,
                 user,
                 trigger_type=trigger_type,
-                name=args.get("name") or f"{trigger_type.title()} automation",
+                name=args.get("name") or f"{trigger_type.title()} {'watch' if trigger_type in ('page', 'inbox') else 'automation'}",
                 trigger=args.get("trigger"),
                 condition=args.get("condition") or "",
                 action=args.get("action") or "",
                 agent=agent,
+                every_minutes=args.get("every_minutes"),
             )
         except ValueError as exc:
             return {"error": str(exc)}
-        return {"created": True, "trigger_type": trigger_type, "automation": made, "note": "It asks the user before any sensitive action."}
+        note = "It asks the user before any sensitive action."
+        if trigger_type == "page":
+            note = "The first check records the page; you wake up when it changes (or when the phrase appears). " + note
+        return {"created": True, "trigger_type": trigger_type, "automation": made, "note": note}
     if trigger_type != "schedule":
-        return {"error": "trigger_type must be 'schedule', 'webhook', 'mail' or 'meeting'."}
+        return {"error": "trigger_type must be 'schedule', 'webhook', 'mail', 'meeting', 'page' or 'inbox'."}
     owner = await _routine_owner(db, user, agent)
     row = Automation(
         user_id=user.id,

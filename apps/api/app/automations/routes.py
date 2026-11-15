@@ -31,6 +31,16 @@ class AutomationPatch(BaseModel):
     enabled: bool
 
 
+class WatchIn(BaseModel):
+    trigger_type: str  # page | inbox
+    name: str
+    trigger: str  # page address, or how many waiting inbox cards is too many
+    action: str
+    condition: str = ""  # page: a phrase to look for (empty = any change)
+    every_minutes: int = 60
+    agent_id: uuid.UUID | None = None
+
+
 @router.get("")
 async def list_automations(
     agent_id: uuid.UUID | None = None,
@@ -59,6 +69,44 @@ async def create_webhook(
         )
     except (ValueError, LookupError) as exc:
         raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/watches")
+async def create_watch(body: WatchIn, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """A page or inbox watch for an agent (app/automations/watches.py)."""
+    from app.agents.service import AgentError, get_agent
+    from app.automations.triggers import create_trigger
+
+    if body.trigger_type not in ("page", "inbox"):
+        raise HTTPException(400, "A watch is a page or inbox watch.")
+    agent = None
+    if body.agent_id:
+        try:
+            agent = await get_agent(db, user, body.agent_id)
+        except AgentError as exc:
+            raise HTTPException(400, str(exc)) from exc
+    try:
+        return await create_trigger(db, user, trigger_type=body.trigger_type, name=body.name, trigger=body.trigger, action=body.action,
+                                    condition=body.condition, agent=agent, every_minutes=body.every_minutes)  # fmt: skip
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/{automation_id}/check")
+async def check_now(automation_id: int, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Check a watch now instead of waiting for its next turn."""
+    from app.automations import watches
+    from app.models import Automation
+
+    row = await db.get(Automation, automation_id)
+    if row is None or row.user_id != user.id or row.trigger_type not in watches.WATCH_TYPES:
+        raise HTTPException(404, "No such watch.")
+    if row.trigger_type == "page":
+        await watches.check_page(db, row)
+    else:
+        await watches.check_inbox(db, row)
+    await db.refresh(row)
+    return service.serialize_automation(row)
 
 
 @router.patch("/{automation_id}")
