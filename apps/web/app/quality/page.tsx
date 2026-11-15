@@ -3,16 +3,22 @@
 import { useEffect, useMemo, useState } from "react";
 import { AppShell } from "../components/AppShell";
 import { AgentAvatar } from "../components/AgentAvatar";
-import { Select } from "../components/Select";
+import { AgentSelect, Select } from "../components/Select";
 import {
   chatHref,
   getMe,
   loadWorkspace,
+  acceptLesson,
+  addLesson,
+  dismissLesson,
+  listLessons,
+  removeLesson,
   qualityExport,
   qualityFeedback,
   qualitySummary,
   rateReply,
   relativeTime,
+  type AgentLesson,
   type Me,
   type QualitySummary,
   type ReplyRating,
@@ -42,6 +48,11 @@ export default function QualityPage() {
   const [bad, setBad] = useState<ReplyRating[] | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [proposed, setProposed] = useState<AgentLesson[]>([]);
+  const [inUse, setInUse] = useState<AgentLesson[]>([]);
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [newFor, setNewFor] = useState("");
+  const [newText, setNewText] = useState("");
 
   useEffect(() => {
     getMe().then((u) => {
@@ -50,15 +61,29 @@ export default function QualityPage() {
         return;
       }
       setMe(u);
-      loadWorkspace().then((w) => setAgents(w.agents || [])).catch(() => undefined);
+      const wanted = new URLSearchParams(window.location.search).get("agent") || "";
+      if (wanted) setAgent(wanted);
+      loadWorkspace()
+        .then((w) => {
+          setAgents(w.agents || []);
+          setNewFor(wanted || w.default_agent_id || w.agents?.[0]?.id || "");
+        })
+        .catch(() => undefined);
     });
   }, []);
 
   async function refresh() {
     try {
-      const [s, f] = await Promise.all([qualitySummary(days, agent), qualityFeedback({ rating: -1, agentId: agent, days })]);
+      const [s, f, p, a] = await Promise.all([
+        qualitySummary(days, agent),
+        qualityFeedback({ rating: -1, agentId: agent, days }),
+        listLessons("proposed", agent),
+        listLessons("accepted", agent),
+      ]);
       setSummary(s);
       setBad(f.feedback);
+      setProposed(p.lessons);
+      setInUse(a.lessons);
       setError("");
     } catch (e: any) {
       setError(e.message);
@@ -80,6 +105,16 @@ export default function QualityPage() {
       a.click();
       URL.revokeObjectURL(a.href);
       setNotice(`Exported ${data.cases.length} test case${data.cases.length === 1 ? "" : "s"}. Add them with: python -m evals.from_feedback <file>`);
+    } catch (e: any) {
+      setError(e.message);
+    }
+  }
+
+  async function lessonAct(fn: () => Promise<unknown>, done: string) {
+    try {
+      await fn();
+      setNotice(done);
+      await refresh();
     } catch (e: any) {
       setError(e.message);
     }
@@ -142,6 +177,45 @@ export default function QualityPage() {
             ))}
           </section>
 
+          {proposed.length ? (
+            <section className="lessons-review" aria-label="Lessons to review">
+              <h2>
+                Lessons to review <span className="pill-count">{proposed.length}</span>
+              </h2>
+              <p className="muted">
+                From replies you marked wrong. Accept one and that agent follows it from its next reply; edit it first if you like.
+              </p>
+              {proposed.map((l) => {
+                const row = avatarOf(l.agent_id);
+                return (
+                  <article key={l.id} className="lesson-card">
+                    <header>
+                      <AgentAvatar name={l.agent_name} color={l.agent_color || row?.color} avatar={row?.avatar} className="agent-avatar tiny" />
+                      <strong>{l.agent_name}</strong>
+                      <span className="faint">will remember</span>
+                    </header>
+                    <textarea
+                      aria-label={`Lesson for ${l.agent_name}`}
+                      rows={2}
+                      maxLength={240}
+                      value={drafts[l.id] ?? l.text}
+                      onChange={(e) => setDrafts((d) => ({ ...d, [l.id]: e.target.value }))}
+                    />
+                    {l.why ? <p className="faint lesson-why">Because: {l.why}</p> : null}
+                    <div className="row">
+                      <button className="btn small" type="button" onClick={() => lessonAct(() => acceptLesson(l.id, drafts[l.id] ?? ""), `${l.agent_name} will follow this from now on.`)}>
+                        Accept
+                      </button>
+                      <button className="btn secondary small" type="button" onClick={() => lessonAct(() => dismissLesson(l.id), "Dismissed.")}>
+                        Dismiss
+                      </button>
+                    </div>
+                  </article>
+                );
+              })}
+            </section>
+          ) : null}
+
           {s && s.agents.length ? (
             <div className="routine-agents" role="tablist" aria-label="Agent">
               <button type="button" role="tab" aria-selected={!agent} className={`routine-agent${!agent ? " on" : ""}`} onClick={() => setAgent("")}>
@@ -179,6 +253,54 @@ export default function QualityPage() {
               ))}
             </section>
           ) : null}
+
+          <section className="lessons-in-use" aria-label="Lessons in use">
+            <div className="vault-list-head">
+              <h2>
+                Lessons in use <span className="pill-count">{inUse.length}</span>
+              </h2>
+            </div>
+            {inUse.length ? (
+              <div className="vault-list">
+                {inUse.map((l) => {
+                  const row = avatarOf(l.agent_id);
+                  return (
+                    <div key={l.id} className="lesson-row">
+                      <AgentAvatar name={l.agent_name} color={l.agent_color || row?.color} avatar={row?.avatar} className="agent-avatar tiny" />
+                      <span className="lesson-text">
+                        <strong>{l.agent_name}</strong> {l.text}
+                      </span>
+                      <span className="faint lesson-src">{l.source === "manual" ? "Added by you" : "From feedback"}</span>
+                      <button className="btn secondary small" type="button" onClick={() => lessonAct(() => removeLesson(l.id), "Removed: the agent won't follow it any more.")}>
+                        Remove
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <p className="muted">No lessons yet. They come from replies you mark wrong, or add one yourself.</p>
+            )}
+            <form
+              className="lesson-add"
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (!newText.trim() || !newFor) return;
+                void lessonAct(async () => {
+                  await addLesson(newFor, newText);
+                  setNewText("");
+                }, "Added. The agent follows it from its next reply.");
+              }}
+            >
+              <div className="lesson-add-agent">
+                <AgentSelect value={newFor} onChange={setNewFor} label="Agent" agents={agents.filter((a) => !a.archived)} />
+              </div>
+              <input aria-label="New lesson" placeholder="e.g. Always answer amounts in INR" value={newText} maxLength={240} onChange={(e) => setNewText(e.target.value)} />
+              <button className="btn secondary" disabled={!newText.trim() || !newFor}>
+                Add lesson
+              </button>
+            </form>
+          </section>
 
           <div className="vault-list-head">
             <h2>

@@ -33,6 +33,7 @@ export type WorkspaceAgent = {
   session_id?: string;
   preview?: string;
   updated_at?: string;
+  lessons?: { id: string; text: string }[];
 };
 
 export type AgentGroup = {
@@ -884,9 +885,30 @@ export type QualitySummary = {
   agents: { agent_id: string | null; agent_name: string; agent_color: string; up: number; down: number; satisfaction: number | null; routine_ok: number; routine_failed: number }[];
 };
 export const rateReply = (body: { session_id: string; request_id: string; rating: number; reasons?: string[]; note?: string; agent_id?: string }) =>
-  skillCall<{ rating: number }>("/api/quality/feedback", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }, "Couldn't save your rating");
+  skillCall<{ rating: number; lesson?: string | null }>("/api/quality/feedback", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }, "Couldn't save your rating");
 export const sessionRatings = (sessionId: string) => skillCall<{ ratings: Record<string, number> }>(`/api/quality/feedback/session/${sessionId}`, {}, "Couldn't load ratings");
 export const qualitySummary = (days = 30, agentId = "") => skillCall<QualitySummary>(`/api/quality/summary${qs({ days, agent_id: agentId })}`, {}, "Couldn't load quality");
 export const qualityFeedback = (opts: { rating?: number; agentId?: string; days?: number } = {}) =>
   skillCall<{ feedback: ReplyRating[] }>(`/api/quality/feedback${qs({ rating: opts.rating, agent_id: opts.agentId, days: opts.days ?? 30 })}`, {}, "Couldn't load ratings");
 export const qualityExport = (ids: string[] = [], days = 90) => skillCall<{ cases: unknown[] }>(`/api/quality/export${qs({ ids: ids.join(","), days })}`, {}, "Couldn't export");
+
+// Learning loop: lessons agents propose from a thumbs-down; accepted ones go into the agent's prompt.
+export type AgentLesson = {
+  id: string;
+  agent_id: string;
+  agent_name: string;
+  agent_color: string;
+  text: string;
+  why: string;
+  status: "proposed" | "accepted" | "dismissed";
+  source: "feedback" | "manual";
+  feedback_id: string | null;
+  at: string;
+};
+export const listLessons = (status = "", agentId = "") => skillCall<{ lessons: AgentLesson[] }>(`/api/quality/lessons${qs({ status, agent_id: agentId })}`, {}, "Couldn't load lessons");
+export const acceptLesson = (id: string, text = "") =>
+  skillCall<AgentLesson>(`/api/quality/lessons/${id}/accept`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text }) }, "Couldn't accept the lesson");
+export const dismissLesson = (id: string) => skillCall<{ ok: boolean }>(`/api/quality/lessons/${id}/dismiss`, { method: "POST" }, "Couldn't dismiss the lesson");
+export const removeLesson = (id: string) => skillCall<{ ok: boolean }>(`/api/quality/lessons/${id}`, { method: "DELETE" }, "Couldn't remove the lesson");
+export const addLesson = (agentId: string, text: string) =>
+  skillCall<AgentLesson>("/api/quality/lessons", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ agent_id: agentId, text }) }, "Couldn't add the lesson");

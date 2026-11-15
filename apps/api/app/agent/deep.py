@@ -2634,6 +2634,9 @@ def system_prompt(
     identity += "Format chat replies in readable Markdown. Bold only the most useful keywords, names, dates, decisions, and action labels; keep ordinary prose unbolded.\n"
     if extra:
         identity += extra + "\n"
+    from app.quality.lessons import lessons_prompt
+
+    identity += lessons_prompt(agent)
     from app.agents.focus import focus_prompt
 
     identity += focus_prompt(agent)

@@ -97,6 +97,7 @@ def serialize_agent(row: WorkspaceAgent) -> dict:
         "pinned": bool(getattr(row, "pinned", False)),
         "archived": bool(getattr(row, "archived", False)),
         "unread": bool(getattr(row, "unread", False)),
+        "lessons": [{"id": str(x.get("id")), "text": str(x.get("text") or "")} for x in (getattr(row, "lessons", None) or []) if isinstance(x, dict)],
     }
 
 

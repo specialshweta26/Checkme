@@ -267,6 +267,9 @@ class WorkspaceAgent(Base):
     archived: Mapped[bool] = mapped_column(Boolean, default=False)
     unread: Mapped[bool] = mapped_column(Boolean, default=False)
     letta_agent_id: Mapped[str | None] = mapped_column(String(100))
+    # Lessons the user accepted (app/quality/lessons.py): [{id, text, source, at}]. Added to the agent's prompt after
+    # its own instructions, which stay exactly as the user wrote them.
+    lessons: Mapped[list] = mapped_column(JSONB, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
@@ -526,6 +529,24 @@ class AgentFeedback(Base):
     history: Mapped[list] = mapped_column(JSONB, default=list)  # the turns before, for a test case
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class AgentLesson(Base):
+    """A lesson an agent proposes from a thumbs-down (app/quality/lessons.py). The user accepts it (it joins the
+    agent's ``lessons``), edits it first, or dismisses it."""
+
+    __tablename__ = "agent_lessons"
+    __table_args__ = (Index("ix_agent_lessons_user_status", "user_id", "status"),)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("workspace_agents.id", ondelete="CASCADE"), index=True)
+    feedback_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    text: Mapped[str] = mapped_column(Text, default="")
+    why: Mapped[str] = mapped_column(Text, default="")  # what the user said went wrong
+    status: Mapped[str] = mapped_column(String(20), default="proposed")  # proposed | accepted | dismissed
+    source: Mapped[str] = mapped_column(String(20), default="feedback")  # feedback | manual
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class ScheduledRun(Base):
