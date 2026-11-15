@@ -188,6 +188,10 @@ async def run_job(job_id, session_factory: Callable | None = None, agent_impl: C
         progress = JobProgress(job, session_factory, agent_name=agent.name)
         work_label = "processing a webhook event" if job.kind == "event" else f"working ({job.role})"
         db.add(service.event(job, "status", f"{agent.name} is {work_label}", {"status": "running"}))
+        if job.parent_id is not None:
+            from app.handoffs.service import job_started
+
+            await job_started(db, job.id)  # its handoff receipt: received
         await db.commit()
         try:
             result = await agent_impl(

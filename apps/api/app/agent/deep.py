@@ -1687,11 +1687,21 @@ async def delegate_job(ctx: "RunContext", role: str, task: str, agent_name: str 
         return {"error": f"role must be one of {', '.join(jobs.ROLES)}"}
     if len(ctx.jobs_started) >= jobs.MAX_CHILDREN:
         return {"error": f"At most {jobs.MAX_CHILDREN} delegated jobs per step. Wait for these to finish."}
+    from app.handoffs import service as handoffs
+
     agent = ctx.agent
     if agent_name.strip():
         agent = await find_agent_by_name(ctx.db, ctx.user, agent_name)
         if agent is None:
             return {"error": f"No agent named {agent_name}."}
+    cross = ctx.agent is not None and str(getattr(agent, "id", "")) != str(getattr(ctx.agent, "id", ""))
+    if cross:
+        reason = handoffs.refusal(agent, ctx.agent, await handoffs.agent_names(ctx.db, ctx.user.id))
+        if reason:
+            handoffs.record(ctx.db, ctx.user.id, ctx.agent, agent, "delegate", task, status="refused", reason=reason,
+                            parent_job_id=parent.id, session_id=parent.session_id)  # fmt: skip
+            await ctx.db.flush()
+            return {"error": reason, "refused": True}
     try:
         child = await jobs.create_job(
             ctx.db, ctx.user, agent=agent, prompt=task, title=title, role=role, kind="delegate", parent=parent
@@ -1699,6 +1709,10 @@ async def delegate_job(ctx: "RunContext", role: str, task: str, agent_name: str 
     except jobs.JobError as exc:
         return {"error": str(exc)}
     await ctx.db.flush()
+    if cross:
+        handoffs.record(ctx.db, ctx.user.id, ctx.agent, agent, "delegate", task, job_id=child.id, parent_job_id=parent.id,
+                        session_id=parent.session_id)  # fmt: skip
+        await ctx.db.flush()
     info = jobs.serialize_job(child)
     ctx.jobs_started.append(info)
     handed = await _hand_over_state(ctx, getattr(agent, "id", None), getattr(agent, "name", "") or role, f"job:{child.id}", job_id=child.id)
@@ -3125,6 +3139,16 @@ async def _ask_teammate(ctx: RunContext, agent_id: str, prompt: str) -> dict:
         return {"error": "Do not ask yourself. Pick a teammate."}
     if ctx.db is None or ctx.session_id is None:
         return {"error": "No group thread"}
+    from app.handoffs import service as handoffs
+
+    reason = handoffs.refusal(member, ctx.agent, {str(p.id): p.name for p in ctx.teammates})
+    if reason:
+        handoffs.record(ctx.db, ctx.user.id, ctx.agent, member, "teammate", task, status="refused", reason=reason, session_id=ctx.session_id)
+        await ctx.db.flush()
+        return {"error": reason, "refused": True}
+    receipt = handoffs.record(ctx.db, ctx.user.id, ctx.agent, member, "teammate", task, session_id=ctx.session_id)
+    handoffs.mark_received(receipt)
+    await ctx.db.flush()
     from_name = getattr(ctx.agent, "name", None) or "a teammate"
     group_name = getattr(ctx.group, "name", None) or "group"
     nested_query = (
@@ -3134,23 +3158,28 @@ async def _ask_teammate(ctx: RunContext, agent_id: str, prompt: str) -> dict:
     )
     peer_key = f"peer:{ctx.task_state['id']}:{member.id}" if ctx.task_state else None
     handed = await _hand_over_state(ctx, member.id, member.name, peer_key) if peer_key else None
-    nested = await run_deep_agent(
-        ctx.db,
-        ctx.user,
-        ctx.session_id,
-        ctx.request_id or "peer",
-        [],
-        nested_query,
-        task_key=peer_key,
-        auto_confirm=ctx.auto_confirm,
-        untrusted_input=ctx.untrusted_seen,
-        workspace_agent=member,
-        group=ctx.group,
-        teammates=ctx.teammates,
-        teammate_depth=ctx.teammate_depth + 1,
-        mentions={"handoff": True},
-        progress=ctx.progress.child(member.name) if ctx.progress is not None else None,
-    )
+    try:
+        nested = await run_deep_agent(
+            ctx.db,
+            ctx.user,
+            ctx.session_id,
+            ctx.request_id or "peer",
+            [],
+            nested_query,
+            task_key=peer_key,
+            auto_confirm=ctx.auto_confirm,
+            untrusted_input=ctx.untrusted_seen,
+            workspace_agent=member,
+            group=ctx.group,
+            teammates=ctx.teammates,
+            teammate_depth=ctx.teammate_depth + 1,
+            mentions={"handoff": True},
+            progress=ctx.progress.child(member.name) if ctx.progress is not None else None,
+        )
+    except Exception as exc:
+        handoffs.mark_finished(receipt, "failed", str(exc))
+        raise
+    handoffs.mark_finished(receipt, "failed" if nested.get("error") and not nested.get("text") else "done", nested.get("text") or nested.get("error") or "")
     ctx.used_tools.append(f"ask_teammate:{member.name}")
     if handed:
         await _take_back_state(ctx, handed["id"], nested.get("text") or "", member.name)

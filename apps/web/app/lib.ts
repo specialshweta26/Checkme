@@ -34,6 +34,7 @@ export type WorkspaceAgent = {
   preview?: string;
   updated_at?: string;
   lessons?: { id: string; text: string }[];
+  accepts_from?: HandoffRule;
 };
 
 export type AgentGroup = {
@@ -969,6 +970,30 @@ export type ApprovalItem = {
 };
 export type ApprovalQueue = { items: ApprovalItem[]; count: number; counts: Partial<Record<ApprovalKind, number>> };
 const JSON_POST = (body: unknown) => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+// Agent-to-agent handoffs (docs/HANDOFFS.md)
+export type HandoffRule = { mode: "anyone" | "selected" | "nobody"; agents: string[] };
+export type HandoffStatus = "sent" | "received" | "done" | "failed" | "cancelled" | "refused";
+export type Handoff = {
+  id: string;
+  from_agent_id: string | null;
+  to_agent_id: string | null;
+  from_name: string;
+  to_name: string;
+  channel: "delegate" | "teammate";
+  status: HandoffStatus;
+  task: string;
+  reply: string;
+  reason: string;
+  job_id: string | null;
+  session_id: string | null;
+  created_at: string | null;
+  received_at: string | null;
+  finished_at: string | null;
+};
+export const listHandoffs = (agentId?: string, limit = 20) =>
+  skillCall<{ messages: Handoff[] }>(`/api/handoffs?limit=${limit}${agentId ? `&agent_id=${agentId}` : ""}`, {}, "Couldn't load handoffs");
+export const setHandoffRule = (agentId: string, rule: HandoffRule) =>
+  skillCall<{ agent_id: string; accepts_from: HandoffRule }>(`/api/handoffs/rules/${agentId}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(rule) }, "Couldn't save that");
 export const listApprovals = () => skillCall<ApprovalQueue>("/api/approvals", {}, "Couldn't load approvals");
 export const approvalsCount = () => skillCall<{ count: number }>("/api/approvals/count", {}, "");
 export const decideApprovals = (decisions: { id: string; kind: ApprovalKind; job_id: string; token?: string; approve: boolean }[]) =>

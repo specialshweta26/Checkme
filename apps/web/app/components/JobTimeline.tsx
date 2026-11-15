@@ -51,6 +51,7 @@ const ICON: Record<string, string> = {
   question: "?",
   deploy: "🚀",
   login: "🔑",
+  handoff: "⇄",
 };
 const TODO_MARK: Record<string, string> = { completed: "✓", in_progress: "▸", pending: "○" };
 

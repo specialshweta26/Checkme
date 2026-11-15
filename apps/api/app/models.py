@@ -270,8 +270,36 @@ class WorkspaceAgent(Base):
     # Lessons the user accepted (app/quality/lessons.py): [{id, text, source, at}]. Added to the agent's prompt after
     # its own instructions, which stay exactly as the user wrote them.
     lessons: Mapped[list] = mapped_column(JSONB, default=list)
+    # Who may hand this agent work (app/handoffs/service.py): {"mode": "anyone" | "selected" | "nobody", "agents": [ids]}.
+    # Empty means anyone. The user can always message it.
+    accepts_from: Mapped[dict] = mapped_column(JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class AgentMessage(Base):
+    """A receipt for one agent handing work to another (docs/HANDOFFS.md): sent -> received -> done | failed | cancelled,
+    or refused when the receiver's rule doesn't allow the sender."""
+
+    __tablename__ = "agent_messages"
+    __table_args__ = (Index("ix_agent_messages_user_created", "user_id", "created_at"),)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    from_agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    to_agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    from_name: Mapped[str] = mapped_column(String(80), default="")
+    to_name: Mapped[str] = mapped_column(String(80), default="")
+    channel: Mapped[str] = mapped_column(String(20), default="delegate")  # delegate | teammate
+    status: Mapped[str] = mapped_column(String(20), default="sent")
+    task: Mapped[str] = mapped_column(Text, default="")
+    reply: Mapped[str] = mapped_column(Text, default="")
+    reason: Mapped[str] = mapped_column(String(400), default="")
+    job_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    parent_job_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    session_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class GitHubInstallation(Base):
