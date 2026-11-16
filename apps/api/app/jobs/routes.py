@@ -53,6 +53,15 @@ async def job_events(job_id: str, after: int = 0, user: User = Depends(current_u
     return await service.tree(db, user, job.root_id or job.id, after)
 
 
+@router.get("/{job_id}/trace")
+async def job_trace(job_id: str, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Why it did that: every step of the job tree with the reasoning, inputs, result and screenshots."""
+    from app.jobs import trace
+
+    job = await _owned(db, user, job_id)
+    return await trace.tree_trace(db, user, job.root_id or job.id)
+
+
 async def _decide(job_id: str, body: TokenIn, user, db, approve: bool) -> dict:
     job = await _owned(db, user, job_id)
     try:

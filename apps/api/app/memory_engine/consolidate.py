@@ -287,6 +287,9 @@ async def consolidate_user(db: AsyncSession, user_id) -> dict:
         from app.db import SessionLocal
 
         done["screenshots"] = await tidy_screenshots(SessionLocal, user_id)
+        from app.jobs.trace import tidy_screenshots as tidy_trace_screenshots
+
+        done["trace_screenshots"] = await tidy_trace_screenshots(SessionLocal, user_id)
     except Exception:  # noqa: BLE001 - storage tidying never fails the memory pass
         log.info("screenshot tidy skipped", exc_info=True)
     await db.commit()

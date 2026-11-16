@@ -10,6 +10,7 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { PlanCard, type JobPlan } from "./PlanCard";
+import { JobTrace } from "./JobTrace";
 
 type JobRow = {
   id: string;
@@ -83,6 +84,7 @@ export function JobTimeline({ jobId, after: startAfter = 0, onSettled }: { jobId
   const [nudge, setNudge] = useState(0);
   const [loginCode, setLoginCode] = useState("");
   const [conversationReply, setConversationReply] = useState("");
+  const [tracing, setTracing] = useState(false);
   const after = useRef(startAfter);
   const settled = useRef(false);
   const sawActive = useRef(false);
@@ -201,6 +203,11 @@ export function JobTimeline({ jobId, after: startAfter = 0, onSettled }: { jobId
       <div className="job-head">
         <span className={`job-badge ${status}`}>{STATUS_LABEL[status] || status}</span>
         <strong className="job-title">{root?.title || "Background job"}</strong>
+        {status !== "planned" && status !== "queued" ? (
+          <button className="btn small secondary" type="button" onClick={() => setTracing(true)} title="Every step, with the reasoning, inputs, results and screenshots">
+            Why it did that
+          </button>
+        ) : null}
         {!done ? (
           <button className="btn secondary small" type="button" disabled={busy === "cancel"} onClick={cancel}>
             Cancel
@@ -332,6 +339,7 @@ export function JobTimeline({ jobId, after: startAfter = 0, onSettled }: { jobId
         ) : null}
       </ol>
       {err ? <p className="err">{err}</p> : null}
+      {tracing ? <JobTrace jobId={root?.id || jobId} live={!done} onClose={() => setTracing(false)} /> : null}
     </div>
   );
 }

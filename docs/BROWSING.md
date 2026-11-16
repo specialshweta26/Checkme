@@ -252,6 +252,9 @@ An older desktop app answers that it can't do this, so nothing breaks.
 Why: when a browser task stopped, the only record was the agent's summary in chat, so nobody could see where or
 why it went wrong.
 
+Every background job, not only browser tasks, also keeps a step-by-step trace with the model's reasoning: see
+docs/RUN_TRACES.md. A job's `browser_task` step links to the run here.
+
 Every `browser_task` run is kept (`BROWSER_RUN_LOG`, table `browser_runs`, the newest 100 per user):
 
 - **Each step:** each batch the planner ran, in words (`fill "Email" with {{login_username}}, click "Sign in"`);
