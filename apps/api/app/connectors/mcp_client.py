@@ -155,6 +155,51 @@ def root_error(exc: BaseException) -> BaseException:
     return exc
 
 
+# --- data that isn't ready yet ----------------------------------------------------------------------------------
+# Some MCP servers sit on dashboards that load their data on demand (about two minutes): asked before that, they answer
+# at once with zeros or a "not ready" flag instead of waiting (docs/LLD.md "Slow MCP tools").
+_NOT_READY_TEXT = ("not connected", "not ready", "still loading", "loading data", "try again", "warming up", "being prepared",
+                   "no data yet", "data is loading", "processing")  # fmt: skip
+_NOT_READY_STATUS = {"loading", "pending", "processing", "warming", "queued", "computing", "in_progress", "not_ready", "stale"}
+
+
+def _walk(value: Any, depth: int = 0):
+    if depth > 8:
+        return
+    if isinstance(value, dict):
+        for k, v in value.items():
+            yield k, v
+            yield from _walk(v, depth + 1)
+    elif isinstance(value, list):
+        for v in value[:200]:
+            yield None, v
+            yield from _walk(v, depth + 1)
+
+
+def looks_not_ready(payload: Any) -> str:
+    """Why a tool's answer looks like data that hasn't loaded yet ("" when it looks like a real answer): an explicit flag
+    (ready false, needs_compute, a loading status, a 'not connected' / 'still loading' message), an empty answer, or
+    every figure zero (three or more numbers)."""
+    if isinstance(payload, dict) and payload.get("empty"):
+        return "it returned no data"
+    numbers: list[float] = []
+    for key, value in _walk(payload):
+        k = str(key or "").lower()
+        if k in {"ready", "is_ready", "loaded", "available"} and value is False:
+            return f"it reported {k}=false"
+        if k in {"needs_compute", "loading", "is_loading", "pending", "stale"} and value is True:
+            return f"it reported {k}"
+        if k in {"status", "state", "feed_status", "sync_status"} and str(value).strip().lower().replace(" ", "_") in _NOT_READY_STATUS:
+            return f"its status was {value}"
+        if isinstance(value, str) and len(value) < 400 and any(p in value.lower() for p in _NOT_READY_TEXT):
+            return f"it said “{value[:120]}”"
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            numbers.append(float(value))
+    if len(numbers) >= 3 and all(n == 0 for n in numbers):
+        return "every figure was zero"
+    return ""
+
+
 def hostname_slug(url: str) -> str:
     host = urlparse(url).hostname or "mcp"
     return host.replace(".", "-")[:32]
