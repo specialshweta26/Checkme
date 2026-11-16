@@ -97,6 +97,8 @@ class RunContext:
     call_impl: Any = None
     results: list[dict] = field(default_factory=list)
     gateway_surface: dict[str, dict] = field(default_factory=dict)
+    # (connector slug, gateway action) -> {"fields": [...], "required": [...]}, from catalog search results.
+    gateway_args: dict = field(default_factory=dict)
     agent: Any = None
     group: Any = None
     teammates: list = field(default_factory=list)
@@ -443,6 +445,10 @@ async def _expand_gateway_catalog(ctx: RunContext, conn, query: str) -> list[dic
             continue
         slim = slim_search(raw, q) if isinstance(raw, dict) else {"candidates": []}
         parsed = [item for item in (slim.get("candidates") or []) if isinstance(item, dict)]
+        for item in parsed:
+            name = str(item.get("public_name") or "")
+            if name and item.get("arguments"):
+                ctx.gateway_args[(conn.slug, name)] = {"fields": list(item["arguments"]), "required": list(item.get("required") or [])}
         if parsed:
             break
     rows = nested_tool_rows(
@@ -1073,6 +1079,38 @@ def _builtin_mail_spec(conn, tool_name: str) -> dict | None:
     }
 
 
+async def gateway_action_args(ctx: RunContext, conn, tool_name: str) -> dict | None:
+    """{"fields", "required"} of a gateway action (a tool reached through the connector's execute tool), from this turn's
+    catalog search, or from a catalog search for its name. None when the gateway doesn't describe its parameters."""
+    key = (conn.slug, tool_name)
+    if key not in ctx.gateway_args:
+        try:
+            await _expand_gateway_catalog(ctx, conn, tool_name.replace("_", " "))
+        except Exception:  # noqa: BLE001
+            log.info("gateway catalog lookup for %s failed", tool_name, exc_info=True)
+        ctx.gateway_args.setdefault(key, None)
+    return ctx.gateway_args.get(key)
+
+
+def check_gateway_args(known: dict | None, tool_name: str, args: dict) -> dict | None:
+    """An error for the agent when a call uses argument names the gateway action doesn't take, or leaves out required
+    ones (docs/LLD.md "Gateway arguments"); None when the call matches, or the action's parameters aren't known."""
+    if not known or not known.get("fields"):
+        return None
+    fields = list(known["fields"])
+    unknown = [k for k in (args or {}) if k not in fields]
+    missing = [r for r in known.get("required") or [] if r not in (args or {})]
+    if not unknown and not missing:
+        return None
+    parts = [f"{tool_name} takes {', '.join(fields)}"]
+    if unknown:
+        parts.append(f"you sent {', '.join(unknown)}, which it does not take (a gateway ignores unknown names and answers for its defaults, often zeros)")
+    if missing:
+        parts.append(f"it needs {', '.join(missing)}")
+    return {"error": "; ".join(parts) + ". Call it again with exactly these argument names.", "arguments_expected": fields,
+            "required": list(known.get("required") or []), "not_run": True}  # fmt: skip
+
+
 async def get_user_tool_schema(ctx: RunContext, connector_slug: str, tool_name: str) -> dict:
     conn = ctx.connectors.get(connector_slug)
     if conn is None:
@@ -1097,6 +1135,18 @@ async def get_user_tool_schema(ctx: RunContext, connector_slug: str, tool_name: 
                         return shaped
                 except Exception:  # noqa: BLE001
                     log.warning("gateway resolve failed on %s %s", connector_slug, tool_name, exc_info=True)
+            known = await gateway_action_args(ctx, conn, tool_name)
+            if known:
+                return {
+                    "connector_slug": connector_slug,
+                    "tool_name": tool_name,
+                    "description": f"Data tool on {conn.alias or conn.name}; it runs through {execute}. Use exactly these argument names.",
+                    "parameters": {"type": "object", "properties": {f: {} for f in known["fields"]}, "required": known["required"],
+                                   "additionalProperties": False},  # fmt: skip
+                    "execute_via": execute,
+                    "read_only": True,
+                    "destructive": False,
+                }
             return {
                 "connector_slug": connector_slug,
                 "tool_name": tool_name,
@@ -1376,6 +1426,12 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
     if hit is None and spec is None:
         surface = await _load_gateway_surface(ctx, conn)
         execute = surface.get("execute")
+        from app.routing.retrieve import is_catalog_tool as _catalog_tool
+
+        if execute and tool_name != execute and not _catalog_tool(tool_name):
+            wrong = check_gateway_args(await gateway_action_args(ctx, conn, tool_name), tool_name, args)
+            if wrong:
+                return wrong  # not run: a gateway quietly ignores names it doesn't know and answers for its defaults
         tool_name, args = wrap_through_execute(tool_name, args, execute)
     args = _rewrite_catalog_search_args(tool_name, args, ctx.query)
     from app.agent import approval

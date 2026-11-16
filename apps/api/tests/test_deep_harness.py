@@ -404,9 +404,9 @@ async def test_nested_tool_runs_through_execute():
     ctx.gateway_surface["digital"] = _gateway_surface()
     out = await call_user_tool(ctx, "digital", "get_sales_dashboard", {"brand": "acme"})
     assert out["on_hand"] == 16
-    assert calls[0][0] == "gateway__execute"
-    assert calls[0][1]["tool_name"] == "get_sales_dashboard"
-    assert calls[0][1]["arguments"]["brand"] == "acme"
+    run = [c for c in calls if c[0] == "gateway__execute"]  # a catalog lookup of the action's parameters may come first
+    assert len(run) == 1 and run[0][1]["tool_name"] == "get_sales_dashboard"
+    assert run[0][1]["arguments"]["brand"] == "acme"
     assert ctx.sources[-1]["source_tool"] == "digital__get_sales_dashboard"
 
 

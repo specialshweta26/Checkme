@@ -311,6 +311,9 @@ def nested_tool_rows(
                 "read_only": True,
                 "destructive": False,
                 "execute_via": execute_via,
+                # The action's own parameter names: call it with exactly these (docs/LLD.md "Gateway arguments").
+                "arguments": list(item.get("arguments") or []),
+                "required": list(item.get("required") or []),
                 "score": retrieve_score(name, score, terms),
             }
         )
