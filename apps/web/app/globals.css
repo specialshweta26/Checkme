@@ -3223,6 +3223,18 @@ body.lumio-desktop .screen-rail.overlay.fullscreen {
 .run-timeline img { width: 300px; border-radius: 8px; border: 1px solid color-mix(in srgb, currentColor 15%, transparent); }
 @media (max-width: 720px) { .run-timeline li { grid-template-columns: 1fr; } .run-timeline img { width: 100%; } }
 .sheet.run-sheet { z-index: 60; }
+.job-trace .job-trace-note { margin: 0; font-size: 13px; }
+.job-trace { padding-top: 0; }
+.job-trace .job-trace-head { position: sticky; top: 0; z-index: 1; background: var(--surface); margin: 0 calc(-1 * var(--space-6)); padding: 14px var(--space-6) 8px; flex-wrap: wrap; border-bottom: 1px solid var(--line); }
+.job-trace .job-trace-head > div:first-child { min-width: min(260px, 100%); }
+.job-trace .job-trace-why { font-style: italic; color: var(--text, inherit); opacity: 0.85; }
+.job-trace .job-trace-tool { font-size: 12px; padding: 1px 6px; border-radius: 6px; background: color-mix(in srgb, currentColor 8%, transparent); }
+.job-trace .job-trace-filter { display: flex; align-items: center; gap: 6px; font-size: 13px; margin-right: 8px; white-space: nowrap; }
+.job-trace .run-timeline li.reply .run-step-text strong { color: #16a34a; }
+.job-trace details summary { cursor: pointer; font-size: 13px; }
+.job-trace .job-pre { max-height: 260px; overflow: auto; white-space: pre-wrap; word-break: break-word; }
+.job-head .btn.small { margin-left: auto; }
+.job-head .btn.small + .btn { margin-left: 0; }
 .run-ai.run-ok { background: color-mix(in srgb, #2563eb 16%, transparent); color: #2563eb; }
 .run-api { margin-top: 12px; padding-top: 12px; border-top: 1px solid color-mix(in srgb, currentColor 10%, transparent); display: grid; gap: 6px; }
 .run-code { margin: 0; padding: 10px 12px; border-radius: 8px; background: #0f172a; color: #e2e8f0; font-size: 12px; overflow-x: auto; white-space: pre; }

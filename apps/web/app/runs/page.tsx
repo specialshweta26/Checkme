@@ -209,6 +209,12 @@ export default function SavedRunsPage() {
     if (me) refresh();
   }, [me]);
 
+  useEffect(() => {
+    // A job's trace links a browser step here: /runs?run=<id> opens that run.
+    const id = me ? new URLSearchParams(window.location.search).get("run") : null;
+    if (id) openRun(id);
+  }, [me]);
+
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
     const rows = [...runs].sort((a, b) => Number(!!b.proposed_fix) - Number(!!a.proposed_fix));

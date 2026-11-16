@@ -674,6 +674,33 @@ class JobEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
+class JobTraceStep(Base):
+    """One step of a background job as the user can inspect it afterwards (docs/RUN_TRACES.md): which tool ran, the
+    model's reasoning just before it, the inputs (secrets hidden), a short result, whether it worked, how long it took
+    and, for browser and computer tools, a small screenshot in storage."""
+
+    __tablename__ = "job_trace_steps"
+    __table_args__ = (Index("ix_job_trace_steps_job_started", "job_id", "started_at"),)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    job_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("agent_jobs.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
+    attempt: Mapped[int] = mapped_column(Integer, default=0)
+    i: Mapped[int] = mapped_column(Integer, default=0)
+    agent_name: Mapped[str] = mapped_column(String(80), default="")
+    kind: Mapped[str] = mapped_column(String(20), default="tool")  # tool | reply
+    tool: Mapped[str] = mapped_column(String(120), default="")
+    action: Mapped[str] = mapped_column(Text, default="")
+    why: Mapped[str] = mapped_column(Text, default="")
+    args: Mapped[dict] = mapped_column(JSONB, default=dict)
+    result: Mapped[str] = mapped_column(Text, default="")
+    ok: Mapped[bool] = mapped_column(Boolean, default=True)
+    error: Mapped[str] = mapped_column(Text, default="")
+    ms: Mapped[int] = mapped_column(Integer, default=0)
+    shot: Mapped[str] = mapped_column(String(300), default="")
+    browser_run_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
 class MemoryPassage(Base):
     """A standing fact (a claim) about the user's world. Postgres is canonical; Letta is optional write-through.
 

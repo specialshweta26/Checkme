@@ -196,6 +196,10 @@ async def run_job(job_id, session_factory: Callable | None = None, agent_impl: C
 
             await job_started(db, job.id)  # its handoff receipt: received
         await db.commit()
+        from app.jobs import trace as job_trace
+
+        tracer = job_trace.Tracer(job, session_factory, agent.name)
+        trace_token = job_trace.CURRENT.set(tracer)
         try:
             result = await agent_impl(
                 db,
@@ -213,6 +217,8 @@ async def run_job(job_id, session_factory: Callable | None = None, agent_impl: C
                 **({"untrusted_input": True} if job.kind == "event" else {}),
             )
         except asyncio.CancelledError:
+            job_trace.CURRENT.reset(trace_token)
+            await tracer.flush()
             from app.agent import cancel as run_cancel
 
             if not run_cancel.is_cancelled():
@@ -222,6 +228,8 @@ async def run_job(job_id, session_factory: Callable | None = None, agent_impl: C
                 task.uncancel()
             return await _stopped(db, job, _limit_reason())
         except Exception as exc:  # noqa: BLE001
+            job_trace.CURRENT.reset(trace_token)
+            await tracer.flush()
             from app.agent import cancel as run_cancel
 
             if isinstance(exc, run_cancel.TurnCancelled) or run_cancel.is_cancelled():
@@ -238,6 +246,10 @@ async def run_job(job_id, session_factory: Callable | None = None, agent_impl: C
             await _forget_run(job)
             await _notify_channel(db, job)
             return job.status
+        job_trace.CURRENT.reset(trace_token)
+        if isinstance(result, dict):
+            tracer.reply(str(result.get("text") or ""))
+        await tracer.flush()
         await db.refresh(job)  # picks up a cancel (and heartbeats) written by other sessions
         if job.status == "cancelled":
             await db.commit()

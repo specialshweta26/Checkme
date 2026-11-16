@@ -3680,6 +3680,13 @@ async def _run_deep_agent(
     from app.agent import cancel as run_cancel
 
     callbacks = _progress_callbacks(ctx, conns, query) + [fast_path.TimingCallback(timer)]
+    from app.jobs import trace as job_trace
+
+    callbacks += job_trace.callbacks(  # a background job keeps every step (docs/RUN_TRACES.md)
+        str(getattr(ctx.agent, "name", "") or ""),
+        ctx.teammate_depth,
+        {str(c.slug): str(getattr(c, "alias", "") or getattr(c, "name", "") or c.slug) for c in conns},
+    )
     if run_cancel.current.get() is not None:
         callbacks.append(run_cancel.callback())
     all_skills: list = []
