@@ -824,6 +824,24 @@ The chat says why it is asking again. The first answer that looks ready is retur
 back marked `not_ready` with a note telling the agent to say the source returned no data, not to report real zeros.
 Tools that change things are never asked again. A real all-zero answer therefore costs up to two minutes of waiting.
 
+### Gateway arguments
+
+A gateway MCP exposes a catalog: a search tool that lists its actions, and an execute tool that runs one by name.
+Catalog search results carry each action's parameters, but the rows handed to the agent dropped them. `get_tool_schema`
+then answered "any arguments" when the gateway had no resolve tool. So the agent guessed names, such as
+`{"brand": "one8", "start": …, "end": …}` for an action that takes `brand_id` / `since` / `until`. The gateway ignored
+the names it didn't know, answered for its defaults, and every figure came back zero.
+
+Now:
+- **Catalog rows:** they keep each action's `arguments` and `required` all the way to the agent, and the turn
+  remembers them (`ctx.gateway_args`).
+- **`get_tool_schema`:** a gateway action's schema lists exactly those names (`additionalProperties: false`).
+- **Checking each call:** before a call runs through execute, `check_gateway_args` compares it with them.
+  1. If the action's parameters aren't known yet, they're looked up with one catalog search per action per turn.
+  2. Names the action doesn't take, or missing required ones, return an error naming the right parameters, with
+     `not_run: true` and the call never sent. The agent then calls again correctly.
+  3. A gateway that doesn't describe its parameters is never blocked.
+
 ## 13. Error handling
 
 | Failure | Behavior |

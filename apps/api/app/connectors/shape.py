@@ -25,6 +25,7 @@ def slim_search(result: Any, query: str = "") -> dict:
                 "description": (item.get("description") or "")[:800],
                 "score": item.get("score"),
                 "arguments": fields,
+                "required": _required,
             }
         )
     return {"query": result.get("query") or question, "candidates": candidates}
