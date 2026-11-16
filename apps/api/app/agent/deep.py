@@ -1239,6 +1239,48 @@ def _is_user_mcp(conn) -> bool:
     return getattr(conn, "kind", "") != "builtin" and bool(getattr(conn, "server_url", "") or "")
 
 
+WARMUP_WAITS_S = (20, 40, 60)  # retries for data that isn't ready yet: up to two minutes in all
+_READ_VERBS = re.compile(r"^(get|list|search|find|fetch|read|query|show|describe|lookup|count|report|summar|analy|view)", re.I)
+
+
+def _reads_only(tool_name: str, hit) -> bool:
+    """Safe to ask again: the server marked it read-only, or its name says it reads (get_…, list_…, search_…)."""
+    if hit is not None and (getattr(hit, "read_only", False) and not getattr(hit, "destructive", False)):
+        return True
+    return bool(_READ_VERBS.match(tool_name or ""))
+
+
+async def retry_until_ready(ctx: RunContext, conn, tool_name: str, result: Any, again) -> Any:
+    """A read-only tool of a connected MCP answered with data that looks not ready (docs/LLD.md "Slow MCP tools"): its
+    dashboard may load on demand and answer with zeros until it has. Ask again after WARMUP_WAITS_S, saying so in the
+    chat, and return the first answer that looks ready; if none does, the last one, marked so the agent says plainly
+    that the source returned no data rather than reporting zero."""
+    from app.agent import cancel as run_cancel
+    from app.connectors.mcp_client import looks_not_ready
+
+    why = looks_not_ready(result)
+    if not why or not getattr(get_settings(), "mcp_warmup_retry", True):
+        return result
+    name = getattr(conn, "alias", None) or getattr(conn, "name", None) or "the connected app"
+    waited = 0
+    for pause in WARMUP_WAITS_S:
+        if ctx.progress is not None:
+            await ctx.progress.emit(f"{name} answered before its data was ready ({why}); asking again in {pause}s", kind="tool", tool=tool_name)
+        await asyncio.sleep(pause)
+        waited += pause
+        run_cancel.check()
+        run_cancel.touch()
+        result = await again()
+        why = looks_not_ready(result)
+        if not why:
+            return result
+    note = (f"{name} still answered with data that looks not ready after {waited}s ({why}). Its dashboard may still be loading "
+            "or its data feed may be down: tell the user this plainly and do not report the figures as real zeros.")  # fmt: skip
+    if isinstance(result, dict):
+        return {**result, "not_ready": True, "note": note}
+    return {"data": result, "not_ready": True, "note": note}
+
+
 @contextlib.asynccontextmanager
 async def waiting_on(ctx: RunContext, conn, tool_name: str):
     """While a connected MCP tool runs (docs/LLD.md "Slow MCP tools"): pass the progress its server reports to the chat,
@@ -1387,6 +1429,9 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
         else:
             async with waiting_on(ctx, conn, tool_name):
                 result = await invoke_named(ctx.db, ctx.user, conn, tool_name, args, ctx.attachments)
+                if _is_user_mcp(conn) and _reads_only(tool_name, hit):
+                    result = await retry_until_ready(ctx, conn, tool_name, result,
+                                                     lambda: invoke_named(ctx.db, ctx.user, conn, tool_name, args, ctx.attachments))  # fmt: skip
         # One approval, one action: running the same thing again needs a new card.
         approval.consume(ctx.confirmations, used_approval)
         note_untrusted(ctx, tool_name)

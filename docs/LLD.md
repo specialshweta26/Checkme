@@ -808,6 +808,22 @@ dashboard: loading 2/4 (50%)"). After 20 s, it posts every 30 s that it is still
 no-progress watchdog from treating the turn as stuck. Built-in tools are not affected. Tested against a real MCP server
 over streamable HTTP, including a 125-second call that returned its data and all 4 progress reports.
 
+**Data that isn't ready yet.** Some dashboards behind an MCP load their data on demand (about two minutes), and asked
+before that they answer **at once** with zeros or a "not ready" flag, not by waiting. The answer looked complete, so the
+agent reported ₹0 sales for a brand whose dashboard showed real sales. For a read-only tool of a connected MCP, one the
+server marked read-only or whose name reads (`get_`, `list_`, `search_`…), `deep.retry_until_ready` asks again after
+20, 40 and 60 s (`MCP_WARMUP_RETRY`) when the answer looks not ready. That means `mcp_client.looks_not_ready`
+found one of these:
+- `ready` / `loaded` / `available` false, or `needs_compute` / `loading` / `pending` / `stale` true;
+- a status of loading, pending, processing, queued or stale;
+- a short message such as "not connected", "still loading" or "try again";
+- an empty answer;
+- three or more figures that are all zero.
+
+The chat says why it is asking again. The first answer that looks ready is returned. If none does, the last one comes
+back marked `not_ready` with a note telling the agent to say the source returned no data, not to report real zeros.
+Tools that change things are never asked again. A real all-zero answer therefore costs up to two minutes of waiting.
+
 ## 13. Error handling
 
 | Failure | Behavior |
