@@ -206,6 +206,7 @@ class Settings(BaseSettings):
     browser_escalate_model: str = ""  # model after repeated failures; empty = OPENAI_MODEL
     browser_fast_max_steps: int = 12  # model rounds per browser_task
     browser_replay: bool = True  # save successful browser_task runs and replay them without model calls
+    mcp_tool_timeout_s: int = 600  # how long a connected MCP tool may take (slow dashboards and reports)
     trim_old_pages: bool = True  # send only the latest page result in full to the model (long browser runs stay fast)
     # Operator-style browsing by sight (app/agent/vision_browser.py): on by default; the model defaults to OPENAI_MODEL.
     browser_vision: bool = True

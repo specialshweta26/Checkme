@@ -786,6 +786,28 @@ model on each call:
 The stored conversation keeps everything, and `inspect_result` can reread it. A 15-step page run went from about
 156,000 to about 11,000 tokens per model call.
 
+### Slow MCP tools
+
+Some connected MCP servers sit on top of dashboards or reports that take minutes to load. When a question went to one
+of them, the agent often came back with nothing. Four things in `app/connectors/mcp_client.py` caused that, and are
+now fixed:
+
+- **Results:** only text blocks were read. A server that answered with `structured_content` (data rows), an embedded
+  resource or a resource link gave the agent `{"ok": true}` and nothing else. All of these are read now, with structured
+  data first. A call that returns nothing at all is marked `empty`, with a note that it is not "zero results".
+- **Errors:** the error flag was read as `isError`, which this SDK names `is_error`, so tool errors came back as if they
+  were answers. Both spellings are read now (`mime_type` and `mimeType` too), and an error raises.
+- **Failure messages:** the SDK wraps every failure in an ExceptionGroup ("unhandled errors in a TaskGroup"). The
+  underlying error is unwrapped first. A timeout says plainly that the server did not answer within the limit and must
+  not be reported as zero results.
+- **Time:** the HTTP read and the tool call both wait up to `MCP_TOOL_TIMEOUT_S` (600 s by default; connecting is
+  still 30 s). The client asks for progress, which also keeps long calls alive on servers that send it.
+
+While a connected MCP tool runs, `deep.waiting_on` passes the progress its server reports to the chat ("Sales
+dashboard: loading 2/4 (50%)"). After 20 s, it posts every 30 s that it is still waiting, which also keeps the
+no-progress watchdog from treating the turn as stuck. Built-in tools are not affected. Tested against a real MCP server
+over streamable HTTP, including a 125-second call that returned its data and all 4 progress reports.
+
 ## 13. Error handling
 
 | Failure | Behavior |

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import re
@@ -1230,6 +1231,52 @@ async def _track_github_writes(ctx: RunContext, conn, tool: str, args: dict, res
         await coding_memory.note(ctx, repo=repo, pr={"url": url, "repo": repo, "number": m["number"], "branch": "", "state": "merged"})
 
 
+SLOW_TOOL_FIRST_S = 20
+SLOW_TOOL_EVERY_S = 30
+
+
+def _is_user_mcp(conn) -> bool:
+    return getattr(conn, "kind", "") != "builtin" and bool(getattr(conn, "server_url", "") or "")
+
+
+@contextlib.asynccontextmanager
+async def waiting_on(ctx: RunContext, conn, tool_name: str):
+    """While a connected MCP tool runs (docs/LLD.md "Slow MCP tools"): pass the progress its server reports to the chat,
+    and if it takes long, say every SLOW_TOOL_EVERY_S that it is still waiting, so the turn visibly lives and the
+    no-progress watchdog knows it isn't stuck. Other tools pass straight through."""
+    if not _is_user_mcp(conn):
+        yield
+        return
+    from app.agent import cancel as run_cancel
+    from app.connectors import mcp_client
+
+    name = getattr(conn, "alias", None) or getattr(conn, "name", None) or "the connected app"
+
+    async def on_progress(progress: float, total: float | None, message: str | None) -> None:
+        run_cancel.touch()
+        if ctx.progress is not None:
+            share = f" ({int(progress / total * 100)}%)" if total else ""
+            await ctx.progress.emit(f"{name}: {message or 'working'}{share}", kind="tool", tool=tool_name)
+
+    async def still_waiting() -> None:
+        started = asyncio.get_running_loop().time()
+        await asyncio.sleep(SLOW_TOOL_FIRST_S)
+        while True:
+            run_cancel.touch()
+            waited = int(asyncio.get_running_loop().time() - started)
+            if ctx.progress is not None:
+                await ctx.progress.emit(f"Still waiting for {name} ({waited}s): its data can take a few minutes to load", kind="tool", tool=tool_name)
+            await asyncio.sleep(SLOW_TOOL_EVERY_S)
+
+    token = mcp_client.PROGRESS.set(on_progress)
+    ticker = asyncio.create_task(still_waiting())
+    try:
+        yield
+    finally:
+        ticker.cancel()
+        mcp_client.PROGRESS.reset(token)
+
+
 async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, args: dict | None = None) -> Any:
     from app.agent import cancel as run_cancel
 
@@ -1338,7 +1385,8 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
         if ctx.call_impl is not None:
             result = await ctx.call_impl(connector_slug, tool_name, args)
         else:
-            result = await invoke_named(ctx.db, ctx.user, conn, tool_name, args, ctx.attachments)
+            async with waiting_on(ctx, conn, tool_name):
+                result = await invoke_named(ctx.db, ctx.user, conn, tool_name, args, ctx.attachments)
         # One approval, one action: running the same thing again needs a new card.
         approval.consume(ctx.confirmations, used_approval)
         note_untrusted(ctx, tool_name)
