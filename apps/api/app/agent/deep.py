@@ -1383,6 +1383,27 @@ def _reads_only(tool_name: str, hit) -> bool:
     return bool(_READ_VERBS.match(tool_name or ""))
 
 
+async def _note_ignored_args(ctx: RunContext, conn, tool_name: str, args: dict, result: Any, why: str) -> Any:
+    """The tool answered for other dates than it was sent: tell the agent, with the action's real parameter names when
+    the catalog has them, so it calls again correctly instead of reporting the wrong period (docs/LLD.md)."""
+    from app.agent import approval
+    from app.routing.retrieve import is_execute_tool
+
+    action = next((a for a in approval.nested_actions(tool_name, args) if not is_execute_tool(a)), tool_name)
+    known = None
+    try:
+        known = await gateway_action_args(ctx, conn, action) if action != tool_name else None  # a gateway action
+    except Exception:  # noqa: BLE001
+        log.info("parameter lookup for %s failed", action, exc_info=True)
+    note = (f"{action} ignored the dates it was sent: {why}. It likely did not recognise the argument names and answered for "
+            "its defaults. Values can be exact-match too (an id's spelling or case, as the connector lists it). Do not report this "
+            "as the requested period: "
+            + (f"call it again with exactly these parameters: {', '.join(known['fields'])}." if known and known.get("fields")
+               else "call get_tool_schema for it and call it again with its own parameter names."))  # fmt: skip
+    body = result if isinstance(result, dict) else {"data": result}
+    return {**body, "args_ignored": True, "note": note, **({"arguments_expected": known["fields"]} if known and known.get("fields") else {})}
+
+
 async def _offer_other_actions(ctx: RunContext, conn, tool_name: str, args: dict, result: dict) -> dict:
     """An action that still answered with no data after the retries: hand the agent the connector's other actions that
     match the user's request, so it tries one of those instead of guessing (one action of a gateway can be empty for
@@ -1605,7 +1626,12 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
         else:
             async with waiting_on(ctx, conn, tool_name):
                 result = await invoke_named(ctx.db, ctx.user, conn, tool_name, args, ctx.attachments)
-                if _is_user_mcp(conn) and (gateway_reads or _reads_only(tool_name, hit)):
+                from app.connectors.mcp_client import ignored_dates
+
+                wrong_dates = ignored_dates(args, result) if _is_user_mcp(conn) else ""
+                if wrong_dates:
+                    result = await _note_ignored_args(ctx, conn, tool_name, args, result, wrong_dates)
+                elif _is_user_mcp(conn) and (gateway_reads or _reads_only(tool_name, hit)):
                     result = await retry_until_ready(ctx, conn, tool_name, result,
                                                      lambda: invoke_named(ctx.db, ctx.user, conn, tool_name, args, ctx.attachments))  # fmt: skip
                     if isinstance(result, dict) and result.get("not_ready"):
