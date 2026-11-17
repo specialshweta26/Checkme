@@ -99,6 +99,8 @@ class RunContext:
     gateway_surface: dict[str, dict] = field(default_factory=dict)
     # (connector slug, gateway action) -> {"fields": [...], "required": [...]}, from catalog search results.
     gateway_args: dict = field(default_factory=dict)
+    # Tool groups this turn starts without (app/agent/tool_scope.py); use_tools loads one.
+    hidden_tools: list = field(default_factory=list)
     agent: Any = None
     group: Any = None
     teammates: list = field(default_factory=list)
@@ -3140,6 +3142,12 @@ def build_agent(ctx: RunContext, prompt: str):
     trim = context_trim.middleware() if getattr(get_settings(), "trim_old_pages", True) else None
     if trim is not None:
         middleware = [*middleware, trim]
+    hidden = list(getattr(ctx, "hidden_tools", None) or []) if ctx is not None else []
+    if hidden:
+        from app.agent import tool_scope
+
+        kwargs["tools"] = [*kwargs["tools"], tool_scope.load_tool(hidden)]
+        middleware = [*middleware, tool_scope.middleware(hidden)]
     turn = getattr(ctx, "turn_context", "") if ctx is not None else ""
     if turn:
         # The per-turn part of the prompt rides in a context message, so the system prompt stays cacheable.
@@ -3257,11 +3265,37 @@ def _approved_result_messages(slug: str, tool: str, args: dict, result: Any, lim
     return [call, ToolMessage(content=json.dumps(body, default=str), tool_call_id=call_id, name="call_tool")]
 
 
+# Older messages than the last exchange that are this long are sent shortened; the stored message stays whole and
+# read_history(message_id=...) rereads it (docs/LLD.md "Lean context").
+OLD_REPLY_CHARS = 2500
+OLD_REPLY_KEEP = 1800
+OLD_USER_CHARS = 6000
+
+
+def shorten_old(history: list[dict]) -> list[dict]:
+    from app.agent import tool_scope
+
+    if not tool_scope._enabled():
+        return list(history or [])
+    items = list(history or [])
+    out = []
+    for i, item in enumerate(items):
+        content = str(item.get("content") or "")
+        limit = OLD_USER_CHARS if item.get("role") == "user" else OLD_REPLY_CHARS
+        if i < len(items) - 2 and len(content) > limit:
+            ref = f"read_history(message_id={item['id']})" if item.get("id") else "read_history"
+            keep = OLD_REPLY_KEEP if item.get("role") != "user" else OLD_USER_CHARS // 2
+            content = content[:keep] + f"\n…[earlier message shortened: {len(content) - keep} more characters; {ref} reads it in full]"
+            item = {**item, "content": content}
+        out.append(item)
+    return out
+
+
 def _lc_messages(history: list[dict], query: str, extra: list | None = None, after: list | None = None):
     from langchain_core.messages import AIMessage, HumanMessage
 
     out = []
-    for item in history or []:
+    for item in shorten_old(history):
         role = item.get("role")
         content = item.get("content") or ""
         if role == "user":
@@ -3679,37 +3713,65 @@ async def run_deep_agent(
 
     agent_token = AGENT.set(workspace_agent.id) if getattr(workspace_agent, "id", None) else None  # per-agent spend
     browser_token = agent_browsers.use(workspace_agent)  # its own browser, or the shared one (docs/AGENT_BROWSERS.md)
+    from app.connectors.mcp_client import turn_sessions
+
     try:
         if job is None and workspace_agent is not None:
             blocked = await _budget_block(db, workspace_agent)
             if blocked is not None:
                 return blocked
-        return await _run_deep_agent(
-            db,
-            user,
-            session_id,
-            request_id,
-            history,
-            query,
-            confirmations,
-            auto_confirm,
-            workspace_agent,
-            group,
-            teammates,
-            teammate_depth,
-            mentions,
-            progress,
-            job,
-            task_key,
-            images,
-            recent_files,
-            untrusted_input,
-        )
+        async with turn_sessions():  # one MCP session per connector for the whole turn (docs/LLD.md)
+            return await _run_deep_agent(
+                db,
+                user,
+                session_id,
+                request_id,
+                history,
+                query,
+                confirmations,
+                auto_confirm,
+                workspace_agent,
+                group,
+                teammates,
+                teammate_depth,
+                mentions,
+                progress,
+                job,
+                task_key,
+                images,
+                recent_files,
+                untrusted_input,
+            )
     finally:
         if agent_token is not None:
             AGENT.reset(agent_token)
         agent_browsers.BROWSER_SPACE.reset(browser_token)
         reset_client_kind(token)
+
+
+def skip_skill_routing(plan, query: str) -> bool:
+    """A quick web question ("weather in Pune", "who won the match") is never a saved skill: skip the embeddings and the
+    confirm call. Short questions that name a skill still go through routing."""
+    from app.agent import fast_path
+
+    return plan.kind == fast_path.QUICK_WEB and not re.search(r"\b(skill|workflow|routine|usual|as always|like last time)\b", query or "", re.I)
+
+
+def _multi_step(ctx: RunContext, plan) -> bool:
+    """Work worth the finish check's extra model call: a plan the agent wrote down, a skill, a browser or computer task,
+    long work, or many tool calls. A one-shot data question or web lookup is not."""
+    from app.agent import fast_path
+
+    used = list(ctx.used_tools or [])
+    return bool(
+        "write_todos" in used
+        or ctx.active_skills
+        or ctx.task_state
+        or ctx.job is not None
+        or plan.kind in {fast_path.COMPUTER, fast_path.DEEP}
+        or any(fast_path.COMPUTER_TOOLS.match(t or "") for t in used)
+        or len(used) >= 6
+    )
 
 
 async def _budget_block(db, agent) -> dict | None:
@@ -3767,6 +3829,13 @@ async def _run_deep_agent(
     if not getattr(get_settings(), "fast_path_enabled", True) or teammate_depth or job is not None:
         plan = fast_path.TurnPlan(fast_path.DEEP, "fast path off for this run")
     timer.kind = plan.kind
+    simple_turn = (
+        fast_path.is_simple_turn(query, has_uploads="attachment_key=" in (query or "") or bool(images), confirmations=bool(confirmations))
+        and not teammate_depth
+        and job is None
+    )
+    # Memory recall has its own database session: start it now, while connectors, the scratchpad and skills load.
+    memory_task = asyncio.create_task(_load_memory_bounded(db, user, query, workspace_agent, "", light=simple_turn))
     if progress is not None and not teammate_depth:
         # Something visible right away, before connectors, memory and skills load.
         await progress.emit("Looking this up on the web" if plan.kind == fast_path.QUICK_WEB else "Reading your message", kind="start")
@@ -3807,12 +3876,6 @@ async def _run_deep_agent(
         job=job,
         toolkit_assignments=toolkits,
     )
-    uploaded = "attachment_key=" in (query or "")
-    simple_turn = (
-        fast_path.is_simple_turn(query, has_uploads=uploaded or bool(images), confirmations=bool(confirmations))
-        and not teammate_depth
-        and job is None
-    )
     if plan.kind == fast_path.COMPUTER and not fast_path.is_computer_file_query(query.split("\n\n", 1)[0]):
         # Start the browser (and restore saved sign-ins) while the model plans its first step. Files don't need it.
         try:
@@ -3852,13 +3915,13 @@ async def _run_deep_agent(
         except Exception:  # noqa: BLE001
             log.info("skills: loading the skill index failed", exc_info=True)
             await db.rollback()
-        if not file_turn and not simple_turn:
+        if all_skills and not file_turn and not simple_turn and not skip_skill_routing(plan, query):
             skills_task = asyncio.create_task(_route_and_confirm(all_skills, query))
         timer.mark("skills_index", _t)
     if progress is not None and plan.kind != fast_path.QUICK_WEB:
         await progress.emit("Recalling what I know about this" if not teammate_depth else "Picking up the task", kind="memory")
     _t = _time.monotonic()
-    memory = await _load_memory_bounded(db, user, query, workspace_agent, getattr(ctx, "task_key", "") or "", light=simple_turn)
+    memory = await memory_task
     timer.mark("memory", _t)
     pad_bit = pad.as_prompt(ctx.scratchpad)
     if pad_bit:
@@ -3973,6 +4036,14 @@ async def _run_deep_agent(
     # Fixed rules stay in the system prompt (cached by the provider across turns); time, memory, skills, connectors
     # and hints for this turn go in a context message beside the user's message (app/agent/turn_context.py).
     prompt, ctx.turn_context = split_prompt(prompt)
+    from app.agent import tool_scope
+
+    ctx.hidden_tools = tool_scope.hidden_groups(
+        query, history, plan.kind,
+        full=bool(matched_skills or ctx.task_state or job is not None or teammate_depth or _coding_agent(workspace_agent)),
+    )  # fmt: skip
+    if ctx.hidden_tools:
+        ctx.turn_context = (ctx.turn_context + "\n\n" + tool_scope.context_note(ctx.hidden_tools)).strip()
     graph = build_agent(ctx, prompt)
     timer.mark("build", _t)
     _t = _time.monotonic()
@@ -4046,7 +4117,7 @@ async def _run_deep_agent(
             break
     if finished and get_settings().agent_finish_check and finish_check.only_promised(ctx, text):
         text = await _do_what_was_promised(ctx, graph, text, result, progress, callbacks, limit, thread)
-    if finished and get_settings().agent_finish_check and finish_check.should_check(ctx, text):
+    if finished and get_settings().agent_finish_check and finish_check.should_check(ctx, text, multi_step=_multi_step(ctx, plan)):
         text = await _finish_what_is_left(ctx, graph, query, text, result, progress, callbacks, limit, thread)
     timer.mark("agent", _t)
     timer.log()

@@ -206,6 +206,8 @@ class Settings(BaseSettings):
     browser_escalate_model: str = ""  # model after repeated failures; empty = OPENAI_MODEL
     browser_fast_max_steps: int = 12  # model rounds per browser_task
     browser_replay: bool = True  # save successful browser_task runs and replay them without model calls
+    lean_context: bool = True  # scope tool schemas to the turn, shorten old long history (docs/LLD.md "Lean context")
+    mcp_session_reuse: bool = True  # keep one MCP session per connector for a whole turn (docs/LLD.md "MCP sessions per turn")
     mcp_warmup_retry: bool = True  # ask a read-only MCP tool again when its first answer looks not ready (all zeros)
     mcp_tool_timeout_s: int = 600  # how long a connected MCP tool may take (slow dashboards and reports)
     trim_old_pages: bool = True  # send only the latest page result in full to the model (long browser runs stay fast)

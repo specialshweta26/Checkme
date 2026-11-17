@@ -36,9 +36,10 @@ def only_promised(ctx: Any, text: str) -> bool:
     return len(text) < 400 and bool(_PROMISE.search(text)) and "?" not in text
 
 
-def should_check(ctx: Any, text: str) -> bool:
-    """Only finished top-level turns that did work. Turns waiting on the user aren't finished yet."""
-    if not text or ctx.teammate_depth or ctx.pending or ctx.question:
+def should_check(ctx: Any, text: str, multi_step: bool = True) -> bool:
+    """Only finished top-level turns that did multi-step work. Turns waiting on the user aren't finished yet, and a
+    one-shot answer (a data lookup, a web question) has nothing left half done."""
+    if not text or ctx.teammate_depth or ctx.pending or ctx.question or not multi_step:
         return False
     return len(ctx.used_tools) >= MIN_TOOL_CALLS
 

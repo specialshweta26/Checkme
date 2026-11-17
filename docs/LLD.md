@@ -842,6 +842,51 @@ Now:
      `not_run: true` and the call never sent. The agent then calls again correctly.
   3. A gateway that doesn't describe its parameters is never blocked.
 
+### Lean context
+
+Each model call used to carry about 24k tokens before the conversation started: a ~7.8k-token system prompt and ~16k
+tokens of schemas for ~100 built-in tools. A turn makes several calls, each re-sending the history and every tool
+result so far, so turns reached 150k–500k input tokens. `LEAN_CONTEXT` (on by default) cuts what is sent, never what
+is stored:
+
+- **Tool schemas per turn** (`app/agent/tool_scope.py`). Specialised groups are left out when nothing points at them:
+  browser, computer, office files, media, research, agent management, skill authoring and mail attachments.
+  - A group stays when the message or the last two messages point at it (a link, "fill the form", "make a deck"), when
+    the turn is a computer or deep turn, or when one of its tools ran in the last replies.
+  - The turn's context lists what is left out; the model loads a group with `use_tools`. A hidden tool it calls anyway
+    still runs, and from then on its group is sent.
+  - Jobs, teammates, coding agents and turns running a saved skill keep every tool.
+  - A data question goes from 98 tools (~63k characters) to 41 (~25k): about 9.5k tokens less on every call.
+- **History.** Messages older than the last exchange and longer than 2,500 characters (6,000 for the user's own) are
+  sent as their start plus a note; `read_history(message_id=…)` reads one in full. The last exchange is sent whole.
+- **Old tool results.** Context trimming cuts results older than the last four messages at 2,500 characters instead of
+  4,000; `inspect_result` still rereads them. The latest results are sent whole.
+
+### MCP sessions per turn
+
+Every MCP call used to open its own session: an HTTP connection, a TLS handshake and an `initialize` round trip. A turn
+that calls one connector five times paid that five times. `run_deep_agent` now runs inside
+`mcp_client.turn_sessions()`, which keeps one session per (server, credentials) for the turn and closes them when it
+ends. Each user's credentials get their own session, and a teammate's run inside a turn shares the outer pool.
+
+- Each session is opened and closed by its own task, because the MCP client's task groups must be left in the task
+  that entered them, while the agent's tools run in many.
+- A reused session that fails with a broken connection is reopened once and the call repeated. A failure on a fresh
+  session, a timeout, or an error the server answered with is never repeated, so a tool that changes things can't run
+  twice.
+- Progress reports, the tool timeout and the not-ready retry work as before. Work that outlives the turn opens its own
+  sessions. `MCP_SESSION_REUSE=false` turns reuse off.
+
+### Fixed per-turn work
+
+- **Memory recall** starts as soon as the turn is classified, in parallel with loading connectors, the scratchpad and
+  the skill index. It already had its own database session and an 8 s limit.
+- **Skill routing** (embeddings and a confirm call) is skipped for quick web questions unless they mention a skill,
+  workflow or routine. Small talk and file requests already skipped it.
+- **The finish check** (an extra model call) runs only after multi-step work: a written plan, a skill, a browser or
+  computer task, a computer or deep turn, a background job, or six or more tool calls. A one-shot data question or
+  web lookup ends with its answer. `AGENT_FINISH_CHECK=false` still turns it off entirely.
+
 ## 13. Error handling
 
 | Failure | Behavior |
