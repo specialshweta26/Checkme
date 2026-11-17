@@ -863,6 +863,18 @@ schema before it is sent (`deep.check_schema_args`):
 - unknown names or missing required ones are not sent. The agent gets the tool's parameters back (type, description,
   allowed values) and calls again correctly.
 
+**The schema reaches the agent.** Tool search used to return a connected MCP tool's name and description only, so the
+agent had no parameters to fill and guessed them. Now:
+- **Search results include the schema:** the top results (`SCHEMA_ROWS`) carry each tool's input schema
+  (`brief_schema`): each parameter's type, format, description and allowed values, which are required, and whether
+  other names are allowed.
+- **Calls are built from it:** the agent is told to break the request into the tool's parameters by their
+  descriptions, with exact names, formats and allowed values, leaving out what the request doesn't give.
+- **Values another tool lists:** when a parameter's description says its values come from another tool of the same
+  connector ("… slug (see list_…)"), `resolve_listed_values` calls that tool once per turn and sends the exact value
+  it lists for what the user wrote (a display name in any case becomes its slug or id). It only calls a listing tool
+  that reads and needs no arguments. A value that isn't listed is not sent: the agent gets the listed values back.
+
 A schema without properties, or one that allows extra names, is never blocked. Gateway actions are checked the same
 way against their catalog's parameters (`check_gateway_args`). If an answer still covers a wider period than the
 dates sent (`mcp_client.ignored_dates`), the agent is told so, with the real parameter names when they're known.
