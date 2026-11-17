@@ -889,6 +889,12 @@ exactly. Three gaps let the display name through:
   every non-letter into `-` sent `acme-in` for the real slug `acme_in`, and the tool answered with no data.
 - **Where listed values come from:** only a tool name (it has an underscore, such as `list_brands`) after "see",
   "from", "use" or "returned by" counts. Plain words ("data from the warehouse") used to be taken as a tool name.
+- **Sibling listings:** a gateway's search can describe an action without its input schema, and then none of the
+  above ran: `get_daily_sales` got `{"brand": "Lotto"}` and answered all zeros, while `"lotto"` gave the figures. A
+  name-like value (capitals or spaces, not a date, number, paging or free-text parameter) for a parameter whose schema
+  doesn't say where its values come from is now looked up in the same server's `list_<plural>` action
+  (`sibling_listing_schema`: `brand` → `list_brands`, `store_id` → `list_stores`), through execute when only the
+  catalog knows it, once per turn. A value already written like a slug is sent as is, without a lookup.
 - **A listing the lookup can't read:** when the listing tool answers in text (a table or prose) rather than records,
   or the value appears in it exactly as written, the value is sent unchanged instead of refused. Refusing made the
   agent call again and again with a value that was right, and the user got no data.

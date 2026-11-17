@@ -503,6 +503,8 @@ async def _expand_gateway_catalog(ctx: RunContext, conn, query: str) -> list[dic
             continue
         slim = slim_search(raw, q) if isinstance(raw, dict) else {"candidates": []}
         parsed = [item for item in (slim.get("candidates") or []) if isinstance(item, dict)]
+        seen = ctx.gateway_args.setdefault(("__seen__", conn.slug), set())
+        seen.update(str(item.get("public_name") or "") for item in parsed if item.get("public_name"))
         for item in parsed:
             name = str(item.get("public_name") or "")
             if name and (item.get("arguments") or item.get("read_only")):
@@ -1336,16 +1338,58 @@ async def resolve_listed_values(ctx: RunContext, conn, tool_name: str, schema: A
     return out, None
 
 
+_NOT_LISTED = re.compile(r"^(start|end|from|to|since|until|date|day|days|window|period|range|trend|compare|grain|granularity|"
+                         r"limit|offset|page|page_size|sort|sort_by|order|query|q|search|text|format|tz|timezone|lookback|"
+                         r"breakdown|module|config|metric|metrics)$|(_date|_at|_from|_to|_start|_end)$", re.I)
+
+
+def _plural(word: str) -> str:
+    if word.endswith("y") and not word.endswith(("ay", "ey", "oy", "uy")):
+        return word[:-1] + "ies"
+    return word if word.endswith("s") else (word + "es" if word.endswith(("x", "ch", "sh")) else word + "s")
+
+
+def sibling_listing_schema(tool_name: str, args: dict, schema: Any = None) -> dict | None:
+    """A schema saying where each name-like value comes from, for parameters the action's own schema doesn't point
+    anywhere: ``brand`` -> "(see list_brands)", ``store_id`` -> "(see list_stores)" on the same server. Dates, numbers,
+    free text and paging are left alone. None when there is nothing to look up."""
+    if "__" not in tool_name:
+        return None
+    props = schema.get("properties") if isinstance(schema, dict) and isinstance(schema.get("properties"), dict) else {}
+    out: dict = {}
+    for name, value in (args or {}).items():
+        if not isinstance(value, str) or not re.search(r"[A-Za-z]", value) or len(value) > 80 or _NOT_LISTED.search(name):
+            continue
+        if re.fullmatch(r"\d{4}-\d\d-\d\d.*", value.strip()):
+            continue
+        if value == value.strip().lower() and not re.search(r"\s", value.strip()):
+            continue  # already written like a slug or id: nothing to look up
+        spec = props.get(name) if isinstance(props.get(name), dict) else {}
+        if _SEE_TOOL.search(str(spec.get("description") or "")) or _enum_values(spec):
+            continue  # its own schema already says where its values come from
+        stem = re.sub(r"_(slug|id|ids|code|key|name|handle)$", "", name.lower())
+        if not re.fullmatch(r"[a-z][a-z0-9_]{1,40}", stem):
+            continue
+        out[name] = {"type": "string", "description": f"(see list_{_plural(stem)})"}
+    return {"type": "object", "properties": out} if out else None
+
+
 async def _list_through_gateway(ctx: RunContext, conn, names: list[str]) -> Any:
     """Run a listing action that only the gateway's catalog knows, through its execute tool (no arguments)."""
     surface = await _load_gateway_surface(ctx, conn)
     execute = surface.get("execute")
     if not execute:
         return None
+    from app.agent import approval
+
     for name in names:
         known = await gateway_action_args(ctx, conn, name)
         if known is None:
-            continue
+            # The catalog listed the action but described no parameters: a plain listing read still runs.
+            if "__" in name and name in (ctx.gateway_args.get(("__seen__", conn.slug)) or set()) and approval.is_read_action(name.rsplit("__", 1)[-1]):
+                known = {}
+            else:
+                continue
         if (known.get("required") or (brief_schema(known.get("schema")) or {}).get("required")):
             return None
         payload = execute_args(surface.get("execute_schema"), {"tool_name": name, "arguments": {}}, ctx.query or "")
@@ -1827,6 +1871,12 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
                     args, wrong = await resolve_listed_values(ctx, conn, tool_name, schema, args)
             else:
                 wrong = check_gateway_args(known, tool_name, args)
+            if not wrong:
+                # A name the user wrote ("Acme") for a parameter the server lists elsewhere (list_brands -> "acme"),
+                # also when the catalog didn't describe the action's parameters (docs/LLD.md "Sibling listings").
+                sibling = sibling_listing_schema(tool_name, args, schema)
+                if sibling:
+                    args, wrong = await resolve_listed_values(ctx, conn, tool_name, sibling, args)
             if wrong:
                 return wrong  # not run: a gateway quietly ignores names it doesn't know and answers for its defaults
         tool_name, args = wrap_through_execute(tool_name, args, execute)
