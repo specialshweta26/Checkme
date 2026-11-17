@@ -229,3 +229,34 @@ async def test_a_gateway_action_that_writes_is_never_asked_again(monkeypatch):
     ctx = deep.RunContext(db=None, user=SimpleNamespace(id="u1"), connectors={"agilitas": conn}, auto_confirm=True, query="send it")
     await deep.call_user_tool(ctx, "agilitas", "send_campaign", {"segment": "lapsed"})
     assert calls == ["gateway__execute"]
+
+
+async def test_an_action_still_empty_after_the_retries_comes_back_with_other_actions(monkeypatch):
+    """One action of a gateway can be empty for some inputs while another answering the same question has the data."""
+    monkeypatch.setattr(deep, "WARMUP_WAITS_S", (0,))
+    calls = []
+
+    async def invoke(db, user, conn, tool_name, args, attachments=None):
+        calls.append(args)
+        return _dashboard(0)
+
+    async def surface(ctx, conn):
+        return {"search": "gateway__tool_search", "execute": "gateway__execute", "resolve": None}
+
+    async def no_catalog(ctx, conn, tool_name):
+        return None
+
+    async def catalog(ctx, conn, query):
+        return [{"tool_name": "get_sales_dashboard", "arguments": ["brand"], "description": "dashboard"},
+                {"tool_name": "get_daily_sales", "arguments": ["brand", "start", "end"], "description": "Day-level sales"}]  # fmt: skip
+
+    monkeypatch.setattr(deep, "invoke_named", invoke)
+    monkeypatch.setattr(deep, "_load_gateway_surface", surface)
+    monkeypatch.setattr(deep, "gateway_action_args", no_catalog)
+    monkeypatch.setattr(deep, "_expand_gateway_catalog", catalog)
+    conn = SimpleNamespace(kind="mcp", server_url="https://mcp-gateway.example.test/mcp", alias="", name="Gateway",
+                           server_key="mcp:gw", id="c1", health="ok", slug="gw")  # fmt: skip
+    ctx = deep.RunContext(db=None, user=SimpleNamespace(id="u1"), connectors={"gw": conn}, query="product wise sales across 7 days")
+    out = await deep.call_user_tool(ctx, "gw", "get_sales_dashboard", {"brand": "x"})
+    assert out["not_ready"] and [a["tool_name"] for a in out["try_instead"]] == ["get_daily_sales"]
+    assert out["try_instead"][0]["arguments"] == ["brand", "start", "end"] and "try_instead" in out["note"]

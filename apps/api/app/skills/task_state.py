@@ -208,6 +208,14 @@ def step_label(state: dict) -> str:
 # ---------------------------------------------------------------- choosing the skill
 
 
+def names_skill(query: str, skill: dict) -> bool:
+    """The request names this skill: most words of its name are in it. Without the confirm check, a skill that only
+    shares a word with the request ("sales") ran its steps on an unrelated question and the turn ballooned."""
+    words = {w for w in re.findall(r"[a-z0-9]+", str(skill.get("name") or "").lower()) if len(w) > 2}
+    asked = set(re.findall(r"[a-z0-9]+", (query or "").lower()))
+    return bool(words) and len(words & asked) / len(words) >= 0.6
+
+
 async def confirm_skills(query: str, candidates: list[dict], llm=None) -> list[dict]:
     """LLM check that routed skills really fit this request. Keeps the candidates if the check fails."""
     if not candidates:
@@ -237,9 +245,9 @@ async def confirm_skills(query: str, candidates: list[dict], llm=None) -> list[d
         text = resp.choices[0].message.content if hasattr(resp, "choices") else str(resp)
         data = json.loads(text or "{}")
         keep = [str(x) for x in (data.get("use") or [])]
-    except Exception as exc:  # noqa: BLE001 - routing alone still works
-        log.info("skills: confirm step unavailable (%s); keeping routed skills", type(exc).__name__)
-        return [{**c, "match": {**(c.get("match") or {}), "confirmed": None}} for c in candidates]
+    except Exception as exc:  # noqa: BLE001 - routing alone still decides, but only for a skill the request names
+        log.info("skills: confirm step unavailable (%s); keeping only skills the request names", type(exc).__name__)
+        return [{**c, "match": {**(c.get("match") or {}), "confirmed": None}} for c in candidates if names_skill(query, c)]
     by_id = {str(c.get("id")): c for c in candidates}
     return [{**by_id[i], "match": {**(by_id[i].get("match") or {}), "confirmed": True}} for i in keep if i in by_id]
 
