@@ -1246,7 +1246,9 @@ def brief_schema(schema: Any) -> dict | None:
     return out
 
 
-_SEE_TOOL = re.compile(r"\b(?:see|from|via|use|listed (?:by|in)|returned by)\s+`?([a-z][a-z0-9_]{2,})`?(?:\(\))?", re.I)
+# "(see list_brands)", "from `get_stores`", "returned by list_regions()": a tool name has an underscore, so plain words
+# ("data from the warehouse", "use the brand code") never count as one.
+_SEE_TOOL = re.compile(r"\b(?:see|from|via|use|listed (?:by|in)|returned by)\s+`?([a-z][a-z0-9]*_[a-z0-9_]+)`?(?:\(\))?", re.I)
 
 
 def _norm_value(value: Any) -> str:
@@ -1324,6 +1326,10 @@ async def resolve_listed_values(ctx: RunContext, conn, tool_name: str, schema: A
         exact = _value_from_listing(value, listing, param)
         if exact is not None:
             out[param] = exact
+        elif _listed_as_written(value, listing) or not _has_rows(listing):
+            # The value is in the listing as written, or the listing is prose / a table the lookup can't read: send it
+            # unchanged rather than refuse a value that may be right.
+            continue
         else:
             return out, {"error": f"{param} '{value}' is not one of the values {names[-1]} lists. Pick the right one from listed_values "
                                   "and call again.", "listed_values": fit_payload(listing, 20000), "not_run": True}  # fmt: skip
@@ -1363,12 +1369,33 @@ def _enum_values(spec: dict) -> list:
     return values
 
 
+def _listed_as_written(value: str, listing: Any) -> bool:
+    """The exact value (same characters, any case) appears in the listing as a whole token, also inside its text."""
+    text = listing if isinstance(listing, str) else json.dumps(listing, default=str, ensure_ascii=False)
+    return bool(re.search(r"(?<![A-Za-z0-9_\-])" + re.escape(value.strip()) + r"(?![A-Za-z0-9_\-])", text, re.I))
+
+
+def _has_rows(listing: Any, depth: int = 0) -> bool:
+    """The listing is a list of values or records somewhere (what the lookup can match), not only text."""
+    if depth > 6:
+        return False
+    if isinstance(listing, list):
+        return any(isinstance(v, (dict, str, int)) for v in listing[:50])
+    if isinstance(listing, dict):
+        return any(_has_rows(v, depth + 1) for v in listing.values() if isinstance(v, (dict, list)))
+    return False
+
+
 def _is_slug_param(name: str, spec: dict) -> bool:
     """The schema says this parameter takes a slug (its name or description), a lowercase machine id."""
     return "slug" in str(name).lower() or bool(re.search(r"\bslugs?\b", str(spec.get("description") or ""), re.I))
 
 
 def _slugify(value: str) -> str:
+    """A display name ("Acme West") as a slug guess. A single word is only lowercased ("Acme" -> "acme"): its "_" and
+    "-" stay, because turning "acme_in" into "acme-in" sent a slug the tool doesn't know and it answered with no data."""
+    if not re.search(r"\s", value.strip()):
+        return value.strip().lower()
     return re.sub(r"[^a-z0-9]+", "-", value.strip().lower()).strip("-") or value
 
 

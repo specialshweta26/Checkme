@@ -189,3 +189,35 @@ async def test_a_gateway_action_is_checked_against_its_catalog_schema(monkeypatc
     assert out["days"][0]["net_sales"] == 640978
     assert sent[-1] == ("gateway__execute", {"tool_name": "srv__get_daily_sales",
                                              "arguments": {"brand": "lotto", "start": "2026-11-09", "end": "2026-11-17"}})  # fmt: skip
+
+
+# --- values that were rewritten into ones the tool doesn't know (empty answers) ---------------------------------------
+
+
+def test_a_slug_keeps_its_underscores_and_ids_are_not_hyphenated():
+    schema = {"type": "object", "properties": {"brand_slug": {"type": "string", "description": "Brand slug (see list_brands)"},
+                                               "store_id": {"type": "string", "description": "Store id, the slug of the store"},
+                                               "code": {"type": "string"}}}  # fmt: skip
+    args, wrong = deep.check_schema_args(schema, "t", {"brand_slug": "nike_in", "store_id": "blr_01", "code": "AB_12"})
+    assert wrong is None and args == {"brand_slug": "nike_in", "store_id": "blr_01", "code": "AB_12"}
+    assert deep.check_schema_args(schema, "t", {"brand_slug": "Nike_IN"})[0] == {"brand_slug": "nike_in"}
+    assert deep.check_schema_args(schema, "t", {"brand_slug": "Nike India"})[0] == {"brand_slug": "nike-india"}
+
+
+def test_only_tool_names_count_as_where_values_come_from():
+    for text in ("Data from the warehouse", "Use the brand code", "Start date, from which to report", "via email"):
+        assert deep._SEE_TOOL.search(text) is None, text
+    for text, tool in (("Brand slug (see list_brands)", "list_brands"), ("returned by `get_stores()`", "get_stores")):
+        assert deep._SEE_TOOL.search(text).group(1) == tool
+
+
+async def test_a_value_in_a_text_listing_is_sent_not_refused(monkeypatch):
+    hits = [_hit("srv__get_catalog_performance", LISTED), _hit("srv__list_brands", {"type": "object", "properties": {}})]
+    answers = {"srv__list_brands": {"text": "| slug | name |\n|---|---|\n| one8 | One 8 |\n| lotto_in | Lotto India |"},
+               "srv__get_catalog_performance": {"rows": [{"sku": "A", "units": 4}]}}  # fmt: skip
+    ctx, sent = _ctx_with(monkeypatch, hits, answers)
+    out = await deep.call_user_tool(ctx, "gw", "srv__get_catalog_performance", {"brand": "lotto_in"})
+    assert out["rows"] and sent[-1] == ("srv__get_catalog_performance", {"brand": "lotto_in"})
+    # A listing the lookup can't read (prose) never blocks the call.
+    out = await deep.call_user_tool(ctx, "gw", "srv__get_catalog_performance", {"brand": "Puma"})
+    assert out["rows"] and sent[-1] == ("srv__get_catalog_performance", {"brand": "puma"})
