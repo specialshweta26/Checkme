@@ -507,7 +507,7 @@ async def _expand_gateway_catalog(ctx: RunContext, conn, query: str) -> list[dic
             name = str(item.get("public_name") or "")
             if name and (item.get("arguments") or item.get("read_only")):
                 ctx.gateway_args[(conn.slug, name)] = {"fields": list(item.get("arguments") or []), "required": list(item.get("required") or []),
-                                                       "read_only": bool(item.get("read_only"))}  # fmt: skip
+                                                       "read_only": bool(item.get("read_only")), "schema": item.get("schema") or {}}  # fmt: skip
         if parsed:
             break
     rows = nested_tool_rows(
@@ -1121,7 +1121,14 @@ async def search_user_tools(ctx: RunContext, query: str, connector_slug: str | N
         if is_catalog_tool(row["tool_name"]) or row["tool_name"] in GATEWAY_EXECUTE_NAMES
     ]
     merged = nested + data_local + (catalog_local if not nested else [])
-    return [{k: v for k, v in row.items() if k != "score"} for row in merged]
+    out = []
+    for i, row in enumerate(merged):
+        item = {k: v for k, v in row.items() if k not in {"score", "schema"}}
+        brief = brief_schema(row.get("schema")) if i < SCHEMA_ROWS else None
+        if brief and "parameters" not in item:
+            item["parameters"] = brief  # a gateway action's own parameters, from its catalog entry
+        out.append(item)
+    return out
 
 
 def _builtin_mail_spec(conn, tool_name: str) -> dict | None:
@@ -1271,7 +1278,8 @@ def _value_from_listing(sent: str, listing: Any, param: str) -> Any:
     walk(listing)
     for d in dicts:
         if any(isinstance(v, (str, int)) and _norm_value(v) == target for v in d.values()):
-            for key in (param, "slug", "id", "key", "code", "value", "handle", "name"):
+            # The machine value first: a listing row often holds the display name under the parameter's own name.
+            for key in ("slug", "id", "key", "code", "value", "handle", param, "name"):
                 if isinstance(d.get(key), (str, int)) and not isinstance(d.get(key), bool):
                     return d[key]
     return next((s for s in strings if _norm_value(s) == target), None)
@@ -1305,6 +1313,8 @@ async def resolve_listed_values(ctx: RunContext, conn, tool_name: str, schema: A
                 reads = lister is not None and (lister.read_only or approval.is_read_action(lister.tool_name))
                 if reads and not (brief_schema(lister.schema) or {}).get("required"):
                     listing = await invoke_named(ctx.db, ctx.user, conn, lister.tool_name, {}, ctx.attachments)
+                elif lister is None and approval.is_read_action(ref.group(1)):
+                    listing = await _list_through_gateway(ctx, conn, names)
             except Exception:  # noqa: BLE001 - without the listing the value goes as written
                 log.info("listing %s for %s failed", names[0], param, exc_info=True)
             ctx.gateway_args[key] = listing
@@ -1318,6 +1328,23 @@ async def resolve_listed_values(ctx: RunContext, conn, tool_name: str, schema: A
             return out, {"error": f"{param} '{value}' is not one of the values {names[-1]} lists. Pick the right one from listed_values "
                                   "and call again.", "listed_values": fit_payload(listing, 20000), "not_run": True}  # fmt: skip
     return out, None
+
+
+async def _list_through_gateway(ctx: RunContext, conn, names: list[str]) -> Any:
+    """Run a listing action that only the gateway's catalog knows, through its execute tool (no arguments)."""
+    surface = await _load_gateway_surface(ctx, conn)
+    execute = surface.get("execute")
+    if not execute:
+        return None
+    for name in names:
+        known = await gateway_action_args(ctx, conn, name)
+        if known is None:
+            continue
+        if (known.get("required") or (brief_schema(known.get("schema")) or {}).get("required")):
+            return None
+        payload = execute_args(surface.get("execute_schema"), {"tool_name": name, "arguments": {}}, ctx.query or "")
+        return await invoke_named(ctx.db, ctx.user, conn, execute, payload, ctx.attachments)
+    return None
 
 
 def _enum_values(spec: dict) -> list:
@@ -1334,6 +1361,15 @@ def _enum_values(spec: dict) -> list:
     if isinstance(items, dict):
         values.extend(_enum_values(items))
     return values
+
+
+def _is_slug_param(name: str, spec: dict) -> bool:
+    """The schema says this parameter takes a slug (its name or description), a lowercase machine id."""
+    return "slug" in str(name).lower() or bool(re.search(r"\bslugs?\b", str(spec.get("description") or ""), re.I))
+
+
+def _slugify(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", value.strip().lower()).strip("-") or value
 
 
 def check_schema_args(schema: Any, tool_name: str, args: dict) -> tuple[dict, dict | None]:
@@ -1359,6 +1395,8 @@ def check_schema_args(schema: Any, tool_name: str, args: dict) -> tuple[dict, di
                 value = next((v for v in allowed if v.lower() == value.strip().lower()), value)
             elif isinstance(value, list) and allowed:
                 value = [next((v for v in allowed if isinstance(x, str) and v.lower() == x.strip().lower()), x) for x in value]
+        if isinstance(spec, dict) and isinstance(value, str) and _is_slug_param(name, spec) and not _enum_values(spec):
+            value = _slugify(value)
         fixed[name] = value
     unknown = [k for k in fixed if k not in props]
     required = [r for r in (schema.get("required") or []) if r not in fixed]
@@ -1372,7 +1410,8 @@ def check_schema_args(schema: Any, tool_name: str, args: dict) -> tuple[dict, di
     if required:
         parts.append(f"it needs {', '.join(required)}")
     return fixed, {"error": "; ".join(parts) + ". Call it again with exactly these parameter names and allowed values.",
-                   "parameters": params, "required": list(schema.get("required") or []), "not_run": True}  # fmt: skip
+                   "parameters": params, "arguments_expected": list(props), "required": list(schema.get("required") or []),
+                   "not_run": True}  # fmt: skip
 
 
 async def _direct_tool(ctx: RunContext, conn, tool_name: str, args: dict, hit) -> tuple | None:
@@ -1479,8 +1518,8 @@ async def get_user_tool_schema(ctx: RunContext, connector_slug: str, tool_name: 
                     "connector_slug": connector_slug,
                     "tool_name": tool_name,
                     "description": f"Data tool on {conn.alias or conn.name}; it runs through {execute}. Use exactly these argument names.",
-                    "parameters": {"type": "object", "properties": {f: {} for f in known["fields"]}, "required": known["required"],
-                                   "additionalProperties": False},  # fmt: skip
+                    "parameters": known.get("schema") or {"type": "object", "properties": {f: {} for f in known["fields"]},
+                                                          "required": known["required"], "additionalProperties": False},  # fmt: skip
                     "execute_via": execute,
                     "read_only": True,
                     "destructive": False,
@@ -1752,7 +1791,15 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
         from app.routing.retrieve import is_catalog_tool as _catalog_tool
 
         if execute and tool_name != execute and not _catalog_tool(tool_name):
-            wrong = check_gateway_args(await gateway_action_args(ctx, conn, tool_name), tool_name, args)
+            known = await gateway_action_args(ctx, conn, tool_name)
+            schema = (known or {}).get("schema")
+            if schema:
+                # The action's own schema from the catalog: the same checks and lookups as a directly listed tool.
+                args, wrong = check_schema_args(schema, tool_name, args)
+                if not wrong:
+                    args, wrong = await resolve_listed_values(ctx, conn, tool_name, schema, args)
+            else:
+                wrong = check_gateway_args(known, tool_name, args)
             if wrong:
                 return wrong  # not run: a gateway quietly ignores names it doesn't know and answers for its defaults
         tool_name, args = wrap_through_execute(tool_name, args, execute)

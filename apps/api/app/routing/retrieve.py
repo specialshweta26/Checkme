@@ -314,6 +314,7 @@ def nested_tool_rows(
                 # The action's own parameter names: call it with exactly these (docs/LLD.md "Gateway arguments").
                 "arguments": list(item.get("arguments") or []),
                 "required": list(item.get("required") or []),
+                **({"schema": item["schema"]} if isinstance(item.get("schema"), dict) and item.get("schema") else {}),
                 "score": retrieve_score(name, score, terms),
             }
         )
