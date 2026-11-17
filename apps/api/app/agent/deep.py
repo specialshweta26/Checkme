@@ -453,6 +453,7 @@ async def _load_gateway_surface(ctx: RunContext, conn) -> dict:
     for name in GATEWAY_EXECUTE_NAMES:
         if name in by_name:
             surface["execute"] = name
+            surface["execute_schema"] = by_name[name].schema or {}
             break
     for name in GATEWAY_RESOLVE_NAMES:
         if name in by_name:
@@ -1374,6 +1375,61 @@ def check_schema_args(schema: Any, tool_name: str, args: dict) -> tuple[dict, di
                    "parameters": params, "required": list(schema.get("required") or []), "not_run": True}  # fmt: skip
 
 
+async def _direct_tool(ctx: RunContext, conn, tool_name: str, args: dict, hit) -> tuple | None:
+    """(hit, tool name, arguments) of the connector's own listed tool behind this call, or None to keep the call as is.
+    A name without the server prefix finds ``<server>__<name>``; an execute call naming an action the connector lists
+    itself is unwrapped into a direct call with the action's own arguments."""
+    from app.agent import approval
+    from app.routing.retrieve import is_catalog_tool, is_execute_tool
+    from app.routing.select import load_listed_as
+
+    try:
+        if hit is None and not is_catalog_tool(tool_name) and not is_execute_tool(tool_name):
+            found = await load_listed_as(ctx.db, conn, tool_name)
+            return (found, found.tool_name, args) if found is not None else None
+        if is_execute_tool(tool_name):
+            actions = [a for a in approval.nested_actions(tool_name, args) if not is_execute_tool(a)]
+            inner = next((args.get(k) for k in _EXECUTE_ARG_KEYS if isinstance(args.get(k), dict)), None)
+            if len(actions) == 1 and inner is not None:
+                name = actions[0]
+                found = (await load_named(ctx.db, [conn], {(conn.slug, name)}) or [None])[0] or await load_listed_as(ctx.db, conn, name)
+                if found is not None and not is_execute_tool(found.tool_name):
+                    return found, found.tool_name, dict(inner)
+    except Exception:  # noqa: BLE001 - the call goes as it was
+        log.info("direct tool lookup for %s failed", tool_name, exc_info=True)
+    return None
+
+
+_EXECUTE_NAME_KEYS = ("tool_name", "tool", "name", "public_name", "public_tool_name", "tool_slug", "action", "tool_id")
+_EXECUTE_ARG_KEYS = ("arguments", "args", "params", "parameters", "input", "tool_input", "tool_args", "payload")
+_EXECUTE_REQUEST_KEYS = ("query", "request", "intent", "task", "prompt", "question")
+
+
+def execute_args(schema: Any, args: dict, request: str = "") -> dict:
+    """The gateway's execute call in the shape its own input schema asks for: its key for the action's name, its key
+    for the action's arguments, and the user's request when it requires one. Lumio always sent
+    ``{"tool_name", "arguments"}``; a gateway that names them differently dropped the arguments, or picked the action
+    by its own search."""
+    props = schema.get("properties") if isinstance(schema, dict) and isinstance(schema.get("properties"), dict) else {}
+    if not props:
+        return args
+    name = next((args.get(k) for k in _EXECUTE_NAME_KEYS if isinstance(args.get(k), str)), None)
+    inner = next((args.get(k) for k in _EXECUTE_ARG_KEYS if isinstance(args.get(k), dict)), None)
+    name_key = next((k for k in _EXECUTE_NAME_KEYS if k in props), None)
+    arg_key = next((k for k in _EXECUTE_ARG_KEYS if k in props), None)
+    if name is None or name_key is None:
+        return args
+    out = {k: v for k, v in args.items() if k in props and k not in _EXECUTE_NAME_KEYS and k not in _EXECUTE_ARG_KEYS}
+    out[name_key] = name
+    if arg_key is not None:
+        spec = props.get(arg_key) if isinstance(props.get(arg_key), dict) else {}
+        out[arg_key] = json.dumps(inner or {}) if spec.get("type") == "string" else (inner or {})
+    for key in _EXECUTE_REQUEST_KEYS:
+        if key in props and key in (schema.get("required") or []) and key not in out:
+            out[key] = request or name.replace("_", " ")
+    return out
+
+
 def check_gateway_args(known: dict | None, tool_name: str, args: dict) -> dict | None:
     """An error for the agent when a call uses argument names the gateway action doesn't take, or leaves out required
     ones (docs/LLD.md "Gateway arguments"); None when the call matches, or the action's parameters aren't known."""
@@ -1684,6 +1740,12 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
             "handoff": False,
             "message": "The user finished on the live computer. Call browser_snapshot, then continue the remaining steps.",
         }
+    if ctx.db is not None and spec is None and _is_user_mcp(conn):
+        # Call the connector's own tool directly, the way other MCP clients do, whenever it lists one for this name:
+        # also when the agent named it without its server prefix, or wrapped it in the gateway's execute call.
+        direct = await _direct_tool(ctx, conn, tool_name, args, hit)
+        if direct is not None:
+            hit, tool_name, args = direct
     if hit is None and spec is None:
         surface = await _load_gateway_surface(ctx, conn)
         execute = surface.get("execute")
@@ -1694,6 +1756,8 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
             if wrong:
                 return wrong  # not run: a gateway quietly ignores names it doesn't know and answers for its defaults
         tool_name, args = wrap_through_execute(tool_name, args, execute)
+        if execute and tool_name == execute:
+            args = execute_args(surface.get("execute_schema"), args, ctx.query)
     args = _rewrite_catalog_search_args(tool_name, args, ctx.query, conn)
     from app.routing.retrieve import is_catalog_tool as _is_catalog, is_execute_tool as _is_execute
 

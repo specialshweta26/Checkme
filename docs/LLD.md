@@ -879,6 +879,20 @@ A schema without properties, or one that allows extra names, is never blocked. G
 way against their catalog's parameters (`check_gateway_args`). If an answer still covers a wider period than the
 dates sent (`mcp_client.ignored_dates`), the agent is told so, with the real parameter names when they're known.
 
+### Gateway execution
+
+Other MCP clients call a gateway's listed tool directly (`tools/call` on `<server>__<tool>`). Lumio sent the call
+through the gateway's `execute` tool whenever the agent named a tool without its server prefix, and always shaped it
+as `{"tool_name", "arguments"}` whatever execute's own schema asked for. A gateway that names those keys differently
+dropped the arguments, or picked the action by its own search. Now:
+- **Without the prefix:** a name given without its server prefix calls the connector's own listed `<server>__<name>`
+  directly (`select.load_listed_as`, only when exactly one tool matches).
+- **Wrapped in execute:** an execute call naming one action that the connector lists itself is unwrapped into a
+  direct call with the action's own arguments.
+- **Execute itself:** when a call still goes through execute, it takes the shape of execute's input schema
+  (`deep.execute_args`): its key for the action name, its key for the arguments (as a JSON string if the schema says
+  string), and the user's request when the schema requires one.
+
 ### Connector results
 
 A connector's answer used to be cut at 24,000 characters, and the `call_tool` wrapper cut again at 60,000. Anything
