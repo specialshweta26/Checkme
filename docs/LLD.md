@@ -874,6 +874,15 @@ answers the same question once, before telling the user the data isn't there.
 set up, and that one flag kept Lumio waiting minutes on data it already had. Flags, empty answers and all-zero figures
 mark an answer not ready only when it has no real figures at all.
 
+**A source that isn't connected, and dates that were ignored.**
+- `connected: false` (or `is_connected: false`) now counts as not ready, like `available: false`. Before, it was taken
+  as an answer, with no retry and no other action tried.
+- A tool that doesn't know an argument's name answers for its defaults. One was sent `start_date` / `end_date` and
+  answered for its own last 30 days. When the answer's `range` / `window` / `period` is wider than the dates sent,
+  `mcp_client.ignored_dates` catches it. The call isn't retried, since the same arguments would be ignored again.
+  Instead the agent is told the dates were ignored, given the action's real parameter names when the catalog has
+  them, and reminded that values can be exact-match (an id's spelling or case).
+
 **Retrying through a gateway.** A read sent through a gateway's execute tool is retried when its data isn't ready,
 like a direct read. The all-zero check skips numbers that label rather than measure, so a dashboard answering zeros
 with a row per hour (`"hour": 1…23`), or a gateway wrapper (`confidence`, `tool_calls`, `…_ms`), is still recognised.

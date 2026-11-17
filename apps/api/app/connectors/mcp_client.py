@@ -351,7 +351,7 @@ def looks_not_ready(payload: Any) -> str:
             continue
         if flag:
             continue
-        if k in {"ready", "is_ready", "loaded", "available"} and value is False:
+        if k in {"ready", "is_ready", "loaded", "available", "connected", "is_connected"} and value is False:
             flag = f"it reported {k}=false"
         elif k in {"needs_compute", "loading", "is_loading", "pending", "stale"} and value is True:
             flag = f"it reported {k}"
@@ -365,6 +365,38 @@ def looks_not_ready(payload: Any) -> str:
         return flag
     if len(numbers) >= 3:
         return "every figure was zero"
+    return ""
+
+
+_DATE = re.compile(r"\b(20\d\d-\d\d-\d\d)")
+_WINDOW_KEYS = {"range", "window", "period", "date_range", "dates"}
+
+
+def _dates_in(value: Any, depth: int = 0) -> set[str]:
+    if depth > 4:
+        return set()
+    if isinstance(value, str):
+        return set(_DATE.findall(value))
+    if isinstance(value, dict):
+        return set().union(*(_dates_in(v, depth + 1) for v in value.values())) if value else set()
+    if isinstance(value, list):
+        return set().union(*(_dates_in(v, depth + 1) for v in value[:20])) if value else set()
+    return set()
+
+
+def ignored_dates(args: Any, payload: Any) -> str:
+    """The answer covers a wider period than the call asked for ("" when it doesn't, or can't be told): its range or
+    window starts before or ends after the dates sent. A tool that doesn't know an argument's name quietly answers for its defaults, so
+    this usually means the argument names were wrong, and asking again with the same ones won't help."""
+    sent = _dates_in(args)
+    if not sent or not isinstance(payload, dict):
+        return ""
+    for key in _WINDOW_KEYS:
+        window = payload.get(key)
+        got = _dates_in(window) if isinstance(window, (dict, list, str)) else set()
+        # A wider window than asked for: the dates weren't applied (a narrower one can be a tool clamping to its data).
+        if got and (min(got) < min(sent) or max(got) > max(sent)):
+            return f"it answered for {min(got)} to {max(got)}, not the dates sent ({min(sent)} to {max(sent)})"
     return ""
 
 
