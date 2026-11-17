@@ -305,69 +305,7 @@ def root_error(exc: BaseException) -> BaseException:
     return exc
 
 
-# --- data that isn't ready yet ----------------------------------------------------------------------------------
-# Some MCP servers sit on dashboards that load their data on demand (about two minutes): asked before that, they answer
-# at once with zeros or a "not ready" flag instead of waiting (docs/LLD.md "Slow MCP tools").
-_NOT_READY_TEXT = ("not connected", "not ready", "still loading", "loading data", "try again", "warming up", "being prepared",
-                   "no data yet", "data is loading", "processing")  # fmt: skip
-# Numbers that label or describe the answer rather than measure the business: an hour or date in a row, an id, a
-# page, or a gateway's own bookkeeping (confidence, tool calls, time taken). An all-zero dashboard has these too.
-_NOT_A_FIGURE = re.compile(
-    r"^(hour|day|date|week|month|year|quarter|weekday|dow|period|index|idx|rank|position|page|limit|offset|id|version|"
-    r"confidence|score|hops|tool_calls|calls|errors|attempts|retries|status_code|code)$|_(id|ms|s|seconds|time|at|index)$|"
-    r"(duration|latency|elapsed|took|timing)",
-)
-_NOT_READY_STATUS = {"loading", "pending", "processing", "warming", "queued", "computing", "in_progress", "not_ready", "stale"}
-
-
-def _walk(value: Any, depth: int = 0):
-    if depth > 8:
-        return
-    if isinstance(value, dict):
-        for k, v in value.items():
-            yield k, v
-            yield from _walk(v, depth + 1)
-    elif isinstance(value, list):
-        for v in value[:200]:
-            yield None, v
-            yield from _walk(v, depth + 1)
-
-
-def looks_not_ready(payload: Any) -> str:
-    """Why a tool's answer looks like data that hasn't loaded yet ("" when it looks like a real answer).
-
-    Real figures always win: an answer with any non-zero business figure is ready, even if one of its sections says
-    "available": false or "not connected" (a dashboard often has an optional part, such as web traffic or a feed, that
-    isn't set up). Otherwise it is not ready when it is empty, flags itself (ready false, needs_compute, a loading
-    status, a 'still loading' message) or has three or more figures that are all zero."""
-    if isinstance(payload, dict) and payload.get("empty"):
-        return "it returned no data"
-    numbers: list[float] = []
-    flag = ""
-    for key, value in _walk(payload):
-        k = str(key or "").lower()
-        if isinstance(value, (int, float)) and not isinstance(value, bool) and not _NOT_A_FIGURE.search(k):
-            numbers.append(float(value))
-            continue
-        if flag:
-            continue
-        if k in {"ready", "is_ready", "loaded", "available", "connected", "is_connected"} and value is False:
-            flag = f"it reported {k}=false"
-        elif k in {"needs_compute", "loading", "is_loading", "pending", "stale"} and value is True:
-            flag = f"it reported {k}"
-        elif k in {"status", "state", "feed_status", "sync_status"} and str(value).strip().lower().replace(" ", "_") in _NOT_READY_STATUS:
-            flag = f"its status was {value}"
-        elif isinstance(value, str) and len(value) < 400 and any(p in value.lower() for p in _NOT_READY_TEXT):
-            flag = f"it said “{value[:120]}”"
-    if any(n != 0 for n in numbers):
-        return ""  # real data is there: use it
-    if flag:
-        return flag
-    if len(numbers) >= 3:
-        return "every figure was zero"
-    return ""
-
-
+# --- arguments a tool ignored -----------------------------------------------------------------------------------
 _DATE = re.compile(r"\b(20\d\d-\d\d-\d\d)")
 _WINDOW_KEYS = {"range", "window", "period", "date_range", "dates"}
 

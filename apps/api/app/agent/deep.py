@@ -1175,6 +1175,61 @@ async def _gateway_read_only(ctx: RunContext, conn, tool_name: str, args: dict) 
     return marked
 
 
+def _enum_values(spec: dict) -> list:
+    values = list(spec.get("enum") or [])
+    for key in ("anyOf", "oneOf"):
+        for option in spec.get(key) or []:
+            if isinstance(option, dict):
+                values.extend(option.get("enum") or [])
+                if "const" in option:
+                    values.append(option["const"])
+    if "const" in spec:
+        values.append(spec["const"])
+    items = spec.get("items")
+    if isinstance(items, dict):
+        values.extend(_enum_values(items))
+    return values
+
+
+def check_schema_args(schema: Any, tool_name: str, args: dict) -> tuple[dict, dict | None]:
+    """(arguments to send, error) for a call to a tool whose input schema is known.
+
+    A tool that doesn't recognise an argument's name ignores it and answers for its defaults: sent ``start_date`` /
+    ``end_date``, one answered for its own last 30 days, and another client sending its real names got the data. So:
+    - a name that differs from one of the tool's parameters only in case is renamed to it;
+    - a value that matches one of a parameter's allowed values except for case is sent as the allowed value;
+    - names the tool doesn't take, or missing required ones, are not sent: the agent gets the tool's parameters back
+      and calls again correctly. A schema without properties, or one that allows extra names, is never blocked."""
+    if not isinstance(schema, dict) or not isinstance(schema.get("properties"), dict) or not schema["properties"]:
+        return args, None
+    props: dict = schema["properties"]
+    by_lower = {str(name).lower(): name for name in props}
+    fixed: dict = {}
+    for key, value in (args or {}).items():
+        name = key if key in props else by_lower.get(str(key).lower(), key)
+        spec = props.get(name)
+        if isinstance(spec, dict):
+            allowed = [v for v in _enum_values(spec) if isinstance(v, str)]
+            if isinstance(value, str) and value not in allowed:
+                value = next((v for v in allowed if v.lower() == value.strip().lower()), value)
+            elif isinstance(value, list) and allowed:
+                value = [next((v for v in allowed if isinstance(x, str) and v.lower() == x.strip().lower()), x) for x in value]
+        fixed[name] = value
+    unknown = [k for k in fixed if k not in props]
+    required = [r for r in (schema.get("required") or []) if r not in fixed]
+    if (not unknown or schema.get("additionalProperties") is True) and not required:
+        return fixed, None
+    params = {name: {k: spec[k] for k in ("type", "description", "enum", "format") if isinstance(spec, dict) and k in spec}
+              for name, spec in props.items()}  # fmt: skip
+    parts = [f"{tool_name} takes {', '.join(props)}"]
+    if unknown and schema.get("additionalProperties") is not True:
+        parts.append(f"you sent {', '.join(unknown)}, which it does not take (a tool ignores names it doesn't know and answers for its defaults)")
+    if required:
+        parts.append(f"it needs {', '.join(required)}")
+    return fixed, {"error": "; ".join(parts) + ". Call it again with exactly these parameter names and allowed values.",
+                   "parameters": params, "required": list(schema.get("required") or []), "not_run": True}  # fmt: skip
+
+
 def check_gateway_args(known: dict | None, tool_name: str, args: dict) -> dict | None:
     """An error for the agent when a call uses argument names the gateway action doesn't take, or leaves out required
     ones (docs/LLD.md "Gateway arguments"); None when the call matches, or the action's parameters aren't known."""
@@ -1372,17 +1427,6 @@ def _is_user_mcp(conn) -> bool:
     return getattr(conn, "kind", "") != "builtin" and bool(getattr(conn, "server_url", "") or "")
 
 
-WARMUP_WAITS_S = (20, 40, 60)  # retries for data that isn't ready yet: up to two minutes in all
-_READ_VERBS = re.compile(r"^(get|list|search|find|fetch|read|query|show|describe|lookup|count|report|summar|analy|view)", re.I)
-
-
-def _reads_only(tool_name: str, hit) -> bool:
-    """Safe to ask again: the server marked it read-only, or its name says it reads (get_…, list_…, search_…)."""
-    if hit is not None and (getattr(hit, "read_only", False) and not getattr(hit, "destructive", False)):
-        return True
-    return bool(_READ_VERBS.match(tool_name or ""))
-
-
 async def _note_ignored_args(ctx: RunContext, conn, tool_name: str, args: dict, result: Any, why: str) -> Any:
     """The tool answered for other dates than it was sent: tell the agent, with the action's real parameter names when
     the catalog has them, so it calls again correctly instead of reporting the wrong period (docs/LLD.md)."""
@@ -1402,61 +1446,6 @@ async def _note_ignored_args(ctx: RunContext, conn, tool_name: str, args: dict, 
                else "call get_tool_schema for it and call it again with its own parameter names."))  # fmt: skip
     body = result if isinstance(result, dict) else {"data": result}
     return {**body, "args_ignored": True, "note": note, **({"arguments_expected": known["fields"]} if known and known.get("fields") else {})}
-
-
-async def _offer_other_actions(ctx: RunContext, conn, tool_name: str, args: dict, result: dict) -> dict:
-    """An action that still answered with no data after the retries: hand the agent the connector's other actions that
-    match the user's request, so it tries one of those instead of guessing (one action of a gateway can be empty for
-    some inputs while another answering the same question has the data). Works for any gateway with a catalog."""
-    from app.agent import approval
-    from app.routing.retrieve import is_execute_tool
-
-    tried = {a for a in approval.nested_actions(tool_name, args) if not is_execute_tool(a)} | {tool_name}
-    try:
-        rows = await _expand_gateway_catalog(ctx, conn, ctx.query or "")
-    except Exception:  # noqa: BLE001 - the answer stands without suggestions
-        log.info("catalog lookup for other actions failed", exc_info=True)
-        return result
-    others = [{"tool_name": r["tool_name"], "arguments": r.get("arguments") or [], "description": str(r.get("description") or "")[:200]}
-              for r in rows if r.get("tool_name") not in tried][:5]  # fmt: skip
-    if not others:
-        return result
-    return {**result, "try_instead": others,
-            "note": str(result.get("note") or "") + " Other actions on this connector that match the request are in try_instead: "
-            "call the best one (with its own argument names) before telling the user there is no data."}  # fmt: skip
-
-
-async def retry_until_ready(ctx: RunContext, conn, tool_name: str, result: Any, again) -> Any:
-    """A read-only tool of a connected MCP answered with data that looks not ready (docs/LLD.md "Slow MCP tools"): its
-    dashboard may load on demand and answer with zeros until it has. Ask again after WARMUP_WAITS_S, saying so in the
-    chat, and return the first answer that looks ready; if none does, the last one, marked so the agent says plainly
-    that the source returned no data rather than reporting zero."""
-    from app.agent import cancel as run_cancel
-    from app.connectors.mcp_client import looks_not_ready
-
-    why = looks_not_ready(result)
-    if not why or not getattr(get_settings(), "mcp_warmup_retry", True):
-        return result
-    name = getattr(conn, "alias", None) or getattr(conn, "name", None) or "the connected app"
-    waited = 0
-    for pause in WARMUP_WAITS_S:
-        if ctx.progress is not None:
-            await ctx.progress.emit(f"{name} answered before its data was ready ({why}); asking again in {pause}s", kind="tool", tool=tool_name)
-        await asyncio.sleep(pause)
-        waited += pause
-        run_cancel.check()
-        run_cancel.touch()
-        result = await again()
-        why = looks_not_ready(result)
-        if not why:
-            return result
-    note = (f"{name} still answered with data that looks not ready after {waited}s ({why}). Its dashboard may still be loading "
-            "or its data feed may be down. If the connector has another action that answers the same question (search its "
-            "catalog with the user's full request, for example a daily sales report instead of a dashboard), try that once "
-            "before answering; otherwise tell the user this plainly, and do not report the figures as real zeros.")  # fmt: skip
-    if isinstance(result, dict):
-        return {**result, "not_ready": True, "note": note}
-    return {"data": result, "not_ready": True, "note": note}
 
 
 @contextlib.asynccontextmanager
@@ -1562,11 +1551,17 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
                 return wrong  # not run: a gateway quietly ignores names it doesn't know and answers for its defaults
         tool_name, args = wrap_through_execute(tool_name, args, execute)
     args = _rewrite_catalog_search_args(tool_name, args, ctx.query, conn)
+    from app.routing.retrieve import is_catalog_tool as _is_catalog, is_execute_tool as _is_execute
+
+    if hit is not None and _is_user_mcp(conn) and not _is_catalog(tool_name) and not _is_execute(tool_name):
+        # A connected MCP's own tool: call it exactly as its schema says (docs/LLD.md "Calling a tool by its schema").
+        args, wrong = check_schema_args(getattr(hit, "schema", None), tool_name, args)
+        if wrong:
+            return wrong
     from app.agent import approval
     from app.routing.retrieve import is_catalog_tool, is_execute_tool
 
     destructive = bool(hit.destructive if hit is not None else (spec.destructive if spec else False))
-    gateway_reads = False  # an execute call whose every action reads: safe to ask again when its data isn't ready
     # Tools nobody vouched for: a gateway action (or an execute call carrying one) is judged by the action's name,
     # and a user-added MCP tool needs a card unless its server marked it read-only.
     user_mcp = getattr(conn, "kind", "") != "builtin" and str(getattr(conn, "server_key", "") or "").startswith("mcp:")
@@ -1584,7 +1579,6 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
                 redirect = await _name_the_action(ctx, conn, connector_slug, tool_name, args)
                 if redirect is not None:
                     return redirect
-        gateway_reads = not unvetted
     elif is_catalog_tool(tool_name):
         unvetted = False
     elif hit is None and spec is None:
@@ -1631,11 +1625,6 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
                 wrong_dates = ignored_dates(args, result) if _is_user_mcp(conn) else ""
                 if wrong_dates:
                     result = await _note_ignored_args(ctx, conn, tool_name, args, result, wrong_dates)
-                elif _is_user_mcp(conn) and (gateway_reads or _reads_only(tool_name, hit)):
-                    result = await retry_until_ready(ctx, conn, tool_name, result,
-                                                     lambda: invoke_named(ctx.db, ctx.user, conn, tool_name, args, ctx.attachments))  # fmt: skip
-                    if isinstance(result, dict) and result.get("not_ready"):
-                        result = await _offer_other_actions(ctx, conn, tool_name, args, result)
         # One approval, one action: running the same thing again needs a new card.
         approval.consume(ctx.confirmations, used_approval)
         note_untrusted(ctx, tool_name)
