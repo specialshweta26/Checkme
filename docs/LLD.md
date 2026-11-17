@@ -842,6 +842,15 @@ Now:
      `not_run: true` and the call never sent. The agent then calls again correctly.
   3. A gateway that doesn't describe its parameters is never blocked.
 
+**Read-only gateway actions.** A gateway action ran without an approval card only when its name plainly reads
+(`get_…`, `list_…`). An action such as `otif_snapshot`, or one passed to execute under a key like `tool`, asked for
+approval even when the gateway itself marks it read-only. Now the catalog's own mark counts as well:
+- an MCP `readOnlyHint` (or a `read_only` flag) that isn't also destructive;
+- or "read-only" in the action's description, but never "not read-only".
+
+These are read from this turn's catalog search, with one lookup per action if needed. Actions that write, and actions
+nobody marks, still ask. The action is also found under `tool`, `tool_id`, `operation` and `function` keys.
+
 ### Lean context
 
 Each model call used to carry about 24k tokens before the conversation started: a ~7.8k-token system prompt and ~16k
