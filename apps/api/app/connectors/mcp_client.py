@@ -334,25 +334,36 @@ def _walk(value: Any, depth: int = 0):
 
 
 def looks_not_ready(payload: Any) -> str:
-    """Why a tool's answer looks like data that hasn't loaded yet ("" when it looks like a real answer): an explicit flag
-    (ready false, needs_compute, a loading status, a 'not connected' / 'still loading' message), an empty answer, or
-    every figure zero (three or more numbers)."""
+    """Why a tool's answer looks like data that hasn't loaded yet ("" when it looks like a real answer).
+
+    Real figures always win: an answer with any non-zero business figure is ready, even if one of its sections says
+    "available": false or "not connected" (a dashboard often has an optional part, such as web traffic or a feed, that
+    isn't set up). Otherwise it is not ready when it is empty, flags itself (ready false, needs_compute, a loading
+    status, a 'still loading' message) or has three or more figures that are all zero."""
     if isinstance(payload, dict) and payload.get("empty"):
         return "it returned no data"
     numbers: list[float] = []
+    flag = ""
     for key, value in _walk(payload):
         k = str(key or "").lower()
-        if k in {"ready", "is_ready", "loaded", "available"} and value is False:
-            return f"it reported {k}=false"
-        if k in {"needs_compute", "loading", "is_loading", "pending", "stale"} and value is True:
-            return f"it reported {k}"
-        if k in {"status", "state", "feed_status", "sync_status"} and str(value).strip().lower().replace(" ", "_") in _NOT_READY_STATUS:
-            return f"its status was {value}"
-        if isinstance(value, str) and len(value) < 400 and any(p in value.lower() for p in _NOT_READY_TEXT):
-            return f"it said “{value[:120]}”"
         if isinstance(value, (int, float)) and not isinstance(value, bool) and not _NOT_A_FIGURE.search(k):
             numbers.append(float(value))
-    if len(numbers) >= 3 and all(n == 0 for n in numbers):
+            continue
+        if flag:
+            continue
+        if k in {"ready", "is_ready", "loaded", "available"} and value is False:
+            flag = f"it reported {k}=false"
+        elif k in {"needs_compute", "loading", "is_loading", "pending", "stale"} and value is True:
+            flag = f"it reported {k}"
+        elif k in {"status", "state", "feed_status", "sync_status"} and str(value).strip().lower().replace(" ", "_") in _NOT_READY_STATUS:
+            flag = f"its status was {value}"
+        elif isinstance(value, str) and len(value) < 400 and any(p in value.lower() for p in _NOT_READY_TEXT):
+            flag = f"it said “{value[:120]}”"
+    if any(n != 0 for n in numbers):
+        return ""  # real data is there: use it
+    if flag:
+        return flag
+    if len(numbers) >= 3:
         return "every figure was zero"
     return ""
 
