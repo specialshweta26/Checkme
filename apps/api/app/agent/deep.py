@@ -66,6 +66,11 @@ MAX_TOOL_CHARS = 24000
 # A connector's answer goes to the model whole. Only an answer too big for the model's context window (about 150k
 # tokens) is cut, and then to as much real data as fits, never to an outline (docs/LLD.md "Connector results").
 CONNECTOR_RESULT_CHARS = 600_000
+# What the model sees inline. The agent harness (deepagents) moves any tool message over 20,000 tokens (80,000
+# characters) to a file the agent then reads in parts: a 90-day daily series came back as "only 30 days" or as zeros
+# depending on which part it read. Connector answers are sent as tables and kept under this, with column totals over
+# every row (docs/LLD.md "Connector results").
+INLINE_RESULT_CHARS = 70_000
 BROWSER_PAGE_TOOLS = {"browser_navigate", "browser_snapshot", "browser_act", "browser_tabs", "browse_open", "browse_act", "browse_screenshot"}
 BROWSER_PAGE_CHARS = 400_000
 INSPECT_CHARS = 32000
@@ -180,10 +185,61 @@ def compact_payload(value: Any, limit: int = MAX_TOOL_CHARS) -> Any:
     }
 
 
+_NOT_SUMMED = re.compile(
+    r"(^|_)(id|ids|date|day|hour|week|month|year|rank|index|idx|position|page|score|pct|percent|percentage|rate|ratio|share|"
+    r"aov|avg|average|mean|median|cvr|ctr|roas|cpc|cpm|cac|ltv|delta|change|growth|lat|lng|latitude|longitude)(_|$)",
+    re.I,
+)
+
+
+def tabulate(value: Any, depth: int = 0) -> Any:
+    """The same data with every list of records (3 or more objects) as one table: its column names once and a row of
+    values per record, plus the totals of its numeric columns over every row. Nothing is dropped; a long series is about
+    a third of its size this way, so it reaches the model whole."""
+    if depth > 12:
+        return value
+    if isinstance(value, dict):
+        return {k: tabulate(v, depth + 1) for k, v in value.items()}
+    if not isinstance(value, list):
+        return value
+    items = [tabulate(v, depth + 1) for v in value]
+    if len(items) < 3 or not all(isinstance(v, dict) for v in items):
+        return items
+    columns: list[str] = []
+    for item in items:
+        for key in item:
+            if key not in columns:
+                columns.append(key)
+    if not columns or sum(len(item) for item in items) < 0.6 * len(items) * len(columns):
+        return items  # records too different to share columns
+    rows = [[item.get(c) for c in columns] for item in items]
+    table: dict = {"columns": columns, "rows": rows, "row_count": len(rows)}
+    totals = {}
+    for i, col in enumerate(columns):
+        cells = [r[i] for r in rows if r[i] is not None]
+        if cells and not _NOT_SUMMED.search(str(col)) and all(isinstance(c, (int, float)) and not isinstance(c, bool) for c in cells):
+            total = sum(cells)
+            totals[col] = round(total, 2) if isinstance(total, float) else total
+    if totals:
+        table["column_totals"] = totals  # over every row, also when rows are left out below
+    return table
+
+
+def _is_table(value: Any) -> bool:
+    return isinstance(value, dict) and isinstance(value.get("columns"), list) and isinstance(value.get("rows"), list)
+
+
 def _cap_lists(value: Any, n: int, depth: int = 0) -> tuple[Any, int]:
-    """(value with every list cut to its first n items, how many items were left out)."""
+    """(value with every list cut to its first n items, how many items were left out). A table keeps its columns and
+    totals and loses rows only."""
     if depth > 12:
         return value, 0
+    if _is_table(value):
+        rows = value["rows"]
+        out = {**value, "rows": rows[:n]}
+        if len(rows) > n:
+            out["rows_shown"] = n
+        return out, max(0, len(rows) - n)
     if isinstance(value, dict):
         out, dropped = {}, 0
         for k, v in value.items():
@@ -201,16 +257,22 @@ def _cap_lists(value: Any, n: int, depth: int = 0) -> tuple[Any, int]:
 
 
 def fit_payload(value: Any, limit: int = CONNECTOR_RESULT_CHARS) -> Any:
-    """A connector's answer for the model: whole when it fits the model's context; otherwise the real data with each long
-    list cut to its first rows (as many as fit), saying how much was left out. An outline only if even that won't fit."""
+    """A connector's answer for the model: whole when it fits inline (as is, or with its record lists as tables);
+    otherwise the real data with long lists cut to their first rows (as many as fit), saying how much was left out,
+    with each table's totals still over every row. An outline only if even that won't fit."""
+    limit = min(limit, INLINE_RESULT_CHARS)
     if _json_size(value) <= limit:
         return value
-    for n in (500, 200, 100, 50, 25, 10, 5):
-        shrunk, dropped = _cap_lists(value, n)
+    tabled = tabulate(value)
+    if _json_size(tabled) <= limit:
+        return tabled
+    for n in (500, 365, 200, 120, 100, 50, 25, 10, 5):
+        shrunk, dropped = _cap_lists(tabled, n)
         if _json_size(shrunk) <= limit:
             return {"partial": True, "data": shrunk, "left_out_items": dropped, "chars": _json_size(value),
-                    "hint": f"Too big for one message, so each list shows its first {n} items. The full result is stored: "
-                            "call inspect_result with this result_id (a path or search, then offset) for the rest."}  # fmt: skip
+                    "hint": f"Too big for one message, so each list shows its first {n} rows; column_totals still cover "
+                            "every row. The full result is stored: call inspect_result with this result_id (a path or "
+                            "search, then offset) for the rest."}  # fmt: skip
     return compact_payload(value, limit)
 
 

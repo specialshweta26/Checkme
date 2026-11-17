@@ -55,7 +55,10 @@ def nested_actions(tool_name: str, args: dict | None) -> list[str]:
     if not is_execute_tool(tool_name):
         return [tool_name]
     names: list[str] = []
-    for key in ("tool_name", "tool_slug", "name", "action", "tool", "tool_id", "operation", "function"):
+    # Every key Lumio may put the action's name under when it shapes an execute call by the gateway's own schema
+    # (deep.execute_args): a name it can't see made a plain read ask for approval.
+    for key in ("tool_name", "tool_slug", "name", "action", "tool", "tool_id", "operation", "function", "public_name",
+                "public_tool_name"):
         if isinstance(args.get(key), str) and args[key].strip():
             names.append(args[key].strip())
     for item in args.get("tools") or []:

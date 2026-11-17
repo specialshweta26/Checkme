@@ -14,14 +14,23 @@ PRODUCTS = {"brand": "x", "window": {"start": "2026-11-11", "end": "2026-11-17"}
             "products": [{"sku": f"SKU-{i}", "name": f"Product {i}", "units": i + 1, "net_sales": (i + 1) * 1999} for i in range(1500)]}  # fmt: skip
 
 
+def _rows_as_records(table: dict) -> list[dict]:
+    return [dict(zip(table["columns"], row)) for row in table["rows"]]
+
+
 def test_a_big_answer_is_sent_whole():
-    assert len(json.dumps(PRODUCTS)) > 60000
-    assert deep.fit_payload(PRODUCTS) == PRODUCTS
+    assert len(json.dumps(PRODUCTS)) > 80000  # over the harness's inline limit as plain JSON
+    out = deep.fit_payload(PRODUCTS)
+    assert "partial" not in out and len(json.dumps(out)) <= deep.INLINE_RESULT_CHARS
+    assert _rows_as_records(out["products"]) == PRODUCTS["products"]  # every row, as a table
+    assert out["products"]["column_totals"]["net_sales"] == sum(p["net_sales"] for p in PRODUCTS["products"])
 
 
 def test_an_answer_too_big_for_the_model_keeps_real_rows_not_an_outline():
     out = deep.fit_payload(PRODUCTS, 30000)
-    assert out["partial"] and out["data"]["products"][0] == PRODUCTS["products"][0] and out["left_out_items"] > 0
+    table = out["data"]["products"]
+    assert out["partial"] and _rows_as_records(table)[0] == PRODUCTS["products"][0] and out["left_out_items"] > 0
+    assert table["column_totals"]["units"] == sum(p["units"] for p in PRODUCTS["products"])  # still over every row
     assert len(json.dumps(out)) <= 31000 and "too_large" not in out
 
 
@@ -34,7 +43,7 @@ async def test_the_agent_gets_the_whole_answer_through_call_tool():
     ctx = deep.RunContext(db=None, user=SimpleNamespace(id="u1"), connectors={"gw": conn}, auto_confirm=True, call_impl=fake_call)
     ctx.gateway_surface["gw"] = {"search": None, "execute": None, "resolve": None}
     out = await deep.call_user_tool(ctx, "gw", "get_product_sales", {"brand": "x"})
-    assert out == PRODUCTS
+    assert _rows_as_records(out["products"]) == PRODUCTS["products"] and out["window"] == PRODUCTS["window"]
 
 
 def test_earlier_connector_results_stay_whole_in_the_turn():

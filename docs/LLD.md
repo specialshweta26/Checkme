@@ -929,6 +929,16 @@ The gateway showed the data while Lumio answered without it, or spent extra mode
   as fit), says how many items were left out, and `inspect_result` reads the rest. An outline is the last resort.
 - **Kept for the turn:** context trimming no longer cuts earlier `call_tool` / `inspect_result` results. An answer
   comparing two calls ("One8 vs Lotto") needs both. Browser pages are still trimmed as before.
+- **Under the harness's file limit:** deepagents moves any tool message over 20,000 tokens (80,000 characters) to a
+  file the agent reads back in parts. A 90- or 120-day daily series crossed it: the agent read part of the file and
+  reported "only 30 days", or zeros, differently on each run. Answers over `INLINE_RESULT_CHARS` (70,000) now go out
+  with every list of records as a table (`deep.tabulate`: column names once, a row of values per record, nothing
+  dropped), about a third of the size. Each table carries `column_totals` over every row (ids, dates, rates, shares and
+  averages aren't added up). If even the table is too big, rows (never columns) are cut, and the totals still cover
+  every row.
+- **Approvals see the action:** execute calls shaped by the gateway's own schema can name the action under
+  `public_name` / `public_tool_name`. `approval.nested_actions` reads those too; before, a plain read such as
+  `get_daily_sales` asked for approval because its name wasn't seen.
 
 ### Lean context
 
