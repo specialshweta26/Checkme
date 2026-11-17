@@ -808,22 +808,6 @@ dashboard: loading 2/4 (50%)"). After 20 s, it posts every 30 s that it is still
 no-progress watchdog from treating the turn as stuck. Built-in tools are not affected. Tested against a real MCP server
 over streamable HTTP, including a 125-second call that returned its data and all 4 progress reports.
 
-**Data that isn't ready yet.** Some dashboards behind an MCP load their data on demand (about two minutes), and asked
-before that they answer **at once** with zeros or a "not ready" flag, not by waiting. The answer looked complete, so the
-agent reported ₹0 sales for a brand whose dashboard showed real sales. For a read-only tool of a connected MCP, one the
-server marked read-only or whose name reads (`get_`, `list_`, `search_`…), `deep.retry_until_ready` asks again after
-20, 40 and 60 s (`MCP_WARMUP_RETRY`) when the answer looks not ready. That means `mcp_client.looks_not_ready`
-found one of these:
-- `ready` / `loaded` / `available` false, or `needs_compute` / `loading` / `pending` / `stale` true;
-- a status of loading, pending, processing, queued or stale;
-- a short message such as "not connected", "still loading" or "try again";
-- an empty answer;
-- three or more figures that are all zero.
-
-The chat says why it is asking again. The first answer that looks ready is returned. If none does, the last one comes
-back marked `not_ready` with a note telling the agent to say the source returned no data, not to report real zeros.
-Tools that change things are never asked again. A real all-zero answer therefore costs up to two minutes of waiting.
-
 ### Gateway arguments
 
 A gateway MCP exposes a catalog: a search tool that lists its actions, and an execute tool that runs one by name.
@@ -866,26 +850,22 @@ which had the data. Catalog searches (the agent's own and the turn's lookups) no
 dates included. The user's own question leads the search text (unless it's a bare "yes"), followed by the agent's
 wording, because an agent's paraphrase ("brand sales dashboard totals daily report") can drop the names and dates the
 action is chosen by. The agent's instructions now say to search with the user's own words, not a short phrase without
-names and dates. Composio's search keeps the short phrase. When an action still answers all zeros after the retries, the agent is told to try another action that
-answers the same question once, before telling the user the data isn't there.
+names and dates. Composio's search keeps the short phrase.
 
-**Real figures win.** An answer with any non-zero business figure is ready, even when one of its sections says
-`available: false` or "not connected". A dashboard often has an optional part (web traffic, a product feed) that isn't
-set up, and that one flag kept Lumio waiting minutes on data it already had. Flags, empty answers and all-zero figures
-mark an answer not ready only when it has no real figures at all.
+**Calling a tool by its schema.** A tool that doesn't recognise an argument's name ignores it and answers for its
+defaults. Sent `start_date` / `end_date` with "Lotto", one answered `{"connected": false}` for its own last 30 days,
+while another client sending `start` / `end` and `lotto` got the data. Retrying or waiting can't fix that, so the
+not-ready retries were removed. Instead, every call to a connected MCP's own tool is checked against the tool's input
+schema before it is sent (`deep.check_schema_args`):
+- a name that differs from a parameter only in case is renamed to it;
+- a value that matches one of a parameter's allowed values (`enum`, including inside `anyOf` and arrays) except for
+  case is sent as the allowed value;
+- unknown names or missing required ones are not sent. The agent gets the tool's parameters back (type, description,
+  allowed values) and calls again correctly.
 
-**A source that isn't connected, and dates that were ignored.**
-- `connected: false` (or `is_connected: false`) now counts as not ready, like `available: false`. Before, it was taken
-  as an answer, with no retry and no other action tried.
-- A tool that doesn't know an argument's name answers for its defaults. One was sent `start_date` / `end_date` and
-  answered for its own last 30 days. When the answer's `range` / `window` / `period` is wider than the dates sent,
-  `mcp_client.ignored_dates` catches it. The call isn't retried, since the same arguments would be ignored again.
-  Instead the agent is told the dates were ignored, given the action's real parameter names when the catalog has
-  them, and reminded that values can be exact-match (an id's spelling or case).
-
-**Retrying through a gateway.** A read sent through a gateway's execute tool is retried when its data isn't ready,
-like a direct read. The all-zero check skips numbers that label rather than measure, so a dashboard answering zeros
-with a row per hour (`"hour": 1…23`), or a gateway wrapper (`confidence`, `tool_calls`, `…_ms`), is still recognised.
+A schema without properties, or one that allows extra names, is never blocked. Gateway actions are checked the same
+way against their catalog's parameters (`check_gateway_args`). If an answer still covers a wider period than the
+dates sent (`mcp_client.ignored_dates`), the agent is told so, with the real parameter names when they're known.
 
 ### Lean context
 
