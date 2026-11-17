@@ -1383,6 +1383,28 @@ def _reads_only(tool_name: str, hit) -> bool:
     return bool(_READ_VERBS.match(tool_name or ""))
 
 
+async def _offer_other_actions(ctx: RunContext, conn, tool_name: str, args: dict, result: dict) -> dict:
+    """An action that still answered with no data after the retries: hand the agent the connector's other actions that
+    match the user's request, so it tries one of those instead of guessing (one action of a gateway can be empty for
+    some inputs while another answering the same question has the data). Works for any gateway with a catalog."""
+    from app.agent import approval
+    from app.routing.retrieve import is_execute_tool
+
+    tried = {a for a in approval.nested_actions(tool_name, args) if not is_execute_tool(a)} | {tool_name}
+    try:
+        rows = await _expand_gateway_catalog(ctx, conn, ctx.query or "")
+    except Exception:  # noqa: BLE001 - the answer stands without suggestions
+        log.info("catalog lookup for other actions failed", exc_info=True)
+        return result
+    others = [{"tool_name": r["tool_name"], "arguments": r.get("arguments") or [], "description": str(r.get("description") or "")[:200]}
+              for r in rows if r.get("tool_name") not in tried][:5]  # fmt: skip
+    if not others:
+        return result
+    return {**result, "try_instead": others,
+            "note": str(result.get("note") or "") + " Other actions on this connector that match the request are in try_instead: "
+            "call the best one (with its own argument names) before telling the user there is no data."}  # fmt: skip
+
+
 async def retry_until_ready(ctx: RunContext, conn, tool_name: str, result: Any, again) -> Any:
     """A read-only tool of a connected MCP answered with data that looks not ready (docs/LLD.md "Slow MCP tools"): its
     dashboard may load on demand and answer with zeros until it has. Ask again after WARMUP_WAITS_S, saying so in the
@@ -1586,6 +1608,8 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
                 if _is_user_mcp(conn) and (gateway_reads or _reads_only(tool_name, hit)):
                     result = await retry_until_ready(ctx, conn, tool_name, result,
                                                      lambda: invoke_named(ctx.db, ctx.user, conn, tool_name, args, ctx.attachments))  # fmt: skip
+                    if isinstance(result, dict) and result.get("not_ready"):
+                        result = await _offer_other_actions(ctx, conn, tool_name, args, result)
         # One approval, one action: running the same thing again needs a new card.
         approval.consume(ctx.confirmations, used_approval)
         note_untrusted(ctx, tool_name)
