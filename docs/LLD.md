@@ -885,7 +885,13 @@ exactly. Three gaps let the display name through:
 - **Listing rows:** the exact value is taken from the row's `slug` / `id` / `key` / `code` first, and the field
   named after the parameter only after those (it often holds the display name).
 - **Slug parameters:** a parameter whose name or description says "slug" and has no allowed values gets a slug
-  ("Lotto" → `lotto`, "Bandra West" → `bandra-west`).
+  ("Lotto" → `lotto`, "Bandra West" → `bandra-west`). A single word is only lowercased: its `_` and `-` stay. Turning
+  every non-letter into `-` sent `acme-in` for the real slug `acme_in`, and the tool answered with no data.
+- **Where listed values come from:** only a tool name (it has an underscore, such as `list_brands`) after "see",
+  "from", "use" or "returned by" counts. Plain words ("data from the warehouse") used to be taken as a tool name.
+- **A listing the lookup can't read:** when the listing tool answers in text (a table or prose) rather than records,
+  or the value appears in it exactly as written, the value is sent unchanged instead of refused. Refusing made the
+  agent call again and again with a value that was right, and the user got no data.
 
 A schema without properties, or one that allows extra names, is never blocked. Gateway actions are checked the same
 way against their catalog's parameters (`check_gateway_args`). If an answer still covers a wider period than the
