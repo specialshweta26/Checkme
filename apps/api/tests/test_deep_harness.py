@@ -410,7 +410,7 @@ async def test_nested_tool_runs_through_execute():
     assert ctx.sources[-1]["source_tool"] == "digital__get_sales_dashboard"
 
 
-async def test_catalog_search_query_is_rewritten():
+async def test_catalog_search_query_is_sent_whole():
     calls = []
 
     async def fake_call(slug, tool, args):
@@ -419,8 +419,7 @@ async def test_catalog_search_query_is_rewritten():
 
     ctx = _ctx([_conn()], call_impl=fake_call, query="inventory left")
     await call_user_tool(ctx, "digital", "gateway__tool_search", {"query": "please show remaining inventory"})
-    assert "inventory" in calls[0]["query"]
-    assert "please" not in calls[0]["query"]
+    assert calls[0]["query"] == "please show remaining inventory"  # whole: gateway retrieval matches on the full request
 
 
 async def test_catalog_search_is_not_stored_as_source():

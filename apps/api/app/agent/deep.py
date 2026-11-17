@@ -334,12 +334,27 @@ def _source_tool(slug: str, tool_name: str, args: dict) -> str:
     return f"{slug}__{tool_name}"
 
 
-def _rewrite_catalog_search_args(tool_name: str, args: dict, fallback_query: str) -> dict:
+def _rewrite_catalog_search_args(tool_name: str, args: dict, fallback_query: str, conn=None) -> dict:
+    """A gateway's catalog search gets the request in full words (brand, metrics, dates): its retrieval matches the
+    right action on that. A stub with the numbers and names cut out matched a dashboard that answered zeros, while the
+    whole request found the daily sales action that had the data. Composio's search keeps the short capability phrase."""
     if not is_catalog_tool(tool_name) or "search" not in tool_name.lower():
         return args
     key = next((k for k in ("query", "q", "search", "text") if k in args), "query")
-    raw = args.get(key) or fallback_query
-    return {**args, key: gateway_search_query(raw)}
+    raw = str(args.get(key) or fallback_query or "")
+    if getattr(conn, "provider", None) == "composio":
+        return {**args, key: gateway_search_query(raw)}
+    return {**args, key: full_request(raw, fallback_query)}
+
+
+def full_request(query: str, question: str = "") -> str:
+    """The search text for a gateway: the agent's own words, or the user's question when the agent sent only a few
+    words. Kept whole, numbers and dates included."""
+    text = " ".join(str(query or "").split())
+    asked = " ".join(str(question or "").split())
+    if asked and len(text.split()) < 4 and asked.lower() not in text.lower():
+        text = f"{text} — {asked}" if text else asked
+    return text[:500]
 
 
 def _schema_from_resolve(slug: str, tool_name: str, result: Any) -> dict | None:
@@ -418,7 +433,8 @@ async def _expand_gateway_catalog(ctx: RunContext, conn, query: str) -> list[dic
     if not search_name or not execute_name:
         return []
     queries: list[str] = []
-    for candidate in (gateway_search_query(query), capability_query(query)):
+    full = full_request(query) if getattr(conn, "provider", None) != "composio" else ""
+    for candidate in (full, gateway_search_query(query), capability_query(query)):
         if candidate and candidate not in queries:
             queries.append(candidate)
     toolkit = None
@@ -1390,7 +1406,9 @@ async def retry_until_ready(ctx: RunContext, conn, tool_name: str, result: Any, 
         if not why:
             return result
     note = (f"{name} still answered with data that looks not ready after {waited}s ({why}). Its dashboard may still be loading "
-            "or its data feed may be down: tell the user this plainly and do not report the figures as real zeros.")  # fmt: skip
+            "or its data feed may be down. If the connector has another action that answers the same question (search its "
+            "catalog with the user's full request, for example a daily sales report instead of a dashboard), try that once "
+            "before answering; otherwise tell the user this plainly, and do not report the figures as real zeros.")  # fmt: skip
     if isinstance(result, dict):
         return {**result, "not_ready": True, "note": note}
     return {"data": result, "not_ready": True, "note": note}
@@ -1498,7 +1516,7 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
             if wrong:
                 return wrong  # not run: a gateway quietly ignores names it doesn't know and answers for its defaults
         tool_name, args = wrap_through_execute(tool_name, args, execute)
-    args = _rewrite_catalog_search_args(tool_name, args, ctx.query)
+    args = _rewrite_catalog_search_args(tool_name, args, ctx.query, conn)
     from app.agent import approval
     from app.routing.retrieve import is_catalog_tool, is_execute_tool
 
