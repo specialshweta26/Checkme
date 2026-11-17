@@ -26,6 +26,7 @@ def slim_search(result: Any, query: str = "") -> dict:
                 "score": item.get("score"),
                 "arguments": fields,
                 "required": _required,
+                "schema": _full_schema(item),
                 **({"read_only": True} if catalog_read_only(item) else {}),
             }
         )
@@ -679,6 +680,11 @@ def _tool_name(item: dict) -> str | None:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return None
+
+
+def _full_schema(item: dict) -> dict:
+    schema = item.get("inputSchema") or item.get("input_schema") or item.get("parameters") or item.get("schema") or {}
+    return schema if isinstance(schema, dict) else {}
 
 
 def _schema_fields(item: dict) -> tuple[list[str], list[str]]:

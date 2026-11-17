@@ -151,3 +151,41 @@ async def test_search_results_carry_each_tools_schema(monkeypatch):
     params = rows[0]["parameters"]
     assert set(params["properties"]) == {"brand", "start", "end"} and params["only_these_names"]
     assert "list_brands" in params["properties"]["brand"]["description"]
+
+
+# --- slugs, listings and gateway actions -----------------------------------------------------------------------------
+
+
+def test_a_parameter_the_schema_calls_a_slug_gets_a_slug():
+    args, wrong = deep.check_schema_args(LISTED, "t", {"brand": "Lotto", "start": "2026-11-09", "end": "2026-11-17"})
+    assert wrong is None and args["brand"] == "lotto"
+    multi = {"type": "object", "properties": {"store_slug": {"type": "string"}}}
+    assert deep.check_schema_args(multi, "t", {"store_slug": "Bandra West"})[0] == {"store_slug": "bandra-west"}
+
+
+def test_a_listing_row_gives_its_slug_not_the_display_name():
+    rows = {"brands": [{"brand": "Lotto", "slug": "lotto"}, {"brand": "One 8", "slug": "one8"}]}
+    assert deep._value_from_listing("Lotto", rows, "brand") == "lotto"
+    assert deep._value_from_listing("one 8", rows, "brand") == "one8"
+
+
+async def test_a_gateway_action_is_checked_against_its_catalog_schema(monkeypatch):
+    sent = []
+
+    async def fake_call(slug, tool, args):
+        sent.append((tool, dict(args)))
+        if tool == "gateway__tool_search":
+            return {"candidates": [{"public_name": "srv__get_daily_sales", "description": "Day-level sales", "inputSchema": LISTED}]}
+        return {"days": [{"net_sales": 640978}]}
+
+    conn = SimpleNamespace(slug="gw", name="Gateway", alias="", kind="mcp", provider="mcp", server_url="https://gw.test/mcp",
+                           server_key="mcp:gw", id="c1", health="ok")  # fmt: skip
+    ctx = deep.RunContext(db=None, user=SimpleNamespace(id="u1"), connectors={"gw": conn}, auto_confirm=True, call_impl=fake_call)
+    ctx.gateway_surface["gw"] = {"search": "gateway__tool_search", "search_schema": {"type": "object", "properties": {"query": {}}},
+                                 "execute": "gateway__execute", "execute_schema": {}, "resolve": None, "resolve_schema": {}}  # fmt: skip
+    wrong = await deep.call_user_tool(ctx, "gw", "srv__get_daily_sales", {"brand": "Lotto", "start_date": "2026-11-09"})
+    assert wrong["not_run"] and "start_date" in wrong["error"]
+    out = await deep.call_user_tool(ctx, "gw", "srv__get_daily_sales", {"brand": "Lotto", "start": "2026-11-09", "end": "2026-11-17"})
+    assert out["days"][0]["net_sales"] == 640978
+    assert sent[-1] == ("gateway__execute", {"tool_name": "srv__get_daily_sales",
+                                             "arguments": {"brand": "lotto", "start": "2026-11-09", "end": "2026-11-17"}})  # fmt: skip

@@ -875,6 +875,18 @@ agent had no parameters to fill and guessed them. Now:
   it lists for what the user wrote (a display name in any case becomes its slug or id). It only calls a listing tool
   that reads and needs no arguments. A value that isn't listed is not sent: the agent gets the listed values back.
 
+**Slugs, and gateway actions.** A tool given `{"brand": "Lotto"}` answered all zeros for a period that another client
+got data for with `{"brand": "lotto"}`: its schema says "Brand slug (see list_brands)", and the slug is matched
+exactly. Three gaps let the display name through:
+- **Gateway actions:** a call through the gateway's execute knew only the action's parameter names. The catalog's
+  full schema (descriptions included) is now kept (`slim_search` → `schema`), shown to the agent as `parameters`,
+  and the call gets the same `check_schema_args` and `resolve_listed_values` as a directly listed tool. A listing
+  action only the catalog knows runs through execute.
+- **Listing rows:** the exact value is taken from the row's `slug` / `id` / `key` / `code` first, and the field
+  named after the parameter only after those (it often holds the display name).
+- **Slug parameters:** a parameter whose name or description says "slug" and has no allowed values gets a slug
+  ("Lotto" → `lotto`, "Bandra West" → `bandra-west`).
+
 A schema without properties, or one that allows extra names, is never blocked. Gateway actions are checked the same
 way against their catalog's parameters (`check_gateway_args`). If an answer still covers a wider period than the
 dates sent (`mcp_client.ignored_dates`), the agent is told so, with the real parameter names when they're known.
