@@ -55,7 +55,7 @@ def nested_actions(tool_name: str, args: dict | None) -> list[str]:
     if not is_execute_tool(tool_name):
         return [tool_name]
     names: list[str] = []
-    for key in ("tool_name", "tool_slug", "name", "action"):
+    for key in ("tool_name", "tool_slug", "name", "action", "tool", "tool_id", "operation", "function"):
         if isinstance(args.get(key), str) and args[key].strip():
             names.append(args[key].strip())
     for item in args.get("tools") or []:
@@ -67,16 +67,17 @@ def nested_actions(tool_name: str, args: dict | None) -> list[str]:
     return names or [tool_name]
 
 
-def gateway_needs_approval(tool_name: str, args: dict | None) -> bool:
+def gateway_needs_approval(tool_name: str, args: dict | None, read_only: set[str] | frozenset = frozenset()) -> bool:
     """A marketplace/gateway action (no stored flags, or a gateway's execute tool): a card unless every action is
-    plainly a read. Discovery tools (search, resolve, list) never need one. Execute is checked first: Composio's
-    execute tools are also on the catalog list."""
+    plainly a read, by its name or because the gateway's own catalog marks it read-only (a read-only hint, or "read-only" in its description). Discovery
+    tools (search, resolve, list) never need one. Execute is checked first: Composio's execute tools are also on the
+    catalog list."""
     if not is_execute_tool(tool_name) and is_catalog_tool(tool_name):
         return False
     actions = nested_actions(tool_name, args)
     if any(is_execute_tool(name) for name in actions):
         return True  # an execute call whose action we can't see
-    return not all(is_read_action(name) for name in actions)
+    return not all(is_read_action(name) or name in read_only for name in actions)
 
 
 def mcp_needs_approval(read_only: bool, destructive: bool) -> bool:

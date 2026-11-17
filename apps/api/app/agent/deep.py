@@ -449,8 +449,9 @@ async def _expand_gateway_catalog(ctx: RunContext, conn, query: str) -> list[dic
         parsed = [item for item in (slim.get("candidates") or []) if isinstance(item, dict)]
         for item in parsed:
             name = str(item.get("public_name") or "")
-            if name and item.get("arguments"):
-                ctx.gateway_args[(conn.slug, name)] = {"fields": list(item["arguments"]), "required": list(item.get("required") or [])}
+            if name and (item.get("arguments") or item.get("read_only")):
+                ctx.gateway_args[(conn.slug, name)] = {"fields": list(item.get("arguments") or []), "required": list(item.get("required") or []),
+                                                       "read_only": bool(item.get("read_only"))}  # fmt: skip
         if parsed:
             break
     rows = nested_tool_rows(
@@ -1094,6 +1095,25 @@ async def gateway_action_args(ctx: RunContext, conn, tool_name: str) -> dict | N
     return ctx.gateway_args.get(key)
 
 
+async def _gateway_read_only(ctx: RunContext, conn, tool_name: str, args: dict) -> set[str]:
+    """The actions in this execute call that the gateway's catalog marks read-only."""
+    from app.agent import approval
+    from app.routing.retrieve import is_execute_tool
+
+    marked: set[str] = set()
+    for action in approval.nested_actions(tool_name, args):
+        if is_execute_tool(action) or is_catalog_tool(action):
+            continue
+        try:
+            known = await gateway_action_args(ctx, conn, action)
+        except Exception:  # noqa: BLE001 - without the catalog the action keeps its card
+            log.info("gateway read-only lookup for %s failed", action, exc_info=True)
+            known = None
+        if known and known.get("read_only"):
+            marked.add(action)
+    return marked
+
+
 def check_gateway_args(known: dict | None, tool_name: str, args: dict) -> dict | None:
     """An error for the agent when a call uses argument names the gateway action doesn't take, or leaves out required
     ones (docs/LLD.md "Gateway arguments"); None when the call matches, or the action's parameters aren't known."""
@@ -1444,8 +1464,11 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
     # and a user-added MCP tool needs a card unless its server marked it read-only.
     user_mcp = getattr(conn, "kind", "") != "builtin" and str(getattr(conn, "server_key", "") or "").startswith("mcp:")
     if is_execute_tool(tool_name):
-        # A gateway action (unknown names were wrapped into the gateway's execute call above).
+        # A gateway action (unknown names were wrapped into the gateway's execute call above). One the gateway's own
+        # catalog marks read-only runs without a card, like a user MCP tool its server marks read-only.
         unvetted = approval.gateway_needs_approval(tool_name, args)
+        if unvetted:
+            unvetted = approval.gateway_needs_approval(tool_name, args, await _gateway_read_only(ctx, conn, tool_name, args))
     elif is_catalog_tool(tool_name):
         unvetted = False
     elif hit is None and spec is None:

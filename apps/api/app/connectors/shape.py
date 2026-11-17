@@ -26,9 +26,31 @@ def slim_search(result: Any, query: str = "") -> dict:
                 "score": item.get("score"),
                 "arguments": fields,
                 "required": _required,
+                **({"read_only": True} if catalog_read_only(item) else {}),
             }
         )
     return {"query": result.get("query") or question, "candidates": candidates}
+
+
+def catalog_read_only(item: dict) -> bool:
+    """The gateway's catalog marks this action read-only (MCP ``readOnlyHint``, or a ``read_only`` flag) and not
+    destructive. Without such a mark nothing is assumed."""
+    ann = item.get("annotations") if isinstance(item.get("annotations"), dict) else {}
+
+    def flag(*names):
+        for src in (ann, item):
+            for name in names:
+                if isinstance(src.get(name), bool):
+                    return src[name]
+        return None
+
+    read = flag("readOnlyHint", "read_only_hint", "read_only", "readOnly", "readonly")
+    destructive = flag("destructiveHint", "destructive_hint", "destructive")
+    if read is None:
+        # A catalog that says so in words: "Read-only. Returns today's OTIF…", never "not read-only".
+        text = str(item.get("description") or "")
+        read = bool(re.search(r"\bread[- ]only\b", text, re.I)) and not re.search(r"\bnot\s+(?:a\s+)?read[- ]only\b", text, re.I)
+    return read is True and destructive is not True
 
 
 def _entity_slug(value: str) -> str:
