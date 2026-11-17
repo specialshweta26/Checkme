@@ -79,3 +79,42 @@ async def test_an_action_that_writes_still_asks():
     out = await deep.call_user_tool(ctx, "agilitas", "campaign_blast", {"segment": "lapsed"})
     assert out["status"] == "awaiting_user_confirmation" and len(ctx.pending) == 1
     assert not any(tool == "gateway__execute" for tool, _ in calls)
+
+
+async def test_an_execute_call_that_names_no_action_is_sent_back_with_the_actions():
+    """A plain-language request to execute can't be judged, so it used to ask for approval even for a read."""
+    calls = []
+    ctx = _gateway(calls)
+    out = await deep.call_user_tool(ctx, "agilitas", "gateway__execute", {"query": "OTIF snapshot for today"})
+    assert out["not_run"] and not ctx.pending and "otif_snapshot" in [a["tool_name"] for a in out["actions"]]
+    assert not any(tool == "gateway__execute" for tool, _ in calls)
+    out = await deep.call_user_tool(ctx, "agilitas", "otif_snapshot", {"date": "2026-11-17"})  # named: a read runs
+    assert out["otif_pct"] == 93.4 and not ctx.pending
+    again = await deep.call_user_tool(ctx, "agilitas", "gateway__execute", {"query": "OTIF snapshot for today"})
+    assert again["status"] == "awaiting_user_confirmation"  # sent back once per turn, then it asks as before
+
+
+async def test_an_unnamed_request_to_change_something_still_asks():
+    ctx = _gateway([])
+    out = await deep.call_user_tool(ctx, "agilitas", "gateway__execute", {"query": "send the OTIF report to the ops group"})
+    assert out["status"] == "awaiting_user_confirmation"
+
+
+async def test_an_execute_tool_its_server_marks_read_only_runs(monkeypatch):
+    async def marked(ctx, conn, execute, hit):
+        return True
+
+    monkeypatch.setattr(deep, "_execute_marked_read_only", marked)
+    calls = []
+    ctx = _gateway(calls)
+    out = await deep.call_user_tool(ctx, "agilitas", "gateway__execute", {"query": "OTIF snapshot for today"})
+    assert out["otif_pct"] == 93.4 and not ctx.pending
+
+
+async def test_the_execute_tools_own_mark_is_read():
+    ctx = _gateway([])
+    conn = ctx.connectors["agilitas"]
+    yes = SimpleNamespace(tool_name="gateway__execute", read_only=True, destructive=False)
+    assert await deep._execute_marked_read_only(ctx, conn, "gateway__execute", yes)
+    assert not await deep._execute_marked_read_only(ctx, conn, "gateway__execute", SimpleNamespace(tool_name="gateway__execute", read_only=False, destructive=True))
+    assert not await deep._execute_marked_read_only(ctx, conn, "gateway__execute", None)

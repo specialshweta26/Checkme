@@ -1095,6 +1095,49 @@ async def gateway_action_args(ctx: RunContext, conn, tool_name: str) -> dict | N
     return ctx.gateway_args.get(key)
 
 
+async def _execute_marked_read_only(ctx: RunContext, conn, execute: str, hit) -> bool:
+    """The gateway's server marks its execute tool itself read-only (MCP readOnlyHint, not destructive)."""
+    if hit is None or getattr(hit, "tool_name", execute) != execute:
+        hit = None
+        if ctx.db is not None:
+            try:
+                found = await load_named(ctx.db, [conn], {(conn.slug, execute)})
+                hit = found[0] if found else None
+            except Exception:  # noqa: BLE001
+                log.info("execute tool lookup failed", exc_info=True)
+    return bool(hit is not None and getattr(hit, "read_only", False) and not getattr(hit, "destructive", False))
+
+
+_REQUEST_KEYS = ("query", "request", "prompt", "task", "instruction", "intent", "question", "goal", "input", "text")
+
+
+async def _name_the_action(ctx: RunContext, conn, slug: str, execute: str, args: dict) -> dict | None:
+    """An execute call that names no action (a plain-language request) can't be judged, so it used to need approval
+    even for a read. Send it back once per turn with the gateway's matching actions, so the agent calls one by name:
+    a read then runs at once and a write asks (docs/LLD.md "Gateway arguments"). None keeps the approval card."""
+    from app.agent import approval
+
+    if approval.nested_actions(execute, args) != [execute] or ctx.gateway_args.get((slug, "__named_once__")):
+        return None
+    request = " ".join(str(args.get(k)) for k in _REQUEST_KEYS if isinstance(args.get(k), str)).strip()
+    if request and approval.action_words(request) & approval.WRITE_WORDS - {"run", "execute"}:
+        return None  # it asks for a change: the user approves it
+    ctx.gateway_args[(slug, "__named_once__")] = True
+    try:
+        rows = await _expand_gateway_catalog(ctx, conn, request or ctx.query or "")
+    except Exception:  # noqa: BLE001
+        log.info("catalog search for an unnamed execute call failed", exc_info=True)
+        rows = []
+    actions = [{"tool_name": r["tool_name"], "arguments": r.get("arguments") or [], "description": str(r.get("description") or "")[:200]}
+               for r in rows[:6]]  # fmt: skip
+    return {
+        "error": f"{execute} was called without naming an action, so it was not run. Call the action itself with "
+        "call_tool (tool_name = the action, its own argument names); it runs through execute. Reads run at once.",
+        "not_run": True,
+        "actions": actions,
+    }
+
+
 async def _gateway_read_only(ctx: RunContext, conn, tool_name: str, args: dict) -> set[str]:
     """The actions in this execute call that the gateway's catalog marks read-only."""
     from app.agent import approval
@@ -1460,6 +1503,7 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
     from app.routing.retrieve import is_catalog_tool, is_execute_tool
 
     destructive = bool(hit.destructive if hit is not None else (spec.destructive if spec else False))
+    gateway_reads = False  # an execute call whose every action reads: safe to ask again when its data isn't ready
     # Tools nobody vouched for: a gateway action (or an execute call carrying one) is judged by the action's name,
     # and a user-added MCP tool needs a card unless its server marked it read-only.
     user_mcp = getattr(conn, "kind", "") != "builtin" and str(getattr(conn, "server_key", "") or "").startswith("mcp:")
@@ -1469,6 +1513,15 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
         unvetted = approval.gateway_needs_approval(tool_name, args)
         if unvetted:
             unvetted = approval.gateway_needs_approval(tool_name, args, await _gateway_read_only(ctx, conn, tool_name, args))
+        if unvetted and approval.find_approval(ctx.confirmations, connector_slug, tool_name, args) is None:
+            vouched = await _execute_marked_read_only(ctx, conn, tool_name, hit)
+            if vouched:
+                unvetted = False  # the gateway's server marks its execute tool read-only: nothing it runs writes
+            else:
+                redirect = await _name_the_action(ctx, conn, connector_slug, tool_name, args)
+                if redirect is not None:
+                    return redirect
+        gateway_reads = not unvetted
     elif is_catalog_tool(tool_name):
         unvetted = False
     elif hit is None and spec is None:
@@ -1510,7 +1563,7 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
         else:
             async with waiting_on(ctx, conn, tool_name):
                 result = await invoke_named(ctx.db, ctx.user, conn, tool_name, args, ctx.attachments)
-                if _is_user_mcp(conn) and _reads_only(tool_name, hit):
+                if _is_user_mcp(conn) and (gateway_reads or _reads_only(tool_name, hit)):
                     result = await retry_until_ready(ctx, conn, tool_name, result,
                                                      lambda: invoke_named(ctx.db, ctx.user, conn, tool_name, args, ctx.attachments))  # fmt: skip
         # One approval, one action: running the same thing again needs a new card.

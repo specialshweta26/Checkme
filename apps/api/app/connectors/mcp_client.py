@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from typing import Any, Awaitable, Callable
@@ -309,6 +310,13 @@ def root_error(exc: BaseException) -> BaseException:
 # at once with zeros or a "not ready" flag instead of waiting (docs/LLD.md "Slow MCP tools").
 _NOT_READY_TEXT = ("not connected", "not ready", "still loading", "loading data", "try again", "warming up", "being prepared",
                    "no data yet", "data is loading", "processing")  # fmt: skip
+# Numbers that label or describe the answer rather than measure the business: an hour or date in a row, an id, a
+# page, or a gateway's own bookkeeping (confidence, tool calls, time taken). An all-zero dashboard has these too.
+_NOT_A_FIGURE = re.compile(
+    r"^(hour|day|date|week|month|year|quarter|weekday|dow|period|index|idx|rank|position|page|limit|offset|id|version|"
+    r"confidence|score|hops|tool_calls|calls|errors|attempts|retries|status_code|code)$|_(id|ms|s|seconds|time|at|index)$|"
+    r"(duration|latency|elapsed|took|timing)",
+)
 _NOT_READY_STATUS = {"loading", "pending", "processing", "warming", "queued", "computing", "in_progress", "not_ready", "stale"}
 
 
@@ -342,7 +350,7 @@ def looks_not_ready(payload: Any) -> str:
             return f"its status was {value}"
         if isinstance(value, str) and len(value) < 400 and any(p in value.lower() for p in _NOT_READY_TEXT):
             return f"it said “{value[:120]}”"
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and not _NOT_A_FIGURE.search(k):
             numbers.append(float(value))
     if len(numbers) >= 3 and all(n == 0 for n in numbers):
         return "every figure was zero"
