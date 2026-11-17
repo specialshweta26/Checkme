@@ -851,6 +851,18 @@ approval even when the gateway itself marks it read-only. Now the catalog's own 
 These are read from this turn's catalog search, with one lookup per action if needed. Actions that write, and actions
 nobody marks, still ask. The action is also found under `tool`, `tool_id`, `operation` and `function` keys.
 
+Two more cases:
+- **An execute call that names no action** ("OTIF snapshot for today") can't be judged, so it used to ask for approval
+  even for a read. It is now sent back once per turn, not run, with the gateway's matching actions, so the agent calls
+  one by name. A read then runs at once, and a write asks. A request that plainly asks for a change, or a second
+  unnamed call, still gets the card.
+- **An execute tool its own server marks read-only** (`readOnlyHint`, not destructive) runs without a card, like any
+  other user MCP tool.
+
+**Retrying through a gateway.** A read sent through a gateway's execute tool is retried when its data isn't ready,
+like a direct read. The all-zero check skips numbers that label rather than measure, so a dashboard answering zeros
+with a row per hour (`"hour": 1…23`), or a gateway wrapper (`confidence`, `tool_calls`, `…_ms`), is still recognised.
+
 ### Lean context
 
 Each model call used to carry about 24k tokens before the conversation started: a ~7.8k-token system prompt and ~16k

@@ -162,3 +162,70 @@ async def test_the_agents_tool_call_asks_again_for_a_connected_mcp(monkeypatch):
                           query="One8 sales in last 19 days")  # fmt: skip
     out = await deep.call_user_tool(ctx, "agilitas", "get_daily_sales", {"brand_id": "one8"})
     assert calls == ["get_daily_sales", "get_daily_sales"] and out["net_sales"] == 412000
+
+
+def _dashboard(net: int) -> dict:
+    """The shape a sales dashboard answered with (Lotto, 13-17 Nov): KPIs, then a row per hour."""
+    kpis = {"net_sales": net, "gross_sales": net, "discounts": 0, "net_orders": net // 1000, "aov": 0, "sessions": None}
+    hourly = [{"hour": h, "sessions": 0, "gross_sales": float(net // 24), "orders": 0, "net_sales": net // 24} for h in range(24)]
+    return {"brand": "Lotto", "window": {"start": "2026-11-13", "end": "2026-11-17"}, "basis": "forward", "kpis": kpis, "hourly": hourly}
+
+
+def test_an_all_zero_dashboard_with_hour_rows_is_not_ready():
+    """Hours 1-23 are labels, not figures: they used to make an all-zero answer look like data."""
+    assert mcp_client.looks_not_ready(_dashboard(0)) == "every figure was zero"
+    assert not mcp_client.looks_not_ready(_dashboard(480000))
+    wrapped = {"outcome": "executed", "confidence": 97, "tool_calls": 8, "hops": 15, "errors": 0, "gateway_time_ms": 66708,
+               "result": _dashboard(0)}  # fmt: skip
+    assert mcp_client.looks_not_ready(wrapped)
+
+
+async def test_a_read_through_a_gateways_execute_is_asked_again(monkeypatch):
+    monkeypatch.setattr(deep, "WARMUP_WAITS_S", (0,))
+    answers = [_dashboard(0), _dashboard(480000)]
+    calls = []
+
+    async def invoke(db, user, conn, tool_name, args, attachments=None):
+        calls.append((tool_name, args))
+        return answers.pop(0)
+
+    async def surface(ctx, conn):
+        return {"search": "gateway__tool_search", "execute": "gateway__execute", "resolve": None}
+
+    async def no_catalog(ctx, conn, tool_name):
+        return None
+
+    monkeypatch.setattr(deep, "invoke_named", invoke)
+    monkeypatch.setattr(deep, "_load_gateway_surface", surface)
+    monkeypatch.setattr(deep, "gateway_action_args", no_catalog)
+    conn = SimpleNamespace(kind="mcp", server_url="https://mcp-gateway.example.test/mcp", alias="", name="Agilitas",
+                           server_key="mcp:agilitas", id="c1", health="ok", slug="agilitas")  # fmt: skip
+    ctx = deep.RunContext(db=None, user=SimpleNamespace(id="u1"), connectors={"agilitas": conn}, auto_confirm=False,
+                          query="Lotto sales last 5 days")  # fmt: skip
+    out = await deep.call_user_tool(ctx, "agilitas", "get_sales_dashboard", {"brand": "lotto"})
+    assert [c[0] for c in calls] == ["gateway__execute", "gateway__execute"] and out["kpis"]["net_sales"] == 480000
+    assert not ctx.pending
+
+
+async def test_a_gateway_action_that_writes_is_never_asked_again(monkeypatch):
+    monkeypatch.setattr(deep, "WARMUP_WAITS_S", (0,))
+    calls = []
+
+    async def invoke(db, user, conn, tool_name, args, attachments=None):
+        calls.append(tool_name)
+        return {"sent": 0, "queued": 0, "failed": 0}
+
+    async def surface(ctx, conn):
+        return {"search": "gateway__tool_search", "execute": "gateway__execute", "resolve": None}
+
+    async def no_catalog(ctx, conn, tool_name):
+        return None
+
+    monkeypatch.setattr(deep, "invoke_named", invoke)
+    monkeypatch.setattr(deep, "_load_gateway_surface", surface)
+    monkeypatch.setattr(deep, "gateway_action_args", no_catalog)
+    conn = SimpleNamespace(kind="mcp", server_url="https://mcp-gateway.example.test/mcp", alias="", name="Agilitas",
+                           server_key="mcp:agilitas", id="c1", health="ok", slug="agilitas")  # fmt: skip
+    ctx = deep.RunContext(db=None, user=SimpleNamespace(id="u1"), connectors={"agilitas": conn}, auto_confirm=True, query="send it")
+    await deep.call_user_tool(ctx, "agilitas", "send_campaign", {"segment": "lapsed"})
+    assert calls == ["gateway__execute"]
