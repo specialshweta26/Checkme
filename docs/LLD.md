@@ -867,6 +867,19 @@ A schema without properties, or one that allows extra names, is never blocked. G
 way against their catalog's parameters (`check_gateway_args`). If an answer still covers a wider period than the
 dates sent (`mcp_client.ignored_dates`), the agent is told so, with the real parameter names when they're known.
 
+### Connector results
+
+A connector's answer used to be cut at 24,000 characters, and the `call_tool` wrapper cut again at 60,000. Anything
+larger, such as a product-wise breakdown, reached the model as an outline (`too_large`, a map of keys) with no figures.
+The gateway showed the data while Lumio answered without it, or spent extra model calls pulling it out with
+`inspect_result`. Now:
+- **Whole answers:** a connector's answer goes to the model whole (`deep.fit_payload`).
+- **Too big for the model:** only an answer bigger than the model's context window (`CONNECTOR_RESULT_CHARS`, 600k
+  characters, about 150k tokens) is cut. It keeps the real data, with each long list showing its first rows (as many
+  as fit), says how many items were left out, and `inspect_result` reads the rest. An outline is the last resort.
+- **Kept for the turn:** context trimming no longer cuts earlier `call_tool` / `inspect_result` results. An answer
+  comparing two calls ("One8 vs Lotto") needs both. Browser pages are still trimmed as before.
+
 ### Lean context
 
 Each model call used to carry about 24k tokens before the conversation started: a ~7.8k-token system prompt and ~16k
@@ -885,7 +898,7 @@ is stored:
 - **History.** Messages older than the last exchange and longer than 2,500 characters (6,000 for the user's own) are
   sent as their start plus a note; `read_history(message_id=…)` reads one in full. The last exchange is sent whole.
 - **Old tool results.** Context trimming cuts results older than the last four messages at 2,500 characters instead of
-  4,000; `inspect_result` still rereads them. The latest results are sent whole.
+  4,000 (connector results excepted, see "Connector results"); `inspect_result` still rereads them. The latest results are sent whole.
 
 ### MCP sessions per turn
 

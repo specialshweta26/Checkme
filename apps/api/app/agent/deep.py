@@ -63,6 +63,9 @@ from connector_core.text import clip
 log = logging.getLogger(__name__)
 
 MAX_TOOL_CHARS = 24000
+# A connector's answer goes to the model whole. Only an answer too big for the model's context window (about 150k
+# tokens) is cut, and then to as much real data as fits, never to an outline (docs/LLD.md "Connector results").
+CONNECTOR_RESULT_CHARS = 600_000
 BROWSER_PAGE_TOOLS = {"browser_navigate", "browser_snapshot", "browser_act", "browser_tabs", "browse_open", "browse_act", "browse_screenshot"}
 BROWSER_PAGE_CHARS = 400_000
 INSPECT_CHARS = 32000
@@ -175,6 +178,40 @@ def compact_payload(value: Any, limit: int = MAX_TOOL_CHARS) -> Any:
             "taken from the user's ask. Page with offset until every requested row is retrieved."
         ),
     }
+
+
+def _cap_lists(value: Any, n: int, depth: int = 0) -> tuple[Any, int]:
+    """(value with every list cut to its first n items, how many items were left out)."""
+    if depth > 12:
+        return value, 0
+    if isinstance(value, dict):
+        out, dropped = {}, 0
+        for k, v in value.items():
+            out[k], d = _cap_lists(v, n, depth + 1)
+            dropped += d
+        return out, dropped
+    if isinstance(value, list):
+        out, dropped = [], max(0, len(value) - n)
+        for v in value[:n]:
+            item, d = _cap_lists(v, n, depth + 1)
+            out.append(item)
+            dropped += d
+        return out, dropped
+    return value, 0
+
+
+def fit_payload(value: Any, limit: int = CONNECTOR_RESULT_CHARS) -> Any:
+    """A connector's answer for the model: whole when it fits the model's context; otherwise the real data with each long
+    list cut to its first rows (as many as fit), saying how much was left out. An outline only if even that won't fit."""
+    if _json_size(value) <= limit:
+        return value
+    for n in (500, 200, 100, 50, 25, 10, 5):
+        shrunk, dropped = _cap_lists(value, n)
+        if _json_size(shrunk) <= limit:
+            return {"partial": True, "data": shrunk, "left_out_items": dropped, "chars": _json_size(value),
+                    "hint": f"Too big for one message, so each list shows its first {n} items. The full result is stored: "
+                            "call inspect_result with this result_id (a path or search, then offset) for the rest."}  # fmt: skip
+    return compact_payload(value, limit)
 
 
 def dumps(value: Any, limit: int = MAX_TOOL_CHARS) -> str:
@@ -1649,9 +1686,9 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
         if tool_name in BROWSER_PAGE_TOOLS:
             payload_limit = BROWSER_PAGE_CHARS
         else:
-            payload_limit = 60000 if tool_name in MAIL_DETAIL_TOOLS else MAX_TOOL_CHARS
-        payload = compact_payload(result, payload_limit)
-        if isinstance(payload, dict) and payload.get("too_large"):
+            payload_limit = CONNECTOR_RESULT_CHARS
+        payload = compact_payload(result, payload_limit) if tool_name in BROWSER_PAGE_TOOLS else fit_payload(result, payload_limit)
+        if isinstance(payload, dict) and (payload.get("too_large") or payload.get("partial")):
             payload["result_id"] = rid
         if tool_name not in CATALOG_TOOLS:
             if source_name not in ctx.used_tools:
@@ -2224,8 +2261,8 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
         return dumps_full(await get_user_tool_schema(ctx, connector_slug, tool_name))
 
     async def call_tool(connector_slug: str, tool_name: str, args: dict[str, Any] | None = None) -> str:
-        """Run a tool on one of this user's connectors now. Do not use this to send or fetch if the user named a future time — call schedule_task instead. Catalog/search/resolve/list tools are not answers. Large results are stored; use inspect_result for the slice the user asked for."""
-        return dumps(await call_user_tool(ctx, connector_slug, tool_name, args), 60000)
+        """Run a tool on one of this user's connectors now. Do not use this to send or fetch if the user named a future time — call schedule_task instead. Catalog/search/resolve/list tools are not answers. Results come back whole; only one too big for the model shows the first rows of each list, and inspect_result reads the rest."""
+        return dumps_full(await call_user_tool(ctx, connector_slug, tool_name, args))  # already fitted to the model
 
     async def schedule_task(prompt: str, agent_name: str = "") -> str:
         """Queue work for a future time on this agent's own routines (or on a named agent with agent_name). Required when the user says in N minutes, later, tonight, tomorrow, every day, or any clock. Pass their full request. Do not fetch data or send mail in this turn. Scheduled git pushes, PRs and merges still wait for the user's approval."""
