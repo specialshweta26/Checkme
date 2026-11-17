@@ -1086,8 +1086,10 @@ async def search_user_tools(ctx: RunContext, query: str, connector_slug: str | N
             "produces": hit.produces,
             "read_only": hit.read_only,
             "destructive": hit.destructive,
+            # The tool's own input schema: build the call from it (docs/LLD.md "Calling a tool by its schema").
+            **({"parameters": brief_schema(hit.schema)} if i < SCHEMA_ROWS and brief_schema(getattr(hit, "schema", None)) else {}),
         }
-        for hit in hits
+        for i, hit in enumerate(hits)
     ]
     nested: list[dict] = []
     for conn in conns:
@@ -1210,6 +1212,111 @@ async def _gateway_read_only(ctx: RunContext, conn, tool_name: str, args: dict) 
         if known and known.get("read_only"):
             marked.add(action)
     return marked
+
+
+SCHEMA_ROWS = 12  # search results that carry their tool's full input schema (the rest: name and description)
+
+
+def brief_schema(schema: Any) -> dict | None:
+    """A tool's input schema as the agent needs it to build a call: each parameter's type, description, format and
+    allowed values, which are required, and whether other names are allowed. None for a tool without parameters."""
+    if not isinstance(schema, dict) or not isinstance(schema.get("properties"), dict) or not schema["properties"]:
+        return None
+    props = {}
+    for name, spec in schema["properties"].items():
+        spec = spec if isinstance(spec, dict) else {}
+        row = {k: spec[k] for k in ("type", "format", "default") if k in spec}
+        if spec.get("description"):
+            row["description"] = str(spec["description"])[:300]
+        allowed = _enum_values(spec)
+        if allowed:
+            row["allowed"] = allowed[:40]
+        props[name] = row
+    out: dict = {"properties": props, "required": list(schema.get("required") or [])}
+    if schema.get("additionalProperties") is False:
+        out["only_these_names"] = True
+    return out
+
+
+_SEE_TOOL = re.compile(r"\b(?:see|from|via|use|listed (?:by|in)|returned by)\s+`?([a-z][a-z0-9_]{2,})`?(?:\(\))?", re.I)
+
+
+def _norm_value(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(value).lower())
+
+
+def _value_from_listing(sent: str, listing: Any, param: str) -> Any:
+    """The exact value a listing tool gives for what the user wrote (a display name -> its slug or id, any case), or
+    None when nothing in the listing matches."""
+    target = _norm_value(sent)
+    if not target:
+        return None
+    dicts: list[dict] = []
+    strings: list[str] = []
+
+    def walk(v: Any, depth: int = 0) -> None:
+        if depth > 6:
+            return
+        if isinstance(v, dict):
+            dicts.append(v)
+            for x in v.values():
+                walk(x, depth + 1)
+        elif isinstance(v, list):
+            for x in v[:500]:
+                walk(x, depth + 1)
+        elif isinstance(v, str) and len(v) <= 120:
+            strings.append(v)
+
+    walk(listing)
+    for d in dicts:
+        if any(isinstance(v, (str, int)) and _norm_value(v) == target for v in d.values()):
+            for key in (param, "slug", "id", "key", "code", "value", "handle", "name"):
+                if isinstance(d.get(key), (str, int)) and not isinstance(d.get(key), bool):
+                    return d[key]
+    return next((s for s in strings if _norm_value(s) == target), None)
+
+
+async def resolve_listed_values(ctx: RunContext, conn, tool_name: str, schema: Any, args: dict) -> tuple[dict, dict | None]:
+    """(arguments, error). A parameter whose description says its values come from another tool of the same connector
+    ("… slug (see list_…)") gets the exact value that tool lists for what the user wrote. The listing tool is
+    called once per turn, and only when it reads. A value the listing doesn't have is not sent: the agent gets the
+    listed values back."""
+    if not isinstance(schema, dict) or not isinstance(schema.get("properties"), dict) or ctx.db is None:
+        return args, None
+    from app.agent import approval
+
+    out = dict(args)
+    prefix = tool_name.rsplit("__", 1)[0] + "__" if "__" in tool_name else ""
+    for param, spec in schema["properties"].items():
+        value = out.get(param)
+        if not isinstance(spec, dict) or not isinstance(value, str) or not value.strip():
+            continue
+        ref = _SEE_TOOL.search(str(spec.get("description") or ""))
+        if not ref:
+            continue
+        names = [f"{prefix}{ref.group(1)}", ref.group(1)] if prefix else [ref.group(1)]
+        key = ("__listing__", conn.slug, names[0])
+        if key not in ctx.gateway_args:
+            listing = None
+            try:
+                found = await load_named(ctx.db, [conn], {(conn.slug, n) for n in names})
+                lister = next((h for n in names for h in found if h.tool_name == n), None)
+                reads = lister is not None and (lister.read_only or approval.is_read_action(lister.tool_name))
+                if reads and not (brief_schema(lister.schema) or {}).get("required"):
+                    listing = await invoke_named(ctx.db, ctx.user, conn, lister.tool_name, {}, ctx.attachments)
+            except Exception:  # noqa: BLE001 - without the listing the value goes as written
+                log.info("listing %s for %s failed", names[0], param, exc_info=True)
+            ctx.gateway_args[key] = listing
+        listing = ctx.gateway_args.get(key)
+        if listing is None:
+            continue
+        exact = _value_from_listing(value, listing, param)
+        if exact is not None:
+            out[param] = exact
+        else:
+            return out, {"error": f"{param} '{value}' is not one of the values {names[-1]} lists. Pick the right one from listed_values "
+                                  "and call again.", "listed_values": fit_payload(listing, 20000), "not_run": True}  # fmt: skip
+    return out, None
 
 
 def _enum_values(spec: dict) -> list:
@@ -1593,6 +1700,9 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
     if hit is not None and _is_user_mcp(conn) and not _is_catalog(tool_name) and not _is_execute(tool_name):
         # A connected MCP's own tool: call it exactly as its schema says (docs/LLD.md "Calling a tool by its schema").
         args, wrong = check_schema_args(getattr(hit, "schema", None), tool_name, args)
+        if wrong:
+            return wrong
+        args, wrong = await resolve_listed_values(ctx, conn, tool_name, getattr(hit, "schema", None), args)
         if wrong:
             return wrong
     from app.agent import approval
@@ -3057,7 +3167,11 @@ def system_prompt(
         + "Only use the connectors listed in the Checkme context for this turn. Other users have different connectors.\n"
         "Discover first when the user wants a connected app (mail, calendar, a marketplace app): list_connectors, then search_tools with the user's request in their own words (names, metrics, dates kept). "
         "A file, folder, or this-computer request is not a connector or skill lookup. Use search_files, list_files, list_dir, read_file, or write_file. Every agent has them. "
-        "Keep the names, metrics and dates in the search query too, and also pass them as tool arguments after get_tool_schema. "
+        "Keep the names, metrics and dates in the search query too. "
+        "Build every call from the chosen tool's parameters (shown in search results, or get_tool_schema): break the request into "
+        "them, one by one, by each parameter's description, with its exact name, format (ISO dates YYYY-MM-DD) and allowed values; "
+        "leave out what the request doesn't give; never invent a parameter name. When a parameter's description says its values come "
+        "from another tool, the exact value is looked up for you. "
         "First search_tools without connector_slug so mail, MCP, and marketplace catalogs all expand. "
         "Only pass connector_slug after a data tool from that connector already appeared. "
         "Pick the tool whose name and description match the capability — do not assume mail owns every 'message'. "
