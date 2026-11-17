@@ -869,6 +869,11 @@ action is chosen by. The agent's instructions now say to search with the user's 
 names and dates. Composio's search keeps the short phrase. When an action still answers all zeros after the retries, the agent is told to try another action that
 answers the same question once, before telling the user the data isn't there.
 
+**Real figures win.** An answer with any non-zero business figure is ready, even when one of its sections says
+`available: false` or "not connected". A dashboard often has an optional part (web traffic, a product feed) that isn't
+set up, and that one flag kept Lumio waiting minutes on data it already had. Flags, empty answers and all-zero figures
+mark an answer not ready only when it has no real figures at all.
+
 **Retrying through a gateway.** A read sent through a gateway's execute tool is retried when its data isn't ready,
 like a direct read. The all-zero check skips numbers that label rather than measure, so a dashboard answering zeros
 with a row per hour (`"hour": 1…23`), or a gateway wrapper (`confidence`, `tool_calls`, `…_ms`), is still recognised.

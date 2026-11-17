@@ -25,8 +25,12 @@ REAL = {"net_sales": 412000, "gross_sales": 455000, "orders": 310, "units": 402}
         ({"rows": [{"sales": 0}, {"sales": 0}, {"sales": 0}]}, True),
         ({"ready": False, "data": []}, True),
         ({"needs_compute": True, "rows": []}, True),
-        ({"status": "Loading", "rows": [1, 2]}, True),
-        ({"feed": "product feed not connected", "orders": 12}, True),
+        ({"status": "Loading", "rows": [0, 0]}, True),
+        ({"status": "Loading", "rows": [1, 2]}, False),
+        ({"feed": "product feed not connected", "orders": 0, "units": 0}, True),
+        ({"feed": "product feed not connected", "orders": 12}, False),  # real figures win over a side note
+        ({"net_sales": 620107, "orders": 261, "web": {"available": False, "sessions": None}}, False),
+        ({"status": "Loading", "rows": [{"sales": 0}]}, True),
         ({"ok": True, "empty": True}, True),
         (REAL, False),
         ({"orders": 0, "units": 0}, False),  # too few numbers to tell
