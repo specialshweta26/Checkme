@@ -1395,6 +1395,13 @@ async def check_gateway_action(ctx: RunContext, conn, action: str, args: dict) -
     return args, wrong
 
 
+def _wrapped_args(args: dict) -> bool:
+    """Arguments already in a gateway execute call's shape: an action name and its arguments (object or JSON text)."""
+    return any(isinstance(args.get(k), str) and args.get(k) for k in _EXECUTE_NAME_KEYS) and any(
+        isinstance(args.get(k), (dict, str)) for k in _EXECUTE_ARG_KEYS
+    )
+
+
 async def _check_inside_execute(ctx: RunContext, conn, args: dict) -> tuple[dict, dict | None]:
     """An execute call's own arguments with the named action's arguments checked (they may be an object or a JSON
     string, under any of the usual keys)."""
@@ -1909,7 +1916,12 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
         from app.routing.retrieve import is_catalog_tool as _catalog_tool
 
         if execute and tool_name != execute and not _catalog_tool(tool_name):
-            args, wrong = await check_gateway_action(ctx, conn, tool_name, args)
+            if _wrapped_args(args):
+                # The agent named the action and also wrote its arguments in execute's shape ({"tool_name", "arguments"}):
+                # they go out as written, so check the arguments inside (they were skipped, so display names went out).
+                args, wrong = await _check_inside_execute(ctx, conn, args)
+            else:
+                args, wrong = await check_gateway_action(ctx, conn, tool_name, args)
             if wrong:
                 return wrong  # not run: a gateway quietly ignores names it doesn't know and answers for its defaults
         tool_name, args = wrap_through_execute(tool_name, args, execute)

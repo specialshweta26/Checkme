@@ -183,3 +183,15 @@ async def test_an_execute_call_made_by_the_agent_gets_the_same_lookup(monkeypatc
     import json as _json
 
     assert _json.loads(sent[-1][1]["arguments"]) == {"brand": "one8"}
+
+
+async def test_an_action_named_with_execute_shaped_arguments_is_checked_inside(monkeypatch):
+    """The live call: call_tool named funnel-analytics-prod__get_daily_sales but wrote its args as
+    {"tool_name": ..., "arguments": {"brand": "Lotto", ...}}; those went out unchecked."""
+    ctx, sent, _ = _gateway_without_schemas(monkeypatch)
+    out = await deep.call_user_tool(ctx, "gw", "funnel-analytics-prod__get_daily_sales",
+                                    {"tool_name": "funnel-analytics-prod__get_daily_sales",
+                                     "arguments": {"brand": "Lotto", "start": "2026-11-13", "end": "2026-11-17"}})  # fmt: skip
+    assert out["days"][0]["net_sales"] == 660023
+    assert sent[-1] == ("gateway__execute", {"tool_name": "funnel-analytics-prod__get_daily_sales",
+                                             "arguments": {"brand": "lotto", "start": "2026-11-13", "end": "2026-11-17"}})  # fmt: skip
