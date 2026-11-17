@@ -11,8 +11,16 @@ ASKED = "Get Lotto daily sales for today with net sales, orders and units"
 
 
 def test_the_agents_own_words_are_sent_whole():
-    out = deep._rewrite_catalog_search_args("gateway__tool_search", {"query": "Lotto daily sales last 6 days net sales orders units"}, ASKED)
+    out = deep._rewrite_catalog_search_args("gateway__tool_search", {"query": "Lotto daily sales last 6 days net sales orders units"}, "")
     assert out == {"query": "Lotto daily sales last 6 days net sales orders units"}  # the 6 and the brand stay
+
+
+def test_the_users_words_lead_when_the_agent_paraphrased_them_away():
+    """The agent wrote "brand sales dashboard totals daily report": the user's names and dates were gone."""
+    out = deep._rewrite_catalog_search_args("gateway__tool_search", {"query": "brand sales dashboard totals daily report"}, "One8 sales in last 3 days")
+    assert out["query"].startswith("One8 sales in last 3 days") and "daily report" in out["query"]
+    yes = deep._rewrite_catalog_search_args("gateway__tool_search", {"query": "daily sales report for a brand"}, "yes")
+    assert yes["query"] == "daily sales report for a brand"  # a bare "yes" adds nothing
 
 
 def test_a_few_words_are_completed_with_the_users_question():

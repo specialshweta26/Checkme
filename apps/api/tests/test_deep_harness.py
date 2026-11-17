@@ -469,7 +469,7 @@ def test_system_prompt_has_no_product_recipes():
     )
     lowered = prompt.lower()
     assert "list_connectors" in lowered
-    assert "capability phrase" in lowered
+    assert "request in their own words" in lowered and "omit brand names" not in lowered
     assert "gateway__tool_search return catalogs" in lowered
     assert "expands gateway catalogs" in lowered
     assert "cloud sandbox" in lowered or "composio connector is an app marketplace" in lowered

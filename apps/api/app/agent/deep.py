@@ -348,12 +348,14 @@ def _rewrite_catalog_search_args(tool_name: str, args: dict, fallback_query: str
 
 
 def full_request(query: str, question: str = "") -> str:
-    """The search text for a gateway: the agent's own words, or the user's question when the agent sent only a few
-    words. Kept whole, numbers and dates included."""
+    """The search text for a gateway: the user's question in their own words, then the agent's wording if it adds any.
+    Kept whole, names, numbers and dates included."""
     text = " ".join(str(query or "").split())
     asked = " ".join(str(question or "").split())
-    if asked and len(text.split()) < 4 and asked.lower() not in text.lower():
-        text = f"{text} — {asked}" if text else asked
+    asked = asked[:300] if len(asked.split()) >= 3 else ""  # "yes" or "go on" says nothing about the action
+    if asked and asked.lower() not in text.lower():
+        # The user's own words lead: an agent's paraphrase can drop the names and dates the action is chosen by.
+        text = f"{asked} — {text}" if text else asked
     return text[:500]
 
 
@@ -1686,7 +1688,7 @@ async def run_staff(ctx: RunContext, name: str, args: dict | None = None) -> Any
 
 
 class SearchToolsInput(BaseModel):
-    query: str = Field(description="Short capability phrase for the tool you need, not the full user sentence.")
+    query: str = Field(description="The user's request in their own words, with the names, metrics and dates they gave.")
     connector_slug: str | None = Field(
         default=None,
         description="Leave empty on the first search so every catalog expands. Set only after a data tool from that connector already appeared.",
@@ -2175,7 +2177,7 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
         return dumps_full(await list_user_connectors(ctx))
 
     async def search_tools_fn(query: str, connector_slug: str | None = None) -> str:
-        """Search this user's tool catalog by capability (what the tool must return). First call without connector_slug so mail, MCP, and marketplace catalogs all expand. Pass a short phrase, not the full user sentence. Omit people, brands, and dates. Returns names and descriptions, not data."""
+        """Search this user's tool catalog by capability (what the tool must return). First call without connector_slug so mail, MCP, and marketplace catalogs all expand. Pass the user's request in their own words, keeping names, metrics and dates: gateway catalogs match the right action on the whole request. Returns names and descriptions, not data."""
         return dumps_full(await search_user_tools(ctx, query, connector_slug))
 
     async def get_tool_schema(connector_slug: str, tool_name: str) -> str:
@@ -2977,9 +2979,9 @@ def system_prompt(
         + workspace_bit
         + mail_quick_ref(connectors)
         + "Only use the connectors listed in the Checkme context for this turn. Other users have different connectors.\n"
-        "Discover first when the user wants a connected app (mail, calendar, a marketplace app): list_connectors, then search_tools with a short capability phrase (what the tool must return), not the full user sentence. "
+        "Discover first when the user wants a connected app (mail, calendar, a marketplace app): list_connectors, then search_tools with the user's request in their own words (names, metrics, dates kept). "
         "A file, folder, or this-computer request is not a connector or skill lookup. Use search_files, list_files, list_dir, read_file, or write_file. Every agent has them. "
-        "Omit brand names, people, and dates from the search query; pass those as tool arguments after get_tool_schema. "
+        "Keep the names, metrics and dates in the search query too, and also pass them as tool arguments after get_tool_schema. "
         "First search_tools without connector_slug so mail, MCP, and marketplace catalogs all expand. "
         "Only pass connector_slug after a data tool from that connector already appeared. "
         "Pick the tool whose name and description match the capability — do not assume mail owns every 'message'. "
@@ -3109,7 +3111,7 @@ def system_prompt(
         "Read get_tool_schema before filling arguments. Argument names come from that schema and description.\n"
         "Search, resolve, list_mcps, and gateway__tool_search return catalogs, not answers. After you pick a data tool, call_tool it. "
         "If a data tool returns a snapshot or as-of date, report those figures and the as-of date — that is still the answer. "
-        "If the first search is weak, search once more with different capability words, then call_tool. Do not stop on a catalog search.\n"
+        "If the first search is weak, search once more with the request worded differently, then call_tool. Do not stop on a catalog search.\n"
         "Call tools as many times as the task needs — different connectors, different argument sets, different windows. Combine results yourself.\n"
         "Gmail and Outlook are mail AND calendar. Never say there is no calendar connector when gmail or outlook is listed. "
         "Send mail with send_message. Create a calendar invite with create_event (attendees, start in IST). "

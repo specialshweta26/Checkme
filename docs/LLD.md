@@ -863,8 +863,10 @@ Two more cases:
 ("brand sales dashboard last days lotto"). It matched a dashboard action that answered zeros, while another app sending
 the whole request ("Get Lotto daily sales analysis for today with net sales orders units…") reached `get_daily_sales`,
 which had the data. Catalog searches (the agent's own and the turn's lookups) now send the request whole, numbers and
-dates included. A query of fewer than four words is completed with the user's question. Composio's search keeps the
-short phrase. When an action still answers all zeros after the retries, the agent is told to try another action that
+dates included. The user's own question leads the search text (unless it's a bare "yes"), followed by the agent's
+wording, because an agent's paraphrase ("brand sales dashboard totals daily report") can drop the names and dates the
+action is chosen by. The agent's instructions now say to search with the user's own words, not a short phrase without
+names and dates. Composio's search keeps the short phrase. When an action still answers all zeros after the retries, the agent is told to try another action that
 answers the same question once, before telling the user the data isn't there.
 
 **Retrying through a gateway.** A read sent through a gateway's execute tool is retried when its data isn't ready,
