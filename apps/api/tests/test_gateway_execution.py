@@ -159,3 +159,27 @@ def test_where_a_value_is_listed_is_guessed_only_for_name_like_values():
     own = {"properties": {"brand": {"type": "string", "description": "Brand slug (see list_brands)."}}}
     assert deep.sibling_listing_schema("srv__get_sales", {"brand": "Lotto"}, own) is None  # its own schema already says
     assert deep.sibling_listing_schema("srv__get_sales", {"category": "Footwear"})["properties"]["category"]["description"] == "(see list_categories)"
+
+
+async def test_an_execute_call_made_by_the_agent_gets_the_same_lookup(monkeypatch):
+    """The live trace: the agent called gateway__execute itself (a tool the connector lists), so the action's
+    arguments skipped every check and "Lotto" went out."""
+    ctx, sent, _ = _gateway_without_schemas(monkeypatch)
+
+    async def execute_is_listed(db, conns, wanted):
+        return [_hit(n, {"type": "object", "properties": {"tool_name": {"type": "string"}, "arguments": {"type": "object"}}})
+                for (_, n) in wanted if n == "gateway__execute"]  # fmt: skip
+
+    monkeypatch.setattr(deep, "load_named", execute_is_listed)
+    out = await deep.call_user_tool(ctx, "gw", "gateway__execute",
+                                    {"tool_name": "funnel-analytics-prod__get_daily_sales",
+                                     "arguments": {"brand": "Lotto", "start": "2026-11-11", "end": "2026-11-17"}})  # fmt: skip
+    assert out["days"][0]["net_sales"] == 660023
+    assert sent[-1] == ("gateway__execute", {"tool_name": "funnel-analytics-prod__get_daily_sales",
+                                             "arguments": {"brand": "lotto", "start": "2026-11-11", "end": "2026-11-17"}})  # fmt: skip
+    # Arguments sent as a JSON string stay a string, with the slug inside.
+    await deep.call_user_tool(ctx, "gw", "gateway__execute",
+                              {"tool_name": "funnel-analytics-prod__get_daily_sales", "arguments": '{"brand": "One8"}'})  # fmt: skip
+    import json as _json
+
+    assert _json.loads(sent[-1][1]["arguments"]) == {"brand": "one8"}

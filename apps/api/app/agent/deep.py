@@ -1374,6 +1374,53 @@ def sibling_listing_schema(tool_name: str, args: dict, schema: Any = None) -> di
     return {"type": "object", "properties": out} if out else None
 
 
+async def check_gateway_action(ctx: RunContext, conn, action: str, args: dict) -> tuple[dict, dict | None]:
+    """(arguments, error) for a gateway action reached through execute: its catalog schema's checks and lookups when
+    the catalog gives one, else its known parameter names, then values the server lists elsewhere."""
+    known = await gateway_action_args(ctx, conn, action)
+    schema = (known or {}).get("schema")
+    if schema:
+        # The action's own schema from the catalog: the same checks and lookups as a directly listed tool.
+        args, wrong = check_schema_args(schema, action, args)
+        if not wrong:
+            args, wrong = await resolve_listed_values(ctx, conn, action, schema, args)
+    else:
+        wrong = check_gateway_args(known, action, args)
+    if not wrong:
+        # A name the user wrote ("Acme") for a parameter the server lists elsewhere (list_brands -> "acme"),
+        # also when the catalog didn't describe the action's parameters (docs/LLD.md "Sibling listings").
+        sibling = sibling_listing_schema(action, args, schema)
+        if sibling:
+            args, wrong = await resolve_listed_values(ctx, conn, action, sibling, args)
+    return args, wrong
+
+
+async def _check_inside_execute(ctx: RunContext, conn, args: dict) -> tuple[dict, dict | None]:
+    """An execute call's own arguments with the named action's arguments checked (they may be an object or a JSON
+    string, under any of the usual keys)."""
+    from app.routing.retrieve import is_catalog_tool, is_execute_tool
+
+    name_key = next((k for k in _EXECUTE_NAME_KEYS if isinstance(args.get(k), str) and args.get(k)), None)
+    arg_key = next((k for k in _EXECUTE_ARG_KEYS if k in args), None)
+    if name_key is None or arg_key is None:
+        return args, None
+    action = args[name_key]
+    if is_execute_tool(action) or is_catalog_tool(action):
+        return args, None
+    raw = args[arg_key]
+    as_text = isinstance(raw, str)
+    try:
+        inner = json.loads(raw) if as_text else raw
+    except (TypeError, ValueError):
+        return args, None
+    if not isinstance(inner, dict):
+        return args, None
+    checked, wrong = await check_gateway_action(ctx, conn, action, dict(inner))
+    if wrong:
+        return args, wrong
+    return {**args, arg_key: json.dumps(checked) if as_text else checked}, None
+
+
 async def _list_through_gateway(ctx: RunContext, conn, names: list[str]) -> Any:
     """Run a listing action that only the gateway's catalog knows, through its execute tool (no arguments)."""
     surface = await _load_gateway_surface(ctx, conn)
@@ -1862,26 +1909,20 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
         from app.routing.retrieve import is_catalog_tool as _catalog_tool
 
         if execute and tool_name != execute and not _catalog_tool(tool_name):
-            known = await gateway_action_args(ctx, conn, tool_name)
-            schema = (known or {}).get("schema")
-            if schema:
-                # The action's own schema from the catalog: the same checks and lookups as a directly listed tool.
-                args, wrong = check_schema_args(schema, tool_name, args)
-                if not wrong:
-                    args, wrong = await resolve_listed_values(ctx, conn, tool_name, schema, args)
-            else:
-                wrong = check_gateway_args(known, tool_name, args)
-            if not wrong:
-                # A name the user wrote ("Acme") for a parameter the server lists elsewhere (list_brands -> "acme"),
-                # also when the catalog didn't describe the action's parameters (docs/LLD.md "Sibling listings").
-                sibling = sibling_listing_schema(tool_name, args, schema)
-                if sibling:
-                    args, wrong = await resolve_listed_values(ctx, conn, tool_name, sibling, args)
+            args, wrong = await check_gateway_action(ctx, conn, tool_name, args)
             if wrong:
                 return wrong  # not run: a gateway quietly ignores names it doesn't know and answers for its defaults
         tool_name, args = wrap_through_execute(tool_name, args, execute)
         if execute and tool_name == execute:
             args = execute_args(surface.get("execute_schema"), args, ctx.query)
+    from app.routing.retrieve import is_execute_tool as _execute_tool
+
+    if hit is not None and spec is None and _is_user_mcp(conn) and _execute_tool(tool_name):
+        # The agent called the gateway's execute tool itself, naming the action inside it: the action's arguments get
+        # the same checks as when it names the action (they used to go out unchecked, e.g. a brand's display name).
+        args, wrong = await _check_inside_execute(ctx, conn, args)
+        if wrong:
+            return wrong
     args = _rewrite_catalog_search_args(tool_name, args, ctx.query, conn)
     from app.routing.retrieve import is_catalog_tool as _is_catalog, is_execute_tool as _is_execute
 
