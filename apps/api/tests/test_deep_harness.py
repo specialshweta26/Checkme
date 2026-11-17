@@ -410,7 +410,7 @@ async def test_nested_tool_runs_through_execute():
     assert ctx.sources[-1]["source_tool"] == "digital__get_sales_dashboard"
 
 
-async def test_catalog_search_query_is_rewritten():
+async def test_catalog_search_query_is_sent_whole():
     calls = []
 
     async def fake_call(slug, tool, args):
@@ -419,8 +419,7 @@ async def test_catalog_search_query_is_rewritten():
 
     ctx = _ctx([_conn()], call_impl=fake_call, query="inventory left")
     await call_user_tool(ctx, "digital", "gateway__tool_search", {"query": "please show remaining inventory"})
-    assert "inventory" in calls[0]["query"]
-    assert "please" not in calls[0]["query"]
+    assert calls[0]["query"] == "please show remaining inventory"  # whole: gateway retrieval matches on the full request
 
 
 async def test_catalog_search_is_not_stored_as_source():
@@ -470,7 +469,7 @@ def test_system_prompt_has_no_product_recipes():
     )
     lowered = prompt.lower()
     assert "list_connectors" in lowered
-    assert "capability phrase" in lowered
+    assert "request in their own words" in lowered and "omit brand names" not in lowered
     assert "gateway__tool_search return catalogs" in lowered
     assert "expands gateway catalogs" in lowered
     assert "cloud sandbox" in lowered or "composio connector is an app marketplace" in lowered

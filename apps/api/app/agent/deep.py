@@ -334,12 +334,29 @@ def _source_tool(slug: str, tool_name: str, args: dict) -> str:
     return f"{slug}__{tool_name}"
 
 
-def _rewrite_catalog_search_args(tool_name: str, args: dict, fallback_query: str) -> dict:
+def _rewrite_catalog_search_args(tool_name: str, args: dict, fallback_query: str, conn=None) -> dict:
+    """A gateway's catalog search gets the request in full words (brand, metrics, dates): its retrieval matches the
+    right action on that. A stub with the numbers and names cut out matched a dashboard that answered zeros, while the
+    whole request found the daily sales action that had the data. Composio's search keeps the short capability phrase."""
     if not is_catalog_tool(tool_name) or "search" not in tool_name.lower():
         return args
     key = next((k for k in ("query", "q", "search", "text") if k in args), "query")
-    raw = args.get(key) or fallback_query
-    return {**args, key: gateway_search_query(raw)}
+    raw = str(args.get(key) or fallback_query or "")
+    if getattr(conn, "provider", None) == "composio":
+        return {**args, key: gateway_search_query(raw)}
+    return {**args, key: full_request(raw, fallback_query)}
+
+
+def full_request(query: str, question: str = "") -> str:
+    """The search text for a gateway: the user's question in their own words, then the agent's wording if it adds any.
+    Kept whole, names, numbers and dates included."""
+    text = " ".join(str(query or "").split())
+    asked = " ".join(str(question or "").split())
+    asked = asked[:300] if len(asked.split()) >= 3 else ""  # "yes" or "go on" says nothing about the action
+    if asked and asked.lower() not in text.lower():
+        # The user's own words lead: an agent's paraphrase can drop the names and dates the action is chosen by.
+        text = f"{asked} — {text}" if text else asked
+    return text[:500]
 
 
 def _schema_from_resolve(slug: str, tool_name: str, result: Any) -> dict | None:
@@ -418,7 +435,8 @@ async def _expand_gateway_catalog(ctx: RunContext, conn, query: str) -> list[dic
     if not search_name or not execute_name:
         return []
     queries: list[str] = []
-    for candidate in (gateway_search_query(query), capability_query(query)):
+    full = full_request(query) if getattr(conn, "provider", None) != "composio" else ""
+    for candidate in (full, gateway_search_query(query), capability_query(query)):
         if candidate and candidate not in queries:
             queries.append(candidate)
     toolkit = None
@@ -1390,7 +1408,9 @@ async def retry_until_ready(ctx: RunContext, conn, tool_name: str, result: Any, 
         if not why:
             return result
     note = (f"{name} still answered with data that looks not ready after {waited}s ({why}). Its dashboard may still be loading "
-            "or its data feed may be down: tell the user this plainly and do not report the figures as real zeros.")  # fmt: skip
+            "or its data feed may be down. If the connector has another action that answers the same question (search its "
+            "catalog with the user's full request, for example a daily sales report instead of a dashboard), try that once "
+            "before answering; otherwise tell the user this plainly, and do not report the figures as real zeros.")  # fmt: skip
     if isinstance(result, dict):
         return {**result, "not_ready": True, "note": note}
     return {"data": result, "not_ready": True, "note": note}
@@ -1498,7 +1518,7 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
             if wrong:
                 return wrong  # not run: a gateway quietly ignores names it doesn't know and answers for its defaults
         tool_name, args = wrap_through_execute(tool_name, args, execute)
-    args = _rewrite_catalog_search_args(tool_name, args, ctx.query)
+    args = _rewrite_catalog_search_args(tool_name, args, ctx.query, conn)
     from app.agent import approval
     from app.routing.retrieve import is_catalog_tool, is_execute_tool
 
@@ -1668,7 +1688,7 @@ async def run_staff(ctx: RunContext, name: str, args: dict | None = None) -> Any
 
 
 class SearchToolsInput(BaseModel):
-    query: str = Field(description="Short capability phrase for the tool you need, not the full user sentence.")
+    query: str = Field(description="The user's request in their own words, with the names, metrics and dates they gave.")
     connector_slug: str | None = Field(
         default=None,
         description="Leave empty on the first search so every catalog expands. Set only after a data tool from that connector already appeared.",
@@ -2157,7 +2177,7 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
         return dumps_full(await list_user_connectors(ctx))
 
     async def search_tools_fn(query: str, connector_slug: str | None = None) -> str:
-        """Search this user's tool catalog by capability (what the tool must return). First call without connector_slug so mail, MCP, and marketplace catalogs all expand. Pass a short phrase, not the full user sentence. Omit people, brands, and dates. Returns names and descriptions, not data."""
+        """Search this user's tool catalog by capability (what the tool must return). First call without connector_slug so mail, MCP, and marketplace catalogs all expand. Pass the user's request in their own words, keeping names, metrics and dates: gateway catalogs match the right action on the whole request. Returns names and descriptions, not data."""
         return dumps_full(await search_user_tools(ctx, query, connector_slug))
 
     async def get_tool_schema(connector_slug: str, tool_name: str) -> str:
@@ -2959,9 +2979,9 @@ def system_prompt(
         + workspace_bit
         + mail_quick_ref(connectors)
         + "Only use the connectors listed in the Checkme context for this turn. Other users have different connectors.\n"
-        "Discover first when the user wants a connected app (mail, calendar, a marketplace app): list_connectors, then search_tools with a short capability phrase (what the tool must return), not the full user sentence. "
+        "Discover first when the user wants a connected app (mail, calendar, a marketplace app): list_connectors, then search_tools with the user's request in their own words (names, metrics, dates kept). "
         "A file, folder, or this-computer request is not a connector or skill lookup. Use search_files, list_files, list_dir, read_file, or write_file. Every agent has them. "
-        "Omit brand names, people, and dates from the search query; pass those as tool arguments after get_tool_schema. "
+        "Keep the names, metrics and dates in the search query too, and also pass them as tool arguments after get_tool_schema. "
         "First search_tools without connector_slug so mail, MCP, and marketplace catalogs all expand. "
         "Only pass connector_slug after a data tool from that connector already appeared. "
         "Pick the tool whose name and description match the capability — do not assume mail owns every 'message'. "
@@ -3091,7 +3111,7 @@ def system_prompt(
         "Read get_tool_schema before filling arguments. Argument names come from that schema and description.\n"
         "Search, resolve, list_mcps, and gateway__tool_search return catalogs, not answers. After you pick a data tool, call_tool it. "
         "If a data tool returns a snapshot or as-of date, report those figures and the as-of date — that is still the answer. "
-        "If the first search is weak, search once more with different capability words, then call_tool. Do not stop on a catalog search.\n"
+        "If the first search is weak, search once more with the request worded differently, then call_tool. Do not stop on a catalog search.\n"
         "Call tools as many times as the task needs — different connectors, different argument sets, different windows. Combine results yourself.\n"
         "Gmail and Outlook are mail AND calendar. Never say there is no calendar connector when gmail or outlook is listed. "
         "Send mail with send_message. Create a calendar invite with create_event (attendees, start in IST). "
