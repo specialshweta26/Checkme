@@ -166,8 +166,8 @@ def test_history_is_left_whole_when_switched_off(monkeypatch):
 def test_old_tool_results_are_cut_shorter():
     from app.agent import context_trim as ct
 
-    msgs = [HumanMessage(content="q"), AIMessage(content="", tool_calls=[{"id": "a", "name": "call_tool", "args": {}}]),
-            ToolMessage(content="y" * 30000, tool_call_id="a", name="call_tool"), AIMessage(content="t"),
+    msgs = [HumanMessage(content="q"), AIMessage(content="", tool_calls=[{"id": "a", "name": "web_fetch", "args": {}}]),
+            ToolMessage(content="y" * 30000, tool_call_id="a", name="web_fetch"), AIMessage(content="t"),
             HumanMessage(content="n"), AIMessage(content="o"), HumanMessage(content="g")]  # fmt: skip
     out, _ = ct.trim_messages(msgs)
     assert ct.LEAN_OLD_RESULT_CHARS <= len(out[2].content) < ct.LEAN_OLD_RESULT_CHARS + 200

@@ -28,6 +28,8 @@ PAGE_TOOLS = {
 KEEP_KEYS = ("popups", "dialogs", "ok", "url", "title", "error", "warnings", "result", "done", "need_user", "stopped_before", "needs_approval",
              "via", "completed", "deep_link_failed", "fallback_url", "bot_wall", "status", "took_ms")  # fmt: skip
 OLD_RESULT_CHARS = 4000
+# A connector's data stays whole for the whole turn: an answer comparing two calls needs both (docs/LLD.md).
+KEEP_WHOLE = {"call_tool", "inspect_result"}
 LEAN_OLD_RESULT_CHARS = 2500  # with LEAN_CONTEXT on (docs/LLD.md "Lean context")
 RECENT_MESSAGES = 4
 OLD_PAGE_TEXT_CHARS = 1500
@@ -91,7 +93,7 @@ def trim_messages(messages: list) -> tuple[list, int]:
         new = text
         if getattr(m, "name", "") in PAGE_TOOLS and i < last_page and len(text) > 1200:
             new = _brief(text)
-        elif i < recent_from and len(text) > cap:
+        elif i < recent_from and len(text) > cap and getattr(m, "name", "") not in KEEP_WHOLE:
             new = text[:cap] + f"\n…[older result trimmed: {len(text) - cap} more characters; inspect_result can reread it]"
         if new is not text:
             saved += len(text) - len(new)
