@@ -195,3 +195,95 @@ async def test_an_action_named_with_execute_shaped_arguments_is_checked_inside(m
     assert out["days"][0]["net_sales"] == 660023
     assert sent[-1] == ("gateway__execute", {"tool_name": "funnel-analytics-prod__get_daily_sales",
                                              "arguments": {"brand": "lotto", "start": "2026-11-13", "end": "2026-11-17"}})  # fmt: skip
+
+
+# --- reads through execute run without asking; loose action names get the catalog's checks -----------------------
+
+DASHBOARD_SCHEMA = {"type": "object", "required": ["brand"], "additionalProperties": False,
+                    "properties": {"brand": {"type": "string", "description": "Brand slug (see list_brands)."},
+                                   "start": {"type": "string", "description": "ISO date (optional)."},
+                                   "end": {"type": "string", "description": "ISO date (optional)."}}}  # fmt: skip
+
+
+def _gateway_with_catalog(monkeypatch, *, auto_confirm: bool):
+    """The gateway as the live one: execute is listed and marked destructive, the catalog lists the real
+    ``funnel-analytics-prod__…`` actions with their schemas, and the agent may name them loosely."""
+    sent: list[tuple[str, dict]] = []
+    catalog = [
+        {"public_name": "funnel-analytics-prod__get_sales_dashboard", "description": "Core sales analytics.",
+         "inputSchema": DASHBOARD_SCHEMA, "annotations": {"readOnlyHint": True}},
+        {"public_name": "funnel-analytics-prod__list_brands", "description": "Brand slugs.", "annotations": {"readOnlyHint": True}},
+        {"public_name": "erp-ag-prod__create_order", "description": "Create an order.",
+         "inputSchema": {"type": "object", "properties": {"sku": {"type": "string"}}}},
+    ]  # fmt: skip
+
+    async def surface(ctx, conn):
+        return {"search": "gateway__tool_search", "execute": "gateway__execute", "search_schema": {},
+                "execute_schema": {"type": "object", "properties": {"tool_name": {"type": "string"}, "arguments": {"type": "object"}}}}  # fmt: skip
+
+    async def silent(ctx, conn, tool, args):
+        return {"candidates": catalog}
+
+    async def invoke(db, user, conn, tool_name, args, attachments=None):
+        sent.append((tool_name, dict(args)))
+        if args.get("tool_name") == "funnel-analytics-prod__list_brands":
+            return {"brands": [{"slug": "one8"}, {"slug": "lotto"}]}
+        return {"ok": True, "window": (args.get("arguments") or {})}
+
+    async def execute_listed(db, conns, wanted):
+        return [SimpleNamespace(tool_name=n, schema={"type": "object", "properties": {"tool_name": {}, "arguments": {}}},
+                                read_only=False, destructive=True, connector_name="Gateway", slug="gw", description="",
+                                group="", produces=[])
+                for (_, n) in wanted if n == "gateway__execute"]  # fmt: skip
+
+    async def no_suffix(db, conn, name):
+        return None
+
+    async def no_usage(*a, **k):
+        return None
+
+    monkeypatch.setattr(deep, "_load_gateway_surface", surface)
+    monkeypatch.setattr(deep, "_silent_call", silent)
+    monkeypatch.setattr(deep, "invoke_named", invoke)
+    monkeypatch.setattr(deep, "load_named", execute_listed)
+    monkeypatch.setattr(routing_select, "load_listed_as", no_suffix)
+    monkeypatch.setattr(deep, "bump_usage", no_usage)
+    conn = SimpleNamespace(kind="mcp", server_url="https://gw.example.test/mcp", alias="", name="Gateway", server_key="mcp:gw",
+                           id="c1", health="ok", slug="gw", provider="mcp")  # fmt: skip
+    ctx = deep.RunContext(db=object(), user=SimpleNamespace(id="u1"), connectors={"gw": conn}, auto_confirm=auto_confirm,
+                          query="One8 sales in the last 110 days")  # fmt: skip
+    return ctx, sent
+
+
+async def test_a_read_through_a_destructive_marked_execute_runs_without_asking(monkeypatch):
+    ctx, sent = _gateway_with_catalog(monkeypatch, auto_confirm=False)
+    out = await deep.call_user_tool(ctx, "gw", "gateway__execute",
+                                    {"tool_name": "funnel-analytics-prod__get_sales_dashboard",
+                                     "arguments": {"brand": "one8", "start": "2026-07-31", "end": "2026-11-17"}})  # fmt: skip
+    assert out.get("ok") and not ctx.pending
+    assert sent[-1][1]["arguments"] == {"brand": "one8", "start": "2026-07-31", "end": "2026-11-17"}
+    # A write still asks.
+    out = await deep.call_user_tool(ctx, "gw", "gateway__execute", {"tool_name": "erp-ag-prod__create_order", "arguments": {"sku": "A"}})
+    assert out["status"] == "awaiting_user_confirmation" and ctx.pending
+    assert all(a.get("tool_name") != "erp-ag-prod__create_order" for _, a in sent)
+
+
+async def test_a_loose_action_name_gets_the_catalogs_checks_so_a_wrong_parameter_is_caught(monkeypatch):
+    """The live 110-day run: funnel-analytics__get_sales_dashboard with {"days": 110} ran for its default 7 days."""
+    ctx, sent = _gateway_with_catalog(monkeypatch, auto_confirm=False)
+    out = await deep.call_user_tool(ctx, "gw", "gateway__execute",
+                                    {"tool_name": "funnel-analytics__get_sales_dashboard", "arguments": {"brand": "One8", "days": 110}})  # fmt: skip
+    assert out["not_run"] and "days" in out["error"] and set(out["arguments_expected"]) == {"brand", "start", "end"}
+    assert not any((a.get("tool_name") or "").endswith("get_sales_dashboard") for _, a in sent) and not ctx.pending
+    # Called by name too, then with the right parameters: it runs under the catalog's name, brand resolved.
+    out = await deep.call_user_tool(ctx, "gw", "funnel-analytics__get_sales_dashboard",
+                                    {"brand": "One8", "start": "2026-07-31", "end": "2026-11-17"})  # fmt: skip
+    assert out.get("ok") and sent[-1] == ("gateway__execute", {"tool_name": "funnel-analytics-prod__get_sales_dashboard",
+                                                              "arguments": {"brand": "one8", "start": "2026-07-31", "end": "2026-11-17"}})  # fmt: skip
+
+
+async def test_canonical_action_leaves_known_and_ambiguous_names_alone(monkeypatch):
+    ctx, _ = _gateway_with_catalog(monkeypatch, auto_confirm=True)
+    assert await deep.canonical_action(ctx, ctx.connectors["gw"], "funnel-analytics-prod__get_sales_dashboard") == "funnel-analytics-prod__get_sales_dashboard"
+    assert await deep.canonical_action(ctx, ctx.connectors["gw"], "funnel-analytics__get_sales_dashboard") == "funnel-analytics-prod__get_sales_dashboard"
+    assert await deep.canonical_action(ctx, ctx.connectors["gw"], "other__get_nothing") == "other__get_nothing"

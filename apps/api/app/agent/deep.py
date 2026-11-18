@@ -1436,6 +1436,26 @@ def sibling_listing_schema(tool_name: str, args: dict, schema: Any = None) -> di
     return {"type": "object", "properties": out} if out else None
 
 
+async def canonical_action(ctx: RunContext, conn, name: str) -> str:
+    """The catalog's own name for an action the agent named loosely: the same tool under a server prefix the catalog
+    doesn't list (``funnel-analytics__get_sales_dashboard`` -> ``funnel-analytics-prod__get_sales_dashboard``). A gateway
+    may still run the loose name, but none of the action's checks run for it (its schema, listed values, read-only
+    mark), so a wrong parameter is ignored and the tool answers for its defaults. Unchanged when the catalog knows the
+    name, or no single action matches."""
+    if not name or "__" not in name:
+        return name
+    try:
+        if await gateway_action_args(ctx, conn, name) is not None:
+            return name
+    except Exception:  # noqa: BLE001
+        return name
+    server, bare = name.rsplit("__", 1)
+    seen = [n for n in (ctx.gateway_args.get(("__seen__", conn.slug)) or set()) if n.endswith("__" + bare) and n != name]
+    if len(seen) > 1:
+        seen = [n for n in seen if n.rsplit("__", 1)[0].startswith(server) or server.startswith(n.rsplit("__", 1)[0])]
+    return seen[0] if len(seen) == 1 else name
+
+
 async def check_gateway_action(ctx: RunContext, conn, action: str, args: dict) -> tuple[dict, dict | None]:
     """(arguments, error) for a gateway action reached through execute: its catalog schema's checks and lookups when
     the catalog gives one, else its known parameter names, then values the server lists elsewhere."""
@@ -1476,6 +1496,9 @@ async def _check_inside_execute(ctx: RunContext, conn, args: dict) -> tuple[dict
     action = args[name_key]
     if is_execute_tool(action) or is_catalog_tool(action):
         return args, None
+    real = await canonical_action(ctx, conn, action)
+    if real != action:
+        args, action = {**args, name_key: real}, real
     raw = args[arg_key]
     as_text = isinstance(raw, str)
     try:
@@ -1978,6 +2001,7 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
         from app.routing.retrieve import is_catalog_tool as _catalog_tool
 
         if execute and tool_name != execute and not _catalog_tool(tool_name):
+            tool_name = await canonical_action(ctx, conn, tool_name)
             if _wrapped_args(args):
                 # The agent named the action and also wrote its arguments in execute's shape ({"tool_name", "arguments"}):
                 # they go out as written, so check the arguments inside (they were skipped, so display names went out).
@@ -2012,6 +2036,10 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
     from app.routing.retrieve import is_catalog_tool, is_execute_tool
 
     destructive = bool(hit.destructive if hit is not None else (spec.destructive if spec else False))
+    if is_execute_tool(tool_name) and _is_user_mcp(conn):
+        # A gateway marks its execute tool destructive because it can run anything; what this call runs is judged by
+        # the action inside it below (a read runs, a write asks), not by execute's own flag.
+        destructive = False
     # Tools nobody vouched for: a gateway action (or an execute call carrying one) is judged by the action's name,
     # and a user-added MCP tool needs a card unless its server marked it read-only.
     user_mcp = getattr(conn, "kind", "") != "builtin" and str(getattr(conn, "server_key", "") or "").startswith("mcp:")

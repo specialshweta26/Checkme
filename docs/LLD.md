@@ -936,6 +936,13 @@ The gateway showed the data while Lumio answered without it, or spent extra mode
   dropped), about a third of the size. Each table carries `column_totals` over every row (ids, dates, rates, shares and
   averages aren't added up). If even the table is too big, rows (never columns) are cut, and the totals still cover
   every row.
+- **Loose action names:** the agent sometimes names a gateway action under a server prefix the catalog doesn't list
+  (`funnel-analytics__get_sales_dashboard` for `funnel-analytics-prod__…`). The gateway still ran it, but none of the
+  action's checks did, so `{"days": 110}` (a parameter the tool doesn't take) went out and the tool answered for its
+  default 7 days. `canonical_action` maps such a name to the catalog's single action with the same tool name, so its
+  schema, listed values and read-only mark apply, and a wrong parameter comes back to the agent with the right ones.
+- **Execute's own flag doesn't decide:** a gateway marks its execute tool destructive (it can run anything), so a
+  direct `gateway__execute` call for a read asked for approval. The action inside decides now: a read runs, a write asks.
 - **Approvals see the action:** execute calls shaped by the gateway's own schema can name the action under
   `public_name` / `public_tool_name`. `approval.nested_actions` reads those too; before, a plain read such as
   `get_daily_sales` asked for approval because its name wasn't seen.
