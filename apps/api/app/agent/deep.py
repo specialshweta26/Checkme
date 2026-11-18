@@ -271,8 +271,9 @@ def fit_payload(value: Any, limit: int = CONNECTOR_RESULT_CHARS) -> Any:
         if _json_size(shrunk) <= limit:
             return {"partial": True, "data": shrunk, "left_out_items": dropped, "chars": _json_size(value),
                     "hint": f"Too big for one message, so each list shows its first {n} rows; column_totals still cover "
-                            "every row. The full result is stored: call inspect_result with this result_id (a path or "
-                            "search, then offset) for the rest."}  # fmt: skip
+                            "every row. The full result is stored: for totals, counts or breakdowns over every row (also "
+                            "when rows are plain arrays) call aggregate_result with this result_id; to read rows, "
+                            "inspect_result (a path or search, then offset)."}  # fmt: skip
     return compact_payload(value, limit)
 
 
@@ -565,6 +566,8 @@ async def _expand_gateway_catalog(ctx: RunContext, conn, query: str) -> list[dic
             continue
         slim = slim_search(raw, q) if isinstance(raw, dict) else {"candidates": []}
         parsed = [item for item in (slim.get("candidates") or []) if isinstance(item, dict)]
+        if isinstance(raw, dict):
+            _keep_gateway_guide(ctx, conn, raw)
         seen = ctx.gateway_args.setdefault(("__seen__", conn.slug), set())
         seen.update(str(item.get("public_name") or "") for item in parsed if item.get("public_name"))
         for item in parsed:
@@ -1185,7 +1188,7 @@ async def search_user_tools(ctx: RunContext, query: str, connector_slug: str | N
         if is_catalog_tool(row["tool_name"]) or row["tool_name"] in GATEWAY_EXECUTE_NAMES
     ]
     merged = nested + data_local + (catalog_local if not nested else [])
-    out = []
+    out = [guide for c in conns if (guide := _gateway_guide_row(ctx, c))]
     for i, row in enumerate(merged):
         item = {k: v for k, v in row.items() if k not in {"score", "schema"}}
         brief = brief_schema(row.get("schema")) if i < SCHEMA_ROWS else None
@@ -1683,6 +1686,59 @@ _EXECUTE_ARG_KEYS = ("arguments", "args", "params", "parameters", "input", "tool
 _EXECUTE_REQUEST_KEYS = ("query", "request", "intent", "task", "prompt", "question")
 
 
+def _keep_gateway_guide(ctx: RunContext, conn, raw: dict) -> None:
+    """A gateway's own advice from its search: the plan it recommends for the client (``client_prompt``), its ranked
+    matches with confidence and reason, and the ``trace_id`` it wants on the execute call. Other clients follow it."""
+    guide = {}
+    for key in ("client_prompt", "trace_id"):
+        if isinstance(raw.get(key), str) and raw[key].strip():
+            guide[key] = raw[key].strip()[:2000]
+    matches = [{k: m.get(k) for k in ("public_name", "confidence", "reason", "description") if m.get(k) is not None}
+               for m in (raw.get("matches") or []) if isinstance(m, dict)]  # fmt: skip
+    if matches:
+        guide["matches"] = matches[:5]
+    if guide:
+        ctx.gateway_args[("__guide__", conn.slug)] = guide
+
+
+def _gateway_guide_row(ctx: RunContext, conn) -> dict | None:
+    guide = ctx.gateway_args.get(("__guide__", conn.slug))
+    if not guide or not (guide.get("client_prompt") or guide.get("matches")):
+        return None
+    return {"connector_slug": conn.slug, "gateway_advice": guide.get("client_prompt", ""), "recommended": guide.get("matches", []),
+            "note": "The gateway's own plan for this request: follow it (its recommended tool, arguments and steps), then call "
+                    "the tool with call_tool."}  # fmt: skip
+
+
+def _with_trace(ctx: RunContext, conn, schema: Any, args: dict) -> dict:
+    """The gateway's trace_id from its search on the execute call, when execute takes one."""
+    props = schema.get("properties") if isinstance(schema, dict) and isinstance(schema.get("properties"), dict) else {}
+    trace = (ctx.gateway_args.get(("__guide__", conn.slug)) or {}).get("trace_id")
+    if trace and "trace_id" in props and not args.get("trace_id"):
+        return {**args, "trace_id": trace}
+    return args
+
+
+async def _read_all_pages(ctx: RunContext, conn, tool_name: str, args: dict, result: Any) -> Any:
+    """A table answered a page at a time: fetch the remaining pages and merge their rows (docs/LLD.md "Paged tables")."""
+    from app.agent import tables
+    from app.routing.retrieve import is_execute_tool
+
+    if not tables.is_paged(result):
+        return result
+    inner_key = next((k for k in _EXECUTE_ARG_KEYS if isinstance(args.get(k), dict)), None) if is_execute_tool(tool_name) else None
+    base = dict(args.get(inner_key) or {}) if inner_key else dict(args)
+
+    async def call(page_args: dict) -> Any:
+        sent = {**args, inner_key: page_args} if inner_key else page_args
+        return await invoke_named(ctx.db, ctx.user, conn, tool_name, sent, ctx.attachments)
+
+    if ctx.progress is not None:
+        total = next((result.get(k) for k in ("totalRows", "total_rows", "total") if isinstance(result.get(k), int)), None)
+        await ctx.progress.emit(f"Reading all {total} rows, page by page" if total else "Reading every page of the table", kind="tool", tool=tool_name)
+    return await tables.all_pages(result, base, call)
+
+
 def execute_args(schema: Any, args: dict, request: str = "") -> dict:
     """The gateway's execute call in the shape its own input schema asks for: its key for the action's name, its key
     for the action's arguments, and the user's request when it requires one. Lumio always sent
@@ -2048,6 +2104,7 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
         tool_name, args = wrap_through_execute(tool_name, args, execute)
         if execute and tool_name == execute:
             args = execute_args(surface.get("execute_schema"), args, ctx.query)
+            args = _with_trace(ctx, conn, surface.get("execute_schema"), args)
     from app.routing.retrieve import is_execute_tool as _execute_tool
 
     if hit is not None and spec is None and _is_user_mcp(conn) and _execute_tool(tool_name):
@@ -2133,6 +2190,8 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
         else:
             async with waiting_on(ctx, conn, tool_name):
                 result = await invoke_named(ctx.db, ctx.user, conn, tool_name, args, ctx.attachments)
+                if _is_user_mcp(conn):
+                    result = await _read_all_pages(ctx, conn, tool_name, args, result)
                 from app.connectors.mcp_client import ignored_dates
 
                 wrong_dates = ignored_dates(args, result) if _is_user_mcp(conn) else ""
@@ -2283,6 +2342,14 @@ class ScheduleTaskInput(BaseModel):
         default="",
         description="Optional: the name of another of the user's agents that should own and run it (e.g. Coder). Empty means you.",
     )
+
+
+class AggregateInput(BaseModel):
+    result_id: str | None = Field(default=None, description="Stored result_id from call_tool. Defaults to the latest.")
+    where: dict | None = Field(default=None, description='Keep rows where these columns match: {"1": "Online"} or {"0": {"gte": "2026-01-01"}}.')
+    group_by: list | None = Field(default=None, description='Columns to group by, e.g. [4] or ["category"]. Omit for one overall total.')
+    sums: list | None = Field(default=None, description="Numeric columns to add up, e.g. [6, 8, 9].")
+    top: int = Field(default=50, description="How many groups to return, biggest first.")
 
 
 class InspectInput(BaseModel):
@@ -2744,6 +2811,25 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
         """Queue work for a future time on this agent's own routines (or on a named agent with agent_name). Required when the user says in N minutes, later, tonight, tomorrow, every day, or any clock. Pass their full request. Do not fetch data or send mail in this turn. Scheduled git pushes, PRs and merges still wait for the user's approval."""
         return dumps(await run_staff(ctx, "schedule_task", {"prompt": prompt, "agent_name": agent_name}))
 
+    async def aggregate_result(
+        result_id: str | None = None,
+        where: dict | None = None,
+        group_by: list | None = None,
+        sums: list | None = None,
+        top: int = 50,
+    ) -> str:
+        """Add up a stored table over EVERY row (never estimate totals from the rows shown). where filters rows ({column: value,
+        [values] or {"gte": x, "lte": y}}), group_by groups them, sums are the numeric columns to total; each group gets a row
+        count. Columns are 0-based indexes when rows are arrays (work out what each column is from sample_rows and the
+        tool's description) or keys when rows are objects. Call it once per breakdown (overall, by category, by day...)."""
+        from app.agent import tables
+
+        row = next((r for r in ctx.results if r.get("result_id") == result_id), None) if result_id else (ctx.results[-1] if ctx.results else None)
+        if row is None:
+            return dumps({"error": "No stored result with that id. call_tool first."})
+        ctx.used_tools.append("aggregate_result")
+        return dumps(tables.aggregate(row.get("data"), where, group_by, sums, top), 32000)
+
     async def inspect_result(
         result_id: str | None = None,
         path: str | None = None,
@@ -2953,6 +3039,12 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
             name="inspect_result",
             description=inspect_result.__doc__,
             args_schema=InspectInput,
+        ),
+        StructuredTool.from_function(
+            coroutine=aggregate_result,
+            name="aggregate_result",
+            description=aggregate_result.__doc__,
+            args_schema=AggregateInput,
         ),
         StructuredTool.from_function(
             coroutine=schedule_task,

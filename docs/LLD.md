@@ -951,6 +951,24 @@ The gateway showed the data while Lumio answered without it, or spent extra mode
   `public_name` / `public_tool_name`. `approval.nested_actions` reads those too; before, a plain read such as
   `get_daily_sales` asked for approval because its name wasn't seen.
 
+### Paged tables
+
+A data tool answered "SIS sales, November MTD" as a table of 8,999 rows, 27 unnamed columns each, a page at a time
+(`totalRows`, `offset`, `limit`, `hasMore`). Another MCP client read both pages and added the rows up with code. Lumio
+read the first page only, and the model could not add up thousands of rows itself. Now (`app/agent/tables.py`):
+- **Every page:** `all_pages` reads the remaining pages of a paged answer (`hasMore`, or `offset` + rows under
+  `totalRows`) and merges the rows: up to 40 pages or 100,000 rows, asking 5,000 rows a page (a tool that caps lower
+  returns fewer). This happens for a direct call and for one through a gateway's execute (paging set on the inner
+  arguments). The chat says "Reading all N rows, page by page".
+- **Totals over every row:** the `aggregate_result` tool filters (`where`: a value, a list, or `gte`/`lte`), groups
+  (`group_by`) and adds up (`sums`) a stored table. Columns are indexes for array rows and keys for object rows. It
+  returns totals, a count per group, and three sample rows to read the columns from. It is fixed arithmetic, not code
+  the model writes. The hint on a cut-down answer points to it.
+- **The gateway's own plan:** a gateway's search can return a `client_prompt` (its recommended tool, arguments and
+  steps), ranked `matches` with confidence and reason, and a `trace_id`. These were dropped. They are now kept: tool
+  search shows them first as `gateway_advice` and `recommended`, and the `trace_id` goes on the execute call when
+  execute takes one.
+
 ### Lean context
 
 Each model call used to carry about 24k tokens before the conversation started: a ~7.8k-token system prompt and ~16k
