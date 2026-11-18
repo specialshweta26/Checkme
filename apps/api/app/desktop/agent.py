@@ -92,6 +92,53 @@ def _result_key(job_id: str) -> str:
     return f"desktop:result:{job_id}"
 
 
+def _features_key(user_id) -> str:
+    return f"desktop:features:{user_id}"
+
+
+async def remember_features(user_id, header: str | None) -> None:
+    """What the connected desktop app says it can do (``X-Lumio-Features`` on its job poll). Older apps send nothing."""
+    names = sorted({f.strip() for f in (header or "").split(",") if f.strip()})[:20]
+    try:
+        await get_redis().set(_features_key(user_id), ",".join(names).encode(), ex=ONLINE_TTL_S)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("desktop features not kept: %s", type(exc).__name__)
+
+
+async def has_feature(user_id, name: str) -> bool:
+    try:
+        raw = await get_redis().get(_features_key(user_id))
+    except Exception:  # noqa: BLE001
+        return False
+    text = raw.decode() if isinstance(raw, (bytes, bytearray)) else str(raw or "")
+    return name in text.split(",")
+
+
+BROWSER_SPACES = "browser-spaces"
+
+
+async def with_agent_browser(user_id, tool: str, args: dict) -> tuple[dict, dict | None]:
+    """A browser command for the agent's own browser carries its name (docs/AGENT_BROWSERS.md). A desktop app too old
+    to keep agents' browsers apart gets the command refused, not run in the shared browser."""
+    if not (tool.startswith("browser") or tool.startswith("browse_")):
+        return args, None
+    from app.agent_browsers.service import current
+
+    space = current()[0]
+    if not space or "space" in args:
+        return args, None
+    if not await has_feature(user_id, BROWSER_SPACES):
+        return args, {
+            "ok": False,
+            "needs_desktop_update": True,
+            "ran_on": "local_computer",
+            "error": "This agent has its own browser, and the Lumio desktop app on this computer is too old to keep it "
+            "apart from the shared browser. Ask the user to update the desktop app (it updates itself on restart), or "
+            "switch the agent to the shared browser in its About panel.",
+        }
+    return {**args, "space": space}, None
+
+
 async def is_online(user_id) -> bool:
     try:
         return bool(await get_redis().get(_online_key(user_id)))
@@ -255,6 +302,9 @@ async def call_local(user_id, tool: str, args: dict | None = None) -> dict:
         return {"ok": False, "fallback_cloud": True, "error": f"{tool} runs on the cloud computer"}
     if not await is_online(user_id):
         raise LocalOffline("desktop app is not connected")
+    args, refused = await with_agent_browser(user_id, tool, dict(args or {}))
+    if refused is not None:
+        return refused
     timeout = 90 if tool.startswith("browser") or tool in {"computer_observe", "computer_act", "computer_ui", "office_app", "boot", "screen_png"} else 60
     try:
         timeout = int((args or {}).get("timeout") or timeout)

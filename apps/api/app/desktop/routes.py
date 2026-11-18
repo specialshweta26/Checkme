@@ -87,9 +87,14 @@ async def heartbeat(pair=Depends(_agent_user)):
 
 
 @router.get("/jobs")
-async def jobs(wait: int = 20, pair=Depends(_agent_user)):
+async def jobs(
+    wait: int = 20,
+    pair=Depends(_agent_user),
+    x_lumio_features: str | None = Header(default=None, alias="X-Lumio-Features"),
+):
     user, row = pair
     await desktop.heartbeat(user.id, desktop.stored_hash(row))
+    await desktop.remember_features(user.id, x_lumio_features)
     job = await desktop.take_job(user.id, wait_s=wait)
     return {"ok": True, "job": job}
 

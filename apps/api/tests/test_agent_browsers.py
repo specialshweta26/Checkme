@@ -75,7 +75,7 @@ def test_each_agent_browser_keeps_its_own_tab_map():
     token = browsers.use(own)
     try:
         assert browser_tabs._key(uid, "cloud") == f"browser:tabs:{uid}:cloud:{browsers.space_for(own)}"
-        assert browser_tabs._key(uid, "desktop") == f"browser:tabs:{uid}:desktop"  # the desktop app has one profile
+        assert browser_tabs._key(uid, "desktop") == f"browser:tabs:{uid}:desktop:{browsers.space_for(own)}"
     finally:
         browsers.BROWSER_SPACE.reset(token)
 
@@ -202,3 +202,72 @@ async def test_own_browser_setting_saved_cookies_and_sign_out(db):
     from app.agents.service import serialize_agent
 
     assert serialize_agent(agent)["browser"] == {"mode": "shared"}
+
+
+# ---------------------------------------------------------------- the desktop app
+
+
+async def test_desktop_browser_commands_carry_the_agents_browser_or_are_refused(monkeypatch):
+    from app.desktop import agent as desktop
+
+    own = SimpleNamespace(id=uuid.uuid4(), browser={"mode": "own"})
+    sent: list[tuple[str, dict]] = []
+    features = {"value": ""}
+
+    async def online(user_id):
+        return True
+
+    async def has_feature(user_id, name):
+        return name in features["value"].split(",")
+
+    async def enqueue(user_id, tool, args):
+        sent.append((tool, args))
+        return "job-1"
+
+    async def wait_result(job_id, timeout_s):
+        return {"ok": True}
+
+    monkeypatch.setattr(desktop, "is_online", online)
+    monkeypatch.setattr(desktop, "has_feature", has_feature)
+    monkeypatch.setattr(desktop, "enqueue", enqueue)
+    monkeypatch.setattr(desktop, "wait_result", wait_result)
+    monkeypatch.setattr(desktop, "_ingest_screen", lambda user_id, out: out)
+
+    # Shared agent: unchanged, whatever the app supports.
+    assert (await desktop.call_local("u", "browser_navigate", {"url": "https://x"}))["ok"]
+    assert sent[-1] == ("browser_navigate", {"url": "https://x"})
+
+    token = browsers.use(own)
+    try:
+        # An older desktop app: refused, never run in the shared browser.
+        out = await desktop.call_local("u", "browser_navigate", {"url": "https://x"})
+        assert out["ok"] is False and out["needs_desktop_update"] and len(sent) == 1
+        # Other tools on the computer still run.
+        assert (await desktop.call_local("u", "list_dir", {"path": "~"}))["ok"] and sent[-1][1] == {"path": "~"}
+        # An app that keeps agents' browsers apart gets the agent's browser with each command.
+        features["value"] = "browser-spaces"
+        for tool in ("browser_navigate", "browser_snapshot", "browser_tabs", "browse_act"):
+            assert (await desktop.call_local("u", tool, {}))["ok"]
+            assert sent[-1] == (tool, {"space": browsers.space_for(own)})
+    finally:
+        browsers.BROWSER_SPACE.reset(token)
+
+
+async def test_the_desktop_app_says_what_it_supports(monkeypatch):
+    from app.desktop import agent as desktop
+
+    store: dict = {}
+
+    class Redis:
+        async def set(self, key, value, ex=None):
+            store[key] = value
+
+        async def get(self, key):
+            return store.get(key)
+
+    monkeypatch.setattr(desktop, "get_redis", lambda: Redis())
+    await desktop.remember_features("u1", "browser-spaces, other")
+    assert await desktop.has_feature("u1", "browser-spaces")
+    await desktop.remember_features("u2", None)  # an older app sends nothing
+    assert not await desktop.has_feature("u2", "browser-spaces")
+    assert not await desktop.has_feature("u3", "browser-spaces")
