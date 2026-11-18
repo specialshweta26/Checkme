@@ -1436,6 +1436,35 @@ def sibling_listing_schema(tool_name: str, args: dict, schema: Any = None) -> di
     return {"type": "object", "properties": out} if out else None
 
 
+async def _tool_of_another_connector(ctx: RunContext, conn, tool_name: str, args: dict) -> tuple[str, str, dict] | None:
+    """(connector, tool, arguments) when a call to this gateway names a tool without a server prefix that this
+    connector doesn't list but exactly one other connected connector does; None otherwise."""
+    from app.routing.retrieve import is_catalog_tool, is_execute_tool
+
+    action, inner = tool_name, args
+    if is_execute_tool(tool_name) or _wrapped_args(args):
+        name_key = next((k for k in _EXECUTE_NAME_KEYS if isinstance(args.get(k), str) and args.get(k)), None)
+        arg_key = next((k for k in _EXECUTE_ARG_KEYS if k in args), None)
+        if name_key is None:
+            return None
+        action = args[name_key]
+        raw = args.get(arg_key) if arg_key else {}
+        try:
+            inner = json.loads(raw) if isinstance(raw, str) else (raw or {})
+        except (TypeError, ValueError):
+            return None
+    if not action or "__" in action or is_execute_tool(action) or is_catalog_tool(action) or not isinstance(inner, dict):
+        return None
+    if await load_named(ctx.db, [conn], {(conn.slug, action)}):
+        return None  # this connector lists it
+    others = [c for slug, c in ctx.connectors.items() if slug != conn.slug]
+    if not others:
+        return None
+    found = await load_named(ctx.db, others, {(c.slug, action) for c in others})
+    owners = sorted({getattr(h, "slug", "") for h in found if getattr(h, "tool_name", "") == action} - {""})
+    return (owners[0], action, dict(inner)) if len(owners) == 1 else None
+
+
 async def canonical_action(ctx: RunContext, conn, name: str) -> str:
     """The catalog's own name for an action the agent named loosely: the same tool under a server prefix the catalog
     doesn't list (``funnel-analytics__get_sales_dashboard`` -> ``funnel-analytics-prod__get_sales_dashboard``). A gateway
@@ -1989,6 +2018,12 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
             "handoff": False,
             "message": "The user finished on the live computer. Call browser_snapshot, then continue the remaining steps.",
         }
+    if ctx.db is not None and spec is None and _is_user_mcp(conn):
+        elsewhere = await _tool_of_another_connector(ctx, conn, tool_name, args)
+        if elsewhere is not None:
+            # A Lumio tool sent to a gateway (write_analytics_report through its execute): run it where it lives, instead of
+            # asking to run an action the gateway doesn't have.
+            return await call_user_tool(ctx, *elsewhere)
     if ctx.db is not None and spec is None and _is_user_mcp(conn):
         # Call the connector's own tool directly, the way other MCP clients do, whenever it lists one for this name:
         # also when the agent named it without its server prefix, or wrapped it in the gateway's execute call.
