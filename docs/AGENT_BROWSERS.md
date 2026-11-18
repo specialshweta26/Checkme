@@ -17,6 +17,23 @@ In an agent's **About** panel, under **Browser**:
 If an agent with its own browser needs you to sign in, it asks as usual. Its browser is a separate window on the cloud
 computer's live screen.
 
+## On your computer (the desktop app)
+
+When an agent works in the browser on your computer, an agent with its own browser gets a separate Chrome there too:
+
+- The shared Lumio browser keeps its profile and port (9333). Each agent browser is its own Chrome with its own
+  profile under `<Lumio data folder>/browser-spaces/<space>` and its own port (9334 to 9399). The port is saved in the
+  profile, so after Lumio restarts it finds that agent's Chrome again.
+- At most three agent browsers stay open. Opening a fourth closes the one used longest ago that isn't running a
+  command; its profile stays, so it reopens signed in. If all three are busy, the step is refused with "try again".
+- Sign out of everything deletes the agent's earlier profile folder the next time its browser opens.
+- Sign-ins on your computer stay in that profile on your computer. They aren't uploaded or copied to the cloud.
+- The desktop app says it supports this (`X-Lumio-Features: browser-spaces`) when it asks for work. An older app
+  doesn't, so the API refuses an own-browser agent's browser steps there and asks to update the app, rather than run
+  them in the shared browser.
+- Code: `apps/desktop/src-tauri/src/agent_browsers.rs` and `browser.rs` (`Target`, `space_target`, `close_browser`);
+  the API side is `with_agent_browser` in `app/desktop/agent.py`.
+
 ## How it works
 
 - **Setting.** `workspace_agents.browser` is `{mode: "shared" | "own", epoch}`. `app/agent_browsers/service.py`
@@ -34,8 +51,8 @@ computer's live screen.
   - At most three agent browsers are open at once. Opening a fourth closes the one used longest ago, and its profile
     stays on disk, so it reopens signed in.
   - Space names are checked (`[A-Za-z0-9_-]`, at most 64 characters) because they become folder names.
-- **Tabs per chat.** `browser_tabs` keeps one chat-to-tab map per browser, so a chat's tab is always in the right
-  profile.
+- **Tabs per chat.** `browser_tabs` keeps one chat-to-tab map per browser (cloud and desktop), so a chat's tab is
+  always in the right profile.
 - **Saved sign-ins.**
   - Cookies of an agent's browser are saved encrypted in `agent_browser_profiles` (one row per agent, tied to its
     current space). They are saved after page loads (at most every 5 minutes) and soon after a sign-in.
@@ -50,8 +67,6 @@ computer's live screen.
 
 Limits:
 
-- **The desktop app** still uses its one Lumio browser profile on your computer for every agent. Separate profiles
-  there need a desktop app release.
 - **Screen-level actions** (`computer_act`) click whatever is on the live screen, and **teaching a skill** records
   in the shared browser.
 - After Sign out of everything, the old profile's folder stays on the cloud computer until it is recycled. No agent
