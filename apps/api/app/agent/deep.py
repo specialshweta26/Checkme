@@ -2346,7 +2346,7 @@ class ScheduleTaskInput(BaseModel):
 
 class AggregateInput(BaseModel):
     result_id: str | None = Field(default=None, description="Stored result_id from call_tool. Defaults to the latest.")
-    where: dict | None = Field(default=None, description='Keep rows where these columns match: {"1": "SIS"} or {"0": {"gte": "2026-11-01"}}.')
+    where: dict | None = Field(default=None, description='Keep rows where these columns match: {"1": "Online"} or {"0": {"gte": "2026-01-01"}}.')
     group_by: list | None = Field(default=None, description='Columns to group by, e.g. [4] or ["category"]. Omit for one overall total.')
     sums: list | None = Field(default=None, description="Numeric columns to add up, e.g. [6, 8, 9].")
     top: int = Field(default=50, description="How many groups to return, biggest first.")
