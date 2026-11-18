@@ -385,7 +385,7 @@ async def chat(
                 content = f"{content}\n\n{record}"
         elif m.role == "assistant" and src:
             content = f"{content}\n\nTool evidence (cite source_tool if asked): {json.dumps(src, default=str)[:2000]}"
-        history.append({"role": m.role, "content": content, "id": getattr(m, "id", None)})
+        history.append({"role": m.role, "content": content})
 
     from app.agent.approval import claim_token, reply_intent
 

@@ -246,9 +246,5 @@ app.include_router(desktop_router, prefix="/api")
 
 
 @app.get("/health")
-@app.get("/api/health")
 async def health():
-    import os
-
-    # The commit this process runs (Render sets RENDER_GIT_COMMIT): shows when a deploy is live.
-    return {"ok": True, "commit": (os.environ.get("RENDER_GIT_COMMIT") or "")[:12]}
+    return {"ok": True}

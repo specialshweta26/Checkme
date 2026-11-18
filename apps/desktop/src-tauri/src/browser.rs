@@ -259,23 +259,119 @@ async fn wait_debug(http: &reqwest::Client, port: u16) -> Result<(), String> {
     Err("Chrome did not open its debug port".into())
 }
 
-pub async fn attach() -> Result<Chrome, String> {
+/// The shared Lumio browser's debug port. Never 9222: that is often the user's own Chrome.
+pub const SHARED_PORT: u16 = 9333;
+/// Ports for agents' own browsers (docs/AGENT_BROWSERS.md): each is a separate Chrome with its own profile.
+const SPACE_PORTS: std::ops::RangeInclusive<u16> = 9334..=9399;
+const PORT_FILE: &str = ".lumio-port";
+
+/// Which Chrome a command drives: the shared Lumio profile, or an agent's own.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Target {
+    pub port: u16,
+    pub profile: PathBuf,
+}
+
+impl Target {
+    pub fn shared() -> Self {
+        Target { port: SHARED_PORT, profile: profile_dir() }
+    }
+}
+
+/// An agent browser's name from the server, `a<agent id>-<n>`. It becomes a folder name, so only letters, digits,
+/// `-` and `_` (at most 64) pass.
+pub fn valid_space(space: &str) -> bool {
+    !space.is_empty() && space.len() <= 64 && space.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+pub fn spaces_dir() -> PathBuf {
+    crate::grants::data_dir().join("browser-spaces")
+}
+
+/// The profile folder and port of an agent's own browser. The port is kept in the profile, so after Lumio restarts it
+/// finds that agent's Chrome again; a new browser takes the first port no other agent browser has claimed or uses.
+pub async fn space_target_in(base: &std::path::Path, space: &str, taken: &[u16]) -> Result<Target, String> {
+    if !valid_space(space) {
+        return Err("bad browser name".into());
+    }
+    let profile = base.join(space);
+    std::fs::create_dir_all(&profile).map_err(|e| format!("could not make the browser profile: {e}"))?;
+    let file = profile.join(PORT_FILE);
+    if let Some(port) = std::fs::read_to_string(&file).ok().and_then(|t| t.trim().parse::<u16>().ok()) {
+        if SPACE_PORTS.contains(&port) && !taken.contains(&port) {
+            return Ok(Target { port, profile });
+        }
+    }
+    let claimed = claimed_ports(base, space);
+    let probe = http_client(Duration::from_millis(300))?;
+    for port in SPACE_PORTS {
+        if taken.contains(&port) || claimed.contains(&port) || port_open(&probe, port).await {
+            continue;
+        }
+        std::fs::write(&file, port.to_string()).map_err(|e| e.to_string())?;
+        return Ok(Target { port, profile });
+    }
+    Err("Too many agent browsers are open on this computer".into())
+}
+
+/// Ports other agent browsers' profiles have kept.
+fn claimed_ports(base: &std::path::Path, except: &str) -> Vec<u16> {
+    let Ok(dirs) = std::fs::read_dir(base) else { return vec![] };
+    dirs.flatten()
+        .filter(|d| d.file_name().to_string_lossy() != except)
+        .filter_map(|d| std::fs::read_to_string(d.path().join(PORT_FILE)).ok())
+        .filter_map(|t| t.trim().parse::<u16>().ok())
+        .collect()
+}
+
+/// Delete this agent's earlier profiles (`a<id>-<older n>`): "Sign out of everything" moved it to a new one.
+pub fn forget_old_profiles(base: &std::path::Path, space: &str) -> Vec<String> {
+    let Some((stem, _)) = space.rsplit_once('-') else { return vec![] };
+    let prefix = format!("{stem}-");
+    let Ok(dirs) = std::fs::read_dir(base) else { return vec![] };
+    let mut gone = vec![];
+    for dir in dirs.flatten() {
+        let name = dir.file_name().to_string_lossy().to_string();
+        if name != space && name.starts_with(&prefix) && valid_space(&name) && std::fs::remove_dir_all(dir.path()).is_ok() {
+            gone.push(name);
+        }
+    }
+    gone
+}
+
+/// Close the Chrome on `port` (an agent browser closed to make room, or one about to be deleted). Its profile stays.
+pub async fn close_browser(port: u16) {
+    let Ok(http) = http_client(Duration::from_secs(2)) else { return };
+    let Ok(res) = http.get(format!("http://127.0.0.1:{port}/json/version")).send().await else { return };
+    let Ok(info) = res.json::<Value>().await else { return };
+    let Some(ws_url) = info.get("webSocketDebuggerUrl").and_then(Value::as_str) else { return };
+    if let Ok((mut ws, _)) = connect_async(ws_url).await {
+        let _ = ws.send(Message::Text(json!({ "id": 1, "method": "Browser.close" }).to_string().into())).await;
+        let _ = tokio::time::timeout(Duration::from_secs(2), ws.next()).await;
+    }
+    for _ in 0..20 {
+        if !port_open(&http, port).await {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+}
+
+pub async fn attach_to(target: &Target) -> Result<Chrome, String> {
     let probe = http_client(Duration::from_millis(500))?;
-    let port = 9333u16;
-    if !port_open(&probe, port).await {
+    if !port_open(&probe, target.port).await {
         return Err("Chrome is not open".into());
     }
     let http = http_client(Duration::from_secs(3))?;
-    Ok(Chrome { _child: None, port, http, tab: std::sync::Mutex::new(None) })
+    Ok(Chrome { _child: None, port: target.port, http, tab: std::sync::Mutex::new(None) })
 }
 
-pub async fn launch(start_url: &str) -> Result<Chrome, String> {
+pub async fn launch_at(start_url: &str, target: &Target) -> Result<Chrome, String> {
     if !(start_url.starts_with("https://") || start_url.starts_with("http://")) {
         return Err("A full https address is required before opening Chrome.".into());
     }
     let probe = http_client(Duration::from_millis(500))?;
-    // Dedicated port + Lumio profile. Never attach to 9222 (that is often the user's own Chrome).
-    let port = 9333u16;
+    let port = target.port;
     let http = http_client(Duration::from_secs(3))?;
     if port_open(&probe, port).await {
         // Attached to a running Chrome: the job's own navigation picks the page. Opening one here would add a tab per
@@ -286,7 +382,7 @@ pub async fn launch(start_url: &str) -> Result<Chrome, String> {
         .into_iter()
         .next()
         .ok_or_else(|| "Install Google Chrome (or Edge) to use this computer's browser.".to_string())?;
-    let args = chrome_args(port, start_url);
+    let args = chrome_args(port, &target.profile, start_url);
     let child = spawn_chrome(&bin, &args).await?;
     if let Err(err) = wait_debug(&probe, port).await {
         if let Some(mut child) = child {
@@ -297,10 +393,10 @@ pub async fn launch(start_url: &str) -> Result<Chrome, String> {
     Ok(Chrome { _child: child, port, http, tab: std::sync::Mutex::new(None) })
 }
 
-fn chrome_args(port: u16, start_url: &str) -> Vec<String> {
+fn chrome_args(port: u16, profile: &std::path::Path, start_url: &str) -> Vec<String> {
     let mut args = vec![
         format!("--remote-debugging-port={port}"),
-        format!("--user-data-dir={}", profile_dir().display()),
+        format!("--user-data-dir={}", profile.display()),
         "--no-first-run".into(),
         "--no-default-browser-check".into(),
         "--disable-sync".into(),

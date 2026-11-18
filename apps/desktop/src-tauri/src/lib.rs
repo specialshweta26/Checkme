@@ -14,6 +14,7 @@ use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
+mod agent_browsers;
 mod browser;
 mod office;
 mod updates;
@@ -26,11 +27,15 @@ const STDOUT_LIMIT: usize = 200_000;
 const FILE_TEXT_LIMIT: usize = 80_000;
 const TABLE_MAX: u64 = 64 * 1024 * 1024;
 const PUBLISH_LIMIT: usize = 8 * 1024 * 1024;
+/// What this app can do that older ones can't, sent when it asks for work. `browser-spaces`: agents' own browsers.
+const FEATURES: &str = "browser-spaces";
 
 struct Sidecar {
     token: Mutex<Option<String>>,
     api_base: Mutex<Option<String>>,
     chrome: Mutex<Option<browser::Chrome>>,
+    /// Agents' own browsers (docs/AGENT_BROWSERS.md); `chrome` is the shared Lumio one.
+    agents: Mutex<agent_browsers::AgentBrowsers>,
     started: AtomicBool,
 }
 
@@ -698,23 +703,42 @@ fn web_url(raw: &str) -> Option<&str> {
     }
 }
 
-async fn ensure_chrome(slot: &Mutex<Option<browser::Chrome>>, start_url: Option<&str>) -> Result<(), String> {
+async fn ensure_chrome(slot: &Mutex<Option<browser::Chrome>>, target: &browser::Target, start_url: Option<&str>) -> Result<(), String> {
     if let Some(url) = start_url.and_then(web_url) {
-        let chrome = browser::launch(url).await?;
+        let chrome = browser::launch_at(url, target).await?;
         *slot.lock().await = Some(chrome);
         return Ok(());
     }
     if slot.lock().await.is_some() {
         return Ok(());
     }
-    if let Ok(chrome) = browser::attach().await {
+    if let Ok(chrome) = browser::attach_to(target).await {
         *slot.lock().await = Some(chrome);
         return Ok(());
     }
     Err("Open a site with browser_navigate and a full https address. Do not open a blank page.".into())
 }
 
-async fn run_browser(slot: &Mutex<Option<browser::Chrome>>, tool: &str, args: &Value) -> Value {
+/// A browser command on the agent's own browser when the server names one (`space`), else on the shared one.
+async fn run_agent_browser(state: &Sidecar, tool: &str, args: &Value) -> Value {
+    let space = args.get("space").and_then(Value::as_str).unwrap_or("");
+    if space.is_empty() {
+        return run_browser(&state.chrome, &browser::Target::shared(), tool, args).await;
+    }
+    let got = state.agents.lock().await.get(space).await;
+    match got {
+        Ok((slot, target)) => {
+            let mut out = run_browser(&slot, &target, tool, args).await;
+            if let Some(obj) = out.as_object_mut() {
+                obj.insert("space".into(), json!(space));
+            }
+            out
+        }
+        Err(err) => json!({ "ok": false, "error": err, "ran_on": "local_computer" }),
+    }
+}
+
+async fn run_browser(slot: &Mutex<Option<browser::Chrome>>, target: &browser::Target, tool: &str, args: &Value) -> Value {
     let start_url = match tool {
         "browser_navigate" | "browse_open" => args.get("url").and_then(Value::as_str).and_then(web_url),
         "browser_search" => Some("https://www.google.com"),
@@ -727,7 +751,7 @@ async fn run_browser(slot: &Mutex<Option<browser::Chrome>>, tool: &str, args: &V
             "ran_on": "local_computer"
         });
     }
-    if let Err(err) = ensure_chrome(slot, start_url).await {
+    if let Err(err) = ensure_chrome(slot, target, start_url).await {
         return json!({ "ok": false, "error": err, "ran_on": "local_computer" });
     }
     let chrome = slot.lock().await;
@@ -940,7 +964,7 @@ mod download_tests {
     }
 }
 
-async fn run_job(tool: &str, args: &Value, chrome: &Mutex<Option<browser::Chrome>>) -> Value {
+async fn run_job(tool: &str, args: &Value, state: &Sidecar) -> Value {
     match tool {
         "exec" => {
             let command = args.get("command").and_then(Value::as_str).unwrap_or("");
@@ -990,7 +1014,7 @@ async fn run_job(tool: &str, args: &Value, chrome: &Mutex<Option<browser::Chrome
                 Err(err) => json!({ "ok": false, "error": err, "ran_on": "local_computer" }),
             }
         }
-        other if other.starts_with("browser") || other.starts_with("browse_") => run_browser(chrome, other, args).await,
+        other if other.starts_with("browser") || other.starts_with("browse_") => run_agent_browser(state, other, args).await,
         _ => json!({ "ok": false, "fallback_cloud": true, "error": format!("{tool} runs on the cloud computer") }),
     }
 }
@@ -1024,7 +1048,7 @@ async fn poll_loop(state: Arc<Sidecar>) {
             continue;
         };
         let url = format!("{api_base}/api/desktop/jobs?wait=20");
-        let response = client.get(&url).header("X-Lumio-Agent", &token).send().await;
+        let response = client.get(&url).header("X-Lumio-Agent", &token).header("X-Lumio-Features", FEATURES).send().await;
         match response {
             Ok(res) if res.status().is_success() => {
                 let body = res.json::<JobsBody>().await.ok();
@@ -1034,7 +1058,7 @@ async fn poll_loop(state: Arc<Sidecar>) {
                     let token = token.clone();
                     let api_base = api_base.clone();
                     tokio::spawn(async move {
-                        let result = run_job(&job.tool, &job.args, &state.chrome).await;
+                        let result = run_job(&job.tool, &job.args, &state).await;
                         let put = format!("{api_base}/api/desktop/jobs/result");
                         let _ = client
                             .post(&put)
@@ -1206,6 +1230,7 @@ pub fn run() {
             token: Mutex::new(None),
             api_base: Mutex::new(None),
             chrome: Mutex::new(None),
+            agents: Mutex::new(agent_browsers::AgentBrowsers::default()),
             started: AtomicBool::new(false),
         }))
         .invoke_handler(tauri::generate_handler![

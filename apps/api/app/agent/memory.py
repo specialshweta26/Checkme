@@ -1239,20 +1239,12 @@ async def search_history(ctx, query: str, limit: int = 12) -> dict:
     }
 
 
-async def read_history(ctx, limit: int = 8, message_id: int = 0) -> dict:
+async def read_history(ctx, limit: int = 8) -> dict:
     missing = _need_db(ctx)
     if missing:
         return missing
     if ctx.session_id is None:
         return {"error": "No chat session is active."}
-    if message_id:
-        row = (
-            await ctx.db.execute(select(ChatMessage).where(ChatMessage.session_id == ctx.session_id, ChatMessage.id == int(message_id)))
-        ).scalar_one_or_none()
-        if row is None:
-            return {"error": "No message with that id in this chat."}
-        text = row.content or ""
-        return {"id": row.id, "role": row.role, "text": text[:30000], **({"truncated": len(text) - 30000} if len(text) > 30000 else {})}
     rows = (
         await ctx.db.execute(
             select(ChatMessage)

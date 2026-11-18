@@ -24,7 +24,7 @@ def _key(user_id: Any, where: str) -> str:
     """One map of chat -> tab per browser: the shared one, or an agent's own (docs/AGENT_BROWSERS.md)."""
     from app.agent_browsers.service import current as browser_space
 
-    space = browser_space()[0] if where == "cloud" else ""
+    space = browser_space()[0]  # the cloud computer and the desktop app both keep agents' browsers apart
     return f"browser:tabs:{user_id}:{where}" + (f":{space}" if space else "")
 
 

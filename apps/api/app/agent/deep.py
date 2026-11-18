@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import logging
 import re
@@ -63,14 +62,6 @@ from connector_core.text import clip
 log = logging.getLogger(__name__)
 
 MAX_TOOL_CHARS = 24000
-# A connector's answer goes to the model whole. Only an answer too big for the model's context window (about 150k
-# tokens) is cut, and then to as much real data as fits, never to an outline (docs/LLD.md "Connector results").
-CONNECTOR_RESULT_CHARS = 600_000
-# What the model sees inline. The agent harness (deepagents) moves any tool message over 20,000 tokens (80,000
-# characters) to a file the agent then reads in parts: a 90-day daily series came back as "only 30 days" or as zeros
-# depending on which part it read. Connector answers are sent as tables and kept under this, with column totals over
-# every row (docs/LLD.md "Connector results").
-INLINE_RESULT_CHARS = 70_000
 BROWSER_PAGE_TOOLS = {"browser_navigate", "browser_snapshot", "browser_act", "browser_tabs", "browse_open", "browse_act", "browse_screenshot"}
 BROWSER_PAGE_CHARS = 400_000
 INSPECT_CHARS = 32000
@@ -105,10 +96,6 @@ class RunContext:
     call_impl: Any = None
     results: list[dict] = field(default_factory=list)
     gateway_surface: dict[str, dict] = field(default_factory=dict)
-    # (connector slug, gateway action) -> {"fields": [...], "required": [...]}, from catalog search results.
-    gateway_args: dict = field(default_factory=dict)
-    # Tool groups this turn starts without (app/agent/tool_scope.py); use_tools loads one.
-    hidden_tools: list = field(default_factory=list)
     agent: Any = None
     group: Any = None
     teammates: list = field(default_factory=list)
@@ -183,97 +170,6 @@ def compact_payload(value: Any, limit: int = MAX_TOOL_CHARS) -> Any:
             "taken from the user's ask. Page with offset until every requested row is retrieved."
         ),
     }
-
-
-_NOT_SUMMED = re.compile(
-    r"(^|_)(id|ids|date|day|hour|week|month|year|rank|index|idx|position|page|score|pct|percent|percentage|rate|ratio|share|"
-    r"aov|avg|average|mean|median|cvr|ctr|roas|cpc|cpm|cac|ltv|delta|change|growth|lat|lng|latitude|longitude)(_|$)",
-    re.I,
-)
-
-
-def tabulate(value: Any, depth: int = 0) -> Any:
-    """The same data with every list of records (3 or more objects) as one table: its column names once and a row of
-    values per record, plus the totals of its numeric columns over every row. Nothing is dropped; a long series is about
-    a third of its size this way, so it reaches the model whole."""
-    if depth > 12:
-        return value
-    if isinstance(value, dict):
-        return {k: tabulate(v, depth + 1) for k, v in value.items()}
-    if not isinstance(value, list):
-        return value
-    items = [tabulate(v, depth + 1) for v in value]
-    if len(items) < 3 or not all(isinstance(v, dict) for v in items):
-        return items
-    columns: list[str] = []
-    for item in items:
-        for key in item:
-            if key not in columns:
-                columns.append(key)
-    if not columns or sum(len(item) for item in items) < 0.6 * len(items) * len(columns):
-        return items  # records too different to share columns
-    rows = [[item.get(c) for c in columns] for item in items]
-    table: dict = {"columns": columns, "rows": rows, "row_count": len(rows)}
-    totals = {}
-    for i, col in enumerate(columns):
-        cells = [r[i] for r in rows if r[i] is not None]
-        if cells and not _NOT_SUMMED.search(str(col)) and all(isinstance(c, (int, float)) and not isinstance(c, bool) for c in cells):
-            total = sum(cells)
-            totals[col] = round(total, 2) if isinstance(total, float) else total
-    if totals:
-        table["column_totals"] = totals  # over every row, also when rows are left out below
-    return table
-
-
-def _is_table(value: Any) -> bool:
-    return isinstance(value, dict) and isinstance(value.get("columns"), list) and isinstance(value.get("rows"), list)
-
-
-def _cap_lists(value: Any, n: int, depth: int = 0) -> tuple[Any, int]:
-    """(value with every list cut to its first n items, how many items were left out). A table keeps its columns and
-    totals and loses rows only."""
-    if depth > 12:
-        return value, 0
-    if _is_table(value):
-        rows = value["rows"]
-        out = {**value, "rows": rows[:n]}
-        if len(rows) > n:
-            out["rows_shown"] = n
-        return out, max(0, len(rows) - n)
-    if isinstance(value, dict):
-        out, dropped = {}, 0
-        for k, v in value.items():
-            out[k], d = _cap_lists(v, n, depth + 1)
-            dropped += d
-        return out, dropped
-    if isinstance(value, list):
-        out, dropped = [], max(0, len(value) - n)
-        for v in value[:n]:
-            item, d = _cap_lists(v, n, depth + 1)
-            out.append(item)
-            dropped += d
-        return out, dropped
-    return value, 0
-
-
-def fit_payload(value: Any, limit: int = CONNECTOR_RESULT_CHARS) -> Any:
-    """A connector's answer for the model: whole when it fits inline (as is, or with its record lists as tables);
-    otherwise the real data with long lists cut to their first rows (as many as fit), saying how much was left out,
-    with each table's totals still over every row. An outline only if even that won't fit."""
-    limit = min(limit, INLINE_RESULT_CHARS)
-    if _json_size(value) <= limit:
-        return value
-    tabled = tabulate(value)
-    if _json_size(tabled) <= limit:
-        return tabled
-    for n in (500, 365, 200, 120, 100, 50, 25, 10, 5):
-        shrunk, dropped = _cap_lists(tabled, n)
-        if _json_size(shrunk) <= limit:
-            return {"partial": True, "data": shrunk, "left_out_items": dropped, "chars": _json_size(value),
-                    "hint": f"Too big for one message, so each list shows its first {n} rows; column_totals still cover "
-                            "every row. The full result is stored: call inspect_result with this result_id (a path or "
-                            "search, then offset) for the rest."}  # fmt: skip
-    return compact_payload(value, limit)
 
 
 def dumps(value: Any, limit: int = MAX_TOOL_CHARS) -> str:
@@ -433,29 +329,12 @@ def _source_tool(slug: str, tool_name: str, args: dict) -> str:
     return f"{slug}__{tool_name}"
 
 
-def _rewrite_catalog_search_args(tool_name: str, args: dict, fallback_query: str, conn=None) -> dict:
-    """A gateway's catalog search gets the request in full words (brand, metrics, dates): its retrieval matches the
-    right action on that. A stub with the numbers and names cut out matched a dashboard that answered zeros, while the
-    whole request found the daily sales action that had the data. Composio's search keeps the short capability phrase."""
+def _rewrite_catalog_search_args(tool_name: str, args: dict, fallback_query: str) -> dict:
     if not is_catalog_tool(tool_name) or "search" not in tool_name.lower():
         return args
     key = next((k for k in ("query", "q", "search", "text") if k in args), "query")
-    raw = str(args.get(key) or fallback_query or "")
-    if getattr(conn, "provider", None) == "composio":
-        return {**args, key: gateway_search_query(raw)}
-    return {**args, key: full_request(raw, fallback_query)}
-
-
-def full_request(query: str, question: str = "") -> str:
-    """The search text for a gateway: the user's question in their own words, then the agent's wording if it adds any.
-    Kept whole, names, numbers and dates included."""
-    text = " ".join(str(query or "").split())
-    asked = " ".join(str(question or "").split())
-    asked = asked[:300] if len(asked.split()) >= 3 else ""  # "yes" or "go on" says nothing about the action
-    if asked and asked.lower() not in text.lower():
-        # The user's own words lead: an agent's paraphrase can drop the names and dates the action is chosen by.
-        text = f"{asked} — {text}" if text else asked
-    return text[:500]
+    raw = args.get(key) or fallback_query
+    return {**args, key: gateway_search_query(raw)}
 
 
 def _schema_from_resolve(slug: str, tool_name: str, result: Any) -> dict | None:
@@ -515,7 +394,6 @@ async def _load_gateway_surface(ctx: RunContext, conn) -> dict:
     for name in GATEWAY_EXECUTE_NAMES:
         if name in by_name:
             surface["execute"] = name
-            surface["execute_schema"] = by_name[name].schema or {}
             break
     for name in GATEWAY_RESOLVE_NAMES:
         if name in by_name:
@@ -535,8 +413,7 @@ async def _expand_gateway_catalog(ctx: RunContext, conn, query: str) -> list[dic
     if not search_name or not execute_name:
         return []
     queries: list[str] = []
-    full = full_request(query) if getattr(conn, "provider", None) != "composio" else ""
-    for candidate in (full, gateway_search_query(query), capability_query(query)):
+    for candidate in (gateway_search_query(query), capability_query(query)):
         if candidate and candidate not in queries:
             queries.append(candidate)
     toolkit = None
@@ -565,13 +442,6 @@ async def _expand_gateway_catalog(ctx: RunContext, conn, query: str) -> list[dic
             continue
         slim = slim_search(raw, q) if isinstance(raw, dict) else {"candidates": []}
         parsed = [item for item in (slim.get("candidates") or []) if isinstance(item, dict)]
-        seen = ctx.gateway_args.setdefault(("__seen__", conn.slug), set())
-        seen.update(str(item.get("public_name") or "") for item in parsed if item.get("public_name"))
-        for item in parsed:
-            name = str(item.get("public_name") or "")
-            if name and (item.get("arguments") or item.get("read_only")):
-                ctx.gateway_args[(conn.slug, name)] = {"fields": list(item.get("arguments") or []), "required": list(item.get("required") or []),
-                                                       "read_only": bool(item.get("read_only")), "schema": item.get("schema") or {}}  # fmt: skip
         if parsed:
             break
     rows = nested_tool_rows(
@@ -1151,10 +1021,8 @@ async def search_user_tools(ctx: RunContext, query: str, connector_slug: str | N
             "produces": hit.produces,
             "read_only": hit.read_only,
             "destructive": hit.destructive,
-            # The tool's own input schema: build the call from it (docs/LLD.md "Calling a tool by its schema").
-            **({"parameters": brief_schema(hit.schema)} if i < SCHEMA_ROWS and brief_schema(getattr(hit, "schema", None)) else {}),
         }
-        for i, hit in enumerate(hits)
+        for hit in hits
     ]
     nested: list[dict] = []
     for conn in conns:
@@ -1185,14 +1053,7 @@ async def search_user_tools(ctx: RunContext, query: str, connector_slug: str | N
         if is_catalog_tool(row["tool_name"]) or row["tool_name"] in GATEWAY_EXECUTE_NAMES
     ]
     merged = nested + data_local + (catalog_local if not nested else [])
-    out = []
-    for i, row in enumerate(merged):
-        item = {k: v for k, v in row.items() if k not in {"score", "schema"}}
-        brief = brief_schema(row.get("schema")) if i < SCHEMA_ROWS else None
-        if brief and "parameters" not in item:
-            item["parameters"] = brief  # a gateway action's own parameters, from its catalog entry
-        out.append(item)
-    return out
+    return [{k: v for k, v in row.items() if k != "score"} for row in merged]
 
 
 def _builtin_mail_spec(conn, tool_name: str) -> dict | None:
@@ -1209,493 +1070,6 @@ def _builtin_mail_spec(conn, tool_name: str) -> dict | None:
         "read_only": spec.read_only,
         "destructive": spec.destructive,
     }
-
-
-async def gateway_action_args(ctx: RunContext, conn, tool_name: str) -> dict | None:
-    """{"fields", "required"} of a gateway action (a tool reached through the connector's execute tool), from this turn's
-    catalog search, or from a catalog search for its name. None when the gateway doesn't describe its parameters."""
-    key = (conn.slug, tool_name)
-    if key not in ctx.gateway_args:
-        try:
-            await _expand_gateway_catalog(ctx, conn, tool_name.replace("_", " "))
-        except Exception:  # noqa: BLE001
-            log.info("gateway catalog lookup for %s failed", tool_name, exc_info=True)
-        ctx.gateway_args.setdefault(key, None)
-    return ctx.gateway_args.get(key)
-
-
-async def _execute_marked_read_only(ctx: RunContext, conn, execute: str, hit) -> bool:
-    """The gateway's server marks its execute tool itself read-only (MCP readOnlyHint, not destructive)."""
-    if hit is None or getattr(hit, "tool_name", execute) != execute:
-        hit = None
-        if ctx.db is not None:
-            try:
-                found = await load_named(ctx.db, [conn], {(conn.slug, execute)})
-                hit = found[0] if found else None
-            except Exception:  # noqa: BLE001
-                log.info("execute tool lookup failed", exc_info=True)
-    return bool(hit is not None and getattr(hit, "read_only", False) and not getattr(hit, "destructive", False))
-
-
-_REQUEST_KEYS = ("query", "request", "prompt", "task", "instruction", "intent", "question", "goal", "input", "text")
-
-
-async def _name_the_action(ctx: RunContext, conn, slug: str, execute: str, args: dict) -> dict | None:
-    """An execute call that names no action (a plain-language request) can't be judged, so it used to need approval
-    even for a read. Send it back once per turn with the gateway's matching actions, so the agent calls one by name:
-    a read then runs at once and a write asks (docs/LLD.md "Gateway arguments"). None keeps the approval card."""
-    from app.agent import approval
-
-    if approval.nested_actions(execute, args) != [execute] or ctx.gateway_args.get((slug, "__named_once__")):
-        return None
-    request = " ".join(str(args.get(k)) for k in _REQUEST_KEYS if isinstance(args.get(k), str)).strip()
-    if request and approval.action_words(request) & approval.WRITE_WORDS - {"run", "execute"}:
-        return None  # it asks for a change: the user approves it
-    ctx.gateway_args[(slug, "__named_once__")] = True
-    try:
-        rows = await _expand_gateway_catalog(ctx, conn, request or ctx.query or "")
-    except Exception:  # noqa: BLE001
-        log.info("catalog search for an unnamed execute call failed", exc_info=True)
-        rows = []
-    actions = [{"tool_name": r["tool_name"], "arguments": r.get("arguments") or [], "description": str(r.get("description") or "")[:200]}
-               for r in rows[:6]]  # fmt: skip
-    return {
-        "error": f"{execute} was called without naming an action, so it was not run. Call the action itself with "
-        "call_tool (tool_name = the action, its own argument names); it runs through execute. Reads run at once.",
-        "not_run": True,
-        "actions": actions,
-    }
-
-
-async def _gateway_read_only(ctx: RunContext, conn, tool_name: str, args: dict) -> set[str]:
-    """The actions in this execute call that the gateway's catalog marks read-only."""
-    from app.agent import approval
-    from app.routing.retrieve import is_execute_tool
-
-    marked: set[str] = set()
-    for action in approval.nested_actions(tool_name, args):
-        if is_execute_tool(action) or is_catalog_tool(action):
-            continue
-        try:
-            known = await gateway_action_args(ctx, conn, action)
-        except Exception:  # noqa: BLE001 - without the catalog the action keeps its card
-            log.info("gateway read-only lookup for %s failed", action, exc_info=True)
-            known = None
-        if known and known.get("read_only"):
-            marked.add(action)
-    return marked
-
-
-SCHEMA_ROWS = 12  # search results that carry their tool's full input schema (the rest: name and description)
-
-
-def brief_schema(schema: Any) -> dict | None:
-    """A tool's input schema as the agent needs it to build a call: each parameter's type, description, format and
-    allowed values, which are required, and whether other names are allowed. None for a tool without parameters."""
-    if not isinstance(schema, dict) or not isinstance(schema.get("properties"), dict) or not schema["properties"]:
-        return None
-    props = {}
-    for name, spec in schema["properties"].items():
-        spec = spec if isinstance(spec, dict) else {}
-        row = {k: spec[k] for k in ("type", "format", "default") if k in spec}
-        if spec.get("description"):
-            row["description"] = str(spec["description"])[:300]
-        allowed = _enum_values(spec)
-        if allowed:
-            row["allowed"] = allowed[:40]
-        props[name] = row
-    out: dict = {"properties": props, "required": list(schema.get("required") or [])}
-    if schema.get("additionalProperties") is False:
-        out["only_these_names"] = True
-    return out
-
-
-# "(see list_brands)", "from `get_stores`", "returned by list_regions()": a tool name has an underscore, so plain words
-# ("data from the warehouse", "use the brand code") never count as one.
-_SEE_TOOL = re.compile(r"\b(?:see|from|via|use|listed (?:by|in)|returned by)\s+`?([a-z][a-z0-9]*_[a-z0-9_]+)`?(?:\(\))?", re.I)
-
-
-def _norm_value(value: Any) -> str:
-    return re.sub(r"[^a-z0-9]", "", str(value).lower())
-
-
-def _value_from_listing(sent: str, listing: Any, param: str) -> Any:
-    """The exact value a listing tool gives for what the user wrote (a display name -> its slug or id, any case), or
-    None when nothing in the listing matches."""
-    target = _norm_value(sent)
-    if not target:
-        return None
-    dicts: list[dict] = []
-    strings: list[str] = []
-
-    def walk(v: Any, depth: int = 0) -> None:
-        if depth > 6:
-            return
-        if isinstance(v, dict):
-            dicts.append(v)
-            for x in v.values():
-                walk(x, depth + 1)
-        elif isinstance(v, list):
-            for x in v[:500]:
-                walk(x, depth + 1)
-        elif isinstance(v, str) and len(v) <= 120:
-            strings.append(v)
-
-    walk(listing)
-    for d in dicts:
-        if any(isinstance(v, (str, int)) and _norm_value(v) == target for v in d.values()):
-            # The machine value first: a listing row often holds the display name under the parameter's own name.
-            for key in ("slug", "id", "key", "code", "value", "handle", param, "name"):
-                if isinstance(d.get(key), (str, int)) and not isinstance(d.get(key), bool):
-                    return d[key]
-    return next((s for s in strings if _norm_value(s) == target), None)
-
-
-async def resolve_listed_values(ctx: RunContext, conn, tool_name: str, schema: Any, args: dict) -> tuple[dict, dict | None]:
-    """(arguments, error). A parameter whose description says its values come from another tool of the same connector
-    ("… slug (see list_…)") gets the exact value that tool lists for what the user wrote. The listing tool is
-    called once per turn, and only when it reads. A value the listing doesn't have is not sent: the agent gets the
-    listed values back."""
-    if not isinstance(schema, dict) or not isinstance(schema.get("properties"), dict) or ctx.db is None:
-        return args, None
-    from app.agent import approval
-
-    out = dict(args)
-    prefix = tool_name.rsplit("__", 1)[0] + "__" if "__" in tool_name else ""
-    for param, spec in schema["properties"].items():
-        value = out.get(param)
-        if not isinstance(spec, dict) or not isinstance(value, str) or not value.strip():
-            continue
-        ref = _SEE_TOOL.search(str(spec.get("description") or ""))
-        if not ref:
-            continue
-        names = [f"{prefix}{ref.group(1)}", ref.group(1)] if prefix else [ref.group(1)]
-        key = ("__listing__", conn.slug, names[0])
-        if key not in ctx.gateway_args:
-            listing = None
-            try:
-                found = await load_named(ctx.db, [conn], {(conn.slug, n) for n in names})
-                lister = next((h for n in names for h in found if h.tool_name == n), None)
-                reads = lister is not None and (lister.read_only or approval.is_read_action(lister.tool_name))
-                if reads and not (brief_schema(lister.schema) or {}).get("required"):
-                    listing = await invoke_named(ctx.db, ctx.user, conn, lister.tool_name, {}, ctx.attachments)
-                elif lister is None and approval.is_read_action(ref.group(1)):
-                    listing = await _list_through_gateway(ctx, conn, names)
-            except Exception:  # noqa: BLE001 - without the listing the value goes as written
-                log.info("listing %s for %s failed", names[0], param, exc_info=True)
-            ctx.gateway_args[key] = listing
-        listing = ctx.gateway_args.get(key)
-        if listing is None:
-            continue
-        exact = _value_from_listing(value, listing, param)
-        if exact is not None:
-            out[param] = exact
-        elif _listed_as_written(value, listing) or not _has_rows(listing):
-            # The value is in the listing as written, or the listing is prose / a table the lookup can't read: send it
-            # unchanged rather than refuse a value that may be right.
-            continue
-        else:
-            return out, {"error": f"{param} '{value}' is not one of the values {names[-1]} lists. Pick the right one from listed_values "
-                                  "and call again.", "listed_values": fit_payload(listing, 20000), "not_run": True}  # fmt: skip
-    return out, None
-
-
-_NOT_LISTED = re.compile(r"^(start|end|from|to|since|until|date|day|days|window|period|range|trend|compare|grain|granularity|"
-                         r"limit|offset|page|page_size|sort|sort_by|order|query|q|search|text|format|tz|timezone|lookback|"
-                         r"breakdown|module|config|metric|metrics)$|(_date|_at|_from|_to|_start|_end)$", re.I)
-
-
-def _plural(word: str) -> str:
-    if word.endswith("y") and not word.endswith(("ay", "ey", "oy", "uy")):
-        return word[:-1] + "ies"
-    return word if word.endswith("s") else (word + "es" if word.endswith(("x", "ch", "sh")) else word + "s")
-
-
-def sibling_listing_schema(tool_name: str, args: dict, schema: Any = None) -> dict | None:
-    """A schema saying where each name-like value comes from, for parameters the action's own schema doesn't point
-    anywhere: ``brand`` -> "(see list_brands)", ``store_id`` -> "(see list_stores)" on the same server. Dates, numbers,
-    free text and paging are left alone. None when there is nothing to look up."""
-    if "__" not in tool_name:
-        return None
-    props = schema.get("properties") if isinstance(schema, dict) and isinstance(schema.get("properties"), dict) else {}
-    out: dict = {}
-    for name, value in (args or {}).items():
-        if not isinstance(value, str) or not re.search(r"[A-Za-z]", value) or len(value) > 80 or _NOT_LISTED.search(name):
-            continue
-        if re.fullmatch(r"\d{4}-\d\d-\d\d.*", value.strip()):
-            continue
-        if value == value.strip().lower() and not re.search(r"\s", value.strip()):
-            continue  # already written like a slug or id: nothing to look up
-        spec = props.get(name) if isinstance(props.get(name), dict) else {}
-        if _SEE_TOOL.search(str(spec.get("description") or "")) or _enum_values(spec):
-            continue  # its own schema already says where its values come from
-        stem = re.sub(r"_(slug|id|ids|code|key|name|handle)$", "", name.lower())
-        if not re.fullmatch(r"[a-z][a-z0-9_]{1,40}", stem):
-            continue
-        out[name] = {"type": "string", "description": f"(see list_{_plural(stem)})"}
-    return {"type": "object", "properties": out} if out else None
-
-
-async def canonical_action(ctx: RunContext, conn, name: str) -> str:
-    """The catalog's own name for an action the agent named loosely: the same tool under a server prefix the catalog
-    doesn't list (``funnel-analytics__get_sales_dashboard`` -> ``funnel-analytics-prod__get_sales_dashboard``). A gateway
-    may still run the loose name, but none of the action's checks run for it (its schema, listed values, read-only
-    mark), so a wrong parameter is ignored and the tool answers for its defaults. Unchanged when the catalog knows the
-    name, or no single action matches."""
-    if not name or "__" not in name:
-        return name
-    try:
-        if await gateway_action_args(ctx, conn, name) is not None:
-            return name
-    except Exception:  # noqa: BLE001
-        return name
-    server, bare = name.rsplit("__", 1)
-    seen = [n for n in (ctx.gateway_args.get(("__seen__", conn.slug)) or set()) if n.endswith("__" + bare) and n != name]
-    if len(seen) > 1:
-        seen = [n for n in seen if n.rsplit("__", 1)[0].startswith(server) or server.startswith(n.rsplit("__", 1)[0])]
-    return seen[0] if len(seen) == 1 else name
-
-
-async def check_gateway_action(ctx: RunContext, conn, action: str, args: dict) -> tuple[dict, dict | None]:
-    """(arguments, error) for a gateway action reached through execute: its catalog schema's checks and lookups when
-    the catalog gives one, else its known parameter names, then values the server lists elsewhere."""
-    known = await gateway_action_args(ctx, conn, action)
-    schema = (known or {}).get("schema")
-    if schema:
-        # The action's own schema from the catalog: the same checks and lookups as a directly listed tool.
-        args, wrong = check_schema_args(schema, action, args)
-        if not wrong:
-            args, wrong = await resolve_listed_values(ctx, conn, action, schema, args)
-    else:
-        wrong = check_gateway_args(known, action, args)
-    if not wrong:
-        # A name the user wrote ("Acme") for a parameter the server lists elsewhere (list_brands -> "acme"),
-        # also when the catalog didn't describe the action's parameters (docs/LLD.md "Sibling listings").
-        sibling = sibling_listing_schema(action, args, schema)
-        if sibling:
-            args, wrong = await resolve_listed_values(ctx, conn, action, sibling, args)
-    return args, wrong
-
-
-def _wrapped_args(args: dict) -> bool:
-    """Arguments already in a gateway execute call's shape: an action name and its arguments (object or JSON text)."""
-    return any(isinstance(args.get(k), str) and args.get(k) for k in _EXECUTE_NAME_KEYS) and any(
-        isinstance(args.get(k), (dict, str)) for k in _EXECUTE_ARG_KEYS
-    )
-
-
-async def _check_inside_execute(ctx: RunContext, conn, args: dict) -> tuple[dict, dict | None]:
-    """An execute call's own arguments with the named action's arguments checked (they may be an object or a JSON
-    string, under any of the usual keys)."""
-    from app.routing.retrieve import is_catalog_tool, is_execute_tool
-
-    name_key = next((k for k in _EXECUTE_NAME_KEYS if isinstance(args.get(k), str) and args.get(k)), None)
-    arg_key = next((k for k in _EXECUTE_ARG_KEYS if k in args), None)
-    if name_key is None or arg_key is None:
-        return args, None
-    action = args[name_key]
-    if is_execute_tool(action) or is_catalog_tool(action):
-        return args, None
-    real = await canonical_action(ctx, conn, action)
-    if real != action:
-        args, action = {**args, name_key: real}, real
-    raw = args[arg_key]
-    as_text = isinstance(raw, str)
-    try:
-        inner = json.loads(raw) if as_text else raw
-    except (TypeError, ValueError):
-        return args, None
-    if not isinstance(inner, dict):
-        return args, None
-    checked, wrong = await check_gateway_action(ctx, conn, action, dict(inner))
-    if wrong:
-        return args, wrong
-    return {**args, arg_key: json.dumps(checked) if as_text else checked}, None
-
-
-async def _list_through_gateway(ctx: RunContext, conn, names: list[str]) -> Any:
-    """Run a listing action that only the gateway's catalog knows, through its execute tool (no arguments)."""
-    surface = await _load_gateway_surface(ctx, conn)
-    execute = surface.get("execute")
-    if not execute:
-        return None
-    from app.agent import approval
-
-    for name in names:
-        known = await gateway_action_args(ctx, conn, name)
-        if known is None:
-            # The catalog listed the action but described no parameters: a plain listing read still runs.
-            if "__" in name and name in (ctx.gateway_args.get(("__seen__", conn.slug)) or set()) and approval.is_read_action(name.rsplit("__", 1)[-1]):
-                known = {}
-            else:
-                continue
-        if (known.get("required") or (brief_schema(known.get("schema")) or {}).get("required")):
-            return None
-        payload = execute_args(surface.get("execute_schema"), {"tool_name": name, "arguments": {}}, ctx.query or "")
-        return await invoke_named(ctx.db, ctx.user, conn, execute, payload, ctx.attachments)
-    return None
-
-
-def _enum_values(spec: dict) -> list:
-    values = list(spec.get("enum") or [])
-    for key in ("anyOf", "oneOf"):
-        for option in spec.get(key) or []:
-            if isinstance(option, dict):
-                values.extend(option.get("enum") or [])
-                if "const" in option:
-                    values.append(option["const"])
-    if "const" in spec:
-        values.append(spec["const"])
-    items = spec.get("items")
-    if isinstance(items, dict):
-        values.extend(_enum_values(items))
-    return values
-
-
-def _listed_as_written(value: str, listing: Any) -> bool:
-    """The exact value (same characters, any case) appears in the listing as a whole token, also inside its text."""
-    text = listing if isinstance(listing, str) else json.dumps(listing, default=str, ensure_ascii=False)
-    return bool(re.search(r"(?<![A-Za-z0-9_\-])" + re.escape(value.strip()) + r"(?![A-Za-z0-9_\-])", text, re.I))
-
-
-def _has_rows(listing: Any, depth: int = 0) -> bool:
-    """The listing is a list of values or records somewhere (what the lookup can match), not only text."""
-    if depth > 6:
-        return False
-    if isinstance(listing, list):
-        return any(isinstance(v, (dict, str, int)) for v in listing[:50])
-    if isinstance(listing, dict):
-        return any(_has_rows(v, depth + 1) for v in listing.values() if isinstance(v, (dict, list)))
-    return False
-
-
-def _is_slug_param(name: str, spec: dict) -> bool:
-    """The schema says this parameter takes a slug (its name or description), a lowercase machine id."""
-    return "slug" in str(name).lower() or bool(re.search(r"\bslugs?\b", str(spec.get("description") or ""), re.I))
-
-
-def _slugify(value: str) -> str:
-    """A display name ("Acme West") as a slug guess. A single word is only lowercased ("Acme" -> "acme"): its "_" and
-    "-" stay, because turning "acme_in" into "acme-in" sent a slug the tool doesn't know and it answered with no data."""
-    if not re.search(r"\s", value.strip()):
-        return value.strip().lower()
-    return re.sub(r"[^a-z0-9]+", "-", value.strip().lower()).strip("-") or value
-
-
-def check_schema_args(schema: Any, tool_name: str, args: dict) -> tuple[dict, dict | None]:
-    """(arguments to send, error) for a call to a tool whose input schema is known.
-
-    A tool that doesn't recognise an argument's name ignores it and answers for its defaults: sent ``start_date`` /
-    ``end_date``, one answered for its own last 30 days, and another client sending its real names got the data. So:
-    - a name that differs from one of the tool's parameters only in case is renamed to it;
-    - a value that matches one of a parameter's allowed values except for case is sent as the allowed value;
-    - names the tool doesn't take, or missing required ones, are not sent: the agent gets the tool's parameters back
-      and calls again correctly. A schema without properties, or one that allows extra names, is never blocked."""
-    if not isinstance(schema, dict) or not isinstance(schema.get("properties"), dict) or not schema["properties"]:
-        return args, None
-    props: dict = schema["properties"]
-    by_lower = {str(name).lower(): name for name in props}
-    fixed: dict = {}
-    for key, value in (args or {}).items():
-        name = key if key in props else by_lower.get(str(key).lower(), key)
-        spec = props.get(name)
-        if isinstance(spec, dict):
-            allowed = [v for v in _enum_values(spec) if isinstance(v, str)]
-            if isinstance(value, str) and value not in allowed:
-                value = next((v for v in allowed if v.lower() == value.strip().lower()), value)
-            elif isinstance(value, list) and allowed:
-                value = [next((v for v in allowed if isinstance(x, str) and v.lower() == x.strip().lower()), x) for x in value]
-        if isinstance(spec, dict) and isinstance(value, str) and _is_slug_param(name, spec) and not _enum_values(spec):
-            value = _slugify(value)
-        fixed[name] = value
-    unknown = [k for k in fixed if k not in props]
-    required = [r for r in (schema.get("required") or []) if r not in fixed]
-    if (not unknown or schema.get("additionalProperties") is True) and not required:
-        return fixed, None
-    params = {name: {k: spec[k] for k in ("type", "description", "enum", "format") if isinstance(spec, dict) and k in spec}
-              for name, spec in props.items()}  # fmt: skip
-    parts = [f"{tool_name} takes {', '.join(props)}"]
-    if unknown and schema.get("additionalProperties") is not True:
-        parts.append(f"you sent {', '.join(unknown)}, which it does not take (a tool ignores names it doesn't know and answers for its defaults)")
-    if required:
-        parts.append(f"it needs {', '.join(required)}")
-    return fixed, {"error": "; ".join(parts) + ". Call it again with exactly these parameter names and allowed values.",
-                   "parameters": params, "arguments_expected": list(props), "required": list(schema.get("required") or []),
-                   "not_run": True}  # fmt: skip
-
-
-async def _direct_tool(ctx: RunContext, conn, tool_name: str, args: dict, hit) -> tuple | None:
-    """(hit, tool name, arguments) of the connector's own listed tool behind this call, or None to keep the call as is.
-    A name without the server prefix finds ``<server>__<name>``; an execute call naming an action the connector lists
-    itself is unwrapped into a direct call with the action's own arguments."""
-    from app.agent import approval
-    from app.routing.retrieve import is_catalog_tool, is_execute_tool
-    from app.routing.select import load_listed_as
-
-    try:
-        if hit is None and not is_catalog_tool(tool_name) and not is_execute_tool(tool_name):
-            found = await load_listed_as(ctx.db, conn, tool_name)
-            return (found, found.tool_name, args) if found is not None else None
-        if is_execute_tool(tool_name):
-            actions = [a for a in approval.nested_actions(tool_name, args) if not is_execute_tool(a)]
-            inner = next((args.get(k) for k in _EXECUTE_ARG_KEYS if isinstance(args.get(k), dict)), None)
-            if len(actions) == 1 and inner is not None:
-                name = actions[0]
-                found = (await load_named(ctx.db, [conn], {(conn.slug, name)}) or [None])[0] or await load_listed_as(ctx.db, conn, name)
-                if found is not None and not is_execute_tool(found.tool_name):
-                    return found, found.tool_name, dict(inner)
-    except Exception:  # noqa: BLE001 - the call goes as it was
-        log.info("direct tool lookup for %s failed", tool_name, exc_info=True)
-    return None
-
-
-_EXECUTE_NAME_KEYS = ("tool_name", "tool", "name", "public_name", "public_tool_name", "tool_slug", "action", "tool_id")
-_EXECUTE_ARG_KEYS = ("arguments", "args", "params", "parameters", "input", "tool_input", "tool_args", "payload")
-_EXECUTE_REQUEST_KEYS = ("query", "request", "intent", "task", "prompt", "question")
-
-
-def execute_args(schema: Any, args: dict, request: str = "") -> dict:
-    """The gateway's execute call in the shape its own input schema asks for: its key for the action's name, its key
-    for the action's arguments, and the user's request when it requires one. Lumio always sent
-    ``{"tool_name", "arguments"}``; a gateway that names them differently dropped the arguments, or picked the action
-    by its own search."""
-    props = schema.get("properties") if isinstance(schema, dict) and isinstance(schema.get("properties"), dict) else {}
-    if not props:
-        return args
-    name = next((args.get(k) for k in _EXECUTE_NAME_KEYS if isinstance(args.get(k), str)), None)
-    inner = next((args.get(k) for k in _EXECUTE_ARG_KEYS if isinstance(args.get(k), dict)), None)
-    name_key = next((k for k in _EXECUTE_NAME_KEYS if k in props), None)
-    arg_key = next((k for k in _EXECUTE_ARG_KEYS if k in props), None)
-    if name is None or name_key is None:
-        return args
-    out = {k: v for k, v in args.items() if k in props and k not in _EXECUTE_NAME_KEYS and k not in _EXECUTE_ARG_KEYS}
-    out[name_key] = name
-    if arg_key is not None:
-        spec = props.get(arg_key) if isinstance(props.get(arg_key), dict) else {}
-        out[arg_key] = json.dumps(inner or {}) if spec.get("type") == "string" else (inner or {})
-    for key in _EXECUTE_REQUEST_KEYS:
-        if key in props and key in (schema.get("required") or []) and key not in out:
-            out[key] = request or name.replace("_", " ")
-    return out
-
-
-def check_gateway_args(known: dict | None, tool_name: str, args: dict) -> dict | None:
-    """An error for the agent when a call uses argument names the gateway action doesn't take, or leaves out required
-    ones (docs/LLD.md "Gateway arguments"); None when the call matches, or the action's parameters aren't known."""
-    if not known or not known.get("fields"):
-        return None
-    fields = list(known["fields"])
-    unknown = [k for k in (args or {}) if k not in fields]
-    missing = [r for r in known.get("required") or [] if r not in (args or {})]
-    if not unknown and not missing:
-        return None
-    parts = [f"{tool_name} takes {', '.join(fields)}"]
-    if unknown:
-        parts.append(f"you sent {', '.join(unknown)}, which it does not take (a gateway ignores unknown names and answers for its defaults, often zeros)")
-    if missing:
-        parts.append(f"it needs {', '.join(missing)}")
-    return {"error": "; ".join(parts) + ". Call it again with exactly these argument names.", "arguments_expected": fields,
-            "required": list(known.get("required") or []), "not_run": True}  # fmt: skip
 
 
 async def get_user_tool_schema(ctx: RunContext, connector_slug: str, tool_name: str) -> dict:
@@ -1722,18 +1096,6 @@ async def get_user_tool_schema(ctx: RunContext, connector_slug: str, tool_name: 
                         return shaped
                 except Exception:  # noqa: BLE001
                     log.warning("gateway resolve failed on %s %s", connector_slug, tool_name, exc_info=True)
-            known = await gateway_action_args(ctx, conn, tool_name)
-            if known:
-                return {
-                    "connector_slug": connector_slug,
-                    "tool_name": tool_name,
-                    "description": f"Data tool on {conn.alias or conn.name}; it runs through {execute}. Use exactly these argument names.",
-                    "parameters": known.get("schema") or {"type": "object", "properties": {f: {} for f in known["fields"]},
-                                                          "required": known["required"], "additionalProperties": False},  # fmt: skip
-                    "execute_via": execute,
-                    "read_only": True,
-                    "destructive": False,
-                }
             return {
                 "connector_slug": connector_slug,
                 "tool_name": tool_name,
@@ -1868,73 +1230,6 @@ async def _track_github_writes(ctx: RunContext, conn, tool: str, args: dict, res
         await coding_memory.note(ctx, repo=repo, pr={"url": url, "repo": repo, "number": m["number"], "branch": "", "state": "merged"})
 
 
-SLOW_TOOL_FIRST_S = 20
-SLOW_TOOL_EVERY_S = 30
-
-
-def _is_user_mcp(conn) -> bool:
-    return getattr(conn, "kind", "") != "builtin" and bool(getattr(conn, "server_url", "") or "")
-
-
-async def _note_ignored_args(ctx: RunContext, conn, tool_name: str, args: dict, result: Any, why: str) -> Any:
-    """The tool answered for other dates than it was sent: tell the agent, with the action's real parameter names when
-    the catalog has them, so it calls again correctly instead of reporting the wrong period (docs/LLD.md)."""
-    from app.agent import approval
-    from app.routing.retrieve import is_execute_tool
-
-    action = next((a for a in approval.nested_actions(tool_name, args) if not is_execute_tool(a)), tool_name)
-    known = None
-    try:
-        known = await gateway_action_args(ctx, conn, action) if action != tool_name else None  # a gateway action
-    except Exception:  # noqa: BLE001
-        log.info("parameter lookup for %s failed", action, exc_info=True)
-    note = (f"{action} ignored the dates it was sent: {why}. It likely did not recognise the argument names and answered for "
-            "its defaults. Values can be exact-match too (an id's spelling or case, as the connector lists it). Do not report this "
-            "as the requested period: "
-            + (f"call it again with exactly these parameters: {', '.join(known['fields'])}." if known and known.get("fields")
-               else "call get_tool_schema for it and call it again with its own parameter names."))  # fmt: skip
-    body = result if isinstance(result, dict) else {"data": result}
-    return {**body, "args_ignored": True, "note": note, **({"arguments_expected": known["fields"]} if known and known.get("fields") else {})}
-
-
-@contextlib.asynccontextmanager
-async def waiting_on(ctx: RunContext, conn, tool_name: str):
-    """While a connected MCP tool runs (docs/LLD.md "Slow MCP tools"): pass the progress its server reports to the chat,
-    and if it takes long, say every SLOW_TOOL_EVERY_S that it is still waiting, so the turn visibly lives and the
-    no-progress watchdog knows it isn't stuck. Other tools pass straight through."""
-    if not _is_user_mcp(conn):
-        yield
-        return
-    from app.agent import cancel as run_cancel
-    from app.connectors import mcp_client
-
-    name = getattr(conn, "alias", None) or getattr(conn, "name", None) or "the connected app"
-
-    async def on_progress(progress: float, total: float | None, message: str | None) -> None:
-        run_cancel.touch()
-        if ctx.progress is not None:
-            share = f" ({int(progress / total * 100)}%)" if total else ""
-            await ctx.progress.emit(f"{name}: {message or 'working'}{share}", kind="tool", tool=tool_name)
-
-    async def still_waiting() -> None:
-        started = asyncio.get_running_loop().time()
-        await asyncio.sleep(SLOW_TOOL_FIRST_S)
-        while True:
-            run_cancel.touch()
-            waited = int(asyncio.get_running_loop().time() - started)
-            if ctx.progress is not None:
-                await ctx.progress.emit(f"Still waiting for {name} ({waited}s): its data can take a few minutes to load", kind="tool", tool=tool_name)
-            await asyncio.sleep(SLOW_TOOL_EVERY_S)
-
-    token = mcp_client.PROGRESS.set(on_progress)
-    ticker = asyncio.create_task(still_waiting())
-    try:
-        yield
-    finally:
-        ticker.cancel()
-        mcp_client.PROGRESS.reset(token)
-
-
 async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, args: dict | None = None) -> Any:
     from app.agent import cancel as run_cancel
 
@@ -1989,74 +1284,21 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
             "handoff": False,
             "message": "The user finished on the live computer. Call browser_snapshot, then continue the remaining steps.",
         }
-    if ctx.db is not None and spec is None and _is_user_mcp(conn):
-        # Call the connector's own tool directly, the way other MCP clients do, whenever it lists one for this name:
-        # also when the agent named it without its server prefix, or wrapped it in the gateway's execute call.
-        direct = await _direct_tool(ctx, conn, tool_name, args, hit)
-        if direct is not None:
-            hit, tool_name, args = direct
     if hit is None and spec is None:
         surface = await _load_gateway_surface(ctx, conn)
         execute = surface.get("execute")
-        from app.routing.retrieve import is_catalog_tool as _catalog_tool
-
-        if execute and tool_name != execute and not _catalog_tool(tool_name):
-            tool_name = await canonical_action(ctx, conn, tool_name)
-            if _wrapped_args(args):
-                # The agent named the action and also wrote its arguments in execute's shape ({"tool_name", "arguments"}):
-                # they go out as written, so check the arguments inside (they were skipped, so display names went out).
-                args, wrong = await _check_inside_execute(ctx, conn, args)
-            else:
-                args, wrong = await check_gateway_action(ctx, conn, tool_name, args)
-            if wrong:
-                return wrong  # not run: a gateway quietly ignores names it doesn't know and answers for its defaults
         tool_name, args = wrap_through_execute(tool_name, args, execute)
-        if execute and tool_name == execute:
-            args = execute_args(surface.get("execute_schema"), args, ctx.query)
-    from app.routing.retrieve import is_execute_tool as _execute_tool
-
-    if hit is not None and spec is None and _is_user_mcp(conn) and _execute_tool(tool_name):
-        # The agent called the gateway's execute tool itself, naming the action inside it: the action's arguments get
-        # the same checks as when it names the action (they used to go out unchecked, e.g. a brand's display name).
-        args, wrong = await _check_inside_execute(ctx, conn, args)
-        if wrong:
-            return wrong
-    args = _rewrite_catalog_search_args(tool_name, args, ctx.query, conn)
-    from app.routing.retrieve import is_catalog_tool as _is_catalog, is_execute_tool as _is_execute
-
-    if hit is not None and _is_user_mcp(conn) and not _is_catalog(tool_name) and not _is_execute(tool_name):
-        # A connected MCP's own tool: call it exactly as its schema says (docs/LLD.md "Calling a tool by its schema").
-        args, wrong = check_schema_args(getattr(hit, "schema", None), tool_name, args)
-        if wrong:
-            return wrong
-        args, wrong = await resolve_listed_values(ctx, conn, tool_name, getattr(hit, "schema", None), args)
-        if wrong:
-            return wrong
+    args = _rewrite_catalog_search_args(tool_name, args, ctx.query)
     from app.agent import approval
     from app.routing.retrieve import is_catalog_tool, is_execute_tool
 
     destructive = bool(hit.destructive if hit is not None else (spec.destructive if spec else False))
-    if is_execute_tool(tool_name) and _is_user_mcp(conn):
-        # A gateway marks its execute tool destructive because it can run anything; what this call runs is judged by
-        # the action inside it below (a read runs, a write asks), not by execute's own flag.
-        destructive = False
     # Tools nobody vouched for: a gateway action (or an execute call carrying one) is judged by the action's name,
     # and a user-added MCP tool needs a card unless its server marked it read-only.
     user_mcp = getattr(conn, "kind", "") != "builtin" and str(getattr(conn, "server_key", "") or "").startswith("mcp:")
     if is_execute_tool(tool_name):
-        # A gateway action (unknown names were wrapped into the gateway's execute call above). One the gateway's own
-        # catalog marks read-only runs without a card, like a user MCP tool its server marks read-only.
+        # A gateway action (unknown names were wrapped into the gateway's execute call above).
         unvetted = approval.gateway_needs_approval(tool_name, args)
-        if unvetted:
-            unvetted = approval.gateway_needs_approval(tool_name, args, await _gateway_read_only(ctx, conn, tool_name, args))
-        if unvetted and approval.find_approval(ctx.confirmations, connector_slug, tool_name, args) is None:
-            vouched = await _execute_marked_read_only(ctx, conn, tool_name, hit)
-            if vouched:
-                unvetted = False  # the gateway's server marks its execute tool read-only: nothing it runs writes
-            else:
-                redirect = await _name_the_action(ctx, conn, connector_slug, tool_name, args)
-                if redirect is not None:
-                    return redirect
     elif is_catalog_tool(tool_name):
         unvetted = False
     elif hit is None and spec is None:
@@ -2096,13 +1338,7 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
         if ctx.call_impl is not None:
             result = await ctx.call_impl(connector_slug, tool_name, args)
         else:
-            async with waiting_on(ctx, conn, tool_name):
-                result = await invoke_named(ctx.db, ctx.user, conn, tool_name, args, ctx.attachments)
-                from app.connectors.mcp_client import ignored_dates
-
-                wrong_dates = ignored_dates(args, result) if _is_user_mcp(conn) else ""
-                if wrong_dates:
-                    result = await _note_ignored_args(ctx, conn, tool_name, args, result, wrong_dates)
+            result = await invoke_named(ctx.db, ctx.user, conn, tool_name, args, ctx.attachments)
         # One approval, one action: running the same thing again needs a new card.
         approval.consume(ctx.confirmations, used_approval)
         note_untrusted(ctx, tool_name)
@@ -2127,9 +1363,9 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
         if tool_name in BROWSER_PAGE_TOOLS:
             payload_limit = BROWSER_PAGE_CHARS
         else:
-            payload_limit = CONNECTOR_RESULT_CHARS
-        payload = compact_payload(result, payload_limit) if tool_name in BROWSER_PAGE_TOOLS else fit_payload(result, payload_limit)
-        if isinstance(payload, dict) and (payload.get("too_large") or payload.get("partial")):
+            payload_limit = 60000 if tool_name in MAIL_DETAIL_TOOLS else MAX_TOOL_CHARS
+        payload = compact_payload(result, payload_limit)
+        if isinstance(payload, dict) and payload.get("too_large"):
             payload["result_id"] = rid
         if tool_name not in CATALOG_TOOLS:
             if source_name not in ctx.used_tools:
@@ -2205,7 +1441,7 @@ async def run_staff(ctx: RunContext, name: str, args: dict | None = None) -> Any
 
 
 class SearchToolsInput(BaseModel):
-    query: str = Field(description="The user's request in their own words, with the names, metrics and dates they gave.")
+    query: str = Field(description="Short capability phrase for the tool you need, not the full user sentence.")
     connector_slug: str | None = Field(
         default=None,
         description="Leave empty on the first search so every catalog expands. Set only after a data tool from that connector already appeared.",
@@ -2694,7 +1930,7 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
         return dumps_full(await list_user_connectors(ctx))
 
     async def search_tools_fn(query: str, connector_slug: str | None = None) -> str:
-        """Search this user's tool catalog by capability (what the tool must return). First call without connector_slug so mail, MCP, and marketplace catalogs all expand. Pass the user's request in their own words, keeping names, metrics and dates: gateway catalogs match the right action on the whole request. Returns names and descriptions, not data."""
+        """Search this user's tool catalog by capability (what the tool must return). First call without connector_slug so mail, MCP, and marketplace catalogs all expand. Pass a short phrase, not the full user sentence. Omit people, brands, and dates. Returns names and descriptions, not data."""
         return dumps_full(await search_user_tools(ctx, query, connector_slug))
 
     async def get_tool_schema(connector_slug: str, tool_name: str) -> str:
@@ -2702,8 +1938,8 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
         return dumps_full(await get_user_tool_schema(ctx, connector_slug, tool_name))
 
     async def call_tool(connector_slug: str, tool_name: str, args: dict[str, Any] | None = None) -> str:
-        """Run a tool on one of this user's connectors now. Do not use this to send or fetch if the user named a future time — call schedule_task instead. Catalog/search/resolve/list tools are not answers. Results come back whole; only one too big for the model shows the first rows of each list, and inspect_result reads the rest."""
-        return dumps_full(await call_user_tool(ctx, connector_slug, tool_name, args))  # already fitted to the model
+        """Run a tool on one of this user's connectors now. Do not use this to send or fetch if the user named a future time — call schedule_task instead. Catalog/search/resolve/list tools are not answers. Large results are stored; use inspect_result for the slice the user asked for."""
+        return dumps(await call_user_tool(ctx, connector_slug, tool_name, args), 60000)
 
     async def schedule_task(prompt: str, agent_name: str = "") -> str:
         """Queue work for a future time on this agent's own routines (or on a named agent with agent_name). Required when the user says in N minutes, later, tonight, tomorrow, every day, or any clock. Pass their full request. Do not fetch data or send mail in this turn. Scheduled git pushes, PRs and merges still wait for the user's approval."""
@@ -3496,13 +2732,9 @@ def system_prompt(
         + workspace_bit
         + mail_quick_ref(connectors)
         + "Only use the connectors listed in the Checkme context for this turn. Other users have different connectors.\n"
-        "Discover first when the user wants a connected app (mail, calendar, a marketplace app): list_connectors, then search_tools with the user's request in their own words (names, metrics, dates kept). "
+        "Discover first when the user wants a connected app (mail, calendar, a marketplace app): list_connectors, then search_tools with a short capability phrase (what the tool must return), not the full user sentence. "
         "A file, folder, or this-computer request is not a connector or skill lookup. Use search_files, list_files, list_dir, read_file, or write_file. Every agent has them. "
-        "Keep the names, metrics and dates in the search query too. "
-        "Build every call from the chosen tool's parameters (shown in search results, or get_tool_schema): break the request into "
-        "them, one by one, by each parameter's description, with its exact name, format (ISO dates YYYY-MM-DD) and allowed values; "
-        "leave out what the request doesn't give; never invent a parameter name. When a parameter's description says its values come "
-        "from another tool, the exact value is looked up for you. "
+        "Omit brand names, people, and dates from the search query; pass those as tool arguments after get_tool_schema. "
         "First search_tools without connector_slug so mail, MCP, and marketplace catalogs all expand. "
         "Only pass connector_slug after a data tool from that connector already appeared. "
         "Pick the tool whose name and description match the capability — do not assume mail owns every 'message'. "
@@ -3632,7 +2864,7 @@ def system_prompt(
         "Read get_tool_schema before filling arguments. Argument names come from that schema and description.\n"
         "Search, resolve, list_mcps, and gateway__tool_search return catalogs, not answers. After you pick a data tool, call_tool it. "
         "If a data tool returns a snapshot or as-of date, report those figures and the as-of date — that is still the answer. "
-        "If the first search is weak, search once more with the request worded differently, then call_tool. Do not stop on a catalog search.\n"
+        "If the first search is weak, search once more with different capability words, then call_tool. Do not stop on a catalog search.\n"
         "Call tools as many times as the task needs — different connectors, different argument sets, different windows. Combine results yourself.\n"
         "Gmail and Outlook are mail AND calendar. Never say there is no calendar connector when gmail or outlook is listed. "
         "Send mail with send_message. Create a calendar invite with create_event (attendees, start in IST). "
@@ -3759,12 +2991,6 @@ def build_agent(ctx: RunContext, prompt: str):
     trim = context_trim.middleware() if getattr(get_settings(), "trim_old_pages", True) else None
     if trim is not None:
         middleware = [*middleware, trim]
-    hidden = list(getattr(ctx, "hidden_tools", None) or []) if ctx is not None else []
-    if hidden:
-        from app.agent import tool_scope
-
-        kwargs["tools"] = [*kwargs["tools"], tool_scope.load_tool(hidden)]
-        middleware = [*middleware, tool_scope.middleware(hidden)]
     turn = getattr(ctx, "turn_context", "") if ctx is not None else ""
     if turn:
         # The per-turn part of the prompt rides in a context message, so the system prompt stays cacheable.
@@ -3882,37 +3108,11 @@ def _approved_result_messages(slug: str, tool: str, args: dict, result: Any, lim
     return [call, ToolMessage(content=json.dumps(body, default=str), tool_call_id=call_id, name="call_tool")]
 
 
-# Older messages than the last exchange that are this long are sent shortened; the stored message stays whole and
-# read_history(message_id=...) rereads it (docs/LLD.md "Lean context").
-OLD_REPLY_CHARS = 2500
-OLD_REPLY_KEEP = 1800
-OLD_USER_CHARS = 6000
-
-
-def shorten_old(history: list[dict]) -> list[dict]:
-    from app.agent import tool_scope
-
-    if not tool_scope._enabled():
-        return list(history or [])
-    items = list(history or [])
-    out = []
-    for i, item in enumerate(items):
-        content = str(item.get("content") or "")
-        limit = OLD_USER_CHARS if item.get("role") == "user" else OLD_REPLY_CHARS
-        if i < len(items) - 2 and len(content) > limit:
-            ref = f"read_history(message_id={item['id']})" if item.get("id") else "read_history"
-            keep = OLD_REPLY_KEEP if item.get("role") != "user" else OLD_USER_CHARS // 2
-            content = content[:keep] + f"\n…[earlier message shortened: {len(content) - keep} more characters; {ref} reads it in full]"
-            item = {**item, "content": content}
-        out.append(item)
-    return out
-
-
 def _lc_messages(history: list[dict], query: str, extra: list | None = None, after: list | None = None):
     from langchain_core.messages import AIMessage, HumanMessage
 
     out = []
-    for item in shorten_old(history):
+    for item in history or []:
         role = item.get("role")
         content = item.get("content") or ""
         if role == "user":
@@ -4330,65 +3530,37 @@ async def run_deep_agent(
 
     agent_token = AGENT.set(workspace_agent.id) if getattr(workspace_agent, "id", None) else None  # per-agent spend
     browser_token = agent_browsers.use(workspace_agent)  # its own browser, or the shared one (docs/AGENT_BROWSERS.md)
-    from app.connectors.mcp_client import turn_sessions
-
     try:
         if job is None and workspace_agent is not None:
             blocked = await _budget_block(db, workspace_agent)
             if blocked is not None:
                 return blocked
-        async with turn_sessions():  # one MCP session per connector for the whole turn (docs/LLD.md)
-            return await _run_deep_agent(
-                db,
-                user,
-                session_id,
-                request_id,
-                history,
-                query,
-                confirmations,
-                auto_confirm,
-                workspace_agent,
-                group,
-                teammates,
-                teammate_depth,
-                mentions,
-                progress,
-                job,
-                task_key,
-                images,
-                recent_files,
-                untrusted_input,
-            )
+        return await _run_deep_agent(
+            db,
+            user,
+            session_id,
+            request_id,
+            history,
+            query,
+            confirmations,
+            auto_confirm,
+            workspace_agent,
+            group,
+            teammates,
+            teammate_depth,
+            mentions,
+            progress,
+            job,
+            task_key,
+            images,
+            recent_files,
+            untrusted_input,
+        )
     finally:
         if agent_token is not None:
             AGENT.reset(agent_token)
         agent_browsers.BROWSER_SPACE.reset(browser_token)
         reset_client_kind(token)
-
-
-def skip_skill_routing(plan, query: str) -> bool:
-    """A quick web question ("weather in Pune", "who won the match") is never a saved skill: skip the embeddings and the
-    confirm call. Short questions that name a skill still go through routing."""
-    from app.agent import fast_path
-
-    return plan.kind == fast_path.QUICK_WEB and not re.search(r"\b(skill|workflow|routine|usual|as always|like last time)\b", query or "", re.I)
-
-
-def _multi_step(ctx: RunContext, plan) -> bool:
-    """Work worth the finish check's extra model call: a plan the agent wrote down, a skill, a browser or computer task,
-    long work, or many tool calls. A one-shot data question or web lookup is not."""
-    from app.agent import fast_path
-
-    used = list(ctx.used_tools or [])
-    return bool(
-        "write_todos" in used
-        or ctx.active_skills
-        or ctx.task_state
-        or ctx.job is not None
-        or plan.kind in {fast_path.COMPUTER, fast_path.DEEP}
-        or any(fast_path.COMPUTER_TOOLS.match(t or "") for t in used)
-        or len(used) >= 6
-    )
 
 
 async def _budget_block(db, agent) -> dict | None:
@@ -4446,13 +3618,6 @@ async def _run_deep_agent(
     if not getattr(get_settings(), "fast_path_enabled", True) or teammate_depth or job is not None:
         plan = fast_path.TurnPlan(fast_path.DEEP, "fast path off for this run")
     timer.kind = plan.kind
-    simple_turn = (
-        fast_path.is_simple_turn(query, has_uploads="attachment_key=" in (query or "") or bool(images), confirmations=bool(confirmations))
-        and not teammate_depth
-        and job is None
-    )
-    # Memory recall has its own database session: start it now, while connectors, the scratchpad and skills load.
-    memory_task = asyncio.create_task(_load_memory_bounded(db, user, query, workspace_agent, "", light=simple_turn))
     if progress is not None and not teammate_depth:
         # Something visible right away, before connectors, memory and skills load.
         await progress.emit("Looking this up on the web" if plan.kind == fast_path.QUICK_WEB else "Reading your message", kind="start")
@@ -4493,6 +3658,12 @@ async def _run_deep_agent(
         job=job,
         toolkit_assignments=toolkits,
     )
+    uploaded = "attachment_key=" in (query or "")
+    simple_turn = (
+        fast_path.is_simple_turn(query, has_uploads=uploaded or bool(images), confirmations=bool(confirmations))
+        and not teammate_depth
+        and job is None
+    )
     if plan.kind == fast_path.COMPUTER and not fast_path.is_computer_file_query(query.split("\n\n", 1)[0]):
         # Start the browser (and restore saved sign-ins) while the model plans its first step. Files don't need it.
         try:
@@ -4532,13 +3703,13 @@ async def _run_deep_agent(
         except Exception:  # noqa: BLE001
             log.info("skills: loading the skill index failed", exc_info=True)
             await db.rollback()
-        if all_skills and not file_turn and not simple_turn and not skip_skill_routing(plan, query):
+        if not file_turn and not simple_turn:
             skills_task = asyncio.create_task(_route_and_confirm(all_skills, query))
         timer.mark("skills_index", _t)
     if progress is not None and plan.kind != fast_path.QUICK_WEB:
         await progress.emit("Recalling what I know about this" if not teammate_depth else "Picking up the task", kind="memory")
     _t = _time.monotonic()
-    memory = await memory_task
+    memory = await _load_memory_bounded(db, user, query, workspace_agent, getattr(ctx, "task_key", "") or "", light=simple_turn)
     timer.mark("memory", _t)
     pad_bit = pad.as_prompt(ctx.scratchpad)
     if pad_bit:
@@ -4653,14 +3824,6 @@ async def _run_deep_agent(
     # Fixed rules stay in the system prompt (cached by the provider across turns); time, memory, skills, connectors
     # and hints for this turn go in a context message beside the user's message (app/agent/turn_context.py).
     prompt, ctx.turn_context = split_prompt(prompt)
-    from app.agent import tool_scope
-
-    ctx.hidden_tools = tool_scope.hidden_groups(
-        query, history, plan.kind,
-        full=bool(matched_skills or ctx.task_state or job is not None or teammate_depth or _coding_agent(workspace_agent)),
-    )  # fmt: skip
-    if ctx.hidden_tools:
-        ctx.turn_context = (ctx.turn_context + "\n\n" + tool_scope.context_note(ctx.hidden_tools)).strip()
     graph = build_agent(ctx, prompt)
     timer.mark("build", _t)
     _t = _time.monotonic()
@@ -4734,7 +3897,7 @@ async def _run_deep_agent(
             break
     if finished and get_settings().agent_finish_check and finish_check.only_promised(ctx, text):
         text = await _do_what_was_promised(ctx, graph, text, result, progress, callbacks, limit, thread)
-    if finished and get_settings().agent_finish_check and finish_check.should_check(ctx, text, multi_step=_multi_step(ctx, plan)):
+    if finished and get_settings().agent_finish_check and finish_check.should_check(ctx, text):
         text = await _finish_what_is_left(ctx, graph, query, text, result, progress, callbacks, limit, thread)
     timer.mark("agent", _t)
     timer.log()

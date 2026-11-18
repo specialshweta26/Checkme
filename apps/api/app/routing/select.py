@@ -178,23 +178,6 @@ async def usage_bonus(db: AsyncSession, user_id, connector_id) -> float:
     return min(0.15, ok / max(1, ok + bad) * 0.15) if ok else 0.0
 
 
-async def load_listed_as(db: AsyncSession, conn: Connector, name: str) -> ToolHit | None:
-    """The connector's own listed tool for a name given without its server prefix: a gateway lists
-    ``<server>__<tool>`` and the agent often names just ``<tool>``. Only an unambiguous match counts."""
-    if not name or not getattr(conn, "server_key", None):
-        return None
-    suffix = "__" + name
-    rows = (
-        await db.execute(
-            select(ToolIndex).where(ToolIndex.server_key == conn.server_key, ToolIndex.tool_name.endswith(suffix, autoescape=True)).limit(3)
-        )
-    ).scalars().all()
-    if len(rows) != 1:
-        return None
-    found = await load_named(db, [conn], {(conn.slug, rows[0].tool_name)})
-    return found[0] if found else None
-
-
 async def load_named(db: AsyncSession, connectors: list[Connector], names: set[tuple[str, str]]) -> list[ToolHit]:
     if not names:
         return []

@@ -88,7 +88,12 @@ export function AgentBrowser({ agent }: { agent: WorkspaceAgent }) {
           )}
         </div>
       ) : null}
-      {mode === "own" ? <p className="faint about-note">In the desktop app, browsing on this computer still uses the one Lumio browser profile.</p> : null}
+      {mode === "own" ? (
+        <p className="faint about-note">
+          In the desktop app it gets its own Chrome window on your computer too. That needs the latest desktop app; an older one refuses its browser steps
+          instead of using the shared browser.
+        </p>
+      ) : null}
       {error ? <p className="err">{error}</p> : null}
       {notice ? <p className="faint about-note">{notice}</p> : null}
     </div>

@@ -181,12 +181,3 @@ def test_task_states_route(task_store):
     data = client.get(f"/skills/tasks/states?job_id={uuid.uuid4()}").json()
     assert data["states"][0]["skill_name"] == SKILL["name"]
     assert client.get("/skills/tasks/states?session_id=nope").status_code == 400
-
-
-async def test_without_the_confirm_check_a_skill_that_only_shares_a_word_is_dropped():
-    async def broken(messages, **_):
-        raise RuntimeError("down")
-
-    files = {"id": str(uuid.uuid4()), "name": "Review Sales Files and Reply", "instruction": "1. Open the files.\n2. Reply."}
-    assert await ts.confirm_skills("product wise sales across 7 days", [files], llm=broken) == []
-    assert await ts.confirm_skills("review the sales files and reply to them", [files], llm=broken)

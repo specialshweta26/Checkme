@@ -288,7 +288,6 @@ class HistorySearchInput(BaseModel):
 
 class HistoryReadInput(BaseModel):
     limit: int = Field(default=8, description="How many recent messages in this chat.")
-    message_id: int = Field(default=0, description="Read this one message in full (an id from a shortened earlier message).")
 
 
 class SkillReadInput(BaseModel):
@@ -813,10 +812,10 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         ctx.used_tools.append("search_history")
         return _dumps(await search_history(ctx, query, limit))
 
-    async def read_hist(limit: int = 8, message_id: int = 0) -> str:
-        """Read the most recent messages in this chat, or one message in full by its id."""
+    async def read_hist(limit: int = 8) -> str:
+        """Read the most recent messages in this chat."""
         ctx.used_tools.append("read_history")
-        return _dumps(await read_history(ctx, limit, message_id=message_id))
+        return _dumps(await read_history(ctx, limit))
 
     def _agent_id():
         return getattr(ctx.agent, "id", None)
