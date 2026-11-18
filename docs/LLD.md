@@ -943,6 +943,10 @@ The gateway showed the data while Lumio answered without it, or spent extra mode
   schema, listed values and read-only mark apply, and a wrong parameter comes back to the agent with the right ones.
 - **Execute's own flag doesn't decide:** a gateway marks its execute tool destructive (it can run anything), so a
   direct `gateway__execute` call for a read asked for approval. The action inside decides now: a read runs, a write asks.
+- **Lumio tools sent to a gateway:** the agent sometimes sends one of Lumio's own tools through a gateway's execute
+  (`write_analytics_report`, which lives on the Computer connector). The gateway has no such action, and as an unknown
+  write it asked for approval. A call naming a tool without a server prefix that this connector doesn't list, but
+  exactly one other connected connector does, now runs on that connector (`_tool_of_another_connector`).
 - **Approvals see the action:** execute calls shaped by the gateway's own schema can name the action under
   `public_name` / `public_tool_name`. `approval.nested_actions` reads those too; before, a plain read such as
   `get_daily_sales` asked for approval because its name wasn't seen.

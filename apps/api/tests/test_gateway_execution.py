@@ -287,3 +287,33 @@ async def test_canonical_action_leaves_known_and_ambiguous_names_alone(monkeypat
     assert await deep.canonical_action(ctx, ctx.connectors["gw"], "funnel-analytics-prod__get_sales_dashboard") == "funnel-analytics-prod__get_sales_dashboard"
     assert await deep.canonical_action(ctx, ctx.connectors["gw"], "funnel-analytics__get_sales_dashboard") == "funnel-analytics-prod__get_sales_dashboard"
     assert await deep.canonical_action(ctx, ctx.connectors["gw"], "other__get_nothing") == "other__get_nothing"
+
+
+async def test_a_lumio_tool_sent_through_the_gateway_runs_where_it_lives(monkeypatch):
+    """The live 110-day run: the report tool (the Computer connector's write_analytics_report) was sent through the
+    gateway's execute and asked for approval as an unknown write."""
+    ctx, sent = _gateway_with_catalog(monkeypatch, auto_confirm=False)
+    computer = SimpleNamespace(kind="builtin", server_url="", alias="", name="Computer", server_key="builtin:computer", id="c2",
+                               health="ok", slug="computer", provider="daytona")  # fmt: skip
+    ctx.connectors["computer"] = computer
+
+    async def listed(db, conns, wanted):
+        out = []
+        for slug, n in wanted:
+            if slug == "gw" and n == "gateway__execute":
+                out.append(SimpleNamespace(tool_name=n, schema={}, read_only=False, destructive=True, connector_name="Gateway",
+                                           slug="gw", description="", group="", produces=[]))  # fmt: skip
+            if slug == "computer" and n == "write_analytics_report":
+                out.append(SimpleNamespace(tool_name=n, schema={}, read_only=False, destructive=False, connector_name="Computer",
+                                           slug="computer", description="", group="", produces=[]))  # fmt: skip
+        return out
+
+    monkeypatch.setattr(deep, "load_named", listed)
+    out = await deep.call_user_tool(ctx, "gw", "gateway__execute",
+                                    {"tool_name": "write_analytics_report", "arguments": {"title": "Sales", "tables": []}})  # fmt: skip
+    assert not ctx.pending and out.get("ok")
+    assert sent[-1] == ("write_analytics_report", {"title": "Sales", "tables": []})  # on the Computer connector, not the gateway
+    # A gateway action is still the gateway's.
+    await deep.call_user_tool(ctx, "gw", "gateway__execute",
+                              {"tool_name": "funnel-analytics-prod__get_sales_dashboard", "arguments": {"brand": "one8"}})  # fmt: skip
+    assert sent[-1][0] == "gateway__execute"
