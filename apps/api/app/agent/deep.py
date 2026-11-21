@@ -3606,9 +3606,10 @@ def system_prompt(
     from app.quality.lessons import lessons_prompt
 
     identity += lessons_prompt(agent)
-    from app.agents.focus import focus_prompt
+    from app.agents.focus import focus_prompt, role_contract
 
     identity += focus_prompt(agent)
+    identity += role_contract(agent)
     from app.skills.profile import capabilities_block
     from app.skills.task_state import prompt_block
 
@@ -4628,13 +4629,9 @@ async def _run_deep_agent(
     conns = await with_computer(db, user, await user_connectors(db, user.id))
     assignments = await connector_assignment_map(db, user)
     toolkits = await toolkit_assignment_map(db, user) if db is not None else {}
-    teammate_ids = [getattr(peer, "id", None) for peer in (teammates or [])]
-    conns = filter_connectors(
-        conns,
-        getattr(workspace_agent, "id", None),
-        teammate_ids,
-        assignments,
-    )
+    # Only this agent's own connectors (plus the shared computer and marketplace). A teammate's connector is used by
+    # asking that teammate, who runs with its own (docs/GUARDRAILS.md "Roles").
+    conns = filter_connectors(conns, getattr(workspace_agent, "id", None), [], assignments)
     mentions = dict(mentions or {})
     if teammate_depth:
         mentions["handoff"] = True
