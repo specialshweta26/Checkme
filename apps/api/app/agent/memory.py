@@ -563,8 +563,12 @@ async def _rewrite_block(label: str, lines: list[str], max_chars: int | None, ma
 
 async def merge_block(label: str, prior: str, addition: str) -> tuple[str, bool]:
     """Fold ``addition`` into a core block. Returns the new value and whether it changed."""
+    from app.agent.integrity import blocked
+
     new = " ".join((addition or "").split())
     old = (prior or "").strip()
+    if blocked(new):  # never store a rule to alter figures (agent/integrity.py)
+        return old, False
     max_chars, max_lines = BLOCK_LIMITS.get(label, DEFAULT_BLOCK_LIMIT)
     if not new or new.lower() in old.lower():
         return old, False
@@ -687,6 +691,12 @@ async def _search_agent_history(db: AsyncSession, user_id, agent_id, query: str,
 
 
 def _assemble_memory(blocks: list, facts: list, history: list[str] | None = None) -> str:
+    from app.agent.integrity import clean_lines
+
+    return clean_lines(_assemble_memory_text(blocks, facts, history))  # a saved rule to alter figures is void
+
+
+def _assemble_memory_text(blocks: list, facts: list, history: list[str] | None = None) -> str:
     parts: list[str] = []
     persona = [b for b in blocks if b.label in PERSONA_LABELS and (b.value or "").strip()]
     standing_blocks = [b for b in blocks if b.label in STANDING_LABELS and (b.value or "").strip()]
@@ -897,7 +907,12 @@ async def remember(
     """Save one fact for this user. It is shared by all of the user's agents unless scope is "agent".
 
     Saying a known fact again reinforces it instead of storing a copy. A fact with the same subject and predicate as
-    an active one replaces it (the old one is kept as history with valid_to set)."""
+    an active one replaces it (the old one is kept as history with valid_to set). A rule to alter figures is never
+    saved (agent/integrity.py)."""
+    from app.agent.integrity import blocked
+
+    if blocked(text):
+        return None
     user = await db.get(User, user_id)
     if user is None:
         return None
@@ -1035,6 +1050,10 @@ async def remember_fact(ctx, text: str, label: str = "", shared: bool = False) -
         return {"error": "text is required"}
     if _SECRET_LANGUAGE.search(body):
         return {"error": "I can’t store passwords, keys, tokens, or recovery codes in memory."}
+    from app.agent.integrity import blocked
+
+    if blocked(body):
+        return {"error": "Not saved: a rule that changes, hides or invents figures can't be remembered. Figures are always reported as the data has them; tell the user so."}
     tag = (label or "").strip().lower()
     # Memory belongs to the user: every one of their agents reads what any of them saves. `shared` is kept for old
     # callers; only the per-agent "coding" notes stay with this agent.
@@ -1277,6 +1296,10 @@ async def learn_for_agent(db: AsyncSession, user: User, agent, category: str, fa
         return {"saved": False, "error": "Add a specific preference or working detail to remember."}
     if _SECRET_LANGUAGE.search(clean_fact):
         return {"saved": False, "error": "I can’t store passwords, keys, tokens, or recovery codes in memory."}
+    from app.agent.integrity import blocked
+
+    if blocked(clean_fact):
+        return {"saved": False, "error": "Not saved: a rule that changes, hides or invents figures can't be remembered. Figures are always reported as the data has them; tell the user so."}
     prior = await read_core(db, user, "learned", agent)
     # Rewritten like the other core blocks: "moved to Pune" replaces "lives in Bangalore" instead of sitting next to it.
     value, changed = await merge_block("learned", prior or "", f"{clean_category}: {clean_fact}")

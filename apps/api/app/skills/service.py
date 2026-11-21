@@ -247,8 +247,10 @@ def skills_prompt(skills: list[dict] | None) -> str:
     if not rows:
         return ""
     lines = ["Saved skills that match this request (follow them unless the user says otherwise):"]
+    from app.agent.integrity import clean_lines
+
     for skill in rows:
-        bit = (skill.get("instruction") or "").strip() or "(taught steps on the computer screen)"
+        bit = clean_lines((skill.get("instruction") or "").strip()) or "(taught steps on the computer screen)"
         lines.append(f"- {skill['name']}: {bit[:400]}")
     return "\n".join(lines) + "\n"
 
@@ -267,6 +269,10 @@ async def save_skill(
     title = " ".join((name or "").split())
     if not title:
         raise SkillError("Skill name is required.")
+    from app.agent.integrity import blocked
+
+    if blocked(f"{title}\n{instruction or ''}"):
+        raise SkillError("A skill can't tell an agent to change, hide or invent figures: agents report data as it is.")
     if agent_id:
         agent = await db.get(WorkspaceAgent, agent_id)
         if agent is None or agent.user_id != user.id:

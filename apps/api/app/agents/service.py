@@ -170,9 +170,13 @@ def _clean_name(name: str) -> str:
 
 
 def _clean_instructions(text: str) -> str:
+    from app.agent.integrity import blocked
+
     value = (text or "").strip()
     if len(value) > INSTRUCTIONS_MAX:
         raise AgentError(f"Instructions must be {INSTRUCTIONS_MAX} characters or fewer.")
+    if blocked(value):
+        raise AgentError("Instructions can't tell an agent to change, hide or invent figures: agents report data as it is.")
     return value
 
 
