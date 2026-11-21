@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type JSX } from "react";
+import { useEffect, useRef, useState, type FormEvent, type JSX } from "react";
 import { isLumioDesktop } from "../lib";
 export function GoogleMark() {
   return (
@@ -24,7 +24,16 @@ export function MicrosoftMark() {
   );
 }
 
-type Provider = "google" | "microsoft";
+type Provider = string;
+
+function KeyMark() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <circle cx="7.5" cy="15.5" r="4.5" />
+      <path d="M10.7 12.3 21 2M16 7l3 3M18.5 4.5l2 2" />
+    </svg>
+  );
+}
 
 function newCode() {
   const bytes = new Uint8Array(32);
@@ -37,9 +46,12 @@ function newCode() {
  * inside the app window), so the app starts sign-in there with a one-time code and waits until the browser has
  * finished, then collects its own session (docs/LLD.md "Desktop sign-in").
  */
-export function AuthProviders({ error = "" }: { error?: string }) {
+export function AuthProviders({ error = "", sso = false }: { error?: string; sso?: boolean }) {
   const [waiting, setWaiting] = useState<Provider | null>(null);
   const [problem, setProblem] = useState("");
+  const [ssoOpen, setSsoOpen] = useState(false);
+  const [workEmail, setWorkEmail] = useState("");
+  const [ssoBusy, setSsoBusy] = useState(false);
   const stopRef = useRef(false);
   // Known only in the browser (the server renders the web version first).
   const [desktop, setDesktop] = useState(false);
@@ -51,10 +63,10 @@ export function AuthProviders({ error = "" }: { error?: string }) {
     };
   }, []);
 
-  async function desktopSignIn(provider: Provider) {
+  async function desktopSignIn(provider: Provider, path = `/api/auth/${provider}/login`) {
     const tauri = (window as { __TAURI__?: { core?: { invoke?: (name: string, args: { url: string }) => Promise<unknown> } } }).__TAURI__?.core;
     if (!tauri?.invoke) {
-      window.location.href = `/api/auth/${provider}/login`;
+      window.location.href = path;
       return;
     }
     const code = newCode();
@@ -62,7 +74,8 @@ export function AuthProviders({ error = "" }: { error?: string }) {
     setWaiting(provider);
     stopRef.current = false;
     try {
-      await tauri.invoke("open_external", { url: `${window.location.origin}/api/auth/${provider}/login?desktop=${code}` });
+      const sep = path.includes("?") ? "&" : "?";
+      await tauri.invoke("open_external", { url: `${window.location.origin}${path}${sep}desktop=${code}` });
     } catch {
       setWaiting(null);
       setProblem("Couldn't open your browser to sign in.");
@@ -91,6 +104,32 @@ export function AuthProviders({ error = "" }: { error?: string }) {
     if (!stopRef.current) {
       setWaiting(null);
       setProblem("Sign-in timed out. Try again.");
+    }
+  }
+
+  async function startSso(e: FormEvent) {
+    e.preventDefault();
+    const email = workEmail.trim();
+    if (!email.includes("@")) {
+      setProblem("Enter your work email.");
+      return;
+    }
+    setSsoBusy(true);
+    setProblem("");
+    try {
+      const res = await fetch(`/api/auth/sso/discover?email=${encodeURIComponent(email)}`, { credentials: "include" });
+      const data = await res.json().catch(() => ({}));
+      if (!data?.sso || !data?.id) {
+        setProblem("Single sign-on isn't set up for that email's company. Use another way to sign in, or ask your admin.");
+        return;
+      }
+      const path = `/api/auth/sso/${encodeURIComponent(data.id)}/login?email=${encodeURIComponent(email)}`;
+      if (desktop) await desktopSignIn(`sso:${data.id}`, path);
+      else window.location.href = path;
+    } catch {
+      setProblem("Can't reach Lumio right now. Try again.");
+    } finally {
+      setSsoBusy(false);
     }
   }
 
@@ -129,7 +168,24 @@ export function AuthProviders({ error = "" }: { error?: string }) {
       <div className="providers">
         {button("google", "Continue with Google", <GoogleMark />)}
         {button("microsoft", "Continue with Microsoft", <MicrosoftMark />)}
+        {sso && !ssoOpen ? (
+          <button className="provider" type="button" disabled={waiting !== null} onClick={() => setSsoOpen(true)}>
+            <KeyMark />
+            Continue with SSO
+          </button>
+        ) : null}
       </div>
+      {sso && ssoOpen ? (
+        <form className="auth-fields sso-form" onSubmit={startSso}>
+          <label>
+            <span>Work email</span>
+            <input type="email" autoComplete="email" required autoFocus value={workEmail} onChange={(e) => setWorkEmail(e.target.value)} placeholder="you@company.com" />
+          </label>
+          <button className="btn large block" type="submit" disabled={ssoBusy || waiting !== null}>
+            {ssoBusy ? "Finding your company…" : "Continue with SSO"}
+          </button>
+        </form>
+      ) : null}
     </>
   );
 }

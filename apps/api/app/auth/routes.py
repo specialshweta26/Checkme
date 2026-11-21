@@ -62,12 +62,41 @@ def _session_cookie(resp, token: str) -> None:
     )
 
 
+async def new_session(db: AsyncSession, request: Request, user: User) -> str:
+    """A signed session token for ``user`` (committed). Also makes sure the platform connectors exist."""
+    from app.connectors.platform import ensure_platform_connectors
+
+    await ensure_platform_connectors(db, user)
+    sess = AuthSession(user_id=user.id, expires_at=session_expiry(), user_agent=request.headers.get("user-agent", "")[:300])
+    db.add(sess)
+    await db.commit()
+    return issue_session_jwt(user.id, sess.id, sess.expires_at)
+
+
+async def desktop_handoff(db: AsyncSession, user: User, code: str) -> str:
+    """Sign-in started from the desktop app: a session of its own waits under the app's code until the app claims it.
+    Returns the page to show in the browser."""
+    desk = AuthSession(user_id=user.id, expires_at=session_expiry(), user_agent="Lumio desktop app")
+    db.add(desk)
+    await db.commit()
+    try:
+        await get_redis().set(_desktop_key(code), issue_session_jwt(user.id, desk.id, desk.expires_at).encode(), ex=DESKTOP_TTL_S)
+        return "/desktop-signed-in"
+    except Exception as exc:  # noqa: BLE001
+        log.warning("desktop sign-in handoff not stored: %s", type(exc).__name__)
+        return "/desktop-signed-in?error=handoff"
+
+
 @router.get("/status")
 async def oauth_status():
+    from app.auth import mailer, sso
+
     s = get_settings()
     return {
         "google": bool(s.google_client_id),
         "microsoft": bool(s.microsoft_client_id),
+        "email": bool(s.email_login and mailer.configured()),
+        "sso": bool(sso.connections()),
         "dev_login": s.dev_login_enabled,
         "public_web_url": s.public_web_url,
     }
@@ -206,16 +235,7 @@ async def callback(
     target = "/connectors?linked=1" if saved.get("mode") == "link" else "/chat"
     code = saved.get("desktop") or ""
     if code and saved.get("mode") == "signin" and DESKTOP_CODE.fullmatch(code):
-        # Started from the desktop app: a session of its own waits under the app's code until the app claims it.
-        desk = AuthSession(user_id=user.id, expires_at=session_expiry(), user_agent="Lumio desktop app")
-        db.add(desk)
-        await db.commit()
-        try:
-            await get_redis().set(_desktop_key(code), issue_session_jwt(user.id, desk.id, desk.expires_at).encode(), ex=DESKTOP_TTL_S)
-            target = "/desktop-signed-in"
-        except Exception as exc:  # noqa: BLE001
-            log.warning("desktop sign-in handoff not stored: %s", type(exc).__name__)
-            target = "/desktop-signed-in?error=handoff"
+        target = await desktop_handoff(db, user, code)
     resp = RedirectResponse(_web(target))
     resp.delete_cookie(OAUTH_COOKIE, path="/")
     _session_cookie(resp, issue_session_jwt(user.id, sess.id, sess.expires_at))

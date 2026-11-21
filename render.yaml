@@ -97,6 +97,16 @@ services:
         sync: false
       - key: MICROSOFT_CLIENT_SECRET
         sync: false
+      # Email sign-in mail (docs/AUTH.md "Mail"): one of these, and MAIL_FROM on a verified domain.
+      - key: RESEND_API_KEY
+        sync: false
+      - key: SENDGRID_API_KEY
+        sync: false
+      - key: MAIL_FROM
+        sync: false
+      # Enterprise SSO connections, JSON (docs/AUTH.md "SSO").
+      - key: SSO_CONNECTIONS
+        sync: false
       - key: OPENAI_API_KEY
         sync: false
       - key: OPENAI_MODEL

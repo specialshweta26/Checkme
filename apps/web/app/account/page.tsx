@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { AppShell } from "../components/AppShell";
+import { ChangePassword } from "../components/ChangePassword";
 import { apiError, getMe, type Me } from "../lib";
 
 // Your data (apps/api/app/account/routes.py): download everything the app holds about you, or delete your account.
@@ -77,6 +78,7 @@ export default function AccountPage() {
             </div>
           </div>
           <div className="task-list">
+            {me?.primary_provider === "email" ? <ChangePassword /> : null}
             <div className="task-card">
               <div className="task-main">
                 <strong>Download your data</strong>

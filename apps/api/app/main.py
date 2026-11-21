@@ -10,7 +10,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.account.routes import router as account_router
 from app.agents.routes import router as agents_router
 from app.automations.routes import router as automations_router, webhook_router
+from app.auth.email import router as email_auth_router
 from app.auth.routes import me_router, router as auth_router
+from app.auth.sso import router as sso_router
 from app.channels.routes import router as channels_router
 from app.chat.routes import router as chat_router
 from app.config import get_settings
@@ -215,6 +217,8 @@ async def lumio_client_kind(request: Request, call_next):
         reset_client_kind(token)
 
 
+app.include_router(email_auth_router, prefix="/api")  # before /auth/{provider}/… so these paths win
+app.include_router(sso_router, prefix="/api")
 app.include_router(auth_router, prefix="/api")
 app.include_router(me_router, prefix="/api")
 app.include_router(account_router, prefix="/api")
