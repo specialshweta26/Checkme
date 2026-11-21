@@ -37,6 +37,13 @@ def _untrusted(ctx) -> None:
     note_untrusted(ctx)
 
 
+def _guard(ctx, source: str, value: Any) -> Any:
+    """Third-party text with any instructions in it labelled (app/agent/injection.py)."""
+    from app.agent import injection
+
+    return injection.guard(value, source, ctx)
+
+
 def _dumps(value: Any, limit: int = 60000) -> str:
     from app.agent.deep import dumps
 
@@ -679,25 +686,26 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         """Search the public web. Use for facts, news, and 'what is going on'. The top results come back WITH their page text (and often a short `answer`), so answer from them directly; read more pages only if needed with web_read (several in parallel). Recent things (news, latest, today) are filtered to recent pages automatically, or pass recency. Do not search_tools for this. For live bookings, inventory, or forms, browser_navigate the site itself instead of a Google Search URL. If it returns an error or no results, say so and never make results up. When the result has `setup`, tell the user which API key to configure. Order: Tavily (and other configured search APIs), then the computer browser, then free engines."""
         ctx.used_tools.append("web_search")
         _untrusted(ctx)  # public web pages are third-party content
-        return _dumps(await web_tools.web_search(query, count, ctx, recency=recency))
+        return _dumps(_guard(ctx, "web search", await web_tools.web_search(query, count, ctx, recency=recency)))
 
     async def web_read(urls: list[str]) -> str:
         """Read up to 5 public pages at once, in parallel, server-side (fast, short time limits; never boots the computer). Returns each page's text, or ok=false with the reason. Use after web_search when its inline page text is not enough. Never invent page content."""
         ctx.used_tools.append("web_read")
         _untrusted(ctx)  # public web pages are third-party content
-        return _dumps(await web_tools.web_read(ctx, list(urls or [])), 32000)
+        return _dumps(_guard(ctx, "web pages", await web_tools.web_read(ctx, list(urls or []))), 32000)
 
     async def browser_search(query: str, count: int = 8) -> str:
         """Search the web inside the live computer browser (Bing, DuckDuckGo, then Google) and return result links read from the page. Use when web_search is empty or blocked. A CAPTCHA page is reported, never solved."""
         ctx.used_tools.append("browser_search")
         _untrusted(ctx)  # public web pages are third-party content
         data = await web_tools._browser_search(ctx, query, max(1, min(int(count or 8), 12)))
-        return _dumps(data if data is not None else computer.computer_missing())
+        return _dumps(_guard(ctx, "web search", data) if data is not None else computer.computer_missing())
 
     async def web_fetch(url: str) -> str:
         """Fetch one public http(s) page and return its text, server-side (fast; does not need the computer). For several pages use web_read. If the site blocks automated access it tries other ways to read the same page (Tavily's copy, proxy/hosted browser when configured, mobile/AMP version, reader, archive) and marks the copy read_only; if everything fails it returns blocked_source: name that site to the user plainly and use other sources. Never invent page content."""
         ctx.used_tools.append("web_fetch")
-        return _dumps(await web_tools.web_fetch(ctx, url), 32000)
+        _untrusted(ctx)  # a public web page is third-party content
+        return _dumps(_guard(ctx, f"the page {str(url)[:120]}", await web_tools.web_fetch(ctx, url)), 32000)
 
     async def research_crawl(
         goal: str = "",
