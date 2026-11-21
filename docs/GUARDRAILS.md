@@ -69,6 +69,12 @@ Every agent works by its own instructions, role and skills.
   request is clearly outside its role, names the agent whose role fits or offers to hand it over (`ask_teammate`), and
   does it itself only if the user says so. The all-round agent (Chief, or any agent without a role of its own,
   `is_general`) takes any request.
+- **Checked before the turn** (`agents/role_gate.py`, `ROLE_GATE` on by default): the prompt rule alone didn't hold
+  (asked for Lotto's sales, the HR agent fetched them). Before a specialist's chat turn, one small model call compares
+  the request with its role and instructions; a request clearly outside them is answered at once, without tools,
+  naming the agent whose role fits (or the all-round agent), and "go ahead" makes the agent do it. Small talk,
+  follow-ups, the all-round agent, background jobs, teammate hand-offs, group chats and replies to an approval are
+  never checked, and any failure lets the request through.
 - **Own connectors only:** a run gets the connectors assigned to its agent (and the shared computer and marketplace,
   and anything not assigned to anyone). Before, an agent in a group also got every connector assigned to its
   teammates; now work that needs a teammate's connector goes to that teammate with `ask_teammate`, and it runs with its

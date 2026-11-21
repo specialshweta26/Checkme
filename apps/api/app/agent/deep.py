@@ -4504,6 +4504,10 @@ async def run_deep_agent(
             blocked = await _budget_block(db, workspace_agent)
             if blocked is not None:
                 return blocked
+            if not teammate_depth and not confirmations and group is None:
+                redirect = await _role_block(db, user, workspace_agent, query, history)
+                if redirect is not None:
+                    return redirect
         async with turn_sessions():  # one MCP session per connector for the whole turn (docs/LLD.md)
             return await _run_deep_agent(
                 db,
@@ -4556,6 +4560,28 @@ def _multi_step(ctx: RunContext, plan) -> bool:
         or any(fast_path.COMPUTER_TOOLS.match(t or "") for t in used)
         or len(used) >= 6
     )
+
+
+async def _role_block(db, user, agent, query: str, history: list) -> dict | None:
+    """A specialist asked for work clearly outside its role answers with the agent that fits, without tools
+    (agents/role_gate.py)."""
+    if not getattr(get_settings(), "role_gate", True):
+        return None
+    try:
+        from app.agents import role_gate
+        from app.models import WorkspaceAgent
+
+        others = []
+        if db is not None:
+            others = list((await db.execute(select(WorkspaceAgent).where(WorkspaceAgent.user_id == user.id))).scalars().all())
+        out = await role_gate.check(agent, query, list(history or []), others)
+    except Exception:  # noqa: BLE001 - the role check never blocks the user
+        log.info("role check failed", exc_info=True)
+        return None
+    if out is None:
+        return None
+    return {"text": out["text"], "used_tools": [], "attachments": [], "pending_confirms": [], "jobs_started": [],
+            "role_redirect": {"fits": out["fits"]}}  # fmt: skip
 
 
 async def _budget_block(db, agent) -> dict | None:
