@@ -81,3 +81,39 @@ def test_snapshot_columns_are_not_totalled_and_totals_say_who_added_them():
     table = deep.tabulate({"rows": rows})["rows"]
     assert table["column_totals"] == {"units": 10, "net_sales": 100}
     assert "Lumio" in table["column_totals_note"]
+
+
+# --- totals per group, and rewrites never blank the figures (the live "Seam shoes" reply had an empty table) -------
+
+SEGMENTS = {"days": [
+    {"date": "2026-11-13", "by_segment": [{"category": "Closed Footwear", "segment": "Running", "net_sales": 410000, "units": 120},
+                                          {"category": "Closed Footwear", "segment": "Lifestyle", "net_sales": 265500, "units": 80},
+                                          {"category": "Apparel", "segment": "Tees", "net_sales": 98000, "units": 60}]},
+    {"date": "2026-11-14", "by_segment": [{"category": "Closed Footwear", "segment": "Running", "net_sales": 301000, "units": 90},
+                                          {"category": "Closed Footwear", "segment": "Lifestyle", "net_sales": 199250, "units": 64},
+                                          {"category": "Apparel", "segment": "Tees", "net_sales": 87500, "units": 51}]},
+]}  # fmt: skip
+SEG_RESULTS = [{"source_tool": "gw.get_sales_split", "args": {"brand": "one8"}, "data": SEGMENTS}]
+
+
+def test_totals_per_date_and_category_from_nested_rows_pass():
+    reply = """| Date | Closed Footwear net sales | Units |
+|---|---:|---:|
+| 13 Nov | ₹6,75,500 | 200 |
+| 14 Nov | ₹5,00,250 | 154 |
+Closed Footwear made ₹11,75,750 over the two days; all categories ₹13,61,250."""
+    assert fact_check.unverified(reply, SEG_RESULTS) == []
+    assert fact_check.unverified("Closed Footwear made ₹12,40,000 on 13 Nov.", SEG_RESULTS) == ["₹12,40,000"]
+
+
+async def test_a_rewrite_that_blanks_table_cells_is_not_used():
+    reply = "| Date | Net sales |\n|---|---:|\n| 13 Nov | ₹9,99,999 |\n| 14 Nov | ₹8,88,888 |"
+    blanked = "| Date | Net sales |\n|---|---:|\n| 13 Nov |  |\n| 14 Nov | — |"
+
+    async def blanker(messages, max_tokens=0):
+        assert "Never leave a blank" in messages[0]["content"]
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=blanked))])
+
+    out, report = await fact_check.verify_reply(reply, SEG_RESULTS, blanker)
+    assert not report["rewritten"] and "₹9,99,999" in out and "Check these figures" in out
+    assert fact_check.blank_cells(blanked) == 2 and fact_check.blank_cells(reply) == 0
