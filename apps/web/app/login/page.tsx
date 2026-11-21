@@ -4,12 +4,15 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { BrandMark } from "../components/BrandMark";
 import { AuthProviders } from "../components/AuthProviders";
-import { applySavedTheme, devLoginAvailable, errorFromQuery, getMe } from "../lib";
+import { EmailSignIn } from "../components/EmailSignIn";
+import { authStatus, type AuthStatus } from "../components/AuthShell";
+import { applySavedTheme, errorFromQuery, getMe } from "../lib";
 
 export default function Login() {
   const [error, setError] = useState("");
   const [deleted, setDeleted] = useState(false);
-  const [devLogin, setDevLogin] = useState(false);
+  const [status, setStatus] = useState<AuthStatus | null>(null);
+  const devLogin = Boolean(status?.dev_login);
 
   useEffect(() => applySavedTheme(), []);
 
@@ -19,7 +22,7 @@ export default function Login() {
     getMe().then((me) => {
       if (me) window.location.replace("/chat");
     });
-    devLoginAvailable().then(setDevLogin);
+    authStatus().then(setStatus);
   }, []);
 
   return (
@@ -47,9 +50,17 @@ export default function Login() {
           <div className="auth-form">
             <div className="auth-eyebrow">Welcome back</div>
             <h2>Sign in to Lumio</h2>
-            <p className="auth-intro">Use the work or personal account you connect your mail and calendar with.</p>
+            <p className="auth-intro">Use your work or personal account, your company's single sign-on, or your email and password.</p>
             {deleted ? <p className="notice">Your account and all its data were deleted.</p> : null}
-            <AuthProviders error={error} />
+            <AuthProviders error={error} sso={Boolean(status?.sso)} />
+            {status?.email ? (
+              <>
+                <div className="auth-divider" role="separator">
+                  or with email
+                </div>
+                <EmailSignIn />
+              </>
+            ) : null}
             {devLogin ? (
               <>
                 <div className="auth-divider" role="separator">

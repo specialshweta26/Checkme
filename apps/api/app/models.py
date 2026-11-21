@@ -168,6 +168,23 @@ class AuthSession(Base):
     user_agent: Mapped[str] = mapped_column(String(300), default="")
 
 
+class PasswordLogin(Base):
+    """Email and password sign-in (docs/AUTH.md). The row exists from sign-up; ``user_id`` is set when the address is
+    verified, and only a verified login can sign in. The password is stored as a salted scrypt hash."""
+
+    __tablename__ = "password_logins"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    email: Mapped[str] = mapped_column(String(320), unique=True, index=True)  # lowercased
+    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=True)
+    display_name: Mapped[str] = mapped_column(String(200), default="")
+    password_hash: Mapped[str] = mapped_column(String(300))
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    failed_count: Mapped[int] = mapped_column(Integer, default=0)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
 class Connector(Base):
     __tablename__ = "connectors"
     __table_args__ = (UniqueConstraint("user_id", "slug"),)

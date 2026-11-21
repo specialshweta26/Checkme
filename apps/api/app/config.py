@@ -53,6 +53,21 @@ class Settings(BaseSettings):
     )
     microsoft_tenant: str = "common"
 
+    # Email and password sign-in, and enterprise SSO (docs/AUTH.md). Mail for verification and password reset goes
+    # through Resend (RESEND_API_KEY) or SendGrid (SENDGRID_API_KEY), or SMTP; with none, email sign-up is hidden
+    # (on a local server the links are written to the API log instead).
+    email_login: bool = True
+    mail_from: str = ""  # e.g. "Lumio <no-reply@yourdomain.com>", on a domain verified with the mail provider
+    resend_api_key: str = ""
+    sendgrid_api_key: str = ""
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    # JSON list of OIDC connections: [{"id": "acme", "name": "Acme", "issuer": "https://acme.okta.com",
+    # "client_id": "…", "client_secret": "…", "domains": ["acme.com"], "enforce": false}]
+    sso_connections: str = ""
+
     session_secret: str = "dev-only-change-me"
     token_encryption_key: str = ""
     session_ttl_days: int = 14
