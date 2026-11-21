@@ -815,7 +815,7 @@ def is_shared_computer(conn) -> bool:
 
 
 def filter_connectors(connectors: list, agent_id=None, teammate_ids: list | None = None, assignments: dict | None = None):
-    """Keep connectors this agent (or any teammate) is allowed to use."""
+    """Keep connectors this agent is allowed to use (``teammate_ids`` widens it; runs pass none, see deep.py)."""
     mapping = assignments or {}
     ids = [str(i) for i in (teammate_ids or []) if i]
     if agent_id:

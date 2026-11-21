@@ -126,6 +126,7 @@ def test_connector_assignments_restrict_specific_agents():
     assert agent_may_use_connector("cc", "c-box", mapping)
     kept = filter_connectors([gmail, computer], agent_id="cc", assignments=mapping)
     assert [c.slug for c in kept] == ["computer"]
+    # Widening by teammates is still possible, but runs pass none: an agent uses only its own (docs/GUARDRAILS.md).
     group_kept = filter_connectors([gmail, computer], agent_id="cc", teammate_ids=["jj"], assignments=mapping)
     assert {c.slug for c in group_kept} == {"gmail", "computer"}
     market = SimpleNamespace(id="c-comp", slug="composio", provider="composio")
