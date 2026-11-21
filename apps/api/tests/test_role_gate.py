@@ -29,7 +29,9 @@ async def test_a_request_outside_the_role_is_pointed_to_the_agent_that_fits():
     out = await role_gate.check(HR, "What were Lotto's sales in the last 3 days?", [], OTHERS,
                                 _model('{"in_role": false, "fits": "Ops Analyst"}', calls))  # fmt: skip
     assert out and out["fits"] == "Ops Analyst"
-    assert "outside my role as HR" in out["text"] and "**Ops Analyst**" in out["text"] and "go ahead" in out["text"]
+    assert "outside my role as your HR." in out["text"] and "**Ops Analyst**" in out["text"] and "go ahead" in out["text"]
+    analyst = SimpleNamespace(id="m", name="Mia", title="marketing analyst", instructions="Campaigns.", focus=None)
+    assert "as Mia, your marketing analyst." in role_gate.reply(analyst, "Ops Analyst", OTHERS)
     assert "recruitment" in calls[0] and "Ops Analyst: Operations Analyst" in calls[0]  # the model saw the roles
 
 
