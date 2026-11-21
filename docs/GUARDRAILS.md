@@ -42,6 +42,14 @@ Reports from connector data must not change or invent numbers.
 - **A mismatch is fixed, never hidden:** the reply is rewritten once with the data and the unmatched figures (one
   model call). Anything still unmatched is marked in the reply ("Check these figures: … not found in the source
   data"). The check's result is kept with the message (`fact_check`: figures checked, rewritten, still unverified).
+- **Totals per group** count too: within a records list, also over rows nested in each record (a day's
+  `by_segment` rows), each numeric field is added up per value of one or two text fields (per date, per category, per
+  date and category), so "Closed Footwear on 13 Nov" built from segment rows matches.
+- **Rewrites never blank figures:** the rewrite replaces a figure with the data's value, or removes the row, column or
+  table and says what the data doesn't cover. A rewrite with more empty table cells than the reply is discarded, and
+  the reply is kept with its figures marked. (The first live run emptied a table of calculated daily totals.)
+- **Limit:** with tens of thousands of source values, an invented figure close to a real one can match by chance, so
+  the check reliably catches figures that are far off, not every near miss.
 - **Turns without data** (no numbers in the tool results) aren't checked and cost nothing extra.
 - **Totals Lumio adds** (`column_totals` in tables, see LLD "Connector results") skip snapshot columns (stock,
   inventory, on-hand, balance, price, cost, rating, target and the like, besides ids, dates, rates and averages), and
