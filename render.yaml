@@ -33,6 +33,9 @@ services:
     runtime: docker
     plan: starter
     branch: main
+    # A deploy lets chat turns in flight finish (SHUTDOWN_GRACE_S, app/main.py). Render stops the old instance after this
+    # many seconds (default 30), which cut long replies off mid-turn.
+    maxShutdownDelaySeconds: 300
     dockerfilePath: ./apps/api/Dockerfile
     dockerContext: .
     # Attachments live in R2 (docs/ATTACHMENT_STORAGE.md). No disk here: a disk would turn zero-downtime deploys off.

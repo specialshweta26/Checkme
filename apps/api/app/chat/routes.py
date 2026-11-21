@@ -224,19 +224,28 @@ async def sessions(user: User = Depends(current_user), db: AsyncSession = Depend
     }
 
 
+SESSION_MESSAGES = 200
+
+
 @router.get("/sessions/{session_id}")
 async def session_messages(session_id: uuid.UUID, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     sess = await db.get(ChatSession, session_id)
     if sess is None or sess.user_id != user.id:
         raise HTTPException(404, "Not found")
-    rows = (
-        await db.execute(
-            select(ChatMessage)
-            .where(ChatMessage.session_id == session_id)
-            .order_by(ChatMessage.id)
-            .limit(200)
+    # The newest messages, oldest first. Taking the first 200 by id hid every new message and reply once a chat grew
+    # past 200: they were saved and answered, but vanished from the chat on reload (web and desktop).
+    rows = list(
+        reversed(
+            (
+                await db.execute(
+                    select(ChatMessage)
+                    .where(ChatMessage.session_id == session_id)
+                    .order_by(ChatMessage.id.desc())
+                    .limit(SESSION_MESSAGES)
+                )
+            ).scalars().all()
         )
-    ).scalars().all()
+    )
     if await _settle_dead_turns(user, rows):
         await db.commit()
     return {
