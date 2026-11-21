@@ -141,6 +141,7 @@ class RunContext:
     # Text in a tool result that tried to instruct the agent (agent/injection.py): {source, snippets}. While any is in
     # the turn, every action that isn't a plain read asks the user first.
     injections: list = field(default_factory=list)
+    fact_report: dict = field(default_factory=dict)  # figures checked against the data (agent/fact_check.py)
     turn_context: str = ""  # the per-turn part of the prompt, sent as a context message (agent/turn_context.py)
 
 
@@ -190,7 +191,8 @@ def compact_payload(value: Any, limit: int = MAX_TOOL_CHARS) -> Any:
 
 _NOT_SUMMED = re.compile(
     r"(^|_)(id|ids|date|day|hour|week|month|year|rank|index|idx|position|page|score|pct|percent|percentage|rate|ratio|share|"
-    r"aov|avg|average|mean|median|cvr|ctr|roas|cpc|cpm|cac|ltv|delta|change|growth|lat|lng|latitude|longitude)(_|$)",
+    r"aov|avg|average|mean|median|cvr|ctr|roas|cpc|cpm|cac|ltv|delta|change|growth|lat|lng|latitude|longitude|"
+    r"stock|inventory|on_hand|onhand|balance|cover|available|soh|price|mrp|cost|rating|level|capacity|limit|target)(_|$)",
     re.I,
 )
 
@@ -225,6 +227,7 @@ def tabulate(value: Any, depth: int = 0) -> Any:
             totals[col] = round(total, 2) if isinstance(total, float) else total
     if totals:
         table["column_totals"] = totals  # over every row, also when rows are left out below
+        table["column_totals_note"] = "Added up by Lumio over every row, not reported by the source."
     return table
 
 
@@ -4899,6 +4902,16 @@ async def _run_deep_agent(
         text = await _do_what_was_promised(ctx, graph, text, result, progress, callbacks, limit, thread)
     if finished and get_settings().agent_finish_check and finish_check.should_check(ctx, text, multi_step=_multi_step(ctx, plan)):
         text = await _finish_what_is_left(ctx, graph, query, text, result, progress, callbacks, limit, thread)
+    if finished and getattr(get_settings(), "fact_check", True) and ctx.results:
+        # Every figure in the reply must come from this turn's data (docs/GUARDRAILS.md "Facts and figures").
+        from app.agent import fact_check
+
+        try:
+            if progress is not None and fact_check.unverified(text, ctx.results):
+                await progress.emit("Checking the figures against the data", kind="check")
+            text, ctx.fact_report = await fact_check.verify_reply(text, ctx.results)
+        except Exception:  # noqa: BLE001 - the reply stands unchecked rather than not at all
+            log.warning("fact check skipped", exc_info=True)
     timer.mark("agent", _t)
     timer.log()
     digest: list = []
@@ -4951,4 +4964,5 @@ async def _run_deep_agent(
         "files_seen": list(ctx.files_seen),
         "timing": timer.summary(),
         "tool_digest": digest,
+        "fact_check": ctx.fact_report or None,
     }

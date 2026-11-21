@@ -208,6 +208,7 @@ class Settings(BaseSettings):
     browser_replay: bool = True  # save successful browser_task runs and replay them without model calls
     lean_context: bool = True  # scope tool schemas to the turn, shorten old long history (docs/LLD.md "Lean context")
     mcp_session_reuse: bool = True  # keep one MCP session per connector for a whole turn (docs/LLD.md "MCP sessions per turn")
+    fact_check: bool = True  # figures in a reply from connector data must match it (agent/fact_check.py)
     mcp_tool_timeout_s: int = 600  # how long a connected MCP tool may take (slow dashboards and reports)
     trim_old_pages: bool = True  # send only the latest page result in full to the model (long browser runs stay fast)
     # Operator-style browsing by sight (app/agent/vision_browser.py): on by default; the model defaults to OPENAI_MODEL.
