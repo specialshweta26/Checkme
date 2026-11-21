@@ -138,6 +138,9 @@ class RunContext:
     # Third-party content (mail, web, MCP results, a webhook payload) is in this turn: an unattended run stops
     # approving its own destructive actions (agent/approval.py).
     untrusted_seen: bool = False
+    # Text in a tool result that tried to instruct the agent (agent/injection.py): {source, snippets}. While any is in
+    # the turn, every action that isn't a plain read asks the user first.
+    injections: list = field(default_factory=list)
     turn_context: str = ""  # the per-turn part of the prompt, sent as a context message (agent/turn_context.py)
 
 
@@ -1914,6 +1917,25 @@ async def may_self_approve(ctx: RunContext, tool: str, args: dict) -> bool:
     return approval.addressed_only_to(tool, args, await _own_addresses(ctx))
 
 
+def injection_rule() -> str:
+    from app.agent.injection import SYSTEM_RULE
+
+    return SYSTEM_RULE
+
+
+def _plain_read(tool_name: str, args: dict, hit) -> bool:
+    """The call only reads: a discovery tool, a tool its server marks read-only, or (for a gateway execute) every action
+    it runs is named as a read."""
+    from app.agent import approval
+    from app.routing.retrieve import is_catalog_tool
+
+    if is_catalog_tool(tool_name):
+        return True
+    if hit is not None and getattr(hit, "read_only", False) and not getattr(hit, "destructive", False):
+        return True
+    return all(approval.is_read_action(a) for a in approval.nested_actions(tool_name, args))
+
+
 def note_untrusted(ctx: RunContext, tool_name: str = "") -> None:
     """Third-party content entered this turn. From now on an unattended run asks before destructive actions."""
     from app.routing.retrieve import is_catalog_tool
@@ -2159,10 +2181,13 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
         unvetted = False  # built-in tools keep their own declared flags
     # Git writes (push, open PR, merge, commit) always need a human, even in auto_confirm runs (schedules, jobs).
     git_write = git_write_gate(conn, connector_slug, tool_name, args)
+    # Instructions were found in a tool result this turn (agent/injection.py): anything that isn't a plain read asks,
+    # also in unattended runs, so injected text can't make the agent send, change or delete on its own.
+    injected = bool(ctx.injections) and not _plain_read(tool_name, args, hit)
     used_approval = None
     needs_card = False
-    if destructive or git_write or unvetted:
-        self_ok = (not git_write) and await may_self_approve(ctx, tool_name, args)
+    if destructive or git_write or unvetted or injected:
+        self_ok = (not git_write) and (not injected) and await may_self_approve(ctx, tool_name, args)
         if not self_ok:
             used_approval = _approval_for(ctx, conn, connector_slug, tool_name, args)
             needs_card = used_approval is None
@@ -2176,6 +2201,11 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
             "title": f"{(hit.connector_name if hit else conn.alias or conn.name)}: {tool_name}",
             "preview": await preview(ctx.user, conn, tool_name, args),
         }
+        if injected:
+            pending["warning"] = ("Asked because content read in this conversation tried to give the assistant instructions ("
+                                  + ", ".join(sorted({i["source"] for i in ctx.injections}))[:300] + ").")  # fmt: skip
+            if isinstance(pending["preview"], dict):
+                pending["preview"] = {"warning": pending["warning"], **pending["preview"]}
         ctx.pending.append(pending)
         return {"status": "awaiting_user_confirmation", "preview": pending["preview"]}
     if tool_name == "get_thread":
@@ -2226,6 +2256,9 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
         if isinstance(payload, dict) and (payload.get("too_large") or payload.get("partial")):
             payload["result_id"] = rid
         if tool_name not in CATALOG_TOOLS:
+            from app.agent import injection
+
+            payload = injection.guard(payload, f"{conn.alias or conn.name} ({source_name})", ctx)
             if source_name not in ctx.used_tools:
                 ctx.used_tools.append(source_name)
             ctx.sources.append(
@@ -2292,7 +2325,9 @@ async def run_staff(ctx: RunContext, name: str, args: dict | None = None) -> Any
         if name not in {"schedule_task", "list_scheduled_tasks", "update_scheduled_task", "create_automation", "list_automations"}:
             note_untrusted(ctx)  # briefings and inbox answers carry mail other people wrote
         ctx.sources.append({"source_tool": name, "args": as_dict(args), "snippet": compact_payload(result, 2000)})
-        return compact_payload(result)
+        from app.agent import injection
+
+        return injection.guard(compact_payload(result), f"the inbox ({name})", ctx)
     except Exception as exc:  # noqa: BLE001
         log.exception("staff tool failed")
         return {"error": str(exc)[:300]}
@@ -3799,6 +3834,7 @@ def system_prompt(
         "for future follow-through, and keep approval enabled for external actions unless the user explicitly changes it. "
         "Tell them the scheduled time only when you actually called schedule_task.\n"
         "Never invent emails, events, ids, or numbers that did not come from a tool result. "
+        + injection_rule() + " "
         "When connector data comes back, write a detailed analyst report — never a short brief. "
         "Cover what the numbers mean, drivers, comparisons, risks, outliers, and recommended actions, with headings, markdown tables, and a published download link from the tool result.\n\n"
         + "\n\n## This turn\n"
