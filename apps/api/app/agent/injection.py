@@ -59,10 +59,48 @@ def _snippet(text: str, m: re.Match) -> str:
     return re.sub(r"\s+", " ", text[start:end]).strip()[:200]
 
 
+_FIGURE_HINT = re.compile(
+    r"multipl|manipulat|inflat|scale|fudge|tamper|tweak|falsif|exaggerat|overstat|understat|round\s+(up|down)|"
+    r"make\s+up|made\s+up|invent|fabricat|pretend|regardless|no\s+matter|hide|omit|leave\s+out|don'?t\s+(show|mention)|"
+    r"double|triple|\d\s?(x|times|%)\s+(higher|more|bigger)|guna|badha|ghata|chhupa|jhoot|गुना|बढ़ा|घटा|छुपा|झूठ",
+    re.I,
+)
+
+
+_ADDRESSED = re.compile(
+    r"\b(before|when|while)\s+(you\s+)?(report|show|send|present|answer|repl|summari|writ)\w*|\byou\s+(must|should|need\s+to|have\s+to|will)\b|"
+    r"\b(always|from\s+now\s+on|going\s+forward|every\s+time)\b|\b(assistant|ai|llm|agent|chatbot|model|claude|gpt|lumio)\b|"
+    r"\binstruction|\bplease\b|\b(karo|karke|dikhao|batao)\b|करके|करो|दिखाओ|बताओ",
+    re.I,
+)
+
+
+def _figure_tampering(text: str) -> str:
+    """A quote of text telling the reader to change, hide or invent figures (agent/integrity.py), or ''. Only the
+    sentences around a hint word are checked, so a large page or table costs one quick search."""
+    from app.agent.integrity import candidates
+
+    for i, m in enumerate(_FIGURE_HINT.finditer(text)):
+        if i >= 20:
+            break
+        window = text[max(0, m.start() - 160): m.end() + 200]
+        if not _ADDRESSED.search(window):
+            continue  # a product called "Double Shot" in a sales table isn't an instruction
+        hit = next((c for c in candidates(window) if c["strong"]), None)
+        if hit:
+            return hit["quote"]
+    return ""
+
+
 def scan(value: Any) -> list[str]:
     """Short quotes of the text in ``value`` that tries to instruct the agent (empty when there is none)."""
     found: list[str] = []
     for text in _strings(value, [MAX_SCAN_CHARS]):
+        quote = _figure_tampering(text)
+        if quote and quote not in found:
+            found.append(quote)
+            if len(found) >= MAX_SNIPPETS:
+                return found
         for rx in _RX:
             for m in rx.finditer(text):
                 snip = _snippet(text, m)

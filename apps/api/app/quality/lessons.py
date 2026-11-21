@@ -38,7 +38,11 @@ def lessons_prompt(agent) -> str:
     rows = [x for x in (getattr(agent, "lessons", None) or []) if isinstance(x, dict) and str(x.get("text") or "").strip()]
     if not rows:
         return ""
-    lines = "\n".join(f"- {str(x['text']).strip()[:MAX_CHARS]}" for x in rows[-MAX_LESSONS:])
+    from app.agent.integrity import clean_lines
+
+    lines = clean_lines("\n".join(f"- {str(x['text']).strip()[:MAX_CHARS]}" for x in rows[-MAX_LESSONS:]))
+    if not lines.strip():
+        return ""
     return "Lessons from this user's feedback on your earlier replies (follow them):\n" + lines + "\n"
 
 

@@ -1922,8 +1922,9 @@ async def may_self_approve(ctx: RunContext, tool: str, args: dict) -> bool:
 
 def injection_rule() -> str:
     from app.agent.injection import SYSTEM_RULE
+    from app.agent.integrity import SYSTEM_RULE as INTEGRITY_RULE
 
-    return SYSTEM_RULE
+    return SYSTEM_RULE + " " + INTEGRITY_RULE
 
 
 def _plain_read(tool_name: str, args: dict, hit) -> bool:
@@ -3589,7 +3590,9 @@ def system_prompt(
     catalog = catalog_lines(connectors)
     name = getattr(agent, "name", None) or "Chief"
     title = (getattr(agent, "title", None) or "chief of staff").strip() or "chief of staff"
-    extra = (getattr(agent, "instructions", None) or "").strip()
+    from app.agent.integrity import clean_lines
+
+    extra = clean_lines((getattr(agent, "instructions", None) or "").strip())  # a saved rule to alter figures is void
     identity = f"You are {name}, this user's {title}. You have mail, calendar, and connected MCP servers.\n"
     # Who the user is, so "what's my name / email" is answered without a tool call. Same every turn for this user,
     # so it stays in the cached part of the prompt.
@@ -4500,6 +4503,10 @@ async def run_deep_agent(
     from app.connectors.mcp_client import turn_sessions
 
     try:
+        if not confirmations:
+            refused = await _integrity_block(query, history)
+            if refused is not None:
+                return refused
         if job is None and workspace_agent is not None:
             blocked = await _budget_block(db, workspace_agent)
             if blocked is not None:
@@ -4582,6 +4589,23 @@ async def _role_block(db, user, agent, query: str, history: list) -> dict | None
         return None
     return {"text": out["text"], "used_tools": [], "attachments": [], "pending_confirms": [], "jobs_started": [],
             "role_redirect": {"fits": out["fits"]}}  # fmt: skip
+
+
+async def _integrity_block(query: str, history: list) -> dict | None:
+    """A request to scale, inflate, hide or invent figures is refused before any tool runs (agent/integrity.py)."""
+    if not getattr(get_settings(), "data_integrity", True):
+        return None
+    try:
+        from app.agent import integrity
+
+        out = await integrity.check(query, list(history or []))
+    except Exception:  # noqa: BLE001 - the deterministic rule in the prompt still holds
+        log.info("integrity check failed", exc_info=True)
+        return None
+    if out is None:
+        return None
+    return {"text": out["text"], "used_tools": [], "attachments": [], "pending_confirms": [], "jobs_started": [],
+            "integrity_refused": {"kind": out["kind"]}}  # fmt: skip
 
 
 async def _budget_block(db, agent) -> dict | None:
