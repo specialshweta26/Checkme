@@ -76,9 +76,8 @@ def reply(agent, fits: str, others: list) -> str:
     if target is None:
         target = next((str(getattr(a, "name", "")) for a in others if is_general(a)), "")
     where = f"**{target}** is the right agent for it — open {target} and ask there, or" if target else "Ask an agent whose role covers it, or"
-    return (
-        f"That's outside my role as {name}, your {title}. {where} say **go ahead** and I'll do it here anyway."
-    )
+    who = f"your {title}" if title.lower() == str(name).lower() else f"{name}, your {title}"
+    return f"That's outside my role as {who}. {where} say **go ahead** and I'll do it here anyway."
 
 
 async def check(agent, query: str, history: list[dict], others: list, complete=None) -> dict | None:
