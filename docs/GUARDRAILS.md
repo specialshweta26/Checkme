@@ -28,3 +28,23 @@ The patterns are narrow on purpose, so sales tables, product names and ordinary 
 auditor") don't trip them. A miss is still covered by the system prompt rule.
 
 Tests: `apps/api/tests/test_injection_guard.py`.
+
+## Facts and figures
+
+Reports from connector data must not change or invent numbers.
+
+- **Every figure is checked** (`agent/fact_check.py`, after the reply is written, `FACT_CHECK` on by default): each
+  amount and count in the reply (₹66,77,22,469, 92,423, ₹66.77 crore, 1.2 lakh, 3.5M) must match a value in that
+  turn's tool results, a column total of a records list, or a sum, difference or ratio of figures that already
+  matched. The tolerance follows the precision written: "₹66.77 crore" and "₹67 crore" both match 66,77,22,469.
+  Percentages and multiples ("13.7%", "11.4×") are commentary and aren't checked. Dates, years, durations and
+  numbers under 100 are skipped.
+- **A mismatch is fixed, never hidden:** the reply is rewritten once with the data and the unmatched figures (one
+  model call). Anything still unmatched is marked in the reply ("Check these figures: … not found in the source
+  data"). The check's result is kept with the message (`fact_check`: figures checked, rewritten, still unverified).
+- **Turns without data** (no numbers in the tool results) aren't checked and cost nothing extra.
+- **Totals Lumio adds** (`column_totals` in tables, see LLD "Connector results") skip snapshot columns (stock,
+  inventory, on-hand, balance, price, cost, rating, target and the like, besides ids, dates, rates and averages), and
+  say they were added up by Lumio, not reported by the source.
+
+Tests: `apps/api/tests/test_fact_check.py`.

@@ -564,6 +564,7 @@ async def chat(
                 "job": (result.get("jobs_started") or [None])[0],
                 "usage": result.get("usage"),
                 "tool_digest": result.get("tool_digest") or [],
+                **({"fact_check": result["fact_check"]} if result.get("fact_check") else {}),
             }
             if isinstance(result.get("question"), dict) and result["question"].get("options"):
                 # ask_user in a chat turn: the web shows the options as buttons that send the option text.
