@@ -115,7 +115,7 @@ async def signup(body: SignupIn, request: Request, db: AsyncSession = Depends(ge
     _available()
     email = normalize_email(body.email)
     _enforced_sso(email)
-    if not access.may_sign_up(email):
+    if not await access.may_sign_up_db(db, email):
         raise HTTPException(403, access.CLOSED_MESSAGE)
     why = passwords.problem(body.password, email)
     if why:
@@ -162,7 +162,7 @@ async def verify(body: TokenIn, request: Request, db: AsyncSession = Depends(get
     if row is None or passwords.fingerprint(row.password_hash) != data.get("f"):
         raise HTTPException(400, "This link isn't valid any more. Sign up again or sign in.")
     if row.user_id is None:
-        if not access.may_sign_up(row.email):  # sign-ups closed after the link was sent
+        if not await access.may_sign_up_db(db, row.email):  # sign-ups closed after the link was sent
             raise HTTPException(403, access.CLOSED_MESSAGE)
         user = User(email=row.email, display_name=row.display_name or row.email.split("@")[0], primary_provider="email",
                     timezone="Asia/Kolkata")  # fmt: skip
@@ -170,6 +170,9 @@ async def verify(body: TokenIn, request: Request, db: AsyncSession = Depends(get
         await db.flush()
         row.user_id = user.id
         db.add(Account(user_id=user.id, provider="email", subject=row.email, email=row.email, scopes=""))
+        from app.admin import audit
+
+        audit.record(db, "sign_up", user.id, detail={"how": "email"}, request=request)
     if row.verified_at is None:
         row.verified_at = datetime.now(timezone.utc)
     await db.flush()
@@ -207,6 +210,8 @@ async def login(body: LoginIn, request: Request, db: AsyncSession = Depends(get_
     user = await db.get(User, row.user_id)
     if user is None:
         raise HTTPException(401, "Wrong email or password.")
+    if user.suspended_at is not None:
+        raise HTTPException(403, access.SUSPENDED_MESSAGE)
     return await _signed_in(db, request, user)
 
 
@@ -278,6 +283,9 @@ async def reset(body: ResetIn, request: Request, db: AsyncSession = Depends(get_
     row.failed_count, row.locked_until = 0, None
     await _revoke_sessions(db, row.user_id)
     user = await db.get(User, row.user_id)
+    from app.admin import audit
+
+    audit.record(db, "password_reset", row.user_id, request=request)
     resp = await _signed_in(db, request, user)
     await _changed_notice(row.email)
     return resp
@@ -300,6 +308,9 @@ async def change_password(body: ChangeIn, request: Request, user: User = Depends
         raise HTTPException(400, why)
     row.password_hash = await passwords.hash_password(body.password)
     await _revoke_sessions(db, user.id, keep=getattr(request.state, "auth_session_id", None))
+    from app.admin import audit
+
+    audit.record(db, "password_changed", user.id, request=request)
     await db.commit()
     await _changed_notice(row.email)
     return {"ok": True}
@@ -337,7 +348,9 @@ async def _changed_notice(email: str) -> None:
 async def _signed_in(db: AsyncSession, request: Request, user: User) -> JSONResponse:
     from app.auth.routes import new_session
 
-    token = await new_session(db, request, user)
+    if user.suspended_at is not None:
+        raise HTTPException(403, access.SUSPENDED_MESSAGE)
+    token = await new_session(db, request, user, how="email")
     resp = JSONResponse({"ok": True, "redirect": "/chat"})
     from app.auth.routes import _session_cookie
 
