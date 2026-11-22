@@ -175,6 +175,8 @@ class Settings(BaseSettings):
     # Fast answers (docs/LLD.md §7.7): quick web turns never wait on the cloud computer.
     fast_path_enabled: bool = True
     read_cache_s: int = 120  # keep a read-only tool result this long per user; 0 = off (app/agent/read_cache.py)
+    voice_input: bool = True  # the chat's microphone button (app/voice/routes.py); needs OPENAI_API_KEY
+    transcribe_model: str = "gpt-4o-mini-transcribe"
     prompt_cache_key: bool = True  # send OpenAI a per-agent prompt_cache_key, so the fixed prompt is read from cache
     stream_tokens: bool = True  # stream model tokens into the chat's working bubble (progress draft)
     tavily_include_answer: bool = True

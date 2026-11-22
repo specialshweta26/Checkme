@@ -5013,3 +5013,9 @@ button.routine-tile:hover { border-color: var(--line-strong); }
   .approval-when { margin-left: 0; width: 100%; }
   .approvals-batch { top: 0; }
 }
+
+/* Voice input (components/VoiceButton.tsx) */
+.voice-btn.recording { color: #e5484d; animation: voice-pulse 1.2s ease-in-out infinite; }
+@keyframes voice-pulse { 50% { opacity: .45; } }
+.voice-error { font-size: 12px; color: var(--err, #e5484d); align-self: center; max-width: 180px; }
+.voice-dots { font-weight: 700; letter-spacing: 1px; }
