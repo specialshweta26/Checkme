@@ -112,6 +112,16 @@ export default function AccountPage() {
             </div>
 
             <div className="task-card">
+              <div className="task-main">
+                <strong>Your activity</strong>
+                <span className="muted">Sign-ins, password changes and anything an admin did to your account, for the last 90 days.</span>
+              </div>
+              <div className="task-actions">
+                <a className="btn secondary" href="/api/me/audit?days=90&fmt=csv">Download CSV</a>
+              </div>
+            </div>
+
+            <div className="task-card">
               <div className="task-main stack">
                 <strong>Delete your account</strong>
                 <span className="muted">

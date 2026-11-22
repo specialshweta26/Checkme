@@ -287,11 +287,14 @@ async def background_spend(db, user_id) -> dict:
 async def over_budget(db, user_id) -> bool:
     """True when today's background work for this user is past the daily budget, or the user is past the daily cap
     on all model use. Cached for a minute."""
-    if user_cap() != (0.0, 0):
-        from app.models import User
+    from app.models import User
 
-        if await over_user_cap(db, await db.get(User, user_id)):
-            return True
+    try:
+        user = await db.get(User, user_id) if db is not None else None
+    except Exception:  # noqa: BLE001 - a lookup error falls back to the background budget alone
+        user = None
+    if await over_user_cap(db, user):
+        return True
     usd_limit, token_limit = budget()
     if not usd_limit and not token_limit:
         return False
@@ -339,6 +342,8 @@ async def day_spend(db, user_id) -> dict:
 
 async def over_user_cap(db, user) -> bool:
     """True when this user is past today's cap on all model use. Cached for a minute; exempt emails never are."""
+    if user is not None and getattr(user, "suspended_at", None) is not None:
+        return True  # a suspended user's tasks and background work stop too (docs/ADMIN.md)
     usd_limit, token_limit = user_cap()
     if (not usd_limit and not token_limit) or user is None or cap_exempt(getattr(user, "email", "")):
         return False

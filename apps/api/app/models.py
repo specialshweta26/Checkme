@@ -46,6 +46,8 @@ class User(Base):
     letta_agent_id: Mapped[str | None] = mapped_column(String(100))
     coder_seeded: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    # Set by an admin (docs/ADMIN.md): a suspended user can't sign in, chat or run tasks until it is cleared.
+    suspended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class BrowserProfile(Base):
@@ -166,6 +168,32 @@ class AuthSession(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     revoked: Mapped[bool] = mapped_column(Boolean, default=False)
     user_agent: Mapped[str] = mapped_column(String(300), default="")
+
+
+class SignupInvite(Base):
+    """An email or a whole domain allowed to create an account while SIGNUP_MODE is invite (docs/ADMIN.md)."""
+
+    __tablename__ = "signup_invites"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    value: Mapped[str] = mapped_column(String(320), unique=True)  # "asha@x.com" or "acme.com", lowercase
+    note: Mapped[str] = mapped_column(String(200), default="")
+    invited_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class AuditEvent(Base):
+    """Who did what, when (docs/ADMIN.md "Audit log"): sign-ins, approvals, admin actions, workspace changes.
+    ``user_id`` is whose account it concerns; ``actor_id`` who did it (the same person, or an admin)."""
+
+    __tablename__ = "audit_events"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    actor_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    action: Mapped[str] = mapped_column(String(60))
+    target: Mapped[str] = mapped_column(String(300), default="")
+    detail: Mapped[dict] = mapped_column(JSONB, default=dict)
+    ip: Mapped[str] = mapped_column(String(64), default="")
 
 
 class PasswordLogin(Base):

@@ -43,3 +43,5 @@ past the cap. Agent budgets (per agent, set by the user) and `DAILY_BACKGROUND_B
 - Mail for email sign-up (docs/AUTH.md "Mail").
 - The web app sends `Referrer-Policy: no-referrer`, so sign-in and reset tokens in a URL never reach another site.
   It also sends `X-Content-Type-Options: nosniff` and, in production, HSTS.
+
+Admins (`ADMIN_EMAILS`) can also invite people, see each person's use and suspend accounts in the console: docs/ADMIN.md.

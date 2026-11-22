@@ -62,13 +62,15 @@ def _session_cookie(resp, token: str) -> None:
     )
 
 
-async def new_session(db: AsyncSession, request: Request, user: User) -> str:
+async def new_session(db: AsyncSession, request: Request, user: User, how: str = "") -> str:
     """A signed session token for ``user`` (committed). Also makes sure the platform connectors exist."""
+    from app.admin import audit
     from app.connectors.platform import ensure_platform_connectors
 
     await ensure_platform_connectors(db, user)
     sess = AuthSession(user_id=user.id, expires_at=session_expiry(), user_agent=request.headers.get("user-agent", "")[:300])
     db.add(sess)
+    audit.record(db, "sign_in", user.id, detail={"how": how or user.primary_provider}, request=request)
     await db.commit()
     return issue_session_jwt(user.id, sess.id, sess.expires_at)
 
@@ -200,9 +202,9 @@ async def callback(
     else:
         user = await db.get(User, account.user_id) if account else None
         if user is None:
-            from app.auth.access import may_sign_up
+            from app.auth.access import may_sign_up_db
 
-            if not may_sign_up(info["email"]):
+            if not await may_sign_up_db(db, info["email"]):
                 return RedirectResponse(_web("/login?error=signup_closed"))
             # No auto-merge by email: a matching email on another provider must be linked explicitly.
             user = User(
@@ -227,8 +229,15 @@ async def callback(
     from app.connectors.platform import ensure_platform_connectors
 
     await ensure_platform_connectors(db, user)
+    if user.suspended_at is not None and saved.get("mode") != "link":
+        await db.rollback()
+        return RedirectResponse(_web("/login?error=suspended"))
     sess = AuthSession(user_id=user.id, expires_at=session_expiry(), user_agent=request.headers.get("user-agent", "")[:300])
     db.add(sess)
+    from app.admin import audit
+
+    audit.record(db, "sign_in" if saved.get("mode") != "link" else "connect_mailbox", user.id,
+                 detail={"how": provider}, request=request)  # fmt: skip
     await db.commit()
 
     await invalidate(account_id=account.id)
@@ -304,6 +313,7 @@ async def me(user: User = Depends(current_user), db: AsyncSession = Depends(get_
         "name": user.display_name,
         "primary_provider": user.primary_provider,
         "timezone": user.timezone,
+        "admin": __import__("app.auth.access", fromlist=["is_admin"]).is_admin(user),
         "accounts": [{"provider": a.provider, "email": a.email} for a in accounts],
         "connectors": [
             {"id": str(c.id), "name": c.alias or c.name, "slug": c.slug, "provider": c.provider, "health": c.health, "enabled": c.enabled}
