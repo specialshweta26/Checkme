@@ -181,6 +181,7 @@ class Settings(BaseSettings):
     tavily_raw_content: bool = True
     # Fast answers (docs/LLD.md §7.7): quick web turns never wait on the cloud computer.
     fast_path_enabled: bool = True
+    reply_target_s: float = 45.0  # a chat reply should be back within this; the admin "Reply times" counts those over
     # Paged tables from a connector (app/agent/tables.py): how much to read and how many pages at once.
     table_max_pages: int = 200
     table_max_rows: int = 100_000
