@@ -1060,6 +1060,17 @@ ends. Each user's credentials get their own session, and a teammate's run inside
   computer task, a computer or deep turn, a background job, or six or more tool calls. A one-shot data question or
   web lookup ends with its answer. `AGENT_FINISH_CHECK=false` still turns it off entirely.
 
+### Action memory
+
+A data question on a gateway connector used to start the catalog hunt from zero every time: 3-6 searches at 4-7 s
+each, a schema read, and often two or three wrong actions, which came to 11-30 model steps. After a finished turn
+with no pending approval, every gateway action that returned data is remembered under the user in Redis
+(`app/agent/action_memory.py`): the questions it answered, its last arguments, and the parameters the catalog gave
+it. At the start of a turn, up to 4 remembered actions whose questions share words with this one go in the turn's
+context, and their parameters are preloaded as if this turn's search had found them. The agent can then call one
+straight away, and still searches when none fits. Only connectors the user still has are offered. The memory keeps
+60 actions per user for `ACTION_MEMORY_DAYS` days (14); 0 turns it off.
+
 ### Automations that send directly
 
 A mail or meeting automation asks before acting unless the user said to send it to them directly
