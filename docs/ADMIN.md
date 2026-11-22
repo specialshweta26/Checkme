@@ -27,6 +27,32 @@ Every chat reply saves where its time went in its `meta.timing`:
 
 The admin page shows this as **Reply times**, for the last 24 hours, 7 days or 30 days. A turn that was stopped (by the person, or by the app because it went quiet) or that failed keeps its timing up to that point, marked "stopped" or "failed". Replies saved before this existed have no timing and are left out. The chat API strips `timing` from the messages it sends to the browser.
 
+## Test scenarios
+
+The admin console's **Test scenarios** panel runs about 20 everyday questions through the real agent, as you, one
+after another, each in its own chat titled "Test: …". The questions cover:
+- instant replies;
+- data connectors: one figure, a trend, by category, top products, brand and period comparisons, stock, a report, and a follow-up in the same chat;
+- mail and calendar;
+- the web;
+- several connectors in one question;
+- the workspace.
+
+Tick the ones to run and add your own questions, one per line (up to 10). Each result shows:
+- the reply time;
+- model time and calls, connectors, tools and the rest;
+- the tools used;
+- whether it waited for an approval;
+- a link to open that chat.
+
+The replies also count in Reply times.
+
+- **Reads only:** nothing is confirmed for you, so anything that would send, change or delete stays an approval card in that chat.
+- **Cost:** it uses your connectors and tokens, like asking the questions yourself.
+- **Limits:** one run at a time. "Stop after this question" ends it. A question may take `SCENARIO_TIMEOUT_S` (300) at most.
+- **Where they live:** the questions are in `apps/api/app/admin/scenarios.json`.
+- **Restarts:** the run lives in the API process, so a restart or deploy ends it.
+
 ## Audit log
 
 The `audit_events` table records:

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { AppShell } from "../components/AppShell";
-import { apiError, getMe, type Me } from "../lib";
+import { apiError, chatHref, getMe, type Me } from "../lib";
 
 // The admin console (apps/api/app/admin/routes.py, docs/ADMIN.md): people, today's use, invites, suspension, audit log.
 
@@ -59,6 +59,28 @@ type Latency = {
   slowest: Reply[];
 };
 
+type Scenario = { id: string; group: string; text: string; after?: string };
+type ScenarioResult = {
+  id: string;
+  group: string;
+  text: string;
+  status: "waiting" | "running" | "ok" | "error" | "timeout" | "skipped";
+  total_ms?: number;
+  model_ms?: number;
+  model_calls?: number;
+  connector_ms?: number;
+  tool_ms?: number;
+  other_ms?: number;
+  over_target?: boolean;
+  waiting_approval?: boolean;
+  reply?: string;
+  error?: string;
+  session_id?: string;
+  agent_id?: string;
+  tools?: { tool: string; calls: number; ms: number }[];
+};
+type ScenarioRun = { id: string; status: string; target_s: number; started_at: string; results: ScenarioResult[] };
+
 const fmt = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n));
 const secs = (ms: number | null | undefined) => (ms == null ? "–" : `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)}s`);
 const when = (s: string | null) => (s ? new Date(s).toLocaleString() : "never");
@@ -78,6 +100,10 @@ export default function AdminPage() {
   const [audit, setAudit] = useState<Audit[]>([]);
   const [lat, setLat] = useState<Latency | null>(null);
   const [latDays, setLatDays] = useState(1);
+  const [scenarios, setScenarios] = useState<Scenario[]>([]);
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const [custom, setCustom] = useState("");
+  const [run, setRun] = useState<ScenarioRun | null>(null);
   const [q, setQ] = useState("");
   const [value, setValue] = useState("");
   const [send, setSend] = useState(true);
@@ -111,6 +137,47 @@ export default function AdminPage() {
   useEffect(() => {
     if (me) loadLatency(latDays);
   }, [me, latDays, loadLatency]);
+
+  const loadScenarios = useCallback(async (first = false) => {
+    const r = await call("/api/admin/scenarios");
+    if (!r.ok) return;
+    if (first) {
+      setScenarios(r.data.scenarios);
+      setPicked(new Set(r.data.scenarios.map((x: Scenario) => x.id)));
+    }
+    setRun(r.data.run);
+  }, []);
+
+  useEffect(() => {
+    if (me) loadScenarios(true);
+  }, [me, loadScenarios]);
+
+  useEffect(() => {
+    if (run?.status !== "running") return;
+    const t = window.setInterval(() => loadScenarios(), 3000);
+    return () => window.clearInterval(t);
+  }, [run?.status, loadScenarios]);
+
+  async function runScenarios() {
+    const own = custom.split("\n").map((x) => x.trim()).filter(Boolean);
+    const r = await call("/api/admin/scenarios/run", { method: "POST", body: JSON.stringify({ ids: [...picked], custom: own }) });
+    if (r.ok) setRun(r.data);
+    else setError(apiError(r.data, "The test run couldn't start."));
+  }
+
+  async function stopScenarios() {
+    const r = await call("/api/admin/scenarios/stop", { method: "POST" });
+    if (r.ok && r.data.results) setRun(r.data);
+  }
+
+  function toggle(id: string) {
+    setPicked((cur) => {
+      const next = new Set(cur);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
 
   useEffect(() => {
     getMe().then((u) => {
@@ -308,6 +375,79 @@ export default function AdminPage() {
             ) : (
               <span className="faint">No timed replies yet. Every new chat reply is timed from now on.</span>
             )}
+          </div>
+
+          <div className="task-card stack">
+            <div className="row spread">
+              <strong>Test scenarios</strong>
+              {run?.status === "running" ? (
+                <button className="btn secondary small" onClick={stopScenarios}>Stop after this question</button>
+              ) : (
+                <button className="btn small" onClick={runScenarios} disabled={!picked.size && !custom.trim()}>
+                  Run {picked.size + custom.split("\n").filter((x) => x.trim()).length} questions
+                </button>
+              )}
+            </div>
+            <span className="muted">
+              Everyday questions run through the real agent as you, one after another, each in its own chat. Reads only: anything that
+              would send or change something stays an approval card. Each reply is timed, and uses your connectors and tokens.
+            </span>
+            {[...new Set(scenarios.map((x) => x.group))].map((g) => (
+              <div key={g} className="stack">
+                <span className="faint">{g}</span>
+                {scenarios
+                  .filter((x) => x.group === g)
+                  .map((x) => (
+                    <label key={x.id} className="row">
+                      <input type="checkbox" checked={picked.has(x.id)} onChange={() => toggle(x.id)} />
+                      <span>
+                        {x.text}
+                        {x.after ? <span className="faint"> (follow-up, same chat)</span> : null}
+                      </span>
+                    </label>
+                  ))}
+              </div>
+            ))}
+            <textarea
+              className="field"
+              rows={3}
+              placeholder="Your own questions, one per line (up to 10)"
+              value={custom}
+              onChange={(e) => setCustom(e.target.value)}
+            />
+            {run ? (
+              <>
+                <span className="muted">
+                  {run.status === "running" ? "Running" : `Run ${run.status}`} ·{" "}
+                  {run.results.filter((x) => x.total_ms != null && !x.over_target).length} within {run.target_s}s ·{" "}
+                  <span className={run.results.some((x) => x.over_target) ? "err" : ""}>
+                    {run.results.filter((x) => x.over_target).length} over
+                  </span>
+                </span>
+                <ul className="admin-list">
+                  {run.results.map((x) => (
+                    <li key={x.id}>
+                      <span className="stack">
+                        <span>{x.text}</span>
+                        <span className={x.over_target || x.status === "error" || x.status === "timeout" ? "err" : "faint"}>
+                          {x.status === "waiting" || x.status === "running" || x.status === "skipped"
+                            ? x.status
+                            : `${secs(x.total_ms)} · model ${secs(x.model_ms)} (${x.model_calls ?? 0} calls) · connectors ${secs(x.connector_ms)} · tools ${secs(x.tool_ms)} · other ${secs(x.other_ms)}${x.waiting_approval ? " · waiting for approval" : ""}${x.error ? ` · ${x.error}` : ""}`}
+                        </span>
+                        {x.tools?.length ? (
+                          <span className="faint">{x.tools.slice(0, 5).map((t) => `${t.tool} ×${t.calls} ${secs(t.ms)}`).join(" · ")}</span>
+                        ) : null}
+                      </span>
+                      {x.session_id ? (
+                        <a className="btn secondary small" href={chatHref({ agent: x.agent_id, conversation: x.session_id })}>
+                          Open chat
+                        </a>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+              </>
+            ) : null}
           </div>
 
           <div className="task-card stack">

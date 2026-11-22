@@ -163,6 +163,39 @@ async def latency(days: int = 1, _: User = Depends(admin_user), db: AsyncSession
     return lat.summarize([tuple(r) for r in rows], float(get_settings().reply_target_s or 45))
 
 
+class ScenarioRunIn(BaseModel):
+    ids: list[str] = []
+    custom: list[str] = []
+
+
+@router.get("/scenarios")
+async def scenarios(admin: User = Depends(admin_user)):
+    """The test questions (app/admin/scenarios.json) and this admin's latest run."""
+    from app.admin import scenarios as sc
+
+    return {"scenarios": sc.defaults(), "run": sc.state(admin.id)}
+
+
+@router.post("/scenarios/run")
+async def run_scenarios(body: ScenarioRunIn, request: Request, admin: User = Depends(admin_user), db: AsyncSession = Depends(get_db)):
+    """Run the chosen test questions (all when none are chosen) plus the admin's own, one after another, as the admin.
+    Reads only: nothing is confirmed on their behalf."""
+    from app.admin import scenarios as sc
+
+    run = sc.start(admin.id, body.ids, body.custom)
+    audit.record(db, "admin_scenarios_run", user_id=admin.id, actor_id=admin.id, target=run["id"],
+                       detail={"questions": len(run["results"])}, request=request)  # fmt: skip
+    await db.commit()
+    return run
+
+
+@router.post("/scenarios/stop")
+async def stop_scenarios(admin: User = Depends(admin_user)):
+    from app.admin import scenarios as sc
+
+    return sc.stop(admin.id) or {"status": "idle"}
+
+
 @router.get("/invites")
 async def invites(_: User = Depends(admin_user), db: AsyncSession = Depends(get_db)):
     rows = (await db.execute(select(SignupInvite).order_by(SignupInvite.created_at.desc()))).scalars().all()
