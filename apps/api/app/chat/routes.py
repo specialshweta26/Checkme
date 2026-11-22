@@ -432,6 +432,8 @@ async def chat(
                 f"{agent_text}\n\n[Checkme: the user declined what the last reply prepared ({', '.join(declined[:4])}). "
                 "It was not run. Do not prepare or run it again in this reply; acknowledge briefly.]"
             )
+    if not resume_id and not interrupted:
+        agent_text = _after_stop_note(agent_text, history_rows)
 
     working = dict(sess.state or {})
     if confirms:
@@ -1048,6 +1050,20 @@ async def _settle_running(user, sess, mode: str | None) -> dict | None:
     last = runs[-1]
     stopped = (getattr(last, "extra", None) or {}).get("stopped") or {}
     return {"text": (getattr(last, "extra", None) or {}).get("text", ""), "partial": stopped.get("partial", ""), "steps": stopped.get("steps", [])}
+
+
+def _after_stop_note(agent_text: str, history_rows: list) -> str:
+    """A new message after the user stopped the last turn: say the stopped request stays stopped. Without this the
+    agent saw that request unanswered in the history and picked it up again on "hy" ("Continue" or "continue" is
+    what resumes it). The request's text stays out of the note: the message also routes skills and tools."""
+    last = next((m for m in history_rows if m.role == "assistant"), None)
+    meta = (last.meta or {}) if last is not None and isinstance(last.meta, dict) else {}
+    if not meta.get("stopped"):
+        return agent_text
+    return (
+        f"{agent_text}\n\n[Checkme: the user stopped your previous request in this chat. It stays stopped: do not "
+        "resume or redo it unless this message asks for it. Answer this message on its own.]"
+    )
 
 
 def _pk(row):
