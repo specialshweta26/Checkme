@@ -957,9 +957,14 @@ A data tool answered "SIS sales, November MTD" as a table of 8,999 rows, 27 unna
 (`totalRows`, `offset`, `limit`, `hasMore`). Another MCP client read both pages and added the rows up with code. Lumio
 read the first page only, and the model could not add up thousands of rows itself. Now (`app/agent/tables.py`):
 - **Every page:** `all_pages` reads the remaining pages of a paged answer (`hasMore`, or `offset` + rows under
-  `totalRows`) and merges the rows: up to 40 pages or 100,000 rows, asking 5,000 rows a page (a tool that caps lower
-  returns fewer). This happens for a direct call and for one through a gateway's execute (paging set on the inner
-  arguments). The chat says "Reading all N rows, page by page".
+  `totalRows`) and merges the rows: up to `TABLE_MAX_PAGES` (200) pages or `TABLE_MAX_ROWS` (100,000) rows, asking
+  `TABLE_PAGE_ROWS` (5,000) rows a page (a tool that caps lower returns fewer). This happens for a direct call and for
+  one through a gateway's execute (paging set on the inner arguments). The chat says "Reading all N rows, page by page".
+- **Several pages at once:** a 92,000-row table took 19 calls one after another, most of a chat turn. The second page
+  shows the page size the tool really uses; when the first page gave the total, the rest are then fetched
+  `TABLE_PAGE_CONCURRENCY` (6) at a time and merged in order. A page that comes back short leaves a gap that is read
+  in order, and a page that fails is read again in order, so the table is the same as reading page by page. Without a
+  total, or with `TABLE_PAGE_CONCURRENCY=1`, pages are read one after another.
 - **Totals over every row:** the `aggregate_result` tool filters (`where`: a value, a list, or `gte`/`lte`), groups
   (`group_by`) and adds up (`sums`) a stored table. Columns are indexes for array rows and keys for object rows. It
   returns totals, a count per group, and three sample rows to read the columns from. It is fixed arithmetic, not code
