@@ -170,6 +170,56 @@ class AuthSession(Base):
     user_agent: Mapped[str] = mapped_column(String(300), default="")
 
 
+class Team(Base):
+    """A group of Lumio users who share skills and one activity log (docs/TEAMS.md). Mail, calendars, connectors,
+    agents and memory stay each person's own."""
+
+    __tablename__ = "teams"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String(120))
+    owner_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class TeamMember(Base):
+    __tablename__ = "team_members"
+    team_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True, index=True)
+    role: Mapped[str] = mapped_column(String(12), default="member")  # owner | admin | member | viewer
+    joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class TeamInvite(Base):
+    """An emailed invitation. Only the hash of its token is kept; it works once, for that email, for 7 days."""
+
+    __tablename__ = "team_invites"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    team_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), index=True)
+    email: Mapped[str] = mapped_column(String(320))
+    role: Mapped[str] = mapped_column(String(12), default="member")
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    invited_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class TeamSkill(Base):
+    """A copy of a member's skill shared with the team: its steps and instructions, never its screenshots, narration
+    or anything typed that looked like a secret. Teammates add their own copy to use it."""
+
+    __tablename__ = "team_skills"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    team_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), index=True)
+    shared_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    source_skill_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    name: Mapped[str] = mapped_column(String(160))
+    kind: Mapped[str] = mapped_column(String(20), default="saved")
+    description: Mapped[str] = mapped_column(Text, default="")
+    instruction: Mapped[str] = mapped_column(Text, default="")
+    steps: Mapped[list] = mapped_column(JSONB, default=list)
+    flow: Mapped[dict] = mapped_column(JSONB, default=dict)
+    files: Mapped[list] = mapped_column(JSONB, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 class Subscription(Base):
     """A user's paid plan (docs/BILLING.md), kept in step by Stripe's webhooks. No row means the free plan."""
 
