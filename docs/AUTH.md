@@ -104,3 +104,5 @@ Not covered yet: SAML-only providers (most also offer OIDC), and SCIM provisioni
   change password, and SSO with a fake provider (forged signature, wrong audience, wrong domain, unverified email,
   forged state)
 - `apps/api/tests/test_auth_mailer.py`: Resend and SendGrid requests, and password hashing
+
+Who may sign up, and the daily cap on each person's model use, are in docs/ROLLOUT.md.

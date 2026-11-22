@@ -310,3 +310,24 @@ def test_status_reports_the_new_sign_in_options(monkeypatch):
     monkeypatch.setattr(get_settings(), "sso_connections", json.dumps([{"id": "acme", "issuer": "https://i.example.com", "client_id": "x", "domains": ["acme.com"]}]))
     out = asyncio.run(routes.oauth_status())
     assert out["email"] is True and out["sso"] is True
+
+
+async def test_invite_only_sign_up_and_links_sent_before_closing(client, monkeypatch):
+    from app.auth.access import CLOSED_MESSAGE
+    from app.config import get_settings
+
+    c, s = client, get_settings()
+    early = _email(c, "early")
+    token = await _signup(c, early)  # sent while sign-ups were open
+    monkeypatch.setattr(s, "signup_mode", "invite")
+    monkeypatch.setattr(s, "signup_allow", "invited@example.org, example.net")
+    r = await c.post("/api/auth/email/signup", json={"email": _email(c, "stranger"), "password": PW})
+    assert r.status_code == 403 and r.json()["detail"] == CLOSED_MESSAGE and not any("stranger" in m["to"] for m in c.sent)
+    r = await c.post("/api/auth/email/verify", json={"token": token})
+    assert r.status_code == 403  # the old link creates no account once sign-ups are closed to it
+    monkeypatch.setattr(s, "signup_allow", "example.com")
+    assert (await c.post("/api/auth/email/verify", json={"token": token})).status_code == 200
+    c.cookies.clear()
+    monkeypatch.setattr(s, "signup_mode", "closed")
+    r = await c.post("/api/auth/email/login", json={"email": early, "password": PW})
+    assert r.status_code == 200  # people who already have an account still sign in

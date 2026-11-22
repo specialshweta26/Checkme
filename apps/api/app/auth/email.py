@@ -23,7 +23,7 @@ from pydantic import BaseModel
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import mailer, passwords, sso
+from app.auth import access, mailer, passwords, sso
 from app.config import get_settings
 from app.db import get_db
 from app.deps import current_user
@@ -115,6 +115,8 @@ async def signup(body: SignupIn, request: Request, db: AsyncSession = Depends(ge
     _available()
     email = normalize_email(body.email)
     _enforced_sso(email)
+    if not access.may_sign_up(email):
+        raise HTTPException(403, access.CLOSED_MESSAGE)
     why = passwords.problem(body.password, email)
     if why:
         raise HTTPException(400, why)
@@ -160,6 +162,8 @@ async def verify(body: TokenIn, request: Request, db: AsyncSession = Depends(get
     if row is None or passwords.fingerprint(row.password_hash) != data.get("f"):
         raise HTTPException(400, "This link isn't valid any more. Sign up again or sign in.")
     if row.user_id is None:
+        if not access.may_sign_up(row.email):  # sign-ups closed after the link was sent
+            raise HTTPException(403, access.CLOSED_MESSAGE)
         user = User(email=row.email, display_name=row.display_name or row.email.split("@")[0], primary_provider="email",
                     timezone="Asia/Kolkata")  # fmt: skip
         db.add(user)

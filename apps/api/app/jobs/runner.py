@@ -187,6 +187,9 @@ async def run_job(job_id, session_factory: Callable | None = None, agent_impl: C
         paused = await _over_budget(db, job, agent)
         if paused:
             return paused
+        capped = await _over_user_cap(db, job, user)
+        if capped:
+            return capped
         query = job_query(job)
         progress = JobProgress(job, session_factory, agent_name=agent.name)
         work_label = "processing a webhook event" if job.kind == "event" else f"working ({job.role})"
@@ -334,6 +337,20 @@ async def _over_budget(db, job: AgentJob, agent) -> str | None:
     text = f"{budgets.over_text(agent, st)} Run this task anyway today, or leave it for now?"
     for ev in budgets.pause(job, budgets.BUDGET, text):
         db.add(ev)
+    if job.parent_id is None:
+        await service.post_to_chat(db, job)
+    await db.commit()
+    return job.status
+
+
+async def _over_user_cap(db, job: AgentJob, user) -> str | None:
+    """Before a run: a user past today's cap on all model use (docs/ROLLOUT.md) doesn't start the task."""
+    from app.agent.meter import CAP_MESSAGE, over_user_cap
+
+    if not await over_user_cap(db, user):
+        return None
+    job.status, job.result = "failed", CAP_MESSAGE
+    db.add(service.event(job, "status", CAP_MESSAGE, {"status": "failed"}))
     if job.parent_id is None:
         await service.post_to_chat(db, job)
     await db.commit()

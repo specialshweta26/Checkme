@@ -104,8 +104,27 @@ services:
         sync: false
       - key: MAIL_FROM
         sync: false
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        sync: false
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
       # Enterprise SSO connections, JSON (docs/AUTH.md "SSO").
       - key: SSO_CONNECTIONS
+        sync: false
+      # Rollout controls (docs/ROLLOUT.md): who may sign up, and each person's daily cap on model use.
+      - key: SIGNUP_MODE
+        sync: false
+      - key: SIGNUP_ALLOW
+        sync: false
+      - key: DAILY_USER_TOKEN_BUDGET
+        sync: false
+      - key: DAILY_USER_BUDGET_USD
+        sync: false
+      - key: BUDGET_EXEMPT
         sync: false
       - key: OPENAI_API_KEY
         sync: false
