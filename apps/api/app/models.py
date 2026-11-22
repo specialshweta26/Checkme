@@ -170,6 +170,20 @@ class AuthSession(Base):
     user_agent: Mapped[str] = mapped_column(String(300), default="")
 
 
+class Subscription(Base):
+    """A user's paid plan (docs/BILLING.md), kept in step by Stripe's webhooks. No row means the free plan."""
+
+    __tablename__ = "subscriptions"
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    plan: Mapped[str] = mapped_column(String(20), default="free")  # free | pro
+    status: Mapped[str] = mapped_column(String(30), default="")  # Stripe's: active, trialing, past_due, canceled…
+    stripe_customer_id: Mapped[str] = mapped_column(String(80), default="", index=True)
+    stripe_subscription_id: Mapped[str] = mapped_column(String(80), default="")
+    current_period_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancel_at_period_end: Mapped[bool] = mapped_column(Boolean, default=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
 class SignupInvite(Base):
     """An email or a whole domain allowed to create an account while SIGNUP_MODE is invite (docs/ADMIN.md)."""
 

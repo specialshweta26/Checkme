@@ -75,6 +75,12 @@ class Settings(BaseSettings):
     daily_user_budget_usd: float = 0.0
     daily_user_token_budget: int = 0
     budget_exempt: str = ""  # comma-separated emails with no daily cap (the owner, the team)
+    # Paid plans through Stripe (docs/BILLING.md). Off until STRIPE_SECRET_KEY and STRIPE_PRICE_PRO are set.
+    stripe_secret_key: str = ""
+    stripe_webhook_secret: str = ""
+    stripe_price_pro: str = ""  # the Pro plan's recurring price id (price_…)
+    plan_pro_token_budget: int = 0  # Pro's daily token cap; 0 = no cap
+    plan_pro_budget_usd: float = 0.0
     admin_emails: str = ""  # comma-separated: who can open the admin console (docs/ADMIN.md)
 
     session_secret: str = "dev-only-change-me"
