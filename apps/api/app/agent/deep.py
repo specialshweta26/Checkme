@@ -513,6 +513,25 @@ async def _silent_call(ctx: RunContext, conn, tool_name: str, args: dict) -> Any
     return await invoke_named(ctx.db, ctx.user, conn, tool_name, args, ctx.attachments)
 
 
+async def _catalog_search(ctx: RunContext, conn, search_name: str, args: dict) -> Any:
+    """A gateway's catalog search, at most once per turn for the same arguments, and from the read cache across turns
+    (app/agent/read_cache.py). search_tools, get_tool_schema and the checks before call_tool all search the catalog,
+    often for the same words: each repeat was another 3-7 s round trip to the gateway."""
+    key = ("__search__", conn.slug, json.dumps([search_name, args], sort_keys=True, default=str))
+    if key in ctx.gateway_args:
+        return ctx.gateway_args[key]
+    from app.agent import read_cache
+
+    shared = ctx.call_impl is None and getattr(ctx.user, "id", None) is not None
+    raw = await read_cache.get(ctx.user.id, conn.slug, search_name, args) if shared else None
+    if raw is None:
+        raw = await _silent_call(ctx, conn, search_name, args)
+        if shared:
+            await read_cache.put(ctx.user.id, conn.slug, search_name, args, raw)
+    ctx.gateway_args[key] = raw
+    return raw
+
+
 async def _load_gateway_surface(ctx: RunContext, conn) -> dict:
     cached = ctx.gateway_surface.get(conn.slug)
     if cached:
@@ -571,14 +590,23 @@ async def _expand_gateway_catalog(ctx: RunContext, conn, query: str) -> list[dic
         except Exception:  # noqa: BLE001
             log.warning("composio list_connections failed on expand", exc_info=True)
     parsed: list[dict] = []
+    calls = []
     for q in queries:
         args = search_call_args(search_schema, q)
         if toolkit:
             args["toolkit"] = toolkit
-        try:
-            raw = await _silent_call(ctx, conn, search_name, args)
-        except Exception:  # noqa: BLE001
-            log.warning("gateway catalog search failed on %s", conn.slug, exc_info=True)
+        calls.append(args)
+    # The first wording alone (it usually finds the action); if it finds nothing, the other wordings at once instead
+    # of one after another. The first that finds something wins, in order, as before.
+    answers: list = []
+    for batch in (calls[:1], calls[1:]):
+        found = await asyncio.gather(*(_catalog_search(ctx, conn, search_name, a) for a in batch), return_exceptions=True)
+        answers.extend(found)
+        if any(isinstance(r, dict) and (slim_search(r, q).get("candidates") or []) for r, q in zip(found, queries[len(answers) - len(found):])):
+            break
+    for q, raw in zip(queries, answers):
+        if isinstance(raw, BaseException):
+            log.warning("gateway catalog search failed on %s: %s", conn.slug, raw)
             continue
         slim = slim_search(raw, q) if isinstance(raw, dict) else {"candidates": []}
         parsed = [item for item in (slim.get("candidates") or []) if isinstance(item, dict)]
@@ -1176,6 +1204,7 @@ async def search_user_tools(ctx: RunContext, query: str, connector_slug: str | N
         for i, hit in enumerate(hits)
     ]
     nested: list[dict] = []
+    expand = []
     for conn in conns:
         already = [
             row
@@ -1188,7 +1217,10 @@ async def search_user_tools(ctx: RunContext, query: str, connector_slug: str | N
             continue
         if connecting and getattr(conn, "provider", None) == "composio":
             continue
-        nested.extend(await _expand_gateway_catalog(ctx, conn, query))
+        expand.append(conn)
+    # Each gateway's catalog at the same time (they were searched one after another).
+    for rows in await asyncio.gather(*(_expand_gateway_catalog(ctx, c, query) for c in expand)):
+        nested.extend(rows)
     nested.sort(key=lambda row: float(row.get("score") or 0), reverse=True)
     nested_keys = {(row["connector_slug"], row["tool_name"]) for row in nested}
     data_local = [
@@ -1814,7 +1846,7 @@ async def get_user_tool_schema(ctx: RunContext, connector_slug: str, tool_name: 
             resolve = surface.get("resolve")
             if resolve:
                 try:
-                    raw = await _silent_call(
+                    raw = await _catalog_search(  # once per turn, and cached: describing an action changes nothing
                         ctx, conn, resolve, resolve_call_args(surface.get("resolve_schema"), tool_name)
                     )
                     shaped = _schema_from_resolve(connector_slug, tool_name, raw)
