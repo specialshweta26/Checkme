@@ -409,6 +409,9 @@ export default function ChatPage() {
       setPending([]);
       window.history.replaceState(null, "", chatHref({ agent: q.get("agent"), group: q.get("group") }));
     }
+    // A link to one conversation (chatHref({ conversation }), e.g. from the admin test scenarios) opens it.
+    const conversation = q.get("c");
+    if (conversation && /^[0-9a-f-]{36}$/i.test(conversation)) openSession(conversation);
   }, []);
 
   useEffect(() => {

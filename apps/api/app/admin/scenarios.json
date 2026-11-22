@@ -1,0 +1,30 @@
+[
+  {"id": "smalltalk", "group": "Instant", "text": "hi"},
+  {"id": "whoami", "group": "Instant", "text": "What's my name and email?"},
+
+  {"id": "data-one-metric", "group": "Data connectors", "text": "What were total net sales yesterday?"},
+  {"id": "data-trend", "group": "Data connectors", "text": "Show the daily net sales trend for the last 2 weeks and say whether it is going up or down."},
+  {"id": "data-category", "group": "Data connectors", "text": "In the last 2 weeks, how is each product category performing in units and net sales?"},
+  {"id": "data-top", "group": "Data connectors", "text": "Top 10 products by units sold in the last 7 days."},
+  {"id": "data-compare-brands", "group": "Data connectors", "text": "Compare the two biggest brands on net sales, orders and units for the last 7 days."},
+  {"id": "data-compare-periods", "group": "Data connectors", "text": "Compare this week's net sales with last week's, by channel."},
+  {"id": "data-inventory", "group": "Data connectors", "text": "Which products are lowest on stock right now?"},
+  {"id": "data-report", "group": "Data connectors", "text": "Make a sales report for the last 30 days with a chart and a downloadable file."},
+  {"id": "data-followup", "group": "Data connectors", "text": "Same as before but only for the last 3 days.", "after": "data-trend"},
+
+  {"id": "mail-latest", "group": "Mail and calendar", "text": "Summarise my 5 latest emails."},
+  {"id": "mail-needs-reply", "group": "Mail and calendar", "text": "Which emails from the last 2 days still need a reply from me?"},
+  {"id": "mail-search", "group": "Mail and calendar", "text": "Find emails about invoices from this month."},
+  {"id": "cal-tomorrow", "group": "Mail and calendar", "text": "What's on my calendar tomorrow?"},
+  {"id": "cal-free", "group": "Mail and calendar", "text": "When am I free for 30 minutes this week?"},
+
+  {"id": "web-news", "group": "Web", "text": "What's the latest news on the Indian footwear retail market?"},
+  {"id": "web-fact", "group": "Web", "text": "What is the current repo rate in India?"},
+  {"id": "web-compare", "group": "Web", "text": "Compare the prices of running shoes from two popular brands on their websites."},
+
+  {"id": "multi-briefing", "group": "Several connectors", "text": "Give me today's briefing: important unread mail, today's meetings and yesterday's sales."},
+  {"id": "multi-parallel", "group": "Several connectors", "text": "Get yesterday's net sales for every channel and my meetings for today, in one answer."},
+
+  {"id": "apps-list", "group": "Workspace", "text": "Which apps and connectors do I have connected?"},
+  {"id": "agents-list", "group": "Workspace", "text": "List my agents and groups."}
+]
