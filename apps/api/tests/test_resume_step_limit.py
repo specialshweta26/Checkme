@@ -68,7 +68,7 @@ def test_can_resume_needs_saved_messages():
 
 
 def test_build_agent_keeps_a_checkpoint_for_the_turn(monkeypatch):
-    monkeypatch.setattr(deep, "_chat_model", lambda: _Model(messages=iter([AIMessage(content="ok")])))
+    monkeypatch.setattr(deep, "_chat_model", lambda ctx=None: _Model(messages=iter([AIMessage(content="ok")])))
     monkeypatch.setattr(deep, "harness_tools", lambda ctx: [])
     graph = deep.build_agent(None, "x")
     assert isinstance(graph.checkpointer, InMemorySaver)
