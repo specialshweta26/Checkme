@@ -54,6 +54,7 @@ class Run:
     extra: dict = field(default_factory=dict)  # e.g. the request text and, once stopped, its partial reply/steps
     last_active: float = field(default_factory=time.monotonic)
     tools_running: set = field(default_factory=set)
+    timing: Any = None  # the turn's timing so far (a callable set by the agent), saved if it is stopped or fails
 
     def touch(self) -> None:
         self.last_active = time.monotonic()
@@ -338,7 +339,11 @@ def resume_prompt(original: str, partial: str = "", steps: list[str] | None = No
     done = [s for s in (steps or []) if s][-12:]
     parts = []
     if interrupted_by:
-        parts.append("The user interrupted your previous turn with this new message; follow the new message.")
+        parts.append(
+            "The user interrupted your previous turn with this new message. Answer the new message. Continue the "
+            "previous request only if the new message asks for that (for example 'continue', or a change to it); a "
+            "greeting or an unrelated question is not a request to continue it."
+        )
     else:
         parts.append("The user stopped your previous turn and now wants you to continue it from where it stopped.")
     parts.append(f"Previous request: {original[:1500]}")

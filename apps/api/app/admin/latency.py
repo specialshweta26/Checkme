@@ -3,7 +3,8 @@
 Every chat reply stores where its time went in ``meta.timing`` (app/chat/routes.py): the whole reply (``reply_ms``,
 from the request arriving), the agent's stages, model time and calls, and each connector call with its first answer and
 its other pages. This adds them up: how many replies took longer than ``REPLY_TARGET_S`` (45 seconds by default), the
-median and 95th percentile, and the slowest replies with what took their time. Message text is never included.
+median and 95th percentile, and the slowest replies with what took their time. Turns that were stopped or failed
+keep their timing so far, marked as such. Message text is never included.
 """
 
 from __future__ import annotations
@@ -39,6 +40,8 @@ def breakdown(timing: dict) -> dict:
                           for c in slow_calls],  # fmt: skip
         "computer_used": bool(timing.get("computer_used")),
         "kind": timing.get("kind") or "",
+        # A turn that didn't finish: stopped (by the person, or the reason the app stopped it) or failed.
+        "ended": "failed" if timing.get("failed") else (f"stopped ({timing['stopped']})" if timing.get("stopped") else ""),
     }
 
 

@@ -42,6 +42,7 @@ type Reply = {
   tool_ms: number;
   slowest_calls: SlowCall[];
   computer_used: boolean;
+  ended: string;
 };
 type Latency = {
   target_s: number;
@@ -270,6 +271,7 @@ export default function AdminPage() {
                           {secs(r.total_ms)} · model {secs(r.model_ms)} ({r.model_calls} calls) · connectors {secs(r.connector_ms)}
                           {r.tool_ms ? ` · tools ${secs(r.tool_ms)}` : ""}
                           {r.computer_used ? " · computer" : ""}
+                          {r.ended ? ` · ${r.ended}` : ""}
                         </span>
                         {r.slowest_calls.length ? (
                           <span className="faint">
