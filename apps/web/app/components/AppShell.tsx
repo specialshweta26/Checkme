@@ -27,7 +27,7 @@ import { IconArtifact, IconData, IconGauge, IconKnow, IconQuality, IconRoutines,
 import { BrandMark } from "./BrandMark";
 import { AgentAvatar } from "./AgentAvatar";
 
-type Nav = "teams" | "admin" | "today" | "chat" | "inbox" | "tasks" | "connectors" | "runs" | "memory" | "usage" | "account" | "profile" | "artifacts" | "vault" | "skills" | "routines" | "quality" | "approvals";
+type Nav = "teams" | "billing" | "admin" | "today" | "chat" | "inbox" | "tasks" | "connectors" | "runs" | "memory" | "usage" | "account" | "profile" | "artifacts" | "vault" | "skills" | "routines" | "quality" | "approvals";
 
 // Everything kept for the user lives under Profile (docs/DESIGN.md "Profile"), not in the sidebar.
 const PROFILE_MENU: [Nav, string, string, (p: { size?: number }) => ReactElement][] = [
@@ -40,9 +40,10 @@ const PROFILE_MENU: [Nav, string, string, (p: { size?: number }) => ReactElement
   ["runs", "/runs", "Saved runs", IconRuns],
   ["vault", "/vault", "Vault", IconVault],
   ["usage", "/usage", "Usage and cost", IconGauge],
+  ["billing", "/billing", "Plan and billing", IconGauge],
   ["account", "/account", "Your data", IconData],
 ];
-const PROFILE_PAGES: Nav[] = ["teams", "admin", "profile", "memory", "routines", "quality", "skills", "artifacts", "runs", "vault", "usage", "account"];
+const PROFILE_PAGES: Nav[] = ["teams", "billing", "admin", "profile", "memory", "routines", "quality", "skills", "artifacts", "runs", "vault", "usage", "account"];
 
 function IconSidebar() {
   return (
@@ -449,7 +450,7 @@ export function AppShell({
   }
 
   const rows = conversations || own;
-  const titles: Record<Nav, string> = { teams: "Teams", admin: "Admin console", today: "Today", chat: "Chat", inbox: "Inbox", tasks: "Tasks", connectors: "Connectors", runs: "Saved runs", memory: "What I know", usage: "Usage", account: "Your data", profile: "Profile", artifacts: "Artifacts", vault: "Vault", skills: "Skills", routines: "Routines", quality: "Quality", approvals: "Approvals" };
+  const titles: Record<Nav, string> = { teams: "Teams", billing: "Plan and billing", admin: "Admin console", today: "Today", chat: "Chat", inbox: "Inbox", tasks: "Tasks", connectors: "Connectors", runs: "Saved runs", memory: "What I know", usage: "Usage", account: "Your data", profile: "Profile", artifacts: "Artifacts", vault: "Vault", skills: "Skills", routines: "Routines", quality: "Quality", approvals: "Approvals" };
   const agentId = activeAgentId || scope.agent || null;
   const groupId = activeGroupId || scope.group || null;
 

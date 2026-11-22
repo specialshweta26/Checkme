@@ -247,6 +247,12 @@ app.include_router(browser_hook_router, prefix="/api")
 app.include_router(inbox_router, prefix="/api")
 app.include_router(files_router, prefix="/api")
 app.include_router(desktop_router, prefix="/api")
+from app.billing.routes import router as billing_router  # noqa: E402
+
+app.include_router(billing_router, prefix="/api")
+from app.voice.routes import router as voice_router  # noqa: E402
+
+app.include_router(voice_router, prefix="/api")
 from app.admin.routes import me_router as admin_me_router  # noqa: E402
 from app.admin.routes import router as admin_router  # noqa: E402
 

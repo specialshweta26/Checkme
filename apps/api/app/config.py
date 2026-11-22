@@ -75,6 +75,12 @@ class Settings(BaseSettings):
     daily_user_budget_usd: float = 0.0
     daily_user_token_budget: int = 0
     budget_exempt: str = ""  # comma-separated emails with no daily cap (the owner, the team)
+    # Paid plans through Stripe (docs/BILLING.md). Off until STRIPE_SECRET_KEY and STRIPE_PRICE_PRO are set.
+    stripe_secret_key: str = ""
+    stripe_webhook_secret: str = ""
+    stripe_price_pro: str = ""  # the Pro plan's recurring price id (price_…)
+    plan_pro_token_budget: int = 0  # Pro's daily token cap; 0 = no cap
+    plan_pro_budget_usd: float = 0.0
     admin_emails: str = ""  # comma-separated: who can open the admin console (docs/ADMIN.md)
 
     session_secret: str = "dev-only-change-me"
@@ -176,6 +182,8 @@ class Settings(BaseSettings):
     # Fast answers (docs/LLD.md §7.7): quick web turns never wait on the cloud computer.
     fast_path_enabled: bool = True
     read_cache_s: int = 120  # keep a read-only tool result this long per user; 0 = off (app/agent/read_cache.py)
+    voice_input: bool = True  # the chat's microphone button (app/voice/routes.py); needs OPENAI_API_KEY
+    transcribe_model: str = "gpt-4o-mini-transcribe"
     prompt_cache_key: bool = True  # send OpenAI a per-agent prompt_cache_key, so the fixed prompt is read from cache
     stream_tokens: bool = True  # stream model tokens into the chat's working bubble (progress draft)
     tavily_include_answer: bool = True

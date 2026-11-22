@@ -5014,6 +5014,11 @@ button.routine-tile:hover { border-color: var(--line-strong); }
   .approvals-batch { top: 0; }
 }
 
+/* Voice input (components/VoiceButton.tsx) */
+.voice-btn.recording { color: #e5484d; animation: voice-pulse 1.2s ease-in-out infinite; }
+@keyframes voice-pulse { 50% { opacity: .45; } }
+.voice-error { font-size: 12px; color: var(--err, #e5484d); align-self: center; max-width: 180px; }
+.voice-dots { font-weight: 700; letter-spacing: 1px; }
 /* Admin console (app/admin/page.tsx) */
 .admin-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 16px; }
 .admin-stats .task-card { display: flex; flex-direction: column; gap: 4px; }
@@ -5028,3 +5033,7 @@ button.routine-tile:hover { border-color: var(--line-strong); }
 /* First-run card in chat (components/GetStarted.tsx) */
 .get-started { margin: 0 auto 16px; max-width: 720px; }
 .row.wrap { flex-wrap: wrap; gap: 8px; }
+
+/* Plan and billing (app/billing/page.tsx) */
+.meter { height: 6px; border-radius: 3px; background: var(--line, rgba(127,127,127,.2)); overflow: hidden; max-width: 360px; }
+.meter > span { display: block; height: 100%; background: var(--accent, #5b8def); }
