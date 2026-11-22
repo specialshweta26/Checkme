@@ -284,6 +284,10 @@ async def chat(
 ):
     if await rate_limited(f"chat:{user.id}", get_settings().chat_rate_limit_per_minute):
         raise HTTPException(429, "Too many messages. Wait a minute.")
+    from app.agent.meter import CAP_MESSAGE, over_user_cap
+
+    if await over_user_cap(db, user):
+        raise HTTPException(429, CAP_MESSAGE)
     text = (body.message or "").strip()
     uploads = [item for item in (body.attachments or []) if isinstance(item, dict) and item.get("key")]
     if not text and not uploads:

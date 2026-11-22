@@ -67,6 +67,14 @@ class Settings(BaseSettings):
     # JSON list of OIDC connections: [{"id": "acme", "name": "Acme", "issuer": "https://acme.okta.com",
     # "client_id": "…", "client_secret": "…", "domains": ["acme.com"], "enforce": false}]
     sso_connections: str = ""
+    # Who may create a new account (docs/ROLLOUT.md). open: anyone; invite: only SIGNUP_ALLOW; closed: no one.
+    # People who already have an account always sign in. SSO connections are set by the operator, so they're exempt.
+    signup_mode: str = "open"
+    signup_allow: str = ""  # comma-separated emails and domains: "asha@x.com, acme.com"
+    # Per-user cap on all model use in a UTC day (chat, tasks and background work); 0 = no cap. USD needs MODEL_PRICES.
+    daily_user_budget_usd: float = 0.0
+    daily_user_token_budget: int = 0
+    budget_exempt: str = ""  # comma-separated emails with no daily cap (the owner, the team)
 
     session_secret: str = "dev-only-change-me"
     token_encryption_key: str = ""

@@ -89,7 +89,7 @@ async def desktop_handoff(db: AsyncSession, user: User, code: str) -> str:
 
 @router.get("/status")
 async def oauth_status():
-    from app.auth import mailer, sso
+    from app.auth import access, mailer, sso
 
     s = get_settings()
     return {
@@ -97,6 +97,7 @@ async def oauth_status():
         "microsoft": bool(s.microsoft_client_id),
         "email": bool(s.email_login and mailer.configured()),
         "sso": bool(sso.connections()),
+        "signup": access.mode(),
         "dev_login": s.dev_login_enabled,
         "public_web_url": s.public_web_url,
     }
@@ -199,6 +200,10 @@ async def callback(
     else:
         user = await db.get(User, account.user_id) if account else None
         if user is None:
+            from app.auth.access import may_sign_up
+
+            if not may_sign_up(info["email"]):
+                return RedirectResponse(_web("/login?error=signup_closed"))
             # No auto-merge by email: a matching email on another provider must be linked explicitly.
             user = User(
                 email=info["email"],

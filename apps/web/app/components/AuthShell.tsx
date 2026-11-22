@@ -42,7 +42,7 @@ export function AuthShell({ eyebrow, title, intro, children }: { eyebrow: string
   );
 }
 
-export type AuthStatus = { google: boolean; microsoft: boolean; email: boolean; sso: boolean; dev_login: boolean };
+export type AuthStatus = { google: boolean; microsoft: boolean; email: boolean; sso: boolean; dev_login: boolean; signup?: "open" | "invite" | "closed" };
 
 export async function authStatus(): Promise<AuthStatus> {
   try {

@@ -51,8 +51,14 @@ export default function Signup() {
 
   return (
     <AuthShell eyebrow="Get started" title="Create your Lumio account" intro="Sign up with Google, Microsoft, your company's SSO, or your email.">
-      <AuthProviders sso={Boolean(status?.sso)} />
-      {status && !status.email ? (
+      {status?.signup === "closed" ? (
+        <p className="auth-intro">
+          Lumio isn&apos;t open for new sign-ups yet. If you already have an account, <Link href="/login">sign in</Link>.
+        </p>
+      ) : null}
+      {status?.signup === "invite" ? <p className="auth-alt">Sign-ups are invite-only for now: use the address you were invited with.</p> : null}
+      {status?.signup === "closed" ? null : <AuthProviders sso={Boolean(status?.sso)} />}
+      {status?.signup === "closed" ? null : status && !status.email ? (
         <p className="auth-alt">Email sign-up isn't available on this server yet. Use one of the options above.</p>
       ) : (
         <>

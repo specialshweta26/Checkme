@@ -285,7 +285,13 @@ async def background_spend(db, user_id) -> dict:
 
 
 async def over_budget(db, user_id) -> bool:
-    """True when today's background work for this user is past the daily budget. Cached for a minute."""
+    """True when today's background work for this user is past the daily budget, or the user is past the daily cap
+    on all model use. Cached for a minute."""
+    if user_cap() != (0.0, 0):
+        from app.models import User
+
+        if await over_user_cap(db, await db.get(User, user_id)):
+            return True
     usd_limit, token_limit = budget()
     if not usd_limit and not token_limit:
         return False
@@ -298,3 +304,53 @@ async def over_budget(db, user_id) -> bool:
     if over:
         log.info("background budget reached for %s: %s", user_id, spend)
     return over
+
+
+# The per-user daily cap on all model use (docs/ROLLOUT.md "Daily cap"): chat, tasks and background work together.
+_cap_cache: dict = {}
+
+
+def user_cap() -> tuple[float, int]:
+    from app.config import get_settings
+
+    s = get_settings()
+    return float(getattr(s, "daily_user_budget_usd", 0) or 0), int(getattr(s, "daily_user_token_budget", 0) or 0)
+
+
+def cap_exempt(email: str) -> bool:
+    from app.config import get_settings
+
+    raw = getattr(get_settings(), "budget_exempt", "") or ""
+    exempt = {x.strip().lower() for x in raw.replace(";", ",").split(",") if x.strip()}
+    return (email or "").strip().lower() in exempt
+
+
+async def day_spend(db, user_id) -> dict:
+    """Today's model use for this user across every feature: cost (when priced) and tokens."""
+    rows = [r for r in await usage_rows(db, user_id, _today()) if ":" not in r["model"] and r["model"] != "search"]
+    usd_limit, token_limit = user_cap()
+    return {
+        "cost_usd": round(sum(r["cost_usd"] or 0 for r in rows), 4),
+        "tokens": sum(r["input"] + r["output"] for r in rows),
+        "limit_usd": usd_limit or None,
+        "limit_tokens": token_limit or None,
+    }
+
+
+async def over_user_cap(db, user) -> bool:
+    """True when this user is past today's cap on all model use. Cached for a minute; exempt emails never are."""
+    usd_limit, token_limit = user_cap()
+    if (not usd_limit and not token_limit) or user is None or cap_exempt(getattr(user, "email", "")):
+        return False
+    hit = _cap_cache.get(user.id)
+    if hit and time.monotonic() - hit[0] < BUDGET_CACHE_S:
+        return hit[1]
+    spend = await day_spend(db, user.id)
+    over = bool((usd_limit and spend["cost_usd"] >= usd_limit) or (token_limit and spend["tokens"] >= token_limit))
+    _cap_cache[user.id] = (time.monotonic(), over)
+    if over:
+        log.info("daily cap reached for %s: %s", user.id, spend)
+    return over
+
+
+CAP_MESSAGE = "You've reached today's usage limit for Lumio. It resets at midnight UTC."

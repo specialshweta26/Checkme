@@ -7,6 +7,18 @@ const nextConfig: NextConfig = {
   experimental: {
     proxyTimeout: 120000,
   },
+  // Sign-in links carry one-time tokens in the URL: send no referrer from any page, so a token never leaks to another
+  // site. nosniff stops content-type guessing; HSTS keeps browsers on HTTPS (Render serves only HTTPS).
+  async headers() {
+    const headers = [
+      { key: "Referrer-Policy", value: "no-referrer" },
+      { key: "X-Content-Type-Options", value: "nosniff" },
+    ];
+    if (process.env.NODE_ENV === "production") {
+      headers.push({ key: "Strict-Transport-Security", value: "max-age=31536000; includeSubDomains" });
+    }
+    return [{ source: "/:path*", headers }];
+  },
 };
 
 export default nextConfig;
