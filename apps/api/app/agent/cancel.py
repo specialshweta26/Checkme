@@ -54,6 +54,7 @@ class Run:
     extra: dict = field(default_factory=dict)  # e.g. the request text and, once stopped, its partial reply/steps
     last_active: float = field(default_factory=time.monotonic)
     tools_running: set = field(default_factory=set)
+    timing: Any = None  # the turn's timing so far (a callable set by the agent), saved if it is stopped or fails
 
     def touch(self) -> None:
         self.last_active = time.monotonic()

@@ -93,3 +93,24 @@ async def test_the_admin_endpoint_reads_stored_replies_without_their_text(monkey
             await ses.execute(text("DELETE FROM users WHERE id = :i"), {"i": user.id})
             await ses.commit()
         await engine.dispose()
+
+
+def test_a_stopped_or_failed_turn_is_marked():
+    stopped = {**_timing(300), "stopped": "no progress"}
+    failed = {**_timing(80), "failed": True}
+    out = latency.summarize([(datetime.now(timezone.utc), "", stopped), (datetime.now(timezone.utc), "", failed)], 45)
+    assert [s["ended"] for s in out["slowest"]] == ["stopped (no progress)", "failed"]
+
+
+def test_the_timing_so_far_of_a_turn_that_did_not_finish():
+    import time
+
+    from app.agent import cancel
+    from app.chat import routes
+
+    run = cancel.Run(key="k", user_id="u", started=time.time() - 12)
+    run.timing = lambda: {"llm_ms": 4000, "calls": [{"connector": "c", "tool": "t", "ms": 7000}]}
+    out = routes._timing_so_far(run, stopped="stopped")
+    assert out["llm_ms"] == 4000 and out["stopped"] == "stopped" and 11500 < out["reply_ms"] < 14000
+    run.timing = lambda: 1 / 0  # a broken callable never stops the stopped marker from being saved
+    assert routes._timing_so_far(run, failed=True)["failed"] is True

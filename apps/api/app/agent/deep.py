@@ -4715,6 +4715,12 @@ async def _run_deep_agent(
         job=job,
         toolkit_assignments=toolkits,
     )
+    from app.agent import cancel as _turn_run
+
+    _run = _turn_run.current.get()
+    if _run is not None and not teammate_depth and job is None:
+        # A turn that is stopped or fails still saves where its time went (app/chat/routes.py, docs/ADMIN.md).
+        _run.timing = lambda: {**timer.summary(), "calls": ctx.call_timings[:30]}
     if plan.kind == fast_path.COMPUTER and not fast_path.is_computer_file_query(query.split("\n\n", 1)[0]):
         # Start the browser (and restore saved sign-ins) while the model plans its first step. Files don't need it.
         try:

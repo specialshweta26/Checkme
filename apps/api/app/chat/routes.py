@@ -532,7 +532,8 @@ async def chat(
                 raise run_cancel.TurnCancelled("stopped") from exc
             log.exception("chat agent failed")
             working_message.content = "I couldn't finish that request. You can retry or continue in this chat."
-            working_message.meta = {**(working_message.meta or {}), "in_progress": False, "failed": True}
+            working_message.meta = {**(working_message.meta or {}), "in_progress": False, "failed": True,
+                                    "timing": _timing_so_far(run, failed=True)}
             try:
                 await db.commit()
             finally:
@@ -1057,6 +1058,15 @@ def _pk(row):
     return identity[0] if identity else row.id
 
 
+def _timing_so_far(run, **flags) -> dict:
+    """Where a turn that didn't finish spent its time, for the admin "Reply times" (app/admin/latency.py)."""
+    try:
+        timing = dict(run.timing() or {}) if callable(getattr(run, "timing", None)) else {}
+    except Exception:  # noqa: BLE001
+        timing = {}
+    return {**timing, "reply_ms": int((time.time() - run.started) * 1000), **flags}
+
+
 async def _store_stopped(db, user, sess, working_message, progress, run, since, uploads) -> dict:
     """Persist the "Stopped" marker (keeping the partial reply), cancel jobs the turn started, clear approvals."""
     from app.jobs import service as jobs
@@ -1080,6 +1090,7 @@ async def _store_stopped(db, user, sess, working_message, progress, run, since, 
                 "stopped_reason": run.reason or "stopped",
                 "steps": steps,
                 "pending_confirms": [],
+                "timing": _timing_so_far(run, stopped=run.reason or "stopped"),
             }
             sess.updated_at = datetime.now(timezone.utc)
             await jobs.stop_chat_jobs(db, user_id, session_id, since=since)
