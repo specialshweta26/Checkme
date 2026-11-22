@@ -147,8 +147,32 @@ CREATE_AUTOMATION = ToolSpec(
             "condition": {"type": "string"},
             "action": {"type": "string"},
             "requires_approval": {"type": "boolean", "default": True},
+            "trigger_type": {"type": "string", "enum": ["schedule", "webhook", "mail", "meeting", "page", "inbox"]},
         },
         "required": ["name", "trigger", "action"],
+        "additionalProperties": False,
+    },
+    group="staff",
+    read_only=False,
+    tags=("mail",),
+)
+
+UPDATE_AUTOMATION = ToolSpec(
+    "update_automation",
+    "Change one of the user's automations by the number id list_automations shows: turn it on or off, ask first or send directly (requires_approval), edit its action, condition or trigger, or delete it.",
+    {
+        "type": "object",
+        "properties": {
+            "automation_id": {"type": "integer"},
+            "enabled": {"type": "boolean"},
+            "requires_approval": {"type": "boolean"},
+            "action": {"type": "string"},
+            "condition": {"type": "string"},
+            "trigger": {"type": "string"},
+            "name": {"type": "string"},
+            "delete": {"type": "boolean"},
+        },
+        "required": ["automation_id"],
         "additionalProperties": False,
     },
     group="staff",
@@ -185,6 +209,7 @@ VIRTUAL_MAIL_TOOLS = [
     LIST_SCHEDULED_TASKS,
     UPDATE_SCHEDULED_TASK,
     CREATE_AUTOMATION,
+    UPDATE_AUTOMATION,
     LIST_AUTOMATIONS,
     LEARN_VOICE,
 ]

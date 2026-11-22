@@ -26,6 +26,7 @@ STAFF_TOOLS = {
     "list_scheduled_tasks",
     "update_scheduled_task",
     "create_automation",
+    "update_automation",
     "list_automations",
     "learn_voice",
 }
@@ -57,6 +58,8 @@ async def dispatch(db: AsyncSession, user, runtime, tool: str, args: dict, agent
         return await update_scheduled_task(db, user, args)
     if tool == "create_automation":
         return await create_automation(db, user, args, agent=agent)
+    if tool == "update_automation":
+        return await update_automation(db, user, args)
     if tool == "list_automations":
         return await list_automations(db, user.id, agent_id=getattr(agent, "id", None) if agent is not None else None)
     if tool == "learn_voice":
@@ -296,6 +299,13 @@ async def list_scheduled_tasks(db, user, agent=None) -> dict:
 async def update_scheduled_task(db, user, args: dict) -> dict:
     from app.tasks.service import set_status
 
+    raw = str(args.get("task_id") or "").strip()
+    if raw.isdigit():  # an automation's id (list_automations): scheduled tasks have UUIDs
+        status = str(args.get("status") or "").lower()
+        change = {"automation_id": raw}
+        if status in ("active", "paused"):
+            change["enabled"] = status == "active"
+        return await update_automation(db, user, {**args, **change})
     try:
         task_id = uuid.UUID(str(args.get("task_id") or ""))
         return await set_status(db, user, task_id, args.get("status") or "")
@@ -335,7 +345,7 @@ async def create_automation(db, user, args: dict, agent=None) -> dict:
                 condition=args.get("condition") or "",
                 action=args.get("action") or "",
                 agent_id=getattr(owner, "id", None) if owner is not None else None,
-                requires_approval=bool(args.get("requires_approval", True)),
+                requires_approval=_as_bool(args.get("requires_approval", True)) is not False,
             )
         except ValueError as exc:
             return {"error": str(exc)}
@@ -360,10 +370,14 @@ async def create_automation(db, user, args: dict, agent=None) -> dict:
                 action=args.get("action") or "",
                 agent=agent,
                 every_minutes=args.get("every_minutes"),
+                requires_approval=_as_bool(args.get("requires_approval", True)) is not False,
             )
         except ValueError as exc:
             return {"error": str(exc)}
         note = "It asks the user before any sensitive action."
+        if not made.get("requires_approval", True):
+            note = ("It sends to the user directly without asking. Anything for someone else, or any change or delete, "
+                    "still asks first.")
         if trigger_type == "page":
             note = "The first check records the page; you wake up when it changes (or when the phrase appears). " + note
         return {"created": True, "trigger_type": trigger_type, "automation": made, "note": note}
@@ -378,7 +392,7 @@ async def create_automation(db, user, args: dict, agent=None) -> dict:
         trigger_type="schedule",
         condition=args.get("condition") or "",
         action=args.get("action") or "",
-        requires_approval=bool(args.get("requires_approval", True)),
+        requires_approval=_as_bool(args.get("requires_approval", True)) is not False,
         enabled=True,
     )
     db.add(row)
@@ -401,6 +415,78 @@ async def create_automation(db, user, args: dict, agent=None) -> dict:
                 out["scheduled_task"] = scheduled
         except Exception as exc:  # noqa: BLE001
             out["schedule_note"] = str(exc)[:200]
+    return out
+
+
+def _as_bool(value) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in ("true", "yes", "1", "on"):
+        return True
+    if text in ("false", "no", "0", "off"):
+        return False
+    return None
+
+
+async def update_automation(db, user, args: dict) -> dict:
+    """Change one of the user's automations (list_automations ids): turn it on or off, ask first or send directly,
+    edit its action, condition or trigger, or delete it."""
+    try:
+        automation_id = int(str(args.get("automation_id") or args.get("id") or "").strip())
+    except ValueError:
+        return {"error": "automation_id must be the number list_automations shows."}
+    row = await db.get(Automation, automation_id)
+    if row is None or row.user_id != user.id:
+        return {"error": "automation not found"}
+    if _as_bool(args.get("delete")):
+        name = row.name
+        await db.delete(row)
+        await db.commit()
+        return {"deleted": True, "id": automation_id, "name": name}
+    changed = []
+    enabled = _as_bool(args.get("enabled")) if "enabled" in args else None
+    if enabled is not None:
+        row.enabled = enabled
+        changed.append("enabled")
+    approval = _as_bool(args.get("requires_approval")) if "requires_approval" in args else None
+    note = ""
+    if approval is not None:
+        kind = getattr(row, "trigger_type", "schedule") or "schedule"
+        if approval is False and kind in ("page", "inbox"):
+            note = "Page and inbox watches always ask first."
+        else:
+            row.requires_approval = approval
+            changed.append("requires_approval")
+    for field, limit in (("action", 8000), ("condition", 4000), ("name", 200)):
+        if isinstance(args.get(field), str) and args[field].strip():
+            setattr(row, field, args[field].strip()[:limit])
+            changed.append(field)
+    if args.get("trigger") not in (None, ""):
+        kind = getattr(row, "trigger_type", "schedule") or "schedule"
+        if kind == "meeting":
+            from app.automations.triggers import minutes_before
+
+            row.trigger = str(minutes_before(args["trigger"]))
+        else:
+            row.trigger = str(args["trigger"]).strip()[:200]
+        changed.append("trigger")
+    if not changed:
+        return {"error": note or "Nothing to change: pass enabled, requires_approval, action, condition, trigger, name or delete."}
+    await db.commit()
+    out = {
+        "updated": True,
+        "changed": changed,
+        "automation": {
+            "id": row.id, "name": row.name, "trigger_type": getattr(row, "trigger_type", "schedule"), "trigger": row.trigger,
+            "enabled": row.enabled, "requires_approval": row.requires_approval,
+        },
+    }  # fmt: skip
+    if note:
+        out["note"] = note
+    if not row.requires_approval:
+        out["note"] = ("It sends to the user directly without asking. Anything for someone else, or any change or delete, "
+                       "still asks first.")  # fmt: skip
     return out
 
 

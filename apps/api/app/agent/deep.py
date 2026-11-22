@@ -2379,23 +2379,43 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
         return {"error": str(exc)[:300]}
 
 
+def _approval_off_refused(ctx: RunContext, name: str, args: dict) -> dict | None:
+    """Only the user, in their own chat, can turn off an automation's ask-first: not an unattended run (a schedule or
+    an event job) and not a turn that has read other people's content (mail, pages, connector results), where the
+    request could have come from that content."""
+    if name not in ("create_automation", "update_automation"):
+        return None
+    from app.agent.staff import _as_bool
+
+    if "requires_approval" not in args or _as_bool(args.get("requires_approval")) is not False:
+        return None
+    if ctx.auto_confirm or ctx.job is not None or ctx.untrusted_seen or ctx.injections:
+        return {"error": "Turning off ask-first must come straight from the user: ask them to say it in a new message, "
+                         "then call this again before reading anything else."}  # fmt: skip
+    return None
+
+
 async def run_staff(ctx: RunContext, name: str, args: dict | None = None) -> Any:
     if name not in STAFF_TOOLS:
         return {"error": f"unknown staff tool {name}", "available": sorted(STAFF_TOOLS)}
     ctx.used_tools.append(name)
+    refused = _approval_off_refused(ctx, name, as_dict(args))
+    if refused:
+        return refused
     runtime = _mail_runtime(ctx)
     if runtime is None and name not in {
         "schedule_task",
         "list_scheduled_tasks",
         "update_scheduled_task",
         "create_automation",
+        "update_automation",
         "list_automations",
         "list_commitments",
     }:
         return {"error": "No mail connector is enabled for this user."}
     try:
         result = await staff_dispatch(ctx.db, ctx.user, runtime, name, as_dict(args), agent=ctx.agent, session_id=ctx.session_id)
-        if name not in {"schedule_task", "list_scheduled_tasks", "update_scheduled_task", "create_automation", "list_automations"}:
+        if name not in {"schedule_task", "list_scheduled_tasks", "update_scheduled_task", "create_automation", "update_automation", "list_automations"}:
             note_untrusted(ctx)  # briefings and inbox answers carry mail other people wrote
         ctx.sources.append({"source_tool": name, "args": as_dict(args), "snippet": compact_payload(result, 2000)})
         from app.agent import injection
@@ -2432,13 +2452,13 @@ class StaffInput(BaseModel):
     name: str = Field(
         description=(
             "today_briefing, ask_inbox, scan_commitments, list_commitments, scan_admin, "
-            "schedule_task, list_scheduled_tasks, update_scheduled_task, create_automation, "
-            "list_automations, or learn_voice."
+            "schedule_task, list_scheduled_tasks, update_scheduled_task (scheduled tasks: UUID ids), create_automation, "
+            "update_automation (automations: the number ids list_automations shows), list_automations, or learn_voice."
         )
     )
     args: dict[str, Any] = Field(
         default_factory=dict,
-        description="For create_automation: name, trigger, condition, action, requires_approval, and optional trigger_type='webhook' plus agent_name, 'mail' (trigger is the sender: an address, @domain or name), 'meeting' (trigger is the minutes before each meeting), 'page' (trigger is a public page address; condition is an optional phrase to wait for; every_minutes 15-1440) or 'inbox' (trigger is how many waiting inbox cards is too many). Webhook trigger must be an exact event type such as issues or push.",
+        description="For create_automation: name, trigger, condition, action, requires_approval, and optional trigger_type='webhook' plus agent_name, 'mail' (trigger is the sender: an address, @domain or name), 'meeting' (trigger is the minutes before each meeting), 'page' (trigger is a public page address; condition is an optional phrase to wait for; every_minutes 15-1440) or 'inbox' (trigger is how many waiting inbox cards is too many). Webhook trigger must be an exact event type such as issues or push. For update_automation: automation_id plus any of enabled, requires_approval, action, condition, trigger, name, or delete:true.",
     )
 
 
@@ -3869,7 +3889,10 @@ def system_prompt(
         "If you cannot tell which connector fits, ask the user.\n"
         "Destructive connector actions still need call_tool; the app asks the user to confirm.\n"
         "If the user wants work done later (email a report in N minutes, tonight, every day), schedule_task and do not fetch now. "
-        "For 'when mail from X arrives' or 'before each meeting', use run_staff_tool(name='create_automation', args={trigger_type:'mail' or 'meeting', name, trigger, condition, action}). "
+        "For 'when mail from X arrives' or 'before each meeting', use run_staff_tool(name='create_automation', args={trigger_type:'mail' or 'meeting', name, trigger, condition, action}); "
+        "when the user says to send it to them directly or not to ask, add requires_approval:false (it then sends to the user without asking; anything for someone else still asks). "
+        "To change an existing automation (turn it on or off, send directly, edit, delete) use run_staff_tool(name='update_automation', args={automation_id, ...}) with the id from list_automations; "
+        "never create a second one to change the first, and if you did, delete the extra. "
         "For 'watch this page / tell me when X changes or appears' use trigger_type:'page' (trigger: the page address, condition: the phrase to wait for or empty for any change, every_minutes); "
         "for 'tell me when my inbox has more than N waiting' use trigger_type:'inbox' (trigger: N). "
         "For other event-driven work, create a webhook automation with run_staff_tool(name='create_automation', args={trigger_type:'webhook', name, trigger:<exact event name>, condition, action, requires_approval:true}). "

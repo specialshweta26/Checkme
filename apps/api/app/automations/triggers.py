@@ -1,7 +1,10 @@
 """Standing triggers on the user's own mail and calendar: "when mail from X arrives" and "before each meeting".
 
 Mail is checked right after each inbox sync, so a trigger can lag by about the sync interval. Meetings are checked
-every minute. Mail and meeting text comes from other people, so these jobs always ask before a sensitive action.
+every minute. Mail and meeting text comes from other people, so a run is treated as having read third-party content
+from the start. With ``requires_approval`` off (the user asked for it to be sent directly) the run may still only send
+to the user's own addresses without asking (deep.may_self_approve); anything for someone else, any change or delete,
+and anything after injected instructions still asks. Page and inbox watches always ask.
 """
 
 from __future__ import annotations
@@ -43,6 +46,7 @@ async def create_trigger(
     condition: str = "",
     agent: Any = None,
     every_minutes: Any = None,
+    requires_approval: bool = True,
 ) -> dict:
     """Create a mail, meeting or watch trigger. `trigger` is the sender to match, the minutes before a meeting, the
     page address (page watch) or how many waiting inbox cards is too many (inbox watch)."""
@@ -79,7 +83,7 @@ async def create_trigger(
         trigger_type=trigger_type,
         condition=(condition or "").strip()[:4000],
         action=action_text,
-        requires_approval=True,  # see the module docstring
+        requires_approval=bool(requires_approval) or trigger_type not in ("mail", "meeting"),  # see the module docstring
         enabled=True,
         every_minutes=watches.every(every_minutes) if trigger_type == "page" else 60,
         state={},
