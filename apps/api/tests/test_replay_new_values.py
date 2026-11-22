@@ -80,9 +80,7 @@ def test_calendar_cells_are_matched_by_their_date_label():
 
 
 def test_the_agent_is_told_how_to_handle_pickers_and_not_to_hand_over():
-    import inspect
+    from app.agent import prompt_rules
 
-    from app.agent import deep
-
-    src = inspect.getsource(deep)
+    src = prompt_rules.browser_rules()
     assert "opens a picker when clicked" in src and "Never hand the screen over because a form is awkward" in src

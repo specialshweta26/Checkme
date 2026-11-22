@@ -127,7 +127,13 @@ def load_tool(hidden: list[str]):
         group = (group or "").strip().lower()
         if group not in GROUPS:
             return {"error": f"Unknown group. Groups: {', '.join(hidden or GROUPS)}"}
-        return {"loaded": group, "note": "Those tools are available from your next step."}
+        out = {"loaded": group, "note": "Those tools are available from your next step."}
+        from app.agent import prompt_rules
+
+        rules = prompt_rules.for_group(group)  # left out of the system prompt with the tools (app/agent/prompt_rules.py)
+        if rules:
+            out["rules"] = rules
+        return out
 
     return StructuredTool.from_function(
         coroutine=use_tools,
