@@ -975,6 +975,30 @@ read the first page only, and the model could not add up thousands of rows itsel
   search shows them first as `gateway_advice` and `recommended`, and the `trace_id` goes on the execute call when
   execute takes one.
 
+### Tool search speed
+
+Reply times on live data-analysis turns showed `search_tools` 4–9 times per reply at 4–7 s each, and
+`get_tool_schema` 3–6 times at 3–5 s, mostly round trips to the gateways' catalogs:
+- **Gateways at the same time:** `search_user_tools` expanded each connected gateway's catalog one after another; now
+  all at once (`asyncio.gather`).
+- **Wordings:** a catalog lookup tries the full request, then shorter wordings. The first goes alone (it usually finds
+  the action); when it finds nothing, the other wordings go together instead of one after another.
+- **Once per turn, and cached:** `_catalog_search` keeps each catalog search and action description (`resolve`) for
+  the turn, and in the read cache for `CATALOG_CACHE_S` (600 s; 0 turns it off) across turns, per person and
+  connector. A write through that connector clears it, like any read cache entry. `get_tool_schema` and the checks
+  before `call_tool` (canonical name, gateway action args, read-only marks) reuse the same searches.
+
+### Big results
+
+A 100,000-row answer is about 20 MB of JSON. Fitting it for the model measured its size by encoding all of it several
+times (1.6 s), and the read cache encoded it once more only to drop it as too big (0.5 s): about 2 s of the app's own
+time per call. `app/agent/jsonsize.py` encodes in chunks and stops at the limit (5 ms for the same table, with the same
+answer); `fit_payload`, `compact_payload` and the read cache use it.
+
+A table cut by `TABLE_MAX_ROWS` / `TABLE_MAX_PAGES` used to come back marked complete when the tool gave no total
+(20 pages of 5,000 rows: exactly the row limit). Now it keeps `hasMore`, says `truncated`, and its note tells the agent
+to narrow the request or say the figures cover only those rows.
+
 ### Parallel tool calls
 
 When the model asks for several tools in one step, the agent framework runs them at the same time (measured: three

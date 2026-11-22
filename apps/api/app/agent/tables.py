@@ -150,11 +150,18 @@ async def all_pages(first: Any, args: dict, call: Callable[[dict], Awaitable[Any
                 break
             if not room():
                 break
+    # Stopped by the page or row limit while the table went on: say so, so the answer isn't taken as the whole table.
+    cut = (more and step > 0 and (pages >= max_pages or len(rows) >= max_rows)) or (total is not None and len(rows) < total)
     rows = rows[:max_rows]
     merged = {**first, key: rows, "returnedRows": len(rows), "offset": start, "pages_fetched": pages}
     for flag in _MORE:
         if flag in merged:
-            merged[flag] = bool(total is not None and len(rows) < total)
+            merged[flag] = bool(cut)
+    if cut:
+        merged["truncated"] = True
+        merged["note"] = (f"Only the first {len(rows)} rows were read (the limit is TABLE_MAX_ROWS={max_rows} rows, "
+                          f"TABLE_MAX_PAGES={max_pages} pages); the table has more. Narrow the request (dates, filters, a "
+                          "grouped or summary tool) for complete totals, or say the figures cover only these rows.")  # fmt: skip
     return merged
 
 

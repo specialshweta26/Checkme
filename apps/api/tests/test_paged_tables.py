@@ -191,3 +191,20 @@ async def test_a_table_without_a_total_is_read_ahead_in_parallel(monkeypatch):
     out = await tables.all_pages(await call({"offset": 0, "limit": 5}), {}, call)
     assert out["data"] == list(range(100)) and out["pages_fetched"] == 20
     assert state["peak"] > 1 and state["calls"] <= 20 + 6  # a few reads past the end at most
+
+
+async def test_a_table_cut_by_the_row_limit_says_so(monkeypatch):
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "table_max_rows", 30)
+
+    async def call(args):  # no total, 100 rows, 5 a page
+        at = args["offset"]
+        rows = list(range(at, min(at + 5, 100)))
+        return {"offset": at, "hasMore": at + len(rows) < 100, "data": rows}
+
+    out = await tables.all_pages(await call({"offset": 0, "limit": 5}), {}, call)
+    assert len(out["data"]) == 30 and out["hasMore"] is True and out["truncated"] is True and "TABLE_MAX_ROWS" in out["note"]
+    monkeypatch.setattr(get_settings(), "table_max_rows", 100_000)
+    whole = await tables.all_pages(await call({"offset": 0, "limit": 5}), {}, call)
+    assert len(whole["data"]) == 100 and whole["hasMore"] is False and "truncated" not in whole
