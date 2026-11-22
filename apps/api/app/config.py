@@ -181,6 +181,11 @@ class Settings(BaseSettings):
     tavily_raw_content: bool = True
     # Fast answers (docs/LLD.md §7.7): quick web turns never wait on the cloud computer.
     fast_path_enabled: bool = True
+    # Paged tables from a connector (app/agent/tables.py): how much to read and how many pages at once.
+    table_max_pages: int = 200
+    table_max_rows: int = 100_000
+    table_page_rows: int = 5000
+    table_page_concurrency: int = 6  # 1 = one page after another
     read_cache_s: int = 120  # keep a read-only tool result this long per user; 0 = off (app/agent/read_cache.py)
     voice_input: bool = True  # the chat's microphone button (app/voice/routes.py); needs OPENAI_API_KEY
     transcribe_model: str = "gpt-4o-mini-transcribe"

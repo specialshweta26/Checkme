@@ -10,15 +10,18 @@ arrays. Another MCP client read every page and added the rows up with code; Lumi
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections import defaultdict
 from typing import Any, Awaitable, Callable
 
 log = logging.getLogger(__name__)
 
-MAX_PAGES = 40
+# Defaults; TABLE_MAX_PAGES, TABLE_MAX_ROWS, TABLE_PAGE_ROWS and TABLE_PAGE_CONCURRENCY override them.
+MAX_PAGES = 200
 MAX_ROWS = 100_000
 PAGE_ROWS = 5000  # asked for on later pages; a tool that caps lower simply returns fewer
+PAGE_CONCURRENCY = 6
 _MORE = ("hasMore", "has_more", "more")
 _TOTAL = ("totalRows", "total_rows", "total", "totalCount", "total_count", "count")
 _LIST_KEYS = ("data", "rows", "items", "results", "records")
@@ -50,36 +53,110 @@ def is_paged(page: Any) -> bool:
     return total is not None and offset is not None and offset + len(rows) < total
 
 
+def _limits() -> tuple[int, int, int, int]:
+    """(max pages, max rows, rows asked per page, pages fetched at once), from the settings."""
+    try:
+        from app.config import get_settings
+
+        st = get_settings()
+        return (int(getattr(st, "table_max_pages", MAX_PAGES) or MAX_PAGES), int(getattr(st, "table_max_rows", MAX_ROWS) or MAX_ROWS),
+                int(getattr(st, "table_page_rows", PAGE_ROWS) or PAGE_ROWS),
+                max(1, int(getattr(st, "table_page_concurrency", PAGE_CONCURRENCY) or 1)))  # fmt: skip
+    except Exception:  # noqa: BLE001
+        return MAX_PAGES, MAX_ROWS, PAGE_ROWS, PAGE_CONCURRENCY
+
+
 async def all_pages(first: Any, args: dict, call: Callable[[dict], Awaitable[Any]]) -> Any:
     """``first`` with every remaining page's rows added. ``args`` are the arguments of the first call (the paging
-    parameters are set on them for each later page); ``call(args)`` runs the tool. Stops at MAX_PAGES / MAX_ROWS."""
+    parameters are set on them for each later page); ``call(args)`` runs the tool. Stops at the page and row limits.
+
+    The second page shows how many rows the tool really returns per page. When the first page gave the total, the
+    pages after it are fetched several at a time (``TABLE_PAGE_CONCURRENCY``): a 92,000-row table at 5,000 rows a page
+    took 19 calls one after another. A page that comes back short leaves a gap, which is then read in order, so the
+    merged table is the same as reading page by page."""
     if not is_paged(first):
         return first
+    max_pages, max_rows, page_rows, concurrency = _limits()
     key = _rows_key(first)
     rows = list(first.get(key) or [])
     total = _num(first, _TOTAL)
-    limit = max(_num(first, ("limit",)) or len(rows) or 1, PAGE_ROWS)
+    first_limit = _num(first, ("limit",))
+    limit = max(first_limit or len(rows) or 1, page_rows)
     offset = (_num(first, ("offset",)) or 0) + len(rows)
     pages = 1
-    page: Any = first
-    while pages < MAX_PAGES and len(rows) < MAX_ROWS and (total is None or offset < total):
-        nxt = {**args, "offset": offset, "limit": limit}
+    calls = {"more": True}
+
+    async def fetch(at: int, size: int) -> list | None:
+        nonlocal limit
         try:
-            page = await call(nxt)
+            page = await call({**args, "offset": at, "limit": size})
         except Exception:  # noqa: BLE001 - a tool that refuses the bigger page gets its own size
-            if limit != (_num(first, ("limit",)) or limit):
-                limit = _num(first, ("limit",)) or limit
-                continue
-            log.info("page at offset %s failed", offset, exc_info=True)
-            break
+            if first_limit and size != first_limit:
+                limit = first_limit
+                try:
+                    page = await call({**args, "offset": at, "limit": first_limit})
+                except Exception:  # noqa: BLE001
+                    log.info("page at offset %s failed", at, exc_info=True)
+                    return None
+            else:
+                log.info("page at offset %s failed", at, exc_info=True)
+                return None
         got = page.get(key) if isinstance(page, dict) else None
-        if not got:
-            break
-        rows.extend(got)
-        offset += len(got)
-        pages += 1
-        if not is_paged(page):
-            break
+        calls["more"] = is_paged(page)  # the page itself says whether more follow
+        return list(got) if got else []
+
+    async def in_order(until: int | None) -> bool:
+        """Read pages one after another from ``offset`` up to ``until`` (or the end). False when the tool stopped."""
+        nonlocal offset, pages
+        while pages < max_pages and len(rows) < max_rows and (until is None or offset < until) and (total is None or offset < total):
+            size = limit if until is None else min(limit, until - offset)
+            got = await fetch(offset, size)
+            if not got:
+                return False
+            rows.extend(got)
+            offset += len(got)
+            pages += 1
+            if not calls["more"] and until is None:
+                return False
+        return True
+
+    # The second page, in order: it tells the page size the tool really uses.
+    step = 0
+    if total is not None and offset < total and pages < max_pages and len(rows) < max_rows:
+        before = len(rows)
+        got = await fetch(offset, limit)
+        if got:
+            rows.extend(got)
+            offset += len(got)
+            pages += 1
+            step = len(got) if calls["more"] else -1
+        elif got is None or len(rows) == before:
+            step = -1  # the tool stopped: nothing more to read
+    if total is not None and step > 0 and concurrency > 1 and offset < total:
+        last = min(total, (_num(first, ("offset",)) or 0) + max_rows)
+        starts = list(range(offset, last, step))[: max(0, max_pages - pages)]
+        sem = asyncio.Semaphore(concurrency)
+
+        async def one(at: int):
+            async with sem:
+                return at, await fetch(at, min(limit, step))
+
+        done = sorted(await asyncio.gather(*(one(at) for at in starts)), key=lambda x: x[0])
+        for at, got in done:
+            if at > offset and not await in_order(at):  # a short page left a gap: fill it in order
+                break
+            if at < offset or not got:
+                if not got:
+                    break
+                got = got[offset - at:]  # an overlap after a gap was filled
+            rows.extend(got)
+            offset += len(got)
+            pages += 1
+        if offset < total:
+            await in_order(None)
+    elif step >= 0:
+        await in_order(None)
+    rows = rows[:max_rows]
     merged = {**first, key: rows, "returnedRows": len(rows), "offset": _num(first, ("offset",)) or 0, "pages_fetched": pages}
     for flag in _MORE:
         if flag in merged:

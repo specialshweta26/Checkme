@@ -89,3 +89,82 @@ async def test_the_agents_call_reads_every_page(monkeypatch):
     assert len(stored["data"]) == TOTAL and len(sent) == 3
     assert sent[1]["tool_name"] == "get_data_daily" and sent[1]["arguments"]["offset"] == 3
     assert out["data"] == stored["data"] or out.get("partial")
+
+
+# --- reading pages several at a time -------------------------------------------------------------------------------
+
+
+def _table(total: int, cap: int, short_at: int | None = None):
+    """A tool over ``total`` rows that returns at most ``cap`` rows a page (fewer at ``short_at``), counting how many
+    calls run at once."""
+    state = {"now": 0, "peak": 0, "calls": 0}
+
+    async def call(args):
+        import asyncio
+
+        state["now"] += 1
+        state["calls"] += 1
+        state["peak"] = max(state["peak"], state["now"])
+        await asyncio.sleep(0.01)
+        state["now"] -= 1
+        at, size = args["offset"], min(args["limit"], cap)
+        if short_at is not None and at == short_at:
+            size = max(1, size // 2)
+        rows = list(range(at, min(at + size, total)))
+        return {"totalRows": total, "offset": at, "limit": size, "hasMore": at + len(rows) < total, "data": rows}
+
+    return call, state
+
+
+async def test_pages_are_read_several_at_a_time_and_merged_in_order(monkeypatch):
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "table_page_concurrency", 6)
+    call, state = _table(92_212, 5000)
+    first = await call({"offset": 0, "limit": 5000})
+    out = await tables.all_pages(first, {}, call)
+    assert out["data"] == list(range(92_212)) and out["hasMore"] is False and out["pages_fetched"] == 19
+    assert state["peak"] > 1 and state["calls"] == 19  # no page read twice
+
+
+async def test_a_short_page_leaves_no_gap(monkeypatch):
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "table_page_concurrency", 4)
+    call, _ = _table(50, 5, short_at=20)
+    out = await tables.all_pages(await call({"offset": 0, "limit": 5}), {}, call)
+    assert out["data"] == list(range(50)) and out["hasMore"] is False
+
+
+async def test_one_page_at_a_time_when_set_or_when_the_total_is_unknown(monkeypatch):
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "table_page_concurrency", 1)
+    call, state = _table(30, 4)
+    out = await tables.all_pages(await call({"offset": 0, "limit": 4}), {}, call)
+    assert out["data"] == list(range(30)) and state["peak"] == 1
+    monkeypatch.setattr(get_settings(), "table_page_concurrency", 6)
+    pages = iter([{"hasMore": True, "data": [3, 4]}, {"hasMore": False, "data": [5]}])
+
+    async def no_total(args):
+        return next(pages)
+
+    out = await tables.all_pages({"hasMore": True, "data": [1, 2]}, {}, no_total)
+    assert out["data"] == [1, 2, 3, 4, 5]
+
+
+async def test_a_failed_page_falls_back_to_reading_in_order(monkeypatch):
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "table_page_concurrency", 4)
+    call, _ = _table(40, 5)
+    failed = {"once": False}
+
+    async def flaky(args):
+        if args["offset"] == 25 and not failed["once"]:
+            failed["once"] = True
+            raise RuntimeError("busy")
+        return await call(args)
+
+    out = await tables.all_pages(await call({"offset": 0, "limit": 5}), {}, flaky)
+    assert out["data"] == list(range(40))
