@@ -974,6 +974,22 @@ read the first page only, and the model could not add up thousands of rows itsel
   search shows them first as `gateway_advice` and `recommended`, and the `trace_id` goes on the execute call when
   execute takes one.
 
+### Parallel tool calls
+
+When the model asks for several tools in one step, the agent framework runs them at the same time (measured: three
+1-second calls finish in about 1 second). The model can ask for that: OpenAI's `parallel_tool_calls` is on by default.
+Two things stopped it from helping:
+- **The database session:** every tool in a turn uses the turn's one `AsyncSession`, and a session can't run two
+  statements at once (`IllegalStateChangeError`). `RunContext` now wraps it in `SerialSession`
+  (`app/agent/serial_db.py`): its database methods take turns behind one lock, re-entrant within a task, while each
+  connector's network call, where the time goes, runs at the same time.
+- **The prompt:** it now says that calls that don't depend on each other's results (different connectors, metrics,
+  date ranges or periods to compare) go together in one step, and only a call whose input comes from an earlier result
+  waits for it.
+
+The computer and browser still take one action at a time (`computer_lock`), and actions that need approval still wait
+for it.
+
 ### Lean context
 
 Each model call used to carry about 24k tokens before the conversation started: a ~7.8k-token system prompt and ~16k

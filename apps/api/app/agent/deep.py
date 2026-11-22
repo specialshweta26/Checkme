@@ -147,6 +147,13 @@ class RunContext:
     fact_report: dict = field(default_factory=dict)  # figures checked against the data (agent/fact_check.py)
     turn_context: str = ""  # the per-turn part of the prompt, sent as a context message (agent/turn_context.py)
 
+    def __post_init__(self) -> None:
+        # Tool calls in one step run at the same time and all use this session: its statements take turns
+        # (app/agent/serial_db.py), so parallel connector calls don't break it.
+        from app.agent.serial_db import serial
+
+        self.db = serial(self.db)
+
 
 def _json_size(value: Any) -> int:
     try:
@@ -3791,7 +3798,9 @@ def system_prompt(
         "Search, resolve, list_mcps, and gateway__tool_search return catalogs, not answers. After you pick a data tool, call_tool it. "
         "If a data tool returns a snapshot or as-of date, report those figures and the as-of date — that is still the answer. "
         "If the first search is weak, search once more with the request worded differently, then call_tool. Do not stop on a catalog search.\n"
-        "Call tools as many times as the task needs — different connectors, different argument sets, different windows. Combine results yourself.\n"
+        "Call tools as many times as the task needs — different connectors, different argument sets, different windows. Combine results yourself. "
+        "Calls that don't depend on each other's results (different connectors, metrics, date ranges or periods to compare) go together in one step: "
+        "they run at the same time, so the answer comes back sooner. Only a call whose input comes from an earlier result waits for it.\n"
         "Gmail and Outlook are mail AND calendar. Never say there is no calendar connector when gmail or outlook is listed. "
         "Send mail with send_message. Create a calendar invite with create_event (attendees, start in IST). "
         "Google Meet or Teams calendar invites: create_google_meet on gmail, create_teams_meeting on outlook. "
