@@ -186,11 +186,13 @@ def outline(value: Any, depth: int = 0) -> Any:
 
 
 def compact_payload(value: Any, limit: int = MAX_TOOL_CHARS) -> Any:
-    if _json_size(value) <= limit:
+    from app.agent.jsonsize import fits, size_or_more
+
+    if fits(value, limit):
         return value
     return {
         "too_large": True,
-        "chars": _json_size(value),
+        "chars": size_or_more(value),
         "map": outline(value),
         "hint": (
             "The full result is stored. Call inspect_result with this result_id and a path or search "
@@ -276,16 +278,18 @@ def fit_payload(value: Any, limit: int = CONNECTOR_RESULT_CHARS) -> Any:
     """A connector's answer for the model: whole when it fits inline (as is, or with its record lists as tables);
     otherwise the real data with long lists cut to their first rows (as many as fit), saying how much was left out,
     with each table's totals still over every row. An outline only if even that won't fit."""
+    from app.agent.jsonsize import fits, size_or_more
+
     limit = min(limit, INLINE_RESULT_CHARS)
-    if _json_size(value) <= limit:
+    if fits(value, limit):  # stops counting at the limit: a 20 MB answer is not encoded whole to learn it is too big
         return value
     tabled = tabulate(value)
-    if _json_size(tabled) <= limit:
+    if fits(tabled, limit):
         return tabled
     for n in (500, 365, 200, 120, 100, 50, 25, 10, 5):
         shrunk, dropped = _cap_lists(tabled, n)
-        if _json_size(shrunk) <= limit:
-            return {"partial": True, "data": shrunk, "left_out_items": dropped, "chars": _json_size(value),
+        if fits(shrunk, limit):
+            return {"partial": True, "data": shrunk, "left_out_items": dropped, "chars": size_or_more(value),
                     "hint": f"Too big for one message, so each list shows its first {n} rows; column_totals still cover "
                             "every row. The full result is stored: for totals, counts or breakdowns over every row (also "
                             "when rows are plain arrays) call aggregate_result with this result_id; to read rows, "
@@ -513,6 +517,26 @@ async def _silent_call(ctx: RunContext, conn, tool_name: str, args: dict) -> Any
     return await invoke_named(ctx.db, ctx.user, conn, tool_name, args, ctx.attachments)
 
 
+async def _catalog_search(ctx: RunContext, conn, search_name: str, args: dict) -> Any:
+    """A gateway's catalog search, at most once per turn for the same arguments, and from the read cache across turns
+    (app/agent/read_cache.py). search_tools, get_tool_schema and the checks before call_tool all search the catalog,
+    often for the same words: each repeat was another 3-7 s round trip to the gateway."""
+    key = ("__search__", conn.slug, json.dumps([search_name, args], sort_keys=True, default=str))
+    if key in ctx.gateway_args:
+        return ctx.gateway_args[key]
+    from app.agent import read_cache
+
+    ttl = int(getattr(get_settings(), "catalog_cache_s", 600) or 0)
+    shared = ttl > 0 and ctx.call_impl is None and getattr(ctx.user, "id", None) is not None
+    raw = await read_cache.get(ctx.user.id, conn.slug, search_name, args, ttl=ttl) if shared else None
+    if raw is None:
+        raw = await _silent_call(ctx, conn, search_name, args)
+        if shared:
+            await read_cache.put(ctx.user.id, conn.slug, search_name, args, raw, ttl=ttl)
+    ctx.gateway_args[key] = raw
+    return raw
+
+
 async def _load_gateway_surface(ctx: RunContext, conn) -> dict:
     cached = ctx.gateway_surface.get(conn.slug)
     if cached:
@@ -571,14 +595,23 @@ async def _expand_gateway_catalog(ctx: RunContext, conn, query: str) -> list[dic
         except Exception:  # noqa: BLE001
             log.warning("composio list_connections failed on expand", exc_info=True)
     parsed: list[dict] = []
+    calls = []
     for q in queries:
         args = search_call_args(search_schema, q)
         if toolkit:
             args["toolkit"] = toolkit
-        try:
-            raw = await _silent_call(ctx, conn, search_name, args)
-        except Exception:  # noqa: BLE001
-            log.warning("gateway catalog search failed on %s", conn.slug, exc_info=True)
+        calls.append(args)
+    # The first wording alone (it usually finds the action); if it finds nothing, the other wordings at once instead
+    # of one after another. The first that finds something wins, in order, as before.
+    answers: list = []
+    for batch in (calls[:1], calls[1:]):
+        found = await asyncio.gather(*(_catalog_search(ctx, conn, search_name, a) for a in batch), return_exceptions=True)
+        answers.extend(found)
+        if any(isinstance(r, dict) and (slim_search(r, q).get("candidates") or []) for r, q in zip(found, queries[len(answers) - len(found):])):
+            break
+    for q, raw in zip(queries, answers):
+        if isinstance(raw, BaseException):
+            log.warning("gateway catalog search failed on %s: %s", conn.slug, raw)
             continue
         slim = slim_search(raw, q) if isinstance(raw, dict) else {"candidates": []}
         parsed = [item for item in (slim.get("candidates") or []) if isinstance(item, dict)]
@@ -1176,6 +1209,7 @@ async def search_user_tools(ctx: RunContext, query: str, connector_slug: str | N
         for i, hit in enumerate(hits)
     ]
     nested: list[dict] = []
+    expand = []
     for conn in conns:
         already = [
             row
@@ -1188,7 +1222,10 @@ async def search_user_tools(ctx: RunContext, query: str, connector_slug: str | N
             continue
         if connecting and getattr(conn, "provider", None) == "composio":
             continue
-        nested.extend(await _expand_gateway_catalog(ctx, conn, query))
+        expand.append(conn)
+    # Each gateway's catalog at the same time (they were searched one after another).
+    for rows in await asyncio.gather(*(_expand_gateway_catalog(ctx, c, query) for c in expand)):
+        nested.extend(rows)
     nested.sort(key=lambda row: float(row.get("score") or 0), reverse=True)
     nested_keys = {(row["connector_slug"], row["tool_name"]) for row in nested}
     data_local = [
@@ -1814,7 +1851,7 @@ async def get_user_tool_schema(ctx: RunContext, connector_slug: str, tool_name: 
             resolve = surface.get("resolve")
             if resolve:
                 try:
-                    raw = await _silent_call(
+                    raw = await _catalog_search(  # once per turn, and cached: describing an action changes nothing
                         ctx, conn, resolve, resolve_call_args(surface.get("resolve_schema"), tool_name)
                     )
                     shaped = _schema_from_resolve(connector_slug, tool_name, raw)

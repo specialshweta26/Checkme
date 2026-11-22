@@ -187,6 +187,7 @@ class Settings(BaseSettings):
     table_max_rows: int = 100_000
     table_page_rows: int = 5000
     table_page_concurrency: int = 6  # 1 = one page after another
+    catalog_cache_s: int = 600  # a gateway catalog search or action description, reused across turns; 0 = once per turn only
     read_cache_s: int = 120  # keep a read-only tool result this long per user; 0 = off (app/agent/read_cache.py)
     voice_input: bool = True  # the chat's microphone button (app/voice/routes.py); needs OPENAI_API_KEY
     transcribe_model: str = "gpt-4o-mini-transcribe"
