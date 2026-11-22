@@ -15,6 +15,7 @@ import { ReplyFeedback } from "../components/ReplyFeedback";
 import { JobTimeline } from "../components/JobTimeline";
 import SkillFlow from "../components/SkillFlow";
 import { Thinking } from "../components/Thinking";
+import { VoiceButton } from "../components/VoiceButton";
 import { GetStarted } from "../components/GetStarted";
 import { announceWorkspaceChanged, chatHref, deleteSession, getMe, isLumioDesktop, listSessions, loadSession, rememberScope, saveDownload, uploadFiles, startTeaching, stopTeaching, type ChatSessionRow, type Me, type UploadedFile, type WorkspaceRoster, sessionRatings } from "../lib";
 
@@ -1258,6 +1259,7 @@ export default function ChatPage() {
                 }
               }}
             />
+            <VoiceButton onText={(t) => setText((cur) => (cur.trim() ? `${cur.trim()} ${t}` : t))} />
             {busyHere && !text.trim() ? (
               <button
                 className="send stop"
