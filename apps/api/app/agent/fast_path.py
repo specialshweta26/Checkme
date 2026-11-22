@@ -142,7 +142,7 @@ def recency_for(query: str) -> tuple[str, bool]:
 
 
 _SMALL_TALK = re.compile(
-    r"\s*(hi|hey|hello|yo|hii+|namaste|thanks|thank you|thx|ok(?:ay)?|cool|great|nice|bye|good (?:morning|afternoon|evening|night)|"
+    r"\s*(hi+|hy+|hey+|heya|hiya|hai|hello+|helo+|hel+o+w*|hlo+|hlw|yo|namaste|hola|thanks|thank you|thx|ok(?:ay)?|cool|great|nice|bye|good (?:morning|afternoon|evening|night)|"
     r"how are you|how's it going|what's up|sup)(?:\s+(?:there|team|everyone|all))?[\s!.?]*",
     re.I,
 )

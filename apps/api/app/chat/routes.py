@@ -432,6 +432,8 @@ async def chat(
                 f"{agent_text}\n\n[Checkme: the user declined what the last reply prepared ({', '.join(declined[:4])}). "
                 "It was not run. Do not prepare or run it again in this reply; acknowledge briefly.]"
             )
+    if not resume_id and not interrupted:
+        agent_text = _after_stop_note(agent_text, history_rows)
 
     working = dict(sess.state or {})
     if confirms:
@@ -532,7 +534,8 @@ async def chat(
                 raise run_cancel.TurnCancelled("stopped") from exc
             log.exception("chat agent failed")
             working_message.content = "I couldn't finish that request. You can retry or continue in this chat."
-            working_message.meta = {**(working_message.meta or {}), "in_progress": False, "failed": True}
+            working_message.meta = {**(working_message.meta or {}), "in_progress": False, "failed": True,
+                                    "timing": _timing_so_far(run, failed=True)}
             try:
                 await db.commit()
             finally:
@@ -1049,12 +1052,35 @@ async def _settle_running(user, sess, mode: str | None) -> dict | None:
     return {"text": (getattr(last, "extra", None) or {}).get("text", ""), "partial": stopped.get("partial", ""), "steps": stopped.get("steps", [])}
 
 
+def _after_stop_note(agent_text: str, history_rows: list) -> str:
+    """A new message after the user stopped the last turn: say the stopped request stays stopped. Without this the
+    agent saw that request unanswered in the history and picked it up again on "hy" ("Continue" or "continue" is
+    what resumes it). The request's text stays out of the note: the message also routes skills and tools."""
+    last = next((m for m in history_rows if m.role == "assistant"), None)
+    meta = (last.meta or {}) if last is not None and isinstance(last.meta, dict) else {}
+    if not meta.get("stopped"):
+        return agent_text
+    return (
+        f"{agent_text}\n\n[Checkme: the user stopped your previous request in this chat. It stays stopped: do not "
+        "resume or redo it unless this message asks for it. Answer this message on its own.]"
+    )
+
+
 def _pk(row):
     """A row's id without touching the database: a rollback expires loaded rows, and reading a plain attribute of an
     expired row needs IO that isn't allowed there (MissingGreenlet)."""
     state = sa_inspect(row, raiseerr=False)
     identity = state.identity if state is not None else None
     return identity[0] if identity else row.id
+
+
+def _timing_so_far(run, **flags) -> dict:
+    """Where a turn that didn't finish spent its time, for the admin "Reply times" (app/admin/latency.py)."""
+    try:
+        timing = dict(run.timing() or {}) if callable(getattr(run, "timing", None)) else {}
+    except Exception:  # noqa: BLE001
+        timing = {}
+    return {**timing, "reply_ms": int((time.time() - run.started) * 1000), **flags}
 
 
 async def _store_stopped(db, user, sess, working_message, progress, run, since, uploads) -> dict:
@@ -1080,6 +1106,7 @@ async def _store_stopped(db, user, sess, working_message, progress, run, since, 
                 "stopped_reason": run.reason or "stopped",
                 "steps": steps,
                 "pending_confirms": [],
+                "timing": _timing_so_far(run, stopped=run.reason or "stopped"),
             }
             sess.updated_at = datetime.now(timezone.utc)
             await jobs.stop_chat_jobs(db, user_id, session_id, since=since)
