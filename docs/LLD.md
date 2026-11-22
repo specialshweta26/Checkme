@@ -1095,3 +1095,14 @@ See `.env.example`. Important knobs in `app/config.py`:
 | `COMPOSIO_GITHUB_AUTH_CONFIG_ID` | Optional: pin the GitHub auth config; a custom OAuth one with unmasked secrets enables real git clone/push |
 
 Do not commit `.env`.
+
+## Read cache and prompt cache
+
+- **Read cache** (`app/agent/read_cache.py`, `READ_CACHE_S`, default 120): a plain read-only tool result is reused for
+  that long, per user, for the exact connector, tool and arguments. Any other call to the connector by the user starts
+  a new generation, so a read after a write is fresh. The computer and browsers are never cached.
+- **Prompt cache key** (`PROMPT_CACHE_KEY`, on): each model call carries a hashed per-agent `prompt_cache_key`, so
+  OpenAI serves the agent's fixed prompt and tool schemas from its cache.
+- **Stable tool list** (`tool_scope.sticky`): a tool group shown once in a chat stays shown for that chat's later
+  turns. The tool schemas come first in the prompt, so a list that changed every turn missed the cache.
+- **Checks side by side**: the integrity check runs at the same time as the budget and role checks.

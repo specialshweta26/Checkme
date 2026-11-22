@@ -2219,7 +2219,17 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
             from app.connectors.daytona_box import set_computer_agent
 
             set_computer_agent(str(getattr(ctx.agent, "id", "") or ""), getattr(ctx.agent, "name", "") or "")
-        if ctx.call_impl is not None:
+        from app.agent import read_cache
+
+        cacheable = (not (destructive or git_write or unvetted or injected) and used_approval is None
+                     and not is_catalog_tool(tool_name) and _plain_read(tool_name, args, hit))  # fmt: skip
+        cached = await read_cache.get(ctx.user.id, connector_slug, tool_name, args) if cacheable else None
+        if not cacheable:
+            await read_cache.wrote(ctx.user.id, connector_slug)
+        if cached is not None:
+            result = cached
+            log.info("read cache hit: %s.%s", connector_slug, tool_name)
+        elif ctx.call_impl is not None:
             result = await ctx.call_impl(connector_slug, tool_name, args)
         else:
             async with waiting_on(ctx, conn, tool_name):
@@ -2231,6 +2241,8 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
                 wrong_dates = ignored_dates(args, result) if _is_user_mcp(conn) else ""
                 if wrong_dates:
                     result = await _note_ignored_args(ctx, conn, tool_name, args, result, wrong_dates)
+            if cacheable:
+                await read_cache.put(ctx.user.id, connector_slug, tool_name, args, result)
         # One approval, one action: running the same thing again needs a new card.
         approval.consume(ctx.confirmations, used_approval)
         note_untrusted(ctx, tool_name)
@@ -3852,7 +3864,19 @@ def system_prompt(
     )
 
 
-def _chat_model():
+def cache_key(ctx: "RunContext | None") -> str:
+    """One prompt-cache key per agent (or user): OpenAI routes requests with the same key to the same cache, so this
+    agent's fixed prompt and tool schemas are read from cache on the next turn. A hash, so no id leaves the server."""
+    import hashlib
+
+    agent = getattr(ctx, "agent", None) if ctx is not None else None
+    owner = getattr(agent, "id", None) or getattr(getattr(ctx, "user", None), "id", None)
+    if owner is None:
+        return ""
+    return "lumio-" + hashlib.sha256(str(owner).encode()).hexdigest()[:24]
+
+
+def _chat_model(ctx: "RunContext | None" = None):
     """gpt-6-luna function tools + reasoning only work on /v1/responses, not chat completions."""
     from app.llm import reasoning_payload
 
@@ -3860,6 +3884,9 @@ def _chat_model():
     effort = (s.openai_reasoning_effort or "").strip() or "none"
     reasoning = reasoning_payload()
     base = {"model": s.openai_model, "api_key": s.openai_api_key, "timeout": 120, "max_retries": 1}
+    key = cache_key(ctx) if getattr(s, "prompt_cache_key", True) else ""
+    if key:
+        base["model_kwargs"] = {"prompt_cache_key": key}
     if bool(getattr(s, "stream_tokens", True)):
         # Tokens reach the callbacks as they are generated (the chat shows the reply as it streams).
         base["streaming"] = True
@@ -3916,7 +3943,7 @@ def build_agent(ctx: RunContext, prompt: str):
 
     _exclude_shell()
     kwargs: dict[str, Any] = {
-        "model": _chat_model(),
+        "model": _chat_model(ctx),
         "tools": harness_tools(ctx),
         "system_prompt": prompt,
         # A chat turn's checkpoint lives for that turn, so hitting the step limit continues instead of starting over.
@@ -4502,19 +4529,23 @@ async def run_deep_agent(
     browser_token = agent_browsers.use(workspace_agent)  # its own browser, or the shared one (docs/AGENT_BROWSERS.md)
     from app.connectors.mcp_client import turn_sessions
 
+    integrity_task = None
     try:
+        # The integrity check needs no database, so it runs beside the budget and role checks (each may wait on a
+        # small model): a turn waits for the slower one, not both. Its refusal still wins.
         if not confirmations:
-            refused = await _integrity_block(query, history)
+            integrity_task = asyncio.create_task(_integrity_block(query, history))
+        early: dict | None = None
+        if job is None and workspace_agent is not None:
+            early = await _budget_block(db, workspace_agent)
+            if early is None and not teammate_depth and not confirmations and group is None:
+                early = await _role_block(db, user, workspace_agent, query, history)
+        if integrity_task is not None:
+            refused = await integrity_task
             if refused is not None:
                 return refused
-        if job is None and workspace_agent is not None:
-            blocked = await _budget_block(db, workspace_agent)
-            if blocked is not None:
-                return blocked
-            if not teammate_depth and not confirmations and group is None:
-                redirect = await _role_block(db, user, workspace_agent, query, history)
-                if redirect is not None:
-                    return redirect
+        if early is not None:
+            return early
         async with turn_sessions():  # one MCP session per connector for the whole turn (docs/LLD.md)
             return await _run_deep_agent(
                 db,
@@ -4538,6 +4569,8 @@ async def run_deep_agent(
                 untrusted_input,
             )
     finally:
+        if integrity_task is not None and not integrity_task.done():
+            integrity_task.cancel()
         if agent_token is not None:
             AGENT.reset(agent_token)
         agent_browsers.BROWSER_SPACE.reset(browser_token)
@@ -4872,6 +4905,7 @@ async def _run_deep_agent(
         query, history, plan.kind,
         full=bool(matched_skills or ctx.task_state or job is not None or teammate_depth or _coding_agent(workspace_agent)),
     )  # fmt: skip
+    ctx.hidden_tools = await tool_scope.sticky(session_id, ctx.hidden_tools, teammate_depth or job is not None)
     if ctx.hidden_tools:
         ctx.turn_context = (ctx.turn_context + "\n\n" + tool_scope.context_note(ctx.hidden_tools)).strip()
     graph = build_agent(ctx, prompt)

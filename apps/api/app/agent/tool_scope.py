@@ -179,3 +179,31 @@ def middleware(hidden: list[str]):
             return await handler(self._request(request))
 
     return ToolScope()
+
+
+STICKY_TTL_S = 6 * 3600
+
+
+async def sticky(session_id, hidden: list[str], skip: bool = False) -> list[str]:
+    """Keep a conversation's tool list stable: a group shown once in this chat stays shown for its later turns.
+
+    The provider caches a prompt only up to the first difference, and the tool schemas come before everything else, so
+    a tool list that changed every turn re-billed the whole fixed prompt. Growing it only once per group keeps the cache
+    hit on the turns after. Never raises: without Redis each turn scopes on its own, as before.
+    """
+    if skip or session_id is None:
+        return hidden
+    try:
+        from app.cache import get_redis
+
+        r = get_redis()
+        key = f"tools-shown:{session_id}"
+        shown = {x.decode() if isinstance(x, bytes) else str(x) for x in (await r.smembers(key) or set())}
+        kept = [g for g in hidden if g not in shown]
+        visible = [g for g in GROUPS if g not in kept]
+        if visible:
+            await r.sadd(key, *visible)
+            await r.expire(key, STICKY_TTL_S)
+        return kept
+    except Exception:  # noqa: BLE001
+        return hidden
