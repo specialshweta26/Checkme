@@ -1,6 +1,7 @@
 "use client";
 
-import { FormEvent, useEffect, useRef, useState, type CSSProperties } from "react";
+import { FormEvent, Fragment, useEffect, useRef, useState, type CSSProperties } from "react";
+import { dayLabel, msgFull, msgTime, replyDelay, startsNewDay } from "./time";
 import { AttachmentWidget } from "../AttachmentWidget";
 import { ChiefAlerts } from "../components/ChiefAlerts";
 import { AppShell } from "../components/AppShell";
@@ -457,7 +458,7 @@ export default function ChatPage() {
       }
     }
     const pendingFiles = uploads;
-    const userTurn: Msg = { role: "user", content: message || "Attached files", meta: pendingFiles.length ? { uploads: pendingFiles } : undefined };
+    const userTurn: Msg = { role: "user", content: message || "Attached files", meta: { at: new Date().toISOString(), ...(pendingFiles.length ? { uploads: pendingFiles } : {}) } };
     const nextMessages = [...(opts.messages ?? messages), userTurn];
     setWatching(true);
     inflightRef.current.add(key);
@@ -543,6 +544,7 @@ export default function ChatPage() {
           role: "assistant" as const,
           content: item.text || "",
           meta: {
+            at: new Date().toISOString(),
             agent_id: item.agent_id,
             agent_name: item.agent_name,
             agent_color: item.agent_color,
@@ -556,7 +558,7 @@ export default function ChatPage() {
       const ownerTurn: Msg = {
         role: "assistant",
         content: data.text || "",
-        meta: { ...data, connect_cards: cardsFromMeta(data) },
+        meta: { ...data, at: new Date().toISOString(), connect_cards: cardsFromMeta(data) },
       };
       const doneMessages: Msg[] = loaded?.messages?.length
         ? loaded.messages
@@ -598,7 +600,7 @@ export default function ChatPage() {
           : err.message || "Something went wrong";
         const failView: AgentView = {
           sessionId,
-          messages: [...nextMessages, { role: "assistant", content, meta: { failed: true, can_continue: lostInTransit(err) } }],
+          messages: [...nextMessages, { role: "assistant", content, meta: { failed: true, can_continue: lostInTransit(err), at: new Date().toISOString() } }],
           pending: [],
         };
         viewsRef.current[key] = failView;
@@ -1045,9 +1047,15 @@ export default function ChatPage() {
                 </div>
               </div>
             ) : null}
-            {messages.map((m, i) =>
-              m.role === "user" ? (
-                <div key={i} className="turn user">
+            {messages.map((m, i) => (
+              <Fragment key={i}>
+              {startsNewDay(messages, i) ? (
+                <div className="day-divider" role="separator">
+                  <span>{dayLabel(m.meta?.at)}</span>
+                </div>
+              ) : null}
+              {m.role === "user" ? (
+                <div className="turn user">
                   {m.meta?.uploads?.length ? (
                     <div className="user-files">
                       {m.meta.uploads.map((file: UploadedFile) => (
@@ -1064,9 +1072,14 @@ export default function ChatPage() {
                     </div>
                   ) : null}
                   {m.content && m.content !== "Attached files" ? <div className="bubble">{m.content}</div> : null}
+                  {msgTime(m.meta?.at) ? (
+                    <time className="turn-time" dateTime={String(m.meta.at)} title={msgFull(m.meta.at)}>
+                      {msgTime(m.meta.at)}
+                    </time>
+                  ) : null}
                 </div>
               ) : (
-                <div key={i} className={`turn assistant${m.meta?.agent_name || !activeGroup ? " speaker" : ""}`}>
+                <div className={`turn assistant${m.meta?.agent_name || !activeGroup ? " speaker" : ""}`}>
                   {(() => {
                     const responseColor = String(m.meta?.agent_color || activeAgent?.color || screenColor || "#f97316");
                     const responseName = String(m.meta?.agent_name || (activeGroup ? "" : screenName));
@@ -1112,6 +1125,12 @@ export default function ChatPage() {
                       after={Number(m.meta.job_after) || 0}
                       onSettled={() => reloadSession(sessionId)}
                     />
+                  ) : null}
+                  {msgTime(m.meta?.at) && !m.meta?.in_progress ? (
+                    <time className="turn-time" dateTime={String(m.meta.at)} title={msgFull(m.meta.at)}>
+                      {msgTime(m.meta.at)}
+                      {replyDelay(messages, i) ? ` · replied in ${replyDelay(messages, i)}` : ""}
+                    </time>
                   ) : null}
                   {sourceLabel(m.meta) ? <div className="source-chip">{sourceLabel(m.meta)}</div> : null}
                   {usageLabel(m.meta?.usage) ? (
@@ -1159,8 +1178,9 @@ export default function ChatPage() {
                     </div>
                   ) : null}
                 </div>
-              ),
-            )}
+              )}
+              </Fragment>
+            ))}
             {busyHere ? <Thinking
                 steps={progress[currentKey]?.steps}
                 hint={progress[currentKey]?.hint}
