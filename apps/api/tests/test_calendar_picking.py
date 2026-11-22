@@ -61,6 +61,6 @@ def test_pick_date_is_a_step_the_fast_loop_and_recordings_know():
 def test_the_agent_is_told_to_use_pick_date():
     import inspect
 
-    from app.agent import deep, harness_extra
+    from app.agent import harness_extra, prompt_rules
 
-    assert "pick_date" in inspect.getsource(deep) and "pick_date" in inspect.getsource(harness_extra)
+    assert "pick_date" in prompt_rules.browser_rules() and "pick_date" in inspect.getsource(harness_extra)

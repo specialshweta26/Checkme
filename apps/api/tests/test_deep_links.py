@@ -28,8 +28,6 @@ def test_working_pages_and_home_pages_are_left_alone():
 
 
 def test_the_prompt_tells_the_agent_to_use_the_site_itself():
-    import inspect
+    from app.agent import prompt_rules
 
-    from app.agent import deep
-
-    assert "deep_link_failed" in inspect.getsource(deep)
+    assert "deep_link_failed" in prompt_rules.browser_rules()
