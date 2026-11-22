@@ -5,6 +5,7 @@ import contextlib
 import json
 import logging
 import re
+import time as _time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -109,6 +110,8 @@ class RunContext:
     gateway_args: dict = field(default_factory=dict)
     # Tool groups this turn starts without (app/agent/tool_scope.py); use_tools loads one.
     hidden_tools: list = field(default_factory=list)
+    # One entry per connector call this turn: connector, tool, how long the first answer and its other pages took.
+    call_timings: list = field(default_factory=list)
     agent: Any = None
     group: Any = None
     teammates: list = field(default_factory=list)
@@ -2229,13 +2232,20 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
         if cached is not None:
             result = cached
             log.info("read cache hit: %s.%s", connector_slug, tool_name)
+            ctx.call_timings.append({"connector": connector_slug, "tool": tool_name, "ms": 0, "cached": True})
         elif ctx.call_impl is not None:
             result = await ctx.call_impl(connector_slug, tool_name, args)
         else:
             async with waiting_on(ctx, conn, tool_name):
+                _t0 = _time.monotonic()
                 result = await invoke_named(ctx.db, ctx.user, conn, tool_name, args, ctx.attachments)
+                timing = {"connector": connector_slug, "tool": tool_name, "first_ms": int((_time.monotonic() - _t0) * 1000)}
                 if _is_user_mcp(conn):
                     result = await _read_all_pages(ctx, conn, tool_name, args, result)
+                    if isinstance(result, dict) and result.get("pages_fetched"):
+                        timing["pages"] = result["pages_fetched"]
+                timing["ms"] = int((_time.monotonic() - _t0) * 1000)
+                ctx.call_timings.append(timing)  # admin "Reply times" (app/admin/latency.py)
                 from app.connectors.mcp_client import ignored_dates
 
                 wrong_dates = ignored_dates(args, result) if _is_user_mcp(conn) else ""
@@ -4648,7 +4658,6 @@ async def _run_deep_agent(
 ) -> dict[str, Any]:
     from app.connectors.platform import ensure_platform_connectors
 
-    import time as _time
 
     from app.agent import fast_path
     from app.agent.coding import is_coding_agent as _coding_agent
@@ -5012,7 +5021,7 @@ async def _run_deep_agent(
         "repo": ctx.repo,
         "thread": list(ctx.thread),
         "files_seen": list(ctx.files_seen),
-        "timing": timer.summary(),
+        "timing": {**timer.summary(), "calls": ctx.call_timings[:30]},
         "tool_digest": digest,
         "fact_check": ctx.fact_report or None,
     }

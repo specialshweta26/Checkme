@@ -19,7 +19,7 @@ from app.auth import access
 from app.config import get_settings
 from app.db import get_db
 from app.deps import current_user
-from app.models import AuditEvent, AuthSession, SignupInvite, UsageDaily, User
+from app.models import AuditEvent, AuthSession, ChatMessage, SignupInvite, UsageDaily, User
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -142,6 +142,25 @@ def _clean_invite(value: str) -> str:
     if not ok or len(v) > 320:
         raise HTTPException(400, "Enter an email address or a domain like acme.com.")
     return v
+
+
+@router.get("/latency")
+async def latency(days: int = 1, _: User = Depends(admin_user), db: AsyncSession = Depends(get_db)):
+    """Reply times (app/admin/latency.py): how many chat replies took longer than REPLY_TARGET_S, and what took the
+    slowest ones their time. Message text is never returned."""
+    from app.admin import latency as lat
+
+    since = datetime.now(timezone.utc) - timedelta(days=max(1, min(days, 30)))
+    rows = (
+        await db.execute(
+            select(ChatMessage.created_at, User.email, ChatMessage.meta["timing"])
+            .join(User, User.id == ChatMessage.user_id)
+            .where(ChatMessage.role == "assistant", ChatMessage.created_at >= since, ChatMessage.meta.has_key("timing"))
+            .order_by(ChatMessage.created_at.desc())
+            .limit(5000)
+        )
+    ).all()
+    return lat.summarize([tuple(r) for r in rows], float(get_settings().reply_target_s or 45))
 
 
 @router.get("/invites")

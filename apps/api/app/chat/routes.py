@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 import uuid
 from typing import Any
 from datetime import datetime, timezone
@@ -257,7 +258,7 @@ async def session_messages(session_id: uuid.UUID, user: User = Depends(current_u
         },
         # Every reply carries its turn id, so it can be rated (app/quality) even when it was saved without one in meta.
         "messages": [
-            {"role": m.role, "content": m.content, "meta": {**(m.meta or {}), "request_id": (m.meta or {}).get("request_id") or m.request_id or None,
+            {"role": m.role, "content": m.content, "meta": {**{k: v for k, v in (m.meta or {}).items() if k != "timing"}, "request_id": (m.meta or {}).get("request_id") or m.request_id or None,
                                                        "at": m.created_at.isoformat() if m.created_at else None}}
             for m in rows
             if m.role in ("user", "assistant")
@@ -283,6 +284,7 @@ async def chat(
     user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    received = time.monotonic()  # the reply's time is counted from here (meta.timing.reply_ms)
     if await rate_limited(f"chat:{user.id}", get_settings().chat_rate_limit_per_minute):
         raise HTTPException(429, "Too many messages. Wait a minute.")
     from app.agent.meter import CAP_MESSAGE, over_user_cap
@@ -579,6 +581,8 @@ async def chat(
                 "usage": result.get("usage"),
                 "tool_digest": result.get("tool_digest") or [],
                 **({"fact_check": result["fact_check"]} if result.get("fact_check") else {}),
+                # Where the reply's time went, for the admin "Reply times" view (app/admin/latency.py).
+                "timing": {**(result.get("timing") or {}), "reply_ms": int((time.monotonic() - received) * 1000)},
             }
             if isinstance(result.get("question"), dict) and result["question"].get("options"):
                 # ask_user in a chat turn: the web shows the options as buttons that send the option text.

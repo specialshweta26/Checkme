@@ -31,8 +31,31 @@ type Person = {
 };
 type Invite = { id: string; value: string; note: string; created_at: string };
 type Audit = { at: string; action: string; user: string; actor: string; target: string; ip: string };
+type SlowCall = { connector?: string; tool?: string; ms?: number; first_ms?: number; pages?: number; cached?: boolean };
+type Reply = {
+  at: string;
+  user: string;
+  total_ms: number;
+  model_ms: number;
+  model_calls: number;
+  connector_ms: number;
+  tool_ms: number;
+  slowest_calls: SlowCall[];
+  computer_used: boolean;
+};
+type Latency = {
+  target_s: number;
+  replies: number;
+  over_target: number;
+  p50_ms: number | null;
+  p95_ms: number | null;
+  max_ms: number | null;
+  over_target_split: { model_ms: number; connector_ms: number; tool_ms: number };
+  slowest: Reply[];
+};
 
 const fmt = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n));
+const secs = (ms: number | null | undefined) => (ms == null ? "–" : `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)}s`);
 const when = (s: string | null) => (s ? new Date(s).toLocaleString() : "never");
 
 async function call(path: string, init?: RequestInit) {
@@ -48,6 +71,8 @@ export default function AdminPage() {
   const [people, setPeople] = useState<Person[]>([]);
   const [invites, setInvites] = useState<Invite[]>([]);
   const [audit, setAudit] = useState<Audit[]>([]);
+  const [lat, setLat] = useState<Latency | null>(null);
+  const [latDays, setLatDays] = useState(1);
   const [q, setQ] = useState("");
   const [value, setValue] = useState("");
   const [send, setSend] = useState(true);
@@ -69,7 +94,18 @@ export default function AdminPage() {
     if (p.ok) setPeople(p.data);
     if (i.ok) setInvites(i.data);
     if (a.ok) setAudit(a.data.slice(0, 50));
+    const failed = [p.ok ? "" : "people", i.ok ? "" : "invites", a.ok ? "" : "audit log"].filter(Boolean);
+    setError(failed.length ? `Couldn't load the ${failed.join(", ")}. Reload the page to try again.` : "");
   }, []);
+
+  const loadLatency = useCallback(async (days: number) => {
+    const r = await call(`/api/admin/latency?days=${days}`);
+    if (r.ok) setLat(r.data);
+  }, []);
+
+  useEffect(() => {
+    if (me) loadLatency(latDays);
+  }, [me, latDays, loadLatency]);
 
   useEffect(() => {
     getMe().then((u) => {
@@ -128,7 +164,7 @@ export default function AdminPage() {
           <div className="page-hero">
             <div>
               <h1>Admin console</h1>
-              <p className="muted">People, today&apos;s use, invites and the audit log.</p>
+              <p className="muted">People, today&apos;s use, invites, reply times and the audit log.</p>
             </div>
           </div>
 
@@ -201,6 +237,56 @@ export default function AdminPage() {
                 </div>
               ))}
             </div>
+          </div>
+
+          <div className="task-card stack">
+            <div className="row spread">
+              <strong>Reply times</strong>
+              <select className="field" value={latDays} onChange={(e) => setLatDays(Number(e.target.value))} aria-label="Period">
+                <option value={1}>Last 24 hours</option>
+                <option value={7}>Last 7 days</option>
+                <option value={30}>Last 30 days</option>
+              </select>
+            </div>
+            {lat && lat.replies ? (
+              <>
+                <span className="muted">
+                  {lat.replies} replies · median {secs(lat.p50_ms)} · 95% within {secs(lat.p95_ms)} · slowest {secs(lat.max_ms)} ·{" "}
+                  <span className={lat.over_target ? "err" : ""}>
+                    {lat.over_target} over {lat.target_s}s
+                  </span>
+                </span>
+                {lat.over_target ? (
+                  <span className="faint">
+                    Time in replies over {lat.target_s}s: model {secs(lat.over_target_split.model_ms)} · connectors{" "}
+                    {secs(lat.over_target_split.connector_ms)} · other tools {secs(lat.over_target_split.tool_ms)}
+                  </span>
+                ) : null}
+                <ul className="admin-list">
+                  {lat.slowest.slice(0, 10).map((r, n) => (
+                    <li key={n}>
+                      <span className="stack">
+                        <span className={r.total_ms > lat.target_s * 1000 ? "err" : ""}>
+                          {secs(r.total_ms)} · model {secs(r.model_ms)} ({r.model_calls} calls) · connectors {secs(r.connector_ms)}
+                          {r.tool_ms ? ` · tools ${secs(r.tool_ms)}` : ""}
+                          {r.computer_used ? " · computer" : ""}
+                        </span>
+                        {r.slowest_calls.length ? (
+                          <span className="faint">
+                            {r.slowest_calls
+                              .map((c) => `${c.connector}/${c.tool} ${c.cached ? "cached" : secs(c.ms)}${c.pages ? ` (${c.pages} pages, first ${secs(c.first_ms)})` : ""}`)
+                              .join(" · ")}
+                          </span>
+                        ) : null}
+                      </span>
+                      <span className="faint">{r.user} · {new Date(r.at).toLocaleString()}</span>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            ) : (
+              <span className="faint">No timed replies yet. Every new chat reply is timed from now on.</span>
+            )}
           </div>
 
           <div className="task-card stack">
