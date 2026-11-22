@@ -49,7 +49,19 @@ async def may_sign_up_db(db, email: str) -> bool:
     from app.models import SignupInvite
 
     hit = (await db.execute(select(SignupInvite.id).where(SignupInvite.value.in_([email, email.rsplit("@", 1)[1]])))).first()
-    return hit is not None
+    if hit is not None:
+        return True
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import func
+
+    from app.models import TeamInvite
+
+    # An open invitation to a team (docs/TEAMS.md) also lets that address sign up.
+    week = datetime.now(timezone.utc) - timedelta(days=7)
+    team = (await db.execute(select(TeamInvite.id).where(func.lower(TeamInvite.email) == email, TeamInvite.accepted_at.is_(None),
+                                                         TeamInvite.created_at >= week))).first()  # fmt: skip
+    return team is not None
 
 
 SUSPENDED_MESSAGE = "This account is suspended. Contact the Lumio team."

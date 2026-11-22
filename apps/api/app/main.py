@@ -252,6 +252,9 @@ from app.admin.routes import router as admin_router  # noqa: E402
 
 app.include_router(admin_router, prefix="/api")
 app.include_router(admin_me_router, prefix="/api")
+from app.teams.routes import router as teams_router  # noqa: E402
+
+app.include_router(teams_router, prefix="/api")
 
 
 @app.get("/health")
