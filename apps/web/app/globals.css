@@ -5037,3 +5037,9 @@ button.routine-tile:hover { border-color: var(--line-strong); }
 /* Plan and billing (app/billing/page.tsx) */
 .meter { height: 6px; border-radius: 3px; background: var(--line, rgba(127,127,127,.2)); overflow: hidden; max-width: 360px; }
 .meter > span { display: block; height: 100%; background: var(--accent, #5b8def); }
+
+/* Message times and day dividers (app/chat/time.ts). */
+.turn-time { display: block; font-size: 11px; color: var(--faint, #94a3b8); margin-top: 2px; font-variant-numeric: tabular-nums; }
+.day-divider { display: flex; justify-content: center; margin: 18px 0 10px; position: sticky; top: 6px; z-index: 2; pointer-events: none; }
+.day-divider span { font-size: 12px; font-weight: 500; color: var(--muted, #64748b); background: var(--surface, #fff);
+  border: 1px solid var(--line, rgba(15, 23, 42, 0.1)); border-radius: 999px; padding: 3px 12px; box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06); }

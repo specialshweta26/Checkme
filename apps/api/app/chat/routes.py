@@ -257,7 +257,8 @@ async def session_messages(session_id: uuid.UUID, user: User = Depends(current_u
         },
         # Every reply carries its turn id, so it can be rated (app/quality) even when it was saved without one in meta.
         "messages": [
-            {"role": m.role, "content": m.content, "meta": {**(m.meta or {}), "request_id": (m.meta or {}).get("request_id") or m.request_id or None}}
+            {"role": m.role, "content": m.content, "meta": {**(m.meta or {}), "request_id": (m.meta or {}).get("request_id") or m.request_id or None,
+                                                       "at": m.created_at.isoformat() if m.created_at else None}}
             for m in rows
             if m.role in ("user", "assistant")
         ],
