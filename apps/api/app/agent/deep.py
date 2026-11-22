@@ -4962,6 +4962,13 @@ async def _run_deep_agent(
     # Fixed rules stay in the system prompt (cached by the provider across turns); time, memory, skills, connectors
     # and hints for this turn go in a context message beside the user's message (app/agent/turn_context.py).
     prompt, ctx.turn_context = split_prompt(prompt)
+    from app.agent import action_memory
+
+    remembered = await action_memory.recall(ctx, query) if not teammate_depth else []
+    if remembered:
+        # The actions that answered questions like this before (docs/LLD.md "Action memory"): skip the catalog hunt.
+        action_memory.preload(ctx, remembered)
+        ctx.turn_context = (ctx.turn_context + "\n\n" + action_memory.block(remembered)).strip()
     if ctx.hidden_tools:
         ctx.turn_context = (ctx.turn_context + "\n\n" + tool_scope.context_note(ctx.hidden_tools)).strip()
     graph = build_agent(ctx, prompt)
@@ -5065,6 +5072,8 @@ async def _run_deep_agent(
         digest = tool_digest.build((state.values or {}).get("messages") or [])
     except Exception:  # noqa: BLE001 - the reply stands without its tool record
         log.info("tool digest skipped", exc_info=True)
+    if finished and not ctx.pending:
+        await action_memory.remember(ctx, query)
     source = ctx.sources[-1] if ctx.sources else None
     had_card = bool(_connect_cards(ctx))
     await _maybe_start_connect(ctx, query)

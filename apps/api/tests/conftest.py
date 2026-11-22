@@ -15,6 +15,7 @@ def _no_catalog_cache_across_tests(monkeypatch):
     from app.config import get_settings
 
     monkeypatch.setattr(get_settings(), "catalog_cache_s", 0)
+    monkeypatch.setattr(get_settings(), "action_memory_days", 0)
 
 
 @pytest.fixture(autouse=True)
