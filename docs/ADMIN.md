@@ -23,7 +23,7 @@ Every chat reply saves where its time went in its `meta.timing`:
 - the agent's stages and its model time and number of model calls;
 - each connector call, with how long its first answer took and how many pages it read (`calls`).
 
-`GET /api/admin/latency?days=1` adds these up. It returns how many replies took longer than `REPLY_TARGET_S` (45 by default), the median, the 95th percentile and the slowest reply. For the replies over the target, it splits their time into model, connectors and other tools, which shows what to make faster first. It also lists the 20 slowest replies with their three slowest connector calls. It never returns message text, only the person's email and the time.
+`GET /api/admin/latency?days=1` adds these up. It returns how many replies took longer than `REPLY_TARGET_S` (45 by default), the median, the 95th percentile and the slowest reply. For the replies over the target, it splits their time into model, connectors and other tools, which shows what to make faster first. It also lists the 20 slowest replies with their three slowest connector calls, each tool the agent called (how many times, how long in all), the checks before connector calls (`prep_ms`), the finish and fact checks, and the time nothing accounts for (`other_ms`). It never returns message text, only the person's email and the time.
 
 The admin page shows this as **Reply times**, for the last 24 hours, 7 days or 30 days. A turn that was stopped (by the person, or by the app because it went quiet) or that failed keeps its timing up to that point, marked "stopped" or "failed". Replies saved before this existed have no timing and are left out. The chat API strips `timing` from the messages it sends to the browser.
 

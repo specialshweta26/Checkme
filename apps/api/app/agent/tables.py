@@ -70,10 +70,11 @@ async def all_pages(first: Any, args: dict, call: Callable[[dict], Awaitable[Any
     """``first`` with every remaining page's rows added. ``args`` are the arguments of the first call (the paging
     parameters are set on them for each later page); ``call(args)`` runs the tool. Stops at the page and row limits.
 
-    The second page shows how many rows the tool really returns per page. When the first page gave the total, the
-    pages after it are fetched several at a time (``TABLE_PAGE_CONCURRENCY``): a 92,000-row table at 5,000 rows a page
-    took 19 calls one after another. A page that comes back short leaves a gap, which is then read in order, so the
-    merged table is the same as reading page by page."""
+    The second page is read on its own: it shows how many rows the tool really returns per page. After that pages are
+    read ``TABLE_PAGE_CONCURRENCY`` at a time and merged in order, with or without a total: a table that only says
+    ``hasMore`` is read ahead, and reading stops at its first empty, short or last page (at most a few calls past
+    the end are wasted). A short page in the middle moves the next batch to the right offset, and a page that fails
+    is read again in order, so the merged table is the same as reading page by page."""
     if not is_paged(first):
         return first
     max_pages, max_rows, page_rows, concurrency = _limits()
@@ -81,83 +82,76 @@ async def all_pages(first: Any, args: dict, call: Callable[[dict], Awaitable[Any
     rows = list(first.get(key) or [])
     total = _num(first, _TOTAL)
     first_limit = _num(first, ("limit",))
+    start = _num(first, ("offset",)) or 0
     limit = max(first_limit or len(rows) or 1, page_rows)
-    offset = (_num(first, ("offset",)) or 0) + len(rows)
+    offset = start + len(rows)
     pages = 1
-    calls = {"more": True}
 
-    async def fetch(at: int, size: int) -> list | None:
+    async def fetch(at: int, size: int) -> tuple[list | None, bool]:
+        """(rows or None when the call failed, whether the page says more follow)."""
         nonlocal limit
-        try:
-            page = await call({**args, "offset": at, "limit": size})
-        except Exception:  # noqa: BLE001 - a tool that refuses the bigger page gets its own size
-            if first_limit and size != first_limit:
-                limit = first_limit
-                try:
-                    page = await call({**args, "offset": at, "limit": first_limit})
-                except Exception:  # noqa: BLE001
-                    log.info("page at offset %s failed", at, exc_info=True)
-                    return None
-            else:
+        for attempt in (size, first_limit):
+            if not attempt:
+                continue
+            try:
+                page = await call({**args, "offset": at, "limit": attempt})
+            except Exception:  # noqa: BLE001 - a tool that refuses the bigger page gets its own size
+                if attempt != first_limit and first_limit:
+                    limit = first_limit
+                    continue
                 log.info("page at offset %s failed", at, exc_info=True)
-                return None
-        got = page.get(key) if isinstance(page, dict) else None
-        calls["more"] = is_paged(page)  # the page itself says whether more follow
-        return list(got) if got else []
+                return None, False
+            got = page.get(key) if isinstance(page, dict) else None
+            return (list(got) if got else []), is_paged(page)
+        return None, False
 
-    async def in_order(until: int | None) -> bool:
-        """Read pages one after another from ``offset`` up to ``until`` (or the end). False when the tool stopped."""
-        nonlocal offset, pages
-        while pages < max_pages and len(rows) < max_rows and (until is None or offset < until) and (total is None or offset < total):
-            size = limit if until is None else min(limit, until - offset)
-            got = await fetch(offset, size)
-            if not got:
-                return False
-            rows.extend(got)
-            offset += len(got)
-            pages += 1
-            if not calls["more"] and until is None:
-                return False
-        return True
+    def room() -> bool:
+        return pages < max_pages and len(rows) < max_rows and (total is None or offset < total)
 
-    # The second page, in order: it tells the page size the tool really uses.
+    more = True
     step = 0
-    if total is not None and offset < total and pages < max_pages and len(rows) < max_rows:
-        before = len(rows)
-        got = await fetch(offset, limit)
+    if room():  # the second page, on its own
+        got, more = await fetch(offset, limit)
         if got:
             rows.extend(got)
             offset += len(got)
             pages += 1
-            step = len(got) if calls["more"] else -1
-        elif got is None or len(rows) == before:
-            step = -1  # the tool stopped: nothing more to read
-    if total is not None and step > 0 and concurrency > 1 and offset < total:
-        last = min(total, (_num(first, ("offset",)) or 0) + max_rows)
-        starts = list(range(offset, last, step))[: max(0, max_pages - pages)]
+            step = len(got)
+        else:
+            more = False
+    while more and step and room():
+        n = min(concurrency, max_pages - pages)
+        if total is not None:
+            n = min(n, -(-(min(total, start + max_rows) - offset) // step))
+        starts = [offset + i * step for i in range(max(1, n))]
         sem = asyncio.Semaphore(concurrency)
 
         async def one(at: int):
             async with sem:
-                return at, await fetch(at, min(limit, step))
+                return await fetch(at, min(limit, step))
 
-        done = sorted(await asyncio.gather(*(one(at) for at in starts)), key=lambda x: x[0])
-        for at, got in done:
-            if at > offset and not await in_order(at):  # a short page left a gap: fill it in order
-                break
-            if at < offset or not got:
-                if not got:
+        batch = await asyncio.gather(*(one(at) for at in starts))
+        for at, (got, page_more) in zip(starts, batch):
+            if at != offset:
+                break  # a short page before this one: the next batch starts at the right offset
+            if got is None:
+                got, page_more = await fetch(offset, min(limit, step))  # read again, in order
+                if got is None:
+                    more = False
                     break
-                got = got[offset - at:]  # an overlap after a gap was filled
+            if not got:
+                more = False
+                break
             rows.extend(got)
             offset += len(got)
             pages += 1
-        if offset < total:
-            await in_order(None)
-    elif step >= 0:
-        await in_order(None)
+            if not page_more or (total is None and len(got) < step):
+                more = False
+                break
+            if not room():
+                break
     rows = rows[:max_rows]
-    merged = {**first, key: rows, "returnedRows": len(rows), "offset": _num(first, ("offset",)) or 0, "pages_fetched": pages}
+    merged = {**first, key: rows, "returnedRows": len(rows), "offset": start, "pages_fetched": pages}
     for flag in _MORE:
         if flag in merged:
             merged[flag] = bool(total is not None and len(rows) < total)
