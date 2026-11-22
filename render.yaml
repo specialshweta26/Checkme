@@ -126,6 +126,9 @@ services:
         sync: false
       - key: BUDGET_EXEMPT
         sync: false
+      # Who can open the admin console (docs/ADMIN.md).
+      - key: ADMIN_EMAILS
+        sync: false
       - key: OPENAI_API_KEY
         sync: false
       - key: OPENAI_MODEL

@@ -16,6 +16,7 @@ import { JobTimeline } from "../components/JobTimeline";
 import SkillFlow from "../components/SkillFlow";
 import { Thinking } from "../components/Thinking";
 import { VoiceButton } from "../components/VoiceButton";
+import { GetStarted } from "../components/GetStarted";
 import { announceWorkspaceChanged, chatHref, deleteSession, getMe, isLumioDesktop, listSessions, loadSession, rememberScope, saveDownload, uploadFiles, startTeaching, stopTeaching, type ChatSessionRow, type Me, type UploadedFile, type WorkspaceRoster, sessionRatings } from "../lib";
 
 const STORE = "assistant.session";
@@ -953,6 +954,7 @@ export default function ChatPage() {
             {/* Mail that needs the user, on Chief only; not part of the conversation the model reads. */}
             {!activeGroup && (activeAgent?.kind || "custom") === "default" ? <ChiefAlerts /> : null}
             {notice ? <p className="notice">{notice}</p> : null}
+            {messages.length === 0 && !busyHere && !activeGroup ? <GetStarted me={me} onPick={(p) => setText(p)} /> : null}
             {messages.length === 0 && !busyHere && showFocusCard && activeAgent ? (
               <FocusOnboarding
                 agentId={activeAgent.id}

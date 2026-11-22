@@ -33,3 +33,30 @@ def may_sign_up(email: str) -> bool:
         return False
     allowed = _allowed()
     return email in allowed or email.rsplit("@", 1)[1] in allowed
+
+
+async def may_sign_up_db(db, email: str) -> bool:
+    """may_sign_up, plus the invites an admin added in the console (signup_invites) while sign-ups are invite-only."""
+    if may_sign_up(email):
+        return True
+    if mode() != "invite" or db is None:
+        return False
+    email = (email or "").strip().lower()
+    if "@" not in email:
+        return False
+    from sqlalchemy import select
+
+    from app.models import SignupInvite
+
+    hit = (await db.execute(select(SignupInvite.id).where(SignupInvite.value.in_([email, email.rsplit("@", 1)[1]])))).first()
+    return hit is not None
+
+
+SUSPENDED_MESSAGE = "This account is suspended. Contact the Lumio team."
+
+
+def is_admin(user) -> bool:
+    raw = get_settings().admin_emails or ""
+    admins = {x.strip().lower() for x in raw.replace(";", ",").split(",") if x.strip()}
+    return bool(user is not None and (getattr(user, "email", "") or "").strip().lower() in admins
+                and getattr(user, "suspended_at", None) is None)  # fmt: skip

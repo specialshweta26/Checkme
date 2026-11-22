@@ -215,7 +215,10 @@ async def sso_callback(cid: str, request: Request, code: str = "", state: str = 
         db.add(account)
     account.email = email
     await db.flush()
-    token = await new_session(db, request, user)
+    if user.suspended_at is not None:
+        await db.rollback()
+        return RedirectResponse(_web("/login?error=suspended"))
+    token = await new_session(db, request, user, how=provider)
     target = "/chat"
     desk = saved.get("desktop") or ""
     if desk and DESKTOP_CODE.fullmatch(desk):

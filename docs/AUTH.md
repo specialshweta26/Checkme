@@ -106,3 +106,10 @@ Not covered yet: SAML-only providers (most also offer OIDC), and SCIM provisioni
 - `apps/api/tests/test_auth_mailer.py`: Resend and SendGrid requests, and password hashing
 
 Who may sign up, and the daily cap on each person's model use, are in docs/ROLLOUT.md.
+
+## Getting started
+
+A person with no Gmail or Outlook connected (email or SSO sign-ups) sees a **Get started** card at the top of an
+empty chat (`apps/web/app/components/GetStarted.tsx`): Connect Gmail or Outlook (shown when that sign-in is set up),
+Add other apps, and Tell Lumio about you. **Hide** keeps it hidden in that browser. On the first visit, the account's
+time zone is also set from the browser, since every new account starts on the server default.

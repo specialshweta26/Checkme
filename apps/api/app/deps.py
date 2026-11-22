@@ -15,6 +15,10 @@ from app.security import SESSION_COOKIE, read_session_jwt
 async def current_user(request: Request, db: AsyncSession = Depends(get_db)) -> User:
     user = await optional_user(request, db)
     if user is None:
+        if getattr(request.state, "suspended", False):
+            from app.auth.access import SUSPENDED_MESSAGE
+
+            raise HTTPException(403, SUSPENDED_MESSAGE)
         raise HTTPException(401, "Not signed in")
     return user
 
@@ -46,6 +50,9 @@ async def optional_user(request: Request, db: AsyncSession = Depends(get_db)) ->
             except Exception:  # noqa: BLE001
                 pass
     user = await db.get(User, uuid.UUID(claims["sub"]))
+    if user is not None and getattr(user, "suspended_at", None) is not None:
+        request.state.suspended = True  # an admin suspended them (docs/ADMIN.md): no request of theirs goes through
+        return None
     if user is not None:
         request.state.auth_session_id = sid
     return user

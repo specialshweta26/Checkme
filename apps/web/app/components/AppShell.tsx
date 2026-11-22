@@ -27,7 +27,7 @@ import { IconArtifact, IconData, IconGauge, IconKnow, IconQuality, IconRoutines,
 import { BrandMark } from "./BrandMark";
 import { AgentAvatar } from "./AgentAvatar";
 
-type Nav = "today" | "chat" | "inbox" | "tasks" | "connectors" | "runs" | "memory" | "usage" | "account" | "profile" | "artifacts" | "vault" | "skills" | "routines" | "quality" | "approvals";
+type Nav = "admin" | "today" | "chat" | "inbox" | "tasks" | "connectors" | "runs" | "memory" | "usage" | "account" | "profile" | "artifacts" | "vault" | "skills" | "routines" | "quality" | "approvals";
 
 // Everything kept for the user lives under Profile (docs/DESIGN.md "Profile"), not in the sidebar.
 const PROFILE_MENU: [Nav, string, string, (p: { size?: number }) => ReactElement][] = [
@@ -41,7 +41,7 @@ const PROFILE_MENU: [Nav, string, string, (p: { size?: number }) => ReactElement
   ["usage", "/usage", "Usage and cost", IconGauge],
   ["account", "/account", "Your data", IconData],
 ];
-const PROFILE_PAGES: Nav[] = ["profile", "memory", "routines", "quality", "skills", "artifacts", "runs", "vault", "usage", "account"];
+const PROFILE_PAGES: Nav[] = ["admin", "profile", "memory", "routines", "quality", "skills", "artifacts", "runs", "vault", "usage", "account"];
 
 function IconSidebar() {
   return (
@@ -448,7 +448,7 @@ export function AppShell({
   }
 
   const rows = conversations || own;
-  const titles: Record<Nav, string> = { today: "Today", chat: "Chat", inbox: "Inbox", tasks: "Tasks", connectors: "Connectors", runs: "Saved runs", memory: "What I know", usage: "Usage", account: "Your data", profile: "Profile", artifacts: "Artifacts", vault: "Vault", skills: "Skills", routines: "Routines", quality: "Quality", approvals: "Approvals" };
+  const titles: Record<Nav, string> = { admin: "Admin console", today: "Today", chat: "Chat", inbox: "Inbox", tasks: "Tasks", connectors: "Connectors", runs: "Saved runs", memory: "What I know", usage: "Usage", account: "Your data", profile: "Profile", artifacts: "Artifacts", vault: "Vault", skills: "Skills", routines: "Routines", quality: "Quality", approvals: "Approvals" };
   const agentId = activeAgentId || scope.agent || null;
   const groupId = activeGroupId || scope.group || null;
 
@@ -664,6 +664,11 @@ export function AppShell({
                     <Icon size={16} /> {label}
                   </a>
                 ))}
+                {me?.admin ? (
+                  <a role="menuitem" className={`pm-item${current === "admin" ? " on" : ""}`} href="/admin" onClick={(e) => { e.preventDefault(); visit("/admin"); }}>
+                    <IconGauge size={16} /> Admin console
+                  </a>
+                ) : null}
                 <form action="/api/auth/logout" method="post">
                   <button className="logout" type="submit" role="menuitem">Sign out</button>
                 </form>

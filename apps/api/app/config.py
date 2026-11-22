@@ -75,6 +75,7 @@ class Settings(BaseSettings):
     daily_user_budget_usd: float = 0.0
     daily_user_token_budget: int = 0
     budget_exempt: str = ""  # comma-separated emails with no daily cap (the owner, the team)
+    admin_emails: str = ""  # comma-separated: who can open the admin console (docs/ADMIN.md)
 
     session_secret: str = "dev-only-change-me"
     token_encryption_key: str = ""

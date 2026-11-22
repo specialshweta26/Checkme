@@ -4,6 +4,7 @@ export type Me = {
   name: string;
   primary_provider: string;
   timezone?: string;
+  admin?: boolean;
   accounts: { provider: string; email: string }[];
   connectors: { id: string; name: string; slug: string; provider: string; health: string; enabled: boolean }[];
 };
@@ -730,6 +731,7 @@ export function errorFromQuery(search: string) {
     access_denied:
       "Google blocked the app because it is in Testing and this account is not a test user. Add the account under Google Auth Platform → Audience → Test users, then try again.",
     signin_required: "Sign in first, then connect the other account.",
+    suspended: "This account is suspended. Contact the Lumio team.",
     signup_closed: "Lumio isn't open for new sign-ups yet. If you were invited, sign in with the address you were invited with.",
     account_linked_elsewhere: "That mailbox is already linked to another user.",
     missing_connector: "That MCP connection was not found.",
