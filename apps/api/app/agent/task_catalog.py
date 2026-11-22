@@ -62,6 +62,12 @@ CATALOG: list[dict[str, Any]] = [
         "args": {"prompt": "what should run and when"},
     },
     {
+        "name": "update_automation",
+        "kind": "staff",
+        "blurb": "Change a saved automation: on or off, send directly or ask first, edit, or delete.",
+        "args": {"automation_id": "the number list_automations shows"},
+    },
+    {
         "name": "list_automations",
         "kind": "staff",
         "blurb": "List saved automations.",

@@ -172,6 +172,7 @@ def describe_tool(name: str, args: dict | None, connector_names: dict[str, str] 
             "list_scheduled_tasks": "Checking your routines",
             "update_scheduled_task": "Updating a routine",
             "create_automation": "Setting up an automation",
+            "update_automation": "Updating an automation",
             "list_automations": "Checking your automations",
             "learn_voice": "Learning your writing voice",
         }.get(staff, f"Running {humanize_tool(staff)}")

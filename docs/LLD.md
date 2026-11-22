@@ -1060,6 +1060,16 @@ ends. Each user's credentials get their own session, and a teammate's run inside
   computer task, a computer or deep turn, a background job, or six or more tool calls. A one-shot data question or
   web lookup ends with its answer. `AGENT_FINISH_CHECK=false` still turns it off entirely.
 
+### Automations that send directly
+
+A mail or meeting automation asks before acting unless the user said to send it to them directly
+(`requires_approval:false`, `app/automations/triggers.py`). Its run still counts as having read other people's content
+from the start, so without asking it may only send to the user's own addresses (`deep.may_self_approve`); a message for
+anyone else, any change or delete, and anything after injected instructions still asks. Page and inbox watches always
+ask. Only the user, in their own chat and before anything third-party is read that turn, can turn ask-first off
+(`deep._approval_off_refused`). `update_automation` changes an automation by its number id (on/off, ask-first, action,
+condition, trigger, delete); `update_scheduled_task` given such an id passes it on, instead of failing on the UUID.
+
 ## 13. Error handling
 
 | Failure | Behavior |

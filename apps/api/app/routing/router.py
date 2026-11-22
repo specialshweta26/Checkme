@@ -98,6 +98,7 @@ async def _assemble(db, connectors: list[Connector], query: str, extra_hits: lis
                     "list_scheduled_tasks",
                     "update_scheduled_task",
                     "create_automation",
+                    "update_automation",
                     "list_automations",
                     "learn_voice",
                 )
