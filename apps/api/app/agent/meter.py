@@ -320,6 +320,19 @@ def user_cap() -> tuple[float, int]:
     return float(getattr(s, "daily_user_budget_usd", 0) or 0), int(getattr(s, "daily_user_token_budget", 0) or 0)
 
 
+async def cap_for(db, user) -> tuple[float, int]:
+    """This user's daily cap: the Pro plan's when they pay for it (docs/BILLING.md), else the default."""
+    from app.billing import service as billing
+
+    if db is not None and user is not None and billing.enabled():
+        try:
+            if await billing.is_pro(db, user.id):
+                return billing.pro_cap()
+        except Exception:  # noqa: BLE001 - a lookup error falls back to the default cap
+            log.info("plan lookup failed", exc_info=True)
+    return user_cap()
+
+
 def cap_exempt(email: str) -> bool:
     from app.config import get_settings
 
@@ -344,8 +357,10 @@ async def over_user_cap(db, user) -> bool:
     """True when this user is past today's cap on all model use. Cached for a minute; exempt emails never are."""
     if user is not None and getattr(user, "suspended_at", None) is not None:
         return True  # a suspended user's tasks and background work stop too (docs/ADMIN.md)
-    usd_limit, token_limit = user_cap()
-    if (not usd_limit and not token_limit) or user is None or cap_exempt(getattr(user, "email", "")):
+    if user is None or cap_exempt(getattr(user, "email", "")):
+        return False
+    usd_limit, token_limit = await cap_for(db, user)
+    if not usd_limit and not token_limit:
         return False
     hit = _cap_cache.get(user.id)
     if hit and time.monotonic() - hit[0] < BUDGET_CACHE_S:

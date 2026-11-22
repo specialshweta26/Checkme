@@ -5028,3 +5028,7 @@ button.routine-tile:hover { border-color: var(--line-strong); }
 /* First-run card in chat (components/GetStarted.tsx) */
 .get-started { margin: 0 auto 16px; max-width: 720px; }
 .row.wrap { flex-wrap: wrap; gap: 8px; }
+
+/* Plan and billing (app/billing/page.tsx) */
+.meter { height: 6px; border-radius: 3px; background: var(--line, rgba(127,127,127,.2)); overflow: hidden; max-width: 360px; }
+.meter > span { display: block; height: 100%; background: var(--accent, #5b8def); }
