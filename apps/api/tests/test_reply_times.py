@@ -114,3 +114,13 @@ def test_the_timing_so_far_of_a_turn_that_did_not_finish():
     assert out["llm_ms"] == 4000 and out["stopped"] == "stopped" and 11500 < out["reply_ms"] < 14000
     run.timing = lambda: 1 / 0  # a broken callable never stops the stopped marker from being saved
     assert routes._timing_so_far(run, failed=True)["failed"] is True
+
+
+def test_tools_and_unaccounted_time_are_broken_down():
+    t = _timing(60, model_s=20, calls=[{"connector": "c", "tool": "execute", "ms": 10000}])
+    t["tools"] = [{"tool": "call_tool", "ms": 10000}, {"tool": "aggregate_result", "ms": 3000}, {"tool": "aggregate_result", "ms": 2000},
+                  {"tool": "search_tools", "ms": 4000}]  # fmt: skip
+    b = latency.breakdown(t)
+    assert b["tools"][0] == {"tool": "call_tool", "calls": 1, "ms": 10000}
+    assert {"tool": "aggregate_result", "calls": 2, "ms": 5000} in b["tools"]
+    assert b["tool_ms"] == 9000 and b["other_ms"] == 60000 - 20000 - 10000 - 9000 and b["route_ms"] == 300

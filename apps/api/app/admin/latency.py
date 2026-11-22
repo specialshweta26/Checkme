@@ -27,6 +27,12 @@ def breakdown(timing: dict) -> dict:
     conn = sum(int(c.get("ms") or 0) for c in calls)
     tools = sum(int(t.get("ms") or 0) for t in timing.get("tools") or [] if isinstance(t, dict) and t.get("tool") != "call_tool")
     slow_calls = sorted(calls, key=lambda c: -int(c.get("ms") or 0))[:3]
+    by_tool: dict[str, list[int]] = {}
+    for t in timing.get("tools") or []:
+        if isinstance(t, dict) and t.get("tool"):
+            agg = by_tool.setdefault(str(t["tool"]), [0, 0])
+            agg[0] += 1
+            agg[1] += int(t.get("ms") or 0)
     stages = {k: int(v) for k, v in (timing.get("stages") or {}).items() if isinstance(v, (int, float))}
     return {
         "total_ms": total,
@@ -34,10 +40,18 @@ def breakdown(timing: dict) -> dict:
         "model_calls": int(timing.get("llm_calls") or 0),
         "connector_ms": conn,
         "tool_ms": tools,
+        # Before each connector call: checking its schema, the gateway action, approval (can call the gateway itself).
+        "prep_ms": sum(int(c.get("prep_ms") or 0) for c in calls),
         "first_token_ms": timing.get("first_token_ms"),
         "stages": stages,
-        "slowest_calls": [{k: c.get(k) for k in ("connector", "tool", "ms", "first_ms", "pages", "cached") if c.get(k) is not None}
+        "slowest_calls": [{k: c.get(k) for k in ("connector", "tool", "ms", "first_ms", "prep_ms", "pages", "cached") if c.get(k) is not None}
                           for c in slow_calls],  # fmt: skip
+        # Each tool the agent called: how many times and for how long in all, slowest first.
+        "tools": [{"tool": k, "calls": v[0], "ms": v[1]} for k, v in sorted(by_tool.items(), key=lambda kv: -kv[1][1])][:8],
+        # What neither the model, the connectors nor the tools account for (the app's own work between them).
+        "other_ms": max(0, total - llm - conn - tools),
+        # Time in the chat route before and after the agent ran (checks, history, saving the reply).
+        "route_ms": max(0, total - int(timing.get("total_ms") or total)),
         "computer_used": bool(timing.get("computer_used")),
         "kind": timing.get("kind") or "",
         # A turn that didn't finish: stopped (by the person, or the reason the app stopped it) or failed.

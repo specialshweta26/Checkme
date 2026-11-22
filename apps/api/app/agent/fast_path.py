@@ -256,7 +256,7 @@ class TurnTimer:
             "llm_calls": self.llm_calls,
             "llm_ms": self.llm_ms,
             "stages": self.stages,
-            "tools": self.tools[:20],
+            "tools": self.tools[:80],
             "computer_used": self.computer_used,
         }
 

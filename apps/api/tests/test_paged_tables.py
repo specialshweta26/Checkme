@@ -168,3 +168,26 @@ async def test_a_failed_page_falls_back_to_reading_in_order(monkeypatch):
 
     out = await tables.all_pages(await call({"offset": 0, "limit": 5}), {}, flaky)
     assert out["data"] == list(range(40))
+
+
+async def test_a_table_without_a_total_is_read_ahead_in_parallel(monkeypatch):
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "table_page_concurrency", 6)
+    state = {"now": 0, "peak": 0, "calls": 0}
+
+    async def call(args):  # 20 pages of 5 rows, no total: only hasMore
+        import asyncio
+
+        state["now"] += 1
+        state["calls"] += 1
+        state["peak"] = max(state["peak"], state["now"])
+        await asyncio.sleep(0.01)
+        state["now"] -= 1
+        at = args["offset"]
+        rows = list(range(at, min(at + 5, 100)))
+        return {"offset": at, "hasMore": at + len(rows) < 100, "data": rows}
+
+    out = await tables.all_pages(await call({"offset": 0, "limit": 5}), {}, call)
+    assert out["data"] == list(range(100)) and out["pages_fetched"] == 20
+    assert state["peak"] > 1 and state["calls"] <= 20 + 6  # a few reads past the end at most

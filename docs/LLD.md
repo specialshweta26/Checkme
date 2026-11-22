@@ -961,10 +961,11 @@ read the first page only, and the model could not add up thousands of rows itsel
   `TABLE_PAGE_ROWS` (5,000) rows a page (a tool that caps lower returns fewer). This happens for a direct call and for
   one through a gateway's execute (paging set on the inner arguments). The chat says "Reading all N rows, page by page".
 - **Several pages at once:** a 92,000-row table took 19 calls one after another, most of a chat turn. The second page
-  shows the page size the tool really uses; when the first page gave the total, the rest are then fetched
-  `TABLE_PAGE_CONCURRENCY` (6) at a time and merged in order. A page that comes back short leaves a gap that is read
-  in order, and a page that fails is read again in order, so the table is the same as reading page by page. Without a
-  total, or with `TABLE_PAGE_CONCURRENCY=1`, pages are read one after another.
+  shows the page size the tool really uses; the rest are then fetched `TABLE_PAGE_CONCURRENCY` (6) at a time and
+  merged in order. A table that only says `hasMore` (no total; a gateway read 20 pages one after another, 10 s) is read
+  ahead the same way and stops at its first empty, short or last page, at most a few calls past the end. A short page in
+  the middle moves the next batch to the right offset, and a page that fails is read again in order, so the table is the
+  same as reading page by page. `TABLE_PAGE_CONCURRENCY=1` reads one page after another.
 - **Totals over every row:** the `aggregate_result` tool filters (`where`: a value, a list, or `gte`/`lte`), groups
   (`group_by`) and adds up (`sums`) a stored table. Columns are indexes for array rows and keys for object rows. It
   returns totals, a count per group, and three sample rows to read the columns from. It is fixed arithmetic, not code
