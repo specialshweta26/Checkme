@@ -10,6 +10,14 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def _no_catalog_cache_across_tests(monkeypatch):
+    """Tests share a Redis and the same fake user and connector names: a catalog cached by one test answered the next."""
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "catalog_cache_s", 0)
+
+
+@pytest.fixture(autouse=True)
 def _offline_browsing_ladder(monkeypatch):
     """Tests never reach the reader, archive, Tavily Extract, hosted browsers or m. sites over the network.
     Ladder tests pass their own steps (``custom=``)."""

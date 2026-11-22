@@ -186,11 +186,13 @@ def outline(value: Any, depth: int = 0) -> Any:
 
 
 def compact_payload(value: Any, limit: int = MAX_TOOL_CHARS) -> Any:
-    if _json_size(value) <= limit:
+    from app.agent.jsonsize import fits, size_or_more
+
+    if fits(value, limit):
         return value
     return {
         "too_large": True,
-        "chars": _json_size(value),
+        "chars": size_or_more(value),
         "map": outline(value),
         "hint": (
             "The full result is stored. Call inspect_result with this result_id and a path or search "
@@ -276,16 +278,18 @@ def fit_payload(value: Any, limit: int = CONNECTOR_RESULT_CHARS) -> Any:
     """A connector's answer for the model: whole when it fits inline (as is, or with its record lists as tables);
     otherwise the real data with long lists cut to their first rows (as many as fit), saying how much was left out,
     with each table's totals still over every row. An outline only if even that won't fit."""
+    from app.agent.jsonsize import fits, size_or_more
+
     limit = min(limit, INLINE_RESULT_CHARS)
-    if _json_size(value) <= limit:
+    if fits(value, limit):  # stops counting at the limit: a 20 MB answer is not encoded whole to learn it is too big
         return value
     tabled = tabulate(value)
-    if _json_size(tabled) <= limit:
+    if fits(tabled, limit):
         return tabled
     for n in (500, 365, 200, 120, 100, 50, 25, 10, 5):
         shrunk, dropped = _cap_lists(tabled, n)
-        if _json_size(shrunk) <= limit:
-            return {"partial": True, "data": shrunk, "left_out_items": dropped, "chars": _json_size(value),
+        if fits(shrunk, limit):
+            return {"partial": True, "data": shrunk, "left_out_items": dropped, "chars": size_or_more(value),
                     "hint": f"Too big for one message, so each list shows its first {n} rows; column_totals still cover "
                             "every row. The full result is stored: for totals, counts or breakdowns over every row (also "
                             "when rows are plain arrays) call aggregate_result with this result_id; to read rows, "
@@ -522,12 +526,13 @@ async def _catalog_search(ctx: RunContext, conn, search_name: str, args: dict) -
         return ctx.gateway_args[key]
     from app.agent import read_cache
 
-    shared = ctx.call_impl is None and getattr(ctx.user, "id", None) is not None
-    raw = await read_cache.get(ctx.user.id, conn.slug, search_name, args) if shared else None
+    ttl = int(getattr(get_settings(), "catalog_cache_s", 600) or 0)
+    shared = ttl > 0 and ctx.call_impl is None and getattr(ctx.user, "id", None) is not None
+    raw = await read_cache.get(ctx.user.id, conn.slug, search_name, args, ttl=ttl) if shared else None
     if raw is None:
         raw = await _silent_call(ctx, conn, search_name, args)
         if shared:
-            await read_cache.put(ctx.user.id, conn.slug, search_name, args, raw)
+            await read_cache.put(ctx.user.id, conn.slug, search_name, args, raw, ttl=ttl)
     ctx.gateway_args[key] = raw
     return raw
 

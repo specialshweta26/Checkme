@@ -40,9 +40,9 @@ async def _key(r, user_id, slug: str, tool: str, args: dict) -> str:
     return f"rc:{user_id}:{slug}:{(gen or b'0').decode() if isinstance(gen, bytes) else gen}:{hashlib.sha256(raw.encode()).hexdigest()[:32]}"
 
 
-async def get(user_id, slug: str, tool: str, args: dict) -> Any:
-    """The cached result, or None."""
-    if not usable(slug):
+async def get(user_id, slug: str, tool: str, args: dict, ttl: int | None = None) -> Any:
+    """The cached result, or None. ``ttl=0`` (a cache turned off by its own setting) never hits."""
+    if not usable(slug) or ttl == 0:
         return None
     try:
         from app.cache import get_redis
@@ -54,17 +54,19 @@ async def get(user_id, slug: str, tool: str, args: dict) -> Any:
         return None
 
 
-async def put(user_id, slug: str, tool: str, args: dict, result: Any) -> None:
-    if not usable(slug) or result is None or (isinstance(result, dict) and result.get("error")):
+async def put(user_id, slug: str, tool: str, args: dict, result: Any, ttl: int | None = None) -> None:
+    if not usable(slug) or ttl == 0 or result is None or (isinstance(result, dict) and result.get("error")):
         return
     try:
-        body = json.dumps(result, default=str)
-        if len(body) > MAX_BYTES:
+        from app.agent.jsonsize import bounded_dumps
+
+        body = bounded_dumps(result, MAX_BYTES)  # a big table is not encoded whole only to be dropped
+        if body is None:
             return
         from app.cache import get_redis
 
         r = get_redis()
-        await r.set(await _key(r, user_id, slug, tool, args), body, ex=_ttl())
+        await r.set(await _key(r, user_id, slug, tool, args), body, ex=ttl or _ttl())
     except Exception:  # noqa: BLE001
         return
 
