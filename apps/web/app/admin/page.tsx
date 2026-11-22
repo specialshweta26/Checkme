@@ -31,7 +31,7 @@ type Person = {
 };
 type Invite = { id: string; value: string; note: string; created_at: string };
 type Audit = { at: string; action: string; user: string; actor: string; target: string; ip: string };
-type SlowCall = { connector?: string; tool?: string; ms?: number; first_ms?: number; pages?: number; cached?: boolean };
+type SlowCall = { connector?: string; tool?: string; ms?: number; first_ms?: number; prep_ms?: number; pages?: number; cached?: boolean };
 type Reply = {
   at: string;
   user: string;
@@ -43,6 +43,10 @@ type Reply = {
   slowest_calls: SlowCall[];
   computer_used: boolean;
   ended: string;
+  tools?: { tool: string; calls: number; ms: number }[];
+  other_ms?: number;
+  prep_ms?: number;
+  stages?: Record<string, number>;
 };
 type Latency = {
   target_s: number;
@@ -273,6 +277,21 @@ export default function AdminPage() {
                           {r.computer_used ? " · computer" : ""}
                           {r.ended ? ` · ${r.ended}` : ""}
                         </span>
+                        <span className="faint">
+                          {[
+                            r.prep_ms ? `checks before calls ${secs(r.prep_ms)}` : "",
+                            r.stages?.finish_check ? `finish check ${secs(r.stages.finish_check)}` : "",
+                            r.stages?.fact_check ? `fact check ${secs(r.stages.fact_check)}` : "",
+                            r.other_ms ? `unaccounted ${secs(r.other_ms)}` : "",
+                          ]
+                            .filter(Boolean)
+                            .join(" · ")}
+                        </span>
+                        {r.tools?.length ? (
+                          <span className="faint">
+                            {r.tools.slice(0, 6).map((t) => `${t.tool} ×${t.calls} ${secs(t.ms)}`).join(" · ")}
+                          </span>
+                        ) : null}
                         {r.slowest_calls.length ? (
                           <span className="faint">
                             {r.slowest_calls

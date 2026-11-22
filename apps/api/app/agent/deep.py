@@ -2059,6 +2059,8 @@ async def waiting_on(ctx: RunContext, conn, tool_name: str):
 async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, args: dict | None = None) -> Any:
     from app.agent import cancel as run_cancel
 
+    _entered = _time.monotonic()  # the checks before the call (schema, gateway action, approval) are timed as prep_ms
+
     run_cancel.check()  # the user pressed Stop: end at this step boundary
     args = as_dict(args)
     orig_tool = tool_name
@@ -2246,7 +2248,8 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
             async with waiting_on(ctx, conn, tool_name):
                 _t0 = _time.monotonic()
                 result = await invoke_named(ctx.db, ctx.user, conn, tool_name, args, ctx.attachments)
-                timing = {"connector": connector_slug, "tool": tool_name, "first_ms": int((_time.monotonic() - _t0) * 1000)}
+                timing = {"connector": connector_slug, "tool": tool_name, "first_ms": int((_time.monotonic() - _t0) * 1000),
+                          "prep_ms": int((_t0 - _entered) * 1000)}
                 if _is_user_mcp(conn):
                     result = await _read_all_pages(ctx, conn, tool_name, args, result)
                     if isinstance(result, dict) and result.get("pages_fetched"):
@@ -4946,6 +4949,7 @@ async def _run_deep_agent(
             )
             text = last_text(result.get("messages") if isinstance(result, dict) else [])
             finished = True
+            timer.mark("graph", _t)  # the agent loop itself; the checks after it are timed on their own
             break
         except Exception as exc:  # noqa: BLE001
             if isinstance(exc, run_cancel.TurnCancelled) or run_cancel.is_cancelled():
@@ -4972,10 +4976,13 @@ async def _run_deep_agent(
             log.exception("deep agent failed")
             text = f"I could not finish that request: {str(exc)[:240]}"
             break
+    _c = _time.monotonic()
     if finished and get_settings().agent_finish_check and finish_check.only_promised(ctx, text):
         text = await _do_what_was_promised(ctx, graph, text, result, progress, callbacks, limit, thread)
     if finished and get_settings().agent_finish_check and finish_check.should_check(ctx, text, multi_step=_multi_step(ctx, plan)):
         text = await _finish_what_is_left(ctx, graph, query, text, result, progress, callbacks, limit, thread)
+    timer.mark("finish_check", _c)
+    _c = _time.monotonic()
     if finished and getattr(get_settings(), "fact_check", True) and ctx.results:
         # Every figure in the reply must come from this turn's data (docs/GUARDRAILS.md "Facts and figures").
         from app.agent import fact_check
@@ -4986,6 +4993,7 @@ async def _run_deep_agent(
             text, ctx.fact_report = await fact_check.verify_reply(text, ctx.results)
         except Exception:  # noqa: BLE001 - the reply stands unchecked rather than not at all
             log.warning("fact check skipped", exc_info=True)
+    timer.mark("fact_check", _c)
     timer.mark("agent", _t)
     timer.log()
     digest: list = []
