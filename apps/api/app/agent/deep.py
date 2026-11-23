@@ -3747,7 +3747,7 @@ def shell_routing_hint(connectors: list | None, agent=None) -> str:
             "Never use shell to bypass folder grants. "
             "If an earlier message already named a file or its folder, go straight to it instead of searching again. "
             "search_files finds a file by the words the user used, across every granted folder. list_files with no path lists those folders. "
-            "list_dir, read_file, write_file, and search_files stay on this computer. If the desktop app is offline, say so and stop. Do not read those files on the cloud computer. "
+            "list_dir, read_file, write_file, edit_file, and search_files stay on this computer. To change part of a file (fix a link, add an index line), use edit_file; it needs no overwrite question. If the desktop app is offline, say so and stop. Do not read those files on the cloud computer. "
             "A missing path on the cloud machine does not mean the file is missing on this Mac. "
             "shell and run_code ask the user to approve each run in a prompt on this computer. Use them when the task needs them, not for file work the file tools do. If the result says need=shell_approval, nothing ran: tell the user and do not retry it or do it another way. "
             "Ask before overwrite, delete, bulk changes, sending forms, purchasing, or publishing. "
@@ -3949,7 +3949,7 @@ def system_prompt(
         "connect_app returns redirect_url; the chat always shows the Composio connect card. Do not only paste the URL, and do not refuse to connect when composio is listed.\n"
         "Computer, browser, files, web search, memory, skills, and scratchpad are first-class tools. Call them directly. "
         "Do not search_tools or call_tool for browser_navigate, browser_snapshot, browser_act, browser_collect, computer_observe, computer_act, "
-        "shell, run_code, list_files, read_file, write_file, save_mail_attachments, attach_file, open_path, launch_app, request_takeover, web_search, web_read, web_fetch, "
+        "shell, run_code, list_files, read_file, write_file, edit_file, save_mail_attachments, attach_file, open_path, launch_app, request_takeover, web_search, web_read, web_fetch, "
         "create_office_file, create_presentation, "
         "remember, recall_memory, or scratchpad_add.\n"
         "When the user asks for a chart, plot, HTML report, or downloadable file: fetch the data first, then "
@@ -4813,6 +4813,22 @@ async def run_deep_agent(
         reset_client_kind(token)
 
 
+_GO_AHEAD = re.compile(r"^\s*(yes|yep|yeah|ok|okay|sure|go ahead|do it|proceed|continue|please do|go on)\b[\s.!,]*(please|anyway|here)?[\s.!]*$", re.I)
+
+
+def skill_query(query: str, history: list | None) -> str:
+    """The request to match skills against. A bare "go ahead" (after the role check or a question) means the user's
+    previous request, which is what a skill would match; matching "go ahead" itself finds nothing."""
+    if not _GO_AHEAD.match(query or ""):
+        return query
+    for m in reversed(list(history or [])):
+        if isinstance(m, dict) and m.get("role") == "user":
+            text = str(m.get("content") or "").strip()
+            if text and not _GO_AHEAD.match(text):
+                return text
+    return query
+
+
 def skip_skill_routing(plan, query: str) -> bool:
     """A quick web question ("weather in Pune", "who won the match") is never a saved skill: skip the embeddings and the
     confirm call. Short questions that name a skill still go through routing."""
@@ -4847,10 +4863,15 @@ async def _role_block(db, user, agent, query: str, history: list) -> dict | None
         from app.agents import role_gate
         from app.models import WorkspaceAgent
 
+        from app.models import AgentSkill
+
         others = []
+        skills: list[dict] = []
         if db is not None:
             others = list((await db.execute(select(WorkspaceAgent).where(WorkspaceAgent.user_id == user.id))).scalars().all())
-        out = await role_gate.check(agent, query, list(history or []), others)
+            rows = (await db.execute(select(AgentSkill).where(AgentSkill.user_id == user.id, AgentSkill.agent_id == agent.id))).scalars().all()
+            skills = [{"name": r.name, "description": r.description or "", "instruction": r.instruction or ""} for r in rows]
+        out = await role_gate.check(agent, query, list(history or []), others, skills=skills)
     except Exception:  # noqa: BLE001 - the role check never blocks the user
         log.info("role check failed", exc_info=True)
         return None
@@ -5019,8 +5040,9 @@ async def _run_deep_agent(
         except Exception:  # noqa: BLE001
             log.info("skills: loading the skill index failed", exc_info=True)
             await db.rollback()
-        if all_skills and not file_turn and not simple_turn and not skip_skill_routing(plan, query):
-            skills_task = asyncio.create_task(_route_and_confirm(all_skills, query))
+        route_query = skill_query(query, history)
+        if all_skills and not file_turn and not simple_turn and not skip_skill_routing(plan, route_query):
+            skills_task = asyncio.create_task(_route_and_confirm(all_skills, route_query))
         timer.mark("skills_index", _t)
     if progress is not None and plan.kind != fast_path.QUICK_WEB:
         await progress.emit("Recalling what I know about this" if not teammate_depth else "Picking up the task", kind="memory")

@@ -163,6 +163,17 @@ class SaveUploadInput(BaseModel):
 class WriteFileInput(BaseModel):
     path: str
     content: str
+    overwrite: bool = Field(
+        default=False,
+        description="Replace a file that already exists. Only when the user asked to change, update or replace this file; to change part of a file, use edit_file instead.",
+    )
+
+
+class EditFileInput(BaseModel):
+    path: str = Field(description="The file to change, as read_file shows it.")
+    old_string: str = Field(description="The exact text to replace, copied from read_file.")
+    new_string: str = Field(description="The text to put in its place.")
+    replace_all: bool = Field(default=False, description="Replace every occurrence instead of exactly one.")
 
 
 class SaveMailInput(BaseModel):
@@ -570,10 +581,15 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         ctx.used_tools.append("save_upload_to_computer")
         return _dumps(_seen(ctx, await uploads.save_upload_to_computer(ctx, attachment_key, path)))
 
-    async def write_file(path: str, content: str) -> str:
-        """Write a UTF-8 file on the computer, creating parent directories."""
+    async def write_file(path: str, content: str, overwrite: bool = False) -> str:
+        """Write a UTF-8 file on the computer, creating parent directories. An existing file is replaced only with overwrite=true."""
         ctx.used_tools.append("write_file")
-        return _dumps(_seen(ctx, await computer.write_file(ctx, path, content)))
+        return _dumps(_seen(ctx, await computer.write_file(ctx, path, content, overwrite)))
+
+    async def edit_file(path: str, old_string: str, new_string: str, replace_all: bool = False) -> str:
+        """Change part of a text file on the computer (in the desktop app, the user's own files): replace old_string, copied exactly from read_file, with new_string. Use this to fix a link, add a line to an index or update a note; it needs no overwrite question."""
+        ctx.used_tools.append("edit_file")
+        return _dumps(_seen(ctx, await computer.edit_file(ctx, path, old_string, new_string, replace_all)))
 
     async def save_mail_attachments(query: str, path: str, account: str = "", page_token: str = "") -> str:
         """Save attachments from the user's mail into a folder on this computer. Searches every connected Gmail and Outlook account unless account is set. Pages past the first 50 messages, downloads the files, and writes them into path. Do not stop at a chat download link."""
@@ -976,6 +992,7 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         StructuredTool.from_function(coroutine=read_upload, name="read_upload", description=read_upload.__doc__, args_schema=UploadInput),
         StructuredTool.from_function(coroutine=save_upload_to_computer, name="save_upload_to_computer", description=save_upload_to_computer.__doc__, args_schema=SaveUploadInput),
         StructuredTool.from_function(coroutine=write_file, name="write_file", description=write_file.__doc__, args_schema=WriteFileInput),
+        StructuredTool.from_function(coroutine=edit_file, name="edit_file", description=edit_file.__doc__, args_schema=EditFileInput),
         StructuredTool.from_function(
             coroutine=save_mail_attachments,
             name="save_mail_attachments",

@@ -60,9 +60,36 @@ async def test_a_role_redirect_ends_the_turn_without_tools(monkeypatch):
     from app.agent import deep
     from app.agents import role_gate as gate
 
-    async def outside(agent, query, history, others):
+    async def outside(agent, query, history, others, **kw):
         return {"text": "That's outside my role as HR.", "fits": "Ops Analyst"}
 
     monkeypatch.setattr(gate, "check", outside)
     out = await deep._role_block(None, SimpleNamespace(id="u"), HR, "Lotto sales?", [])
     assert out["text"].startswith("That's outside my role") and out["used_tools"] == [] and out["role_redirect"]["fits"] == "Ops Analyst"
+
+
+WIKI = SimpleNamespace(id="baba", name="Baba", title="Llm wiki", focus=None, instructions="Always use the wiki skill.")
+WIKI_SKILL = {"name": "Karpathy llm wiki", "description": "Ingest sources into a markdown LLM wiki, query it and lint it.",
+              "instruction": "x " * 3000}  # fmt: skip
+
+
+async def test_a_request_the_agents_own_skill_covers_is_never_redirected():
+    """Live: Baba (title "Llm wiki", with the Karpathy wiki skill) answered "outside my role" to "ingest <url> into the wiki"."""
+    calls: list = []
+    out = await role_gate.check(WIKI, "ingest https://agilitas.com/pages/our-story into the wiki", [], [*OTHERS, WIKI],
+                                _model('{"in_role": false, "fits": "Chief"}', calls), skills=[WIKI_SKILL])  # fmt: skip
+    assert out is None and calls == []
+
+
+async def test_skills_are_shown_to_the_check_and_unrelated_requests_still_go_to_it():
+    calls: list = []
+    await role_gate.check(WIKI, "What were Lotto's sales yesterday?", [], OTHERS, _model('{"in_role": true}', calls),
+                          skills=[WIKI_SKILL])  # fmt: skip
+    assert len(calls) == 1 and "Karpathy llm wiki" in calls[0]
+
+
+def test_a_skills_long_instructions_alone_do_not_cover_everything():
+    long_only = {"name": "Wiki", "description": "", "instruction": "sales figures report " + "word " * 500}
+    assert role_gate.covered_by_skill([{"name": "Payroll run", "description": "Run monthly payroll."}], "ingest this url") is False
+    assert role_gate.covered_by_skill([WIKI_SKILL], "lint the wiki") is True
+    assert isinstance(role_gate.covered_by_skill([long_only], "hello there"), bool)
