@@ -144,7 +144,7 @@
     wrap.id = "lumio-computer-settings";
     wrap.innerHTML =
       '<button type="button" id="lumio-cs-toggle">This computer</button>' +
-      '<div id="lumio-cs-panel"><h2>This computer</h2><p id="lumio-cs-note" style="margin:0 0 8px;color:#64748b">Desktop, Documents, and Downloads are already available. Allow another folder only when you want Lumio to use it. Terminal stays off until you turn it on.</p><ul id="lumio-cs-folders"></ul><label style="display:flex;gap:8px;align-items:center;margin-top:8px"><input type="checkbox" id="lumio-cs-term"/> Allow terminal / Python</label><div class="row"><button type="button" id="lumio-cs-add">Allow another folder</button><button type="button" id="lumio-cs-clear">Clear Lumio browser data</button></div></div>';
+      '<div id="lumio-cs-panel"><h2>This computer</h2><p id="lumio-cs-note" style="margin:0 0 8px;color:#64748b">Desktop, Documents, and Downloads are already available. Allow another folder only when you want Lumio to use it. Lumio asks you before it runs any terminal command or Python.</p><ul id="lumio-cs-folders"></ul><div class="row"><button type="button" id="lumio-cs-add">Allow another folder</button><button type="button" id="lumio-cs-clear">Clear Lumio browser data</button></div></div>';
     document.documentElement.appendChild(wrap);
     var panel = wrap.querySelector("#lumio-cs-panel");
     wrap.querySelector("#lumio-cs-toggle").onclick = function () {
@@ -157,13 +157,6 @@
         await refresh();
       } catch (e) {}
     };
-    wrap.querySelector("#lumio-cs-term").onchange = async function (ev) {
-      try {
-        await invoke("set_terminal_grant", { enabled: ev.target.checked });
-      } catch (e) {
-        ev.target.checked = false;
-      }
-    };
     wrap.querySelector("#lumio-cs-clear").onclick = async function () {
       if (!window.confirm("Clear cookies and site data in Lumio’s browser? Your Chrome/Edge/Safari profiles are not touched.")) return;
       try {
@@ -173,7 +166,6 @@
     async function refresh() {
       try {
         var data = await invoke("list_folder_grants");
-        wrap.querySelector("#lumio-cs-term").checked = !!data.terminal;
         var ul = wrap.querySelector("#lumio-cs-folders");
         ul.innerHTML = "";
         (data.folders || []).forEach(function (f) {

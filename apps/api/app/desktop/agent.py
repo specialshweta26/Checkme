@@ -115,6 +115,12 @@ async def has_feature(user_id, name: str) -> bool:
 
 
 BROWSER_SPACES = "browser-spaces"
+SHELL_APPROVAL = "shell-approval"
+# A desktop app with `shell-approval` asks the user before each shell or Python run and waits up to this long
+# (apps/desktop/src-tauri/src/approval.rs WAIT). The server waits that much longer, so a slow answer is not taken
+# for an offline app (which would send the command to the cloud computer instead).
+SHELL_APPROVAL_WAIT_S = 120
+APPROVAL_TOOLS = frozenset({"exec", "run_code"})
 
 
 async def with_agent_browser(user_id, tool: str, args: dict) -> tuple[dict, dict | None]:
@@ -311,10 +317,11 @@ async def call_local(user_id, tool: str, args: dict | None = None) -> dict:
     except (TypeError, ValueError):
         pass
     timeout = max(10, min(timeout, 300))
+    extra = SHELL_APPROVAL_WAIT_S if tool in APPROVAL_TOOLS and await has_feature(user_id, SHELL_APPROVAL) else 0
     sent = time.monotonic()
     job_id = await enqueue(user_id, tool, args or {})
     try:
-        out = await wait_result(job_id, timeout + 15)
+        out = await wait_result(job_id, timeout + extra + 15)
     except LocalOffline:
         raise
     except Exception as vis_exc:  # noqa: BLE001

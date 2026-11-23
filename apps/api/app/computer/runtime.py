@@ -119,7 +119,7 @@ def capabilities_for(category: str) -> dict[str, Any]:
         notes = ["Uses Lumio's own Chrome profile. Does not read cookies or passwords from the user's everyday browser."]
     elif category == "terminal":
         caps = {"api": False, "browser": False, "script": True, "accessibility": False, "visual": False, "pointer": False}
-        notes = ["Terminal stays off until the user enables it in This computer settings."]
+        notes = ["Each shell command asks the user to allow it in a prompt on this computer."]
     elif category == "hybrid":
         caps = {"api": False, "browser": False, "script": False, "accessibility": False, "visual": True, "pointer": True}
         notes = ["No official API is connected for this app. Visual control needs Screen Recording and Accessibility, which are not bypassed."]

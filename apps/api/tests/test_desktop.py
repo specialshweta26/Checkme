@@ -425,3 +425,45 @@ async def test_an_old_picture_is_not_shown_forever(monkeypatch):
     with pytest.raises(LocalOffline, match="offline"):
         await agent.local_browser_frame(key)
 
+
+
+async def _timeout_for(monkeypatch, tool: str, features: set[str]) -> float:
+    from app.desktop import agent
+
+    seen = {}
+
+    async def online(_uid):
+        return True
+
+    async def feature(_uid, name):
+        return name in features
+
+    async def enqueue(_uid, _tool, _args):
+        return "job-1"
+
+    async def wait(job_id, timeout_s):
+        seen["timeout"] = timeout_s
+        return {"ok": True}
+
+    monkeypatch.setattr(agent, "is_online", online)
+    monkeypatch.setattr(agent, "has_feature", feature)
+    monkeypatch.setattr(agent, "enqueue", enqueue)
+    monkeypatch.setattr(agent, "wait_result", wait)
+    await agent.call_local(uuid.uuid4(), tool, {"command": "ls", "timeout": 60})
+    return seen["timeout"]
+
+
+async def test_shell_waits_for_the_users_answer_on_a_desktop_that_asks(monkeypatch):
+    from app.desktop.agent import SHELL_APPROVAL, SHELL_APPROVAL_WAIT_S
+
+    asks = await _timeout_for(monkeypatch, "exec", {SHELL_APPROVAL})
+    old = await _timeout_for(monkeypatch, "exec", set())
+    assert asks == old + SHELL_APPROVAL_WAIT_S
+    assert await _timeout_for(monkeypatch, "run_code", {SHELL_APPROVAL}) == asks
+
+
+async def test_file_tools_get_no_approval_wait(monkeypatch):
+    from app.desktop.agent import SHELL_APPROVAL
+
+    assert await _timeout_for(monkeypatch, "write_file", {SHELL_APPROVAL}) == await _timeout_for(monkeypatch, "write_file", set())
+

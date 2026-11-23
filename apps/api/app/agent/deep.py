@@ -3749,7 +3749,7 @@ def shell_routing_hint(connectors: list | None, agent=None) -> str:
             "search_files finds a file by the words the user used, across every granted folder. list_files with no path lists those folders. "
             "list_dir, read_file, write_file, and search_files stay on this computer. If the desktop app is offline, say so and stop. Do not read those files on the cloud computer. "
             "A missing path on the cloud machine does not mean the file is missing on this Mac. "
-            "Terminal/run_code stay off unless they enabled Terminal in This computer settings. "
+            "shell and run_code ask the user to approve each run in a prompt on this computer. Use them when the task needs them, not for file work the file tools do. If the result says need=shell_approval, nothing ran: tell the user and do not retry it or do it another way. "
             "Ask before overwrite, delete, bulk changes, sending forms, purchasing, or publishing. "
             "To operate an installed app, call computer_use: discover, then inspect, then launch. Trust its status and evidence. "
             "If status is needs_approval or unsupported, stop and say so. Do not retry a refused step through clicks or the shell. "

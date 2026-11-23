@@ -22,7 +22,8 @@ pub struct FolderGrant {
 pub struct Grants {
     #[serde(default)]
     pub folders: Vec<FolderGrant>,
-    #[serde(default)]
+    /// Old setting from when Terminal had an on/off switch. Read so old files still load; no longer gates anything.
+    #[serde(default, skip_serializing)]
     pub terminal: bool,
 }
 
@@ -113,16 +114,9 @@ pub fn snapshot() -> Grants {
     with_grants(|g| g.clone())
 }
 
+/// Terminal is always available; each command asks the user first (`approval.rs`).
 pub fn terminal_allowed() -> bool {
-    with_grants(|g| g.terminal)
-}
-
-pub fn set_terminal(enabled: bool) -> Result<Grants, String> {
-    with_grants(|g| {
-        g.terminal = enabled;
-        persist(g)?;
-        Ok(g.clone())
-    })
+    true
 }
 
 fn new_id() -> String {
@@ -282,7 +276,8 @@ fn home_protected(path: &Path) -> bool {
     })
 }
 
-/// Resolve a path for create/write. Parent must exist and be granted; file may be new.
+/// Resolve a path for create/write. The file and any of its parent folders may be new: the nearest folder that
+/// exists must sit inside a grant, and the missing part may not climb out with `..`. Callers create the folders.
 pub fn resolve_writable(raw: &str) -> Result<PathBuf, AccessError> {
     let grants = snapshot();
     if grants.folders.is_empty() {
@@ -297,14 +292,48 @@ pub fn resolve_writable(raw: &str) -> Result<PathBuf, AccessError> {
     if given.exists() {
         return resolve_existing(raw);
     }
-    let parent = given.parent().filter(|p| !p.as_os_str().is_empty()).ok_or_else(|| AccessError::Io("path is required".into()))?;
-    let parent_c = canonical(parent).map_err(AccessError::Io)?;
-    if !under_grant(&parent_c, &grants) {
+    let mut missing: Vec<std::ffi::OsString> = Vec::new();
+    let mut base = given.as_path();
+    while !base.exists() {
+        match (base.parent().filter(|p| !p.as_os_str().is_empty()), base.file_name()) {
+            (Some(parent), Some(name)) => {
+                missing.push(name.to_os_string());
+                base = parent;
+            }
+            _ => return Err(AccessError::Io("path is required".into())),
+        }
+    }
+    // `file_name()` is None for a trailing `..`, so a climb out ends the loop above with an error; check the parts
+    // that were collected anyway in case a platform hands back `.` or `..` as a name.
+    if missing.iter().any(|part| part == "." || part == ".." || part.is_empty()) {
+        return Err(AccessError::Io("a new path may not contain . or .. folders".into()));
+    }
+    let base_c = match canonical(base) {
+        Ok(resolved) => resolved,
+        Err(err) if crate::os::is_denied_message(&err) && (under_grant_text(base, &grants) || home_protected(base)) => base.to_path_buf(),
+        Err(err) => return Err(AccessError::Io(err)),
+    };
+    if !base_c.is_dir() && base_c.exists() {
+        return Err(AccessError::Io(format!("{} is a file, not a folder", base_c.display())));
+    }
+    if !under_grant(&base_c, &grants) && !under_grant_text(&base_c, &grants) {
         return Err(AccessError::NeedGrant {
-            path: parent_c.to_string_lossy().into_owned(),
+            path: base_c.to_string_lossy().into_owned(),
         });
     }
-    Ok(parent_c.join(given.file_name().unwrap_or_default()))
+    let mut out = base_c;
+    for part in missing.iter().rev() {
+        out.push(part);
+    }
+    Ok(out)
+}
+
+/// Create the folders a resolved write path needs. Only call with a path from `resolve_writable`.
+pub fn make_parents(file: &Path) -> Result<(), String> {
+    match file.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() && !parent.exists() => fs::create_dir_all(parent).map_err(|e| e.to_string()),
+        _ => Ok(()),
+    }
 }
 
 pub fn list_roots() -> Value {
@@ -312,7 +341,7 @@ pub fn list_roots() -> Value {
     json!({
         "ok": true,
         "folders": grants.folders,
-        "terminal": grants.terminal,
+        "terminal": "ask_each_command",
         "ran_on": "local_computer",
         "note": "Desktop, Documents, and Downloads are already allowed. List and read them directly. Ask in the chat before using any other folder.",
     })
@@ -409,7 +438,7 @@ fn walk_search(dir: &Path, q: &str, hits: &mut Vec<Value>) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex as StdMutex;
@@ -417,7 +446,7 @@ mod tests {
     static SEQ: AtomicU64 = AtomicU64::new(0);
     static TEST_LOCK: StdMutex<()> = StdMutex::new(());
 
-    fn isolate() -> PathBuf {
+    pub(crate) fn isolate() -> PathBuf {
         let n = SEQ.fetch_add(1, Ordering::SeqCst);
         let dir = std::env::temp_dir().join(format!("lumio-grants-{n}"));
         let _ = fs::remove_dir_all(&dir);
@@ -427,7 +456,7 @@ mod tests {
         dir
     }
 
-    fn lock_tests() -> std::sync::MutexGuard<'static, ()> {
+    pub(crate) fn lock_tests() -> std::sync::MutexGuard<'static, ()> {
         TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }
 
@@ -515,5 +544,55 @@ mod tests {
             Err(AccessError::NeedGrant { .. }) => {}
             other => panic!("expected need grant after revoke, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn write_path_may_add_folders_inside_a_grant() {
+        let _lock = lock_tests();
+        let root = isolate();
+        let folder = root.join("work");
+        fs::create_dir_all(&folder).unwrap();
+        add_folder(&folder).unwrap();
+        let target = folder.join("new/deeper/notes.txt");
+        let got = resolve_writable(target.to_str().unwrap()).unwrap();
+        assert!(got.ends_with("new/deeper/notes.txt"));
+        assert!(got.starts_with(canonical(&folder).unwrap()));
+        make_parents(&got).unwrap();
+        fs::write(&got, b"hi").unwrap();
+        assert_eq!(fs::read(&got).unwrap(), b"hi");
+    }
+
+    #[test]
+    fn new_folders_cannot_climb_out_of_a_grant() {
+        let _lock = lock_tests();
+        let root = isolate();
+        let folder = root.join("work");
+        fs::create_dir_all(&folder).unwrap();
+        add_folder(&folder).unwrap();
+        let escape = folder.join("new/../../outside/x.txt");
+        assert!(resolve_writable(escape.to_str().unwrap()).is_err());
+        assert!(!root.join("outside").exists());
+    }
+
+    #[test]
+    fn new_folders_outside_a_grant_ask_for_one() {
+        let _lock = lock_tests();
+        let root = isolate();
+        let folder = root.join("work");
+        fs::create_dir_all(&folder).unwrap();
+        add_folder(&folder).unwrap();
+        let other = root.join("other/sub/x.txt");
+        match resolve_writable(other.to_str().unwrap()) {
+            Err(AccessError::NeedGrant { .. }) => {}
+            other => panic!("expected need grant, got {other:?}"),
+        }
+        assert!(!root.join("other").exists());
+    }
+
+    #[test]
+    fn old_terminal_setting_still_loads() {
+        let g: Grants = serde_json::from_str(r#"{"folders":[],"terminal":false}"#).unwrap();
+        assert!(g.folders.is_empty());
+        assert!(terminal_allowed());
     }
 }
