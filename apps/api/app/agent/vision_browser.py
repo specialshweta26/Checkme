@@ -161,8 +161,7 @@ async def computer_task(ctx, goal: str, values: dict | None = None, allow_final_
     """Do ``goal`` on the computer's browser by sight. Never raises."""
     from app.agent import usage
     from app.agent.fast_browser import _log, _result, scrub
-    from app.config import get_settings
-    from app.llm import openai_client
+    from app import llm_gateway
 
     vals = {k: str(v) for k, v in (values or {}).items()}
     started = time.monotonic()
@@ -181,7 +180,8 @@ async def computer_task(ctx, goal: str, values: dict | None = None, allow_final_
             from app.agent.fast_browser import BOT_WALL_NEED
 
             return _result(state, vals, ok=False, done=False, need_user=BOT_WALL_NEED)
-        model = str(getattr(get_settings(), "computer_use_model", "") or "").strip() or get_settings().openai_model
+        spec = llm_gateway.resolve(ctx, "computer_use")
+        model = spec.model
         tools = [{"type": "computer"}]
         instructions = SYSTEM % (_FINAL_ALLOW if allow_final_action else _FINAL_BLOCK)
         placeholders = ", ".join("{{%s}}" % k for k in vals) or "none"
@@ -190,7 +190,7 @@ async def computer_task(ctx, goal: str, values: dict | None = None, allow_final_
                                            f"Current page: {state.get('url') or ''} {state.get('title') or ''}"},
             {"type": "input_image", "image_url": image},
         ]}]
-        client = openai_client()
+        client = llm_gateway.openai_client(spec)
         resp = await client.responses.create(model=model, tools=tools, instructions=instructions, input=first,
                                              max_output_tokens=1200)
         usage.from_openai(model, getattr(resp, "usage", None))

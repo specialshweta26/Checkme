@@ -79,11 +79,11 @@ def _segments(resp: Any) -> list[dict]:
 
 async def transcribe(data: bytes, ext: str) -> list[dict]:
     """[{start, end, text}] in seconds from the clip start. Raises on failure."""
-    from app.llm import openai_client
+    from app import llm_gateway
 
     model = (get_settings().openai_transcribe_model or "whisper-1").strip()
     upload = (f"narration.{ext}", data)
-    client = openai_client()
+    client = llm_gateway.openai_client(llm_gateway.resolve(None, "transcribe"))
     if model == "whisper-1":
         resp = await asyncio.wait_for(
             client.audio.transcriptions.create(

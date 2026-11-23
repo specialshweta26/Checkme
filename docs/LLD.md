@@ -1203,3 +1203,23 @@ Do not commit `.env`.
 - **Stable tool list** (`tool_scope.sticky`): a tool group shown once in a chat stays shown for that chat's later
   turns. The tool schemas come first in the prompt, so a list that changed every turn missed the cache.
 - **Checks side by side**: the integrity check runs at the same time as the budget and role checks.
+
+## Model gateway
+
+Every model call asks `app/llm_gateway.resolve(ctx, purpose)` which model, key and provider to use, and builds its
+model or client from the returned `ModelSpec`. Purposes: `agent` (the deep agent's chat model, `deep._chat_model`),
+`small` (routing, checks, memory: `llm.chat_complete(..., purpose="small")` and the memory manager), `vision` (the
+skill writer's screenshots), `computer_use`, `image`, `transcribe` and `embed`.
+
+- Phase 1 (now): every spec is Lumio's own OpenAI key and the models in settings (`OPENAI_MODEL`, `OPENAI_SMALL_MODEL`,
+  `COMPUTER_USE_MODEL`, ...), so behaviour is unchanged. A caller that names a model (`model=`, for example
+  `BROWSER_FAST_MODEL`) keeps the provider and key and only swaps the model. A `chat_complete` call that passes
+  `model=small_model()` counts as the `small` purpose, so a later small-model choice reaches every background call.
+- Later phases: users save their own keys (OpenAI, Anthropic, Google, xAI, Groq, OpenRouter, any OpenAI-compatible
+  address) and choose a default model for their profile and per agent. `resolve` is the one place that choice is made:
+  the agent's setting, then the user's default, then the team's, then Lumio's (`_chosen`).
+- Embeddings always use Lumio's model: stored memory vectors only match vectors from the same model.
+- A `ModelSpec` never prints its key (`repr` and `describe()` leave it out). Specs for a provider Lumio can't call yet
+  raise `UnsupportedProvider` instead of falling back to Lumio's key, so a user's choice is never silently ignored.
+- `openai_client(spec)` returns Lumio's shared client for its own key, and one cached client per key and address for
+  anything else.
