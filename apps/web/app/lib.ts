@@ -952,6 +952,28 @@ export const setWatchEnabled = (id: number, enabled: boolean) =>
   skillCall<Watch>(`/api/automations/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled }) }, "Couldn't change it");
 export const deleteWatch = (id: number) => skillCall<{ ok: boolean }>(`/api/automations/${id}`, { method: "DELETE" }, "Couldn't delete it");
 
+// Triggers: "before each meeting" and "when mail from X arrives" (apps/api/app/automations/triggers.py).
+export type Trigger = {
+  id: number;
+  name: string;
+  trigger: string;
+  trigger_type: "meeting" | "mail";
+  condition: string;
+  action: string;
+  enabled: boolean;
+  requires_approval: boolean;
+  agent_id: string | null;
+};
+export async function listTriggers(agentId?: string | null) {
+  const data = await skillCall<{ automations: (Trigger & { trigger_type: string })[] }>(`/api/automations${qs({ agent_id: agentId })}`, {}, "Couldn't load triggers");
+  return data.automations.filter((a): a is Trigger => a.trigger_type === "meeting" || a.trigger_type === "mail");
+}
+export const updateTrigger = (id: number, changes: Partial<Pick<Trigger, "enabled" | "requires_approval" | "name" | "action" | "condition" | "trigger">>) =>
+  skillCall<Trigger>(`/api/automations/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(changes) }, "Couldn't change it");
+export const deleteTrigger = (id: number) => skillCall<{ ok: boolean }>(`/api/automations/${id}`, { method: "DELETE" }, "Couldn't delete it");
+export const routineEdit = (id: string, changes: { title?: string; instruction?: string }) =>
+  skillCall<Routine>(`/api/tasks/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(changes) }, "Couldn't save it");
+
 // ---- One approvals queue (docs/APPROVALS.md) ----
 export type ApprovalKind = "plan" | "action" | "question" | "handoff" | "chat";
 export type ApprovalItem = {

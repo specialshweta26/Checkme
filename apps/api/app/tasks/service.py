@@ -145,6 +145,24 @@ async def set_status(db: AsyncSession, user: User, task_id: uuid.UUID, status: s
     return serialize(task, user.timezone or "Asia/Kolkata", agent_name=name, agent_color=color)
 
 
+async def edit_task(db: AsyncSession, user: User, task_id: uuid.UUID, *, title: str | None = None, instruction: str | None = None) -> dict:
+    """Change what a routine is called or what it does. Its schedule stays (delete and add one to change when)."""
+    task = await get_owned(db, user, task_id)
+    if title is not None:
+        clean = " ".join(title.split())[:200]
+        if not clean:
+            raise ValueError("A routine needs a name.")
+        task.title = clean
+    if instruction is not None:
+        clean = instruction.strip()[:8000]
+        if not clean:
+            raise ValueError("Say what the routine should do.")
+        task.instruction = clean
+    await db.commit()
+    name, color = await _agent_labels(db, task)
+    return serialize(task, user.timezone or "Asia/Kolkata", agent_name=name, agent_color=color)
+
+
 async def _agent_labels(db: AsyncSession, task: ScheduledTask) -> tuple[str, str]:
     if not task.agent_id:
         return "", ""

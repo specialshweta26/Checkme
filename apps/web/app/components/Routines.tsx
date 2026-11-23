@@ -6,6 +6,7 @@ import {
   createRoutine,
   listRoutines,
   routineDelete,
+  routineEdit,
   routineRunNow,
   routineSetStatus,
   routineSummary,
@@ -13,6 +14,7 @@ import {
   type RoutineRun,
   type RoutineSummary,
 } from "../lib";
+import { ConfirmDelete, Triggers } from "./Triggers";
 import { Watches } from "./Watches";
 
 // Routines (docs/ROUTINES.md): scheduled tasks, one agent at a time from the clock button or an agent card, and every
@@ -79,6 +81,9 @@ export function RunStatus({ status }: { status: string }) {
 export function RoutineRow({ task, onChanged, onError, compact = false }: { task: Routine; onChanged: () => void; onError: (m: string) => void; compact?: boolean }) {
   const [busy, setBusy] = useState("");
   const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [title, setTitle] = useState(task.title);
+  const [instruction, setInstruction] = useState(task.instruction || task.prompt || "");
   const lastFailed = Boolean(task.last_error);
 
   async function act(kind: string, fn: () => Promise<unknown>) {
@@ -110,7 +115,28 @@ export function RoutineRow({ task, onChanged, onError, compact = false }: { task
       </button>
       {open ? (
         <div className="routine-detail">
-          <p className="routine-instruction">{task.instruction || task.prompt}</p>
+          {editing ? (
+            <div style={{ display: "grid", gap: 6 }}>
+              <input aria-label="Routine name" value={title} onChange={(e) => setTitle(e.target.value)} />
+              <textarea aria-label="What it does" rows={4} value={instruction} onChange={(e) => setInstruction(e.target.value)} />
+              <p className="faint">It keeps running {task.schedule_label}. To change when, delete it and add a new one.</p>
+              <div className="row" style={{ gap: 6 }}>
+                <button
+                  className="btn small"
+                  type="button"
+                  disabled={!!busy || !title.trim() || !instruction.trim()}
+                  onClick={() => act("save", async () => { await routineEdit(task.id, { title, instruction }); setEditing(false); })}
+                >
+                  {busy === "save" ? "Saving…" : "Save"}
+                </button>
+                <button className="btn secondary small" type="button" disabled={!!busy} onClick={() => setEditing(false)}>
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : (
+            <p className="routine-instruction">{task.instruction || task.prompt}</p>
+          )}
           {task.last_run_at ? (
             <div className={`routine-last${lastFailed ? " bad" : ""}`}>
               <span className="faint">Last run · {task.last_run_label}</span>
@@ -136,14 +162,12 @@ export function RoutineRow({ task, onChanged, onError, compact = false }: { task
               </a>
             ) : null}
             <span style={{ flex: 1 }} />
-            <button
-              className="btn secondary small"
-              type="button"
-              disabled={!!busy}
-              onClick={() => window.confirm(`Delete the routine “${task.title}”? Its run history goes with it.`) && act("del", () => routineDelete(task.id))}
-            >
-              Delete
-            </button>
+            {!editing ? (
+              <button className="btn secondary small" type="button" disabled={!!busy} onClick={() => setEditing(true)}>
+                Edit
+              </button>
+            ) : null}
+            <ConfirmDelete label={`“${task.title}” and its run history`} busy={busy === "del"} onDelete={() => act("del", () => routineDelete(task.id))} />
           </div>
         </div>
       ) : null}
@@ -285,6 +309,7 @@ export function AgentRoutinesPanel({ agentId, agentName }: { agentId: string; ag
           {live.map((t) => (
             <RoutineRow key={t.id} task={t} compact onChanged={refresh} onError={setError} />
           ))}
+          <Triggers agentId={agentId} />
           <Watches agentId={agentId} agentName={agentName} compact />
           {done.length ? (
             <details className="drawer-done">

@@ -2,6 +2,7 @@
 
 import { useEffect, useState, type FormEvent } from "react";
 import { AgentSelect, Select } from "./Select";
+import { ConfirmDelete } from "./Triggers";
 import { checkWatch, createWatch, deleteWatch, listWatches, relativeTime, setWatchEnabled, type Watch, type WorkspaceAgent } from "../lib";
 
 // Watches (docs/WATCHES.md): an agent wakes when a page changes (or a phrase appears on it), or when the inbox has
@@ -75,14 +76,7 @@ function WatchRow({ w, onChanged, onError, showAgent }: { w: Watch; onChanged: (
         <button className="btn secondary small" type="button" disabled={!!busy} onClick={() => act("toggle", () => setWatchEnabled(w.id, !w.enabled))}>
           {w.enabled ? "Pause" : "Resume"}
         </button>
-        <button
-          className="btn secondary small"
-          type="button"
-          disabled={!!busy}
-          onClick={() => window.confirm(`Delete the watch “${w.name}”?`) && act("del", () => deleteWatch(w.id))}
-        >
-          Delete
-        </button>
+        <ConfirmDelete label={`the watch “${w.name}”`} busy={busy === "del"} onDelete={() => act("del", () => deleteWatch(w.id))} />
       </div>
     </div>
   );
