@@ -108,7 +108,7 @@ Every agent works by its own instructions, role and skills.
   never checked, and any failure lets the request through. The agent's own skills count as its role: a request whose
   words match one of its skills' names or descriptions (`role_gate.covered_by_skill`) goes straight through without
   the model call, and the skills are listed in the check's prompt otherwise (live: Baba, titled "Llm wiki" with the
-  Karpathy wiki skill, called "ingest <url> into the wiki" outside its role).
+  Karpathy wiki skill, called "ingest <url> into the wiki" outside its role). Skills shared with every agent count too. Instructions that give the agent every request ("always use only skill to answer", "answer every question", "handle all requests"; `role_gate.takes_everything`) turn the check off for that agent: the user's own words beat the small model's reading of the title (live: Baba sent "one8 products" to Teamily despite such instructions).
 - **Own connectors only:** a run gets the connectors assigned to its agent (and the shared computer and marketplace,
   and anything not assigned to anyone). Before, an agent in a group also got every connector assigned to its
   teammates; now work that needs a teammate's connector goes to that teammate with `ask_teammate`, and it runs with its

@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 from langchain_core.tools import StructuredTool
 from langgraph.checkpoint.memory import InMemorySaver
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents import chat_tools as workspace_tools
@@ -4869,7 +4869,10 @@ async def _role_block(db, user, agent, query: str, history: list) -> dict | None
         skills: list[dict] = []
         if db is not None:
             others = list((await db.execute(select(WorkspaceAgent).where(WorkspaceAgent.user_id == user.id))).scalars().all())
-            rows = (await db.execute(select(AgentSkill).where(AgentSkill.user_id == user.id, AgentSkill.agent_id == agent.id))).scalars().all()
+            # Its own skills and the ones shared with every agent: the same set a turn routes skills from.
+            rows = (await db.execute(select(AgentSkill).where(
+                AgentSkill.user_id == user.id, or_(AgentSkill.agent_id == agent.id, AgentSkill.agent_id.is_(None))
+            ))).scalars().all()  # fmt: skip
             skills = [{"name": r.name, "description": r.description or "", "instruction": r.instruction or ""} for r in rows]
         out = await role_gate.check(agent, query, list(history or []), others, skills=skills)
     except Exception:  # noqa: BLE001 - the role check never blocks the user

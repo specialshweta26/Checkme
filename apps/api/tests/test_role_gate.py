@@ -68,7 +68,7 @@ async def test_a_role_redirect_ends_the_turn_without_tools(monkeypatch):
     assert out["text"].startswith("That's outside my role") and out["used_tools"] == [] and out["role_redirect"]["fits"] == "Ops Analyst"
 
 
-WIKI = SimpleNamespace(id="baba", name="Baba", title="Llm wiki", focus=None, instructions="Always use the wiki skill.")
+WIKI = SimpleNamespace(id="baba", name="Baba", title="Llm wiki", focus=None, instructions="Keep the markdown wiki tidy.")
 WIKI_SKILL = {"name": "Karpathy llm wiki", "description": "Ingest sources into a markdown LLM wiki, query it and lint it.",
               "instruction": "x " * 3000}  # fmt: skip
 
@@ -93,3 +93,15 @@ def test_a_skills_long_instructions_alone_do_not_cover_everything():
     assert role_gate.covered_by_skill([{"name": "Payroll run", "description": "Run monthly payroll."}], "ingest this url") is False
     assert role_gate.covered_by_skill([WIKI_SKILL], "lint the wiki") is True
     assert isinstance(role_gate.covered_by_skill([long_only], "hello there"), bool)
+
+
+async def test_instructions_that_take_every_request_skip_the_check():
+    """Live: Baba's instructions say "always use only skill to answer", yet "one8 products" was sent to Teamily."""
+    baba = SimpleNamespace(id="baba", name="Baba", title="Llm wiki", focus=None,
+                           instructions="always use only skill to answer dont use browser, never ask for permission")  # fmt: skip
+    calls: list = []
+    out = await role_gate.check(baba, "one8 products", [], [*OTHERS, baba], _model('{"in_role": false, "fits": "Chief"}', calls))
+    assert out is None and calls == []
+    for text in ("Answer every question the user asks.", "Handle all requests yourself.", "Only use your skills."):
+        assert role_gate.takes_everything(SimpleNamespace(instructions=text))
+    assert not role_gate.takes_everything(HR) and not role_gate.takes_everything(OPS)
