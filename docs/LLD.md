@@ -1218,8 +1218,31 @@ skill writer's screenshots), `computer_use`, `image`, `transcribe` and `embed`.
 - Later phases: users save their own keys (OpenAI, Anthropic, Google, xAI, Groq, OpenRouter, any OpenAI-compatible
   address) and choose a default model for their profile and per agent. `resolve` is the one place that choice is made:
   the agent's setting, then the user's default, then the team's, then Lumio's (`_chosen`).
-- Embeddings always use Lumio's model: stored memory vectors only match vectors from the same model.
+- Embeddings use Lumio's model until phase 7: stored memory vectors only match vectors from the same model.
 - A `ModelSpec` never prints its key (`repr` and `describe()` leave it out). Specs for a provider Lumio can't call yet
   raise `UnsupportedProvider` instead of falling back to Lumio's key, so a user's choice is never silently ignored.
 - `openai_client(spec)` returns Lumio's shared client for its own key, and one cached client per key and address for
   anything else.
+
+Phases:
+
+1. Gateway (done): every call goes through `resolve`; behaviour unchanged.
+2. Saved keys: a table of the user's model keys (provider, label, encrypted key, optional address, status, last
+   checked, models it can use), an API and a Settings page to add, test and remove keys and pick a default model. A
+   key is checked with a cheap model-list call when saved and never shown again.
+3. Per-agent model: `WorkspaceAgent.model` = `{key_id, model, small_model, vision_model}`; empty means the user's
+   default, so existing agents don't change.
+4. Providers: Anthropic, Google, xAI, Groq, OpenRouter and OpenAI-compatible addresses through LangChain's provider
+   packages, with each provider's own prompt caching, usage metering and harness profile. Custom addresses refuse
+   private and internal network addresses. A key that fails says so in the chat; Lumio's key is used instead only if
+   the user turned that on. Calls on the user's own key are metered but don't count toward Lumio's daily cap.
+5. Multimodal routing: a capability table per model (tools, images, audio, PDF, reasoning, context size, price).
+   Agents can only pick models with tool calling; images, audio and PDFs go straight to a model that accepts them,
+   otherwise a vision or transcription model describes them first; computer use where the provider supports it.
+6. Quality: the admin scenarios run per provider; only models that pass are marked recommended.
+7. User-chosen embeddings: each vector table records the model that made each vector, and search compares only
+   vectors from the same model. Changing the embedding model re-embeds that user's memories in the background on
+   their key (cost shown before they confirm); search keeps using the old vectors until it finishes, and keyword
+   search (`search_tsv`) works throughout. Vectors keep one size (models that can return a chosen size are asked
+   for it); a model that can't needs its own column. Providers without embeddings (Anthropic, Groq, xAI) fall back
+   to another provider the user has, a local open model, or Lumio's. The shared tool index stays on Lumio's model.
