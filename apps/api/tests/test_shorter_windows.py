@@ -44,9 +44,10 @@ async def test_answers_that_fit_or_have_no_dates_are_left_alone():
     assert await windows.split(call, {"start": "2026-11-09", "end": "2026-11-09"}, cut) is cut  # one day
 
 
-async def test_the_split_stops_at_a_budget_and_says_what_is_still_cut():
+async def test_still_reduced_windows_give_the_first_answer_back():
     async def call(args):
         return {"_note": NOTE}
 
     out = await windows.split(call, {"start": "2026-01-01", "end": "2026-12-31"}, {"_note": NOTE})
-    assert len(out["windows"]) <= windows.MAX_WINDOWS and all(w.get("still_reduced") for w in out["windows"])
+    # Still reduced in short periods: the first answer comes back, with a way out instead of repeating the call.
+    assert "windows" not in out and out["_note"] == NOTE and "Don't call it again" in out["_lumio_note"]

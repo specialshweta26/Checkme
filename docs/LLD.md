@@ -1065,7 +1065,10 @@ ends. Each user's credentials get their own session, and a teammate's run inside
 A gateway can answer a long period with "Response was too large for MCP and has been reduced. Narrow the window with
 start/end". When an answer says it was reduced and the call names a start and end date, Lumio splits the period in
 halves (and again while a half is still reduced, up to 16 windows), asks for every piece at once, and gives the agent
-each window's full answer to add up (`app/agent/windows.py`). Before, the agent repeated the same two-week call 9 times.
+each window's full answer to add up (`app/agent/windows.py`), but only when every window came back whole and they
+fit the model together. Otherwise (the detail itself is large, so short periods are reduced too) the agent gets the
+first answer with a note to use a more specific action instead of calling it again. Before, the agent repeated the
+same two-week call 9 times; an unguarded split made 9 windows it then read 61 times.
 
 ### Figures Lumio worked out
 
