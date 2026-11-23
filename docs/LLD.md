@@ -1198,6 +1198,16 @@ Do not commit `.env`.
 - **Read cache** (`app/agent/read_cache.py`, `READ_CACHE_S`, default 120): a plain read-only tool result is reused for
   that long, per user, for the exact connector, tool and arguments. Any other call to the connector by the user starts
   a new generation, so a read after a write is fresh. The computer and browsers are never cached.
+- **Closed days kept longer** (`READ_CACHE_PAST_S`, default 6 hours, `read_cache.ttl_for`): a read whose dates (end,
+  until, date, … at the top level or inside a gateway's execute arguments) all lie before the user's today doesn't
+  change, so it is kept that long instead of READ_CACHE_S. Asking about yesterday again doesn't spend the source's
+  data allowance.
+- **Source limits** (`app/agent/source_limit.py`): when a user MCP's result or error says its own usage limit is used up
+  ("Organization daily data volume limit exceeded", "quota exceeded", "daily … limit reached"), Lumio answers every
+  call to that connector for the user itself, without calling it, until the user's midnight or for an hour, whichever
+  is sooner (at least five minutes). The answer says the limit is the source account's, not Lumio's or the model's,
+  tells the agent not to try other actions on it, and gives the time Lumio tries again. Ordinary errors and rate
+  limits ("slow down") don't pause anything.
 - **Prompt cache key** (`PROMPT_CACHE_KEY`, on): each model call carries a hashed per-agent `prompt_cache_key`, so
   OpenAI serves the agent's fixed prompt and tool schemas from its cache.
 - **Stable tool list** (`tool_scope.sticky`): a tool group shown once in a chat stays shown for that chat's later

@@ -191,6 +191,9 @@ class Settings(BaseSettings):
     catalog_cache_s: int = 600  # a gateway catalog search or action description, reused across turns; 0 = once per turn only
     action_memory_days: int = 14  # which gateway action answered which question, offered next time (agent/action_memory.py); 0 = off
     read_cache_s: int = 120  # keep a read-only tool result this long per user; 0 = off (app/agent/read_cache.py)
+    # A read whose dates all lie before today (a closed day or period) is kept this long: it doesn't change, and asking
+    # again only spends the source's data allowance. 0 = use READ_CACHE_S.
+    read_cache_past_s: int = 6 * 3600
     voice_input: bool = True  # the chat's microphone button (app/voice/routes.py); needs OPENAI_API_KEY
     transcribe_model: str = "gpt-4o-mini-transcribe"
     prompt_cache_key: bool = True  # send OpenAI a per-agent prompt_cache_key, so the fixed prompt is read from cache

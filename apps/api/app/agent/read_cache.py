@@ -26,6 +26,53 @@ def _ttl() -> int:
     return int(getattr(get_settings(), "read_cache_s", 120) or 0)
 
 
+_DAY_KEYS = ("date", "day", "on", "as_of", "asOf")
+
+
+def _dates(args: Any, depth: int = 0) -> list[str]:
+    """The end (or single) dates a call names, at the top level or one argument object down (a gateway's execute)."""
+    from app.agent.windows import END_KEYS
+
+    if not isinstance(args, dict) or depth > 2:
+        return []
+    found = [str(args[k]).strip()[:10] for k in (*END_KEYS, *_DAY_KEYS) if isinstance(args.get(k), str)]
+    for value in args.values():
+        if isinstance(value, dict):
+            found += _dates(value, depth + 1)
+        elif isinstance(value, str) and value.strip().startswith("{"):
+            try:
+                found += _dates(json.loads(value), depth + 1)
+            except ValueError:
+                pass
+    return found
+
+
+def ttl_for(args: Any, tz_name: str | None = None) -> int:
+    """How long to keep this read: longer when every date it names is before today (a closed period)."""
+    from datetime import date, datetime
+    from zoneinfo import ZoneInfo
+
+    from app.config import get_settings
+
+    base = _ttl()
+    past = int(getattr(get_settings(), "read_cache_past_s", 0) or 0)
+    if base <= 0 or past <= base:
+        return base
+    days = []
+    for raw in _dates(args):
+        try:
+            days.append(date.fromisoformat(raw))
+        except ValueError:
+            return base  # a date Lumio can't read: don't assume it's closed
+    if not days:
+        return base
+    try:
+        today = datetime.now(ZoneInfo(tz_name or "UTC")).date()
+    except Exception:  # noqa: BLE001
+        today = datetime.utcnow().date()
+    return past if all(d < today for d in days) else base
+
+
 def usable(slug: str) -> bool:
     return _ttl() > 0 and slug not in NEVER and not slug.startswith("computer")
 
