@@ -209,6 +209,29 @@ _NOT_SUMMED = re.compile(
 )
 
 
+KEYED_MIN = 3  # a breakdown keyed by name (by category, by state) with at least this many entries becomes a table
+KEYED_SCALARS_MIN = 20  # {sku: units} pairs: only a long one is worth a table
+
+
+def _keyed_records(value: dict) -> list[dict] | None:
+    """A breakdown a source keyed by name instead of listing (``{"Shoes": {"units": 9}, "Caps": {...}}``, or
+    ``{"MH": 120, "KA": 80, ...}``) as records with the name in a column; None for an ordinary object. A dict can't be
+    cut to its first rows, so a big one used to turn the whole answer into an outline, and the agent dug through it a
+    piece at a time."""
+    if len(value) < KEYED_MIN:
+        return None
+    vals = list(value.values())
+    if all(isinstance(v, dict) and v and not any(isinstance(x, (dict, list)) for x in v.values()) for v in vals):
+        columns = {k for v in vals for k in v}
+        if sum(len(v) for v in vals) < 0.6 * len(vals) * len(columns):
+            return None  # different kinds of things, not one breakdown
+        name = "name" if "name" not in columns else "key"
+        return [{name: k, **v} for k, v in value.items()]
+    if len(value) >= KEYED_SCALARS_MIN and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in vals):
+        return [{"name": k, "value": v} for k, v in value.items()]
+    return None
+
+
 def tabulate(value: Any, depth: int = 0) -> Any:
     """The same data with every list of records (3 or more objects) as one table: its column names once and a row of
     values per record, plus the totals of its numeric columns over every row. Nothing is dropped; a long series is about
@@ -216,7 +239,11 @@ def tabulate(value: Any, depth: int = 0) -> Any:
     if depth > 12:
         return value
     if isinstance(value, dict):
-        return {k: tabulate(v, depth + 1) for k, v in value.items()}
+        keyed = _keyed_records(value)
+        if keyed is not None:
+            value = keyed  # {"Shoes": {...}, "Caps": {...}}: the same records as a list, so they become a table below
+        else:
+            return {k: tabulate(v, depth + 1) for k, v in value.items()}
     if not isinstance(value, list):
         return value
     items = [tabulate(v, depth + 1) for v in value]
@@ -288,7 +315,7 @@ def result_shape(value: Any) -> dict:
         flags += sorted({k for v in nested for k in _CUT_FLAGS if v.get(k) not in (None, False, 0, "", [], {})} - set(flags))
         if flags:
             out["flags"] = flags
-        for k in ("note", "message", "warning"):
+        for k in ("note", "_note", "message", "warning"):
             if isinstance(value.get(k), str) and value[k].strip():
                 out[k] = value[k].strip()[:200]
         lists = [len(v) for v in value.values() if isinstance(v, list)] + [len(x) for v in nested for x in v.values() if isinstance(x, list)]

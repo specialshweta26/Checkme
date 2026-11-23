@@ -5,6 +5,7 @@ import { AppShell } from "../components/AppShell";
 import { AgentAvatar } from "../components/AgentAvatar";
 import { RoutineRow, RunRow } from "../components/Routines";
 import { Watches } from "../components/Watches";
+import { Triggers } from "../components/Triggers";
 import {
   createRoutine,
   getMe,
@@ -280,6 +281,7 @@ export default function RoutinesPage() {
             ) : null}
           </div>
 
+          {tab === "routines" ? <Triggers agentId={agent || null} /> : null}
           {tab === "watches" ? (
             <Watches agentId={agent || null} agentName={agents.find((a) => a.id === agent)?.name} agents={agents} />
           ) : tab === "routines" ? (

@@ -28,7 +28,12 @@ class WebhookAutomationIn(BaseModel):
 
 
 class AutomationPatch(BaseModel):
-    enabled: bool
+    enabled: bool | None = None
+    requires_approval: bool | None = None
+    name: str | None = None
+    action: str | None = None
+    condition: str | None = None
+    trigger: str | None = None
 
 
 class WatchIn(BaseModel):
@@ -116,10 +121,23 @@ async def patch_automation(
     user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    try:
-        return await service.set_enabled(db, user, automation_id, body.enabled)
-    except LookupError as exc:
-        raise HTTPException(404, str(exc)) from exc
+    changes = body.model_dump(exclude_none=True)
+    if list(changes) == ["enabled"]:
+        try:
+            return await service.set_enabled(db, user, automation_id, body.enabled)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+    if not changes:
+        raise HTTPException(400, "Nothing to update")
+    # The person's own edit in the app: the same rules as the agent's update_automation (watches always ask first).
+    from app.agent.staff import update_automation
+    from app.models import Automation
+
+    out = await update_automation(db, user, {"automation_id": automation_id, **changes})
+    if out.get("error"):
+        raise HTTPException(404 if out["error"] == "automation not found" else 400, out["error"])
+    row = await db.get(Automation, automation_id)
+    return {**service.serialize_automation(row), **({"note": out["note"]} if out.get("note") else {})}
 
 
 @router.delete("/{automation_id}")

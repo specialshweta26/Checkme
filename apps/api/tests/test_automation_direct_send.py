@@ -129,3 +129,33 @@ def test_mail_the_user_asked_for_to_an_address_they_typed_needs_no_card():
     assert not asked_in_chat("send_message", {"to": ["friend@example.com"]}, "who is friend@example.com?")
     assert not asked_in_chat("delete_message", {"to": ["friend@example.com"]}, asked)
     assert not asked_in_chat("send_message", {"to": []}, asked)
+
+
+@needs_db
+async def test_the_app_edits_and_deletes_a_meeting_trigger(factory):
+    from app.automations.routes import AutomationPatch, patch_automation
+
+    user_id = await _user(factory)
+    made = await _make(factory, user_id, trigger_type="meeting")
+    aid = made["automation"]["id"]
+    async with factory() as db:
+        user = await db.get(User, user_id)
+        out = await patch_automation(aid, AutomationPatch(action="Send me a short pre-read", trigger="30", requires_approval=False), user, db)
+    assert out["action"] == "Send me a short pre-read" and out["trigger"] == "30" and out["requires_approval"] is False
+    async with factory() as db:
+        user = await db.get(User, user_id)
+        out = await patch_automation(aid, AutomationPatch(enabled=False), user, db)
+    assert out["enabled"] is False
+
+
+@needs_db
+async def test_a_routine_can_be_renamed_and_rewritten(factory):
+    from app.tasks.service import create_from_prompt, edit_task
+
+    user_id = await _user(factory)
+    async with factory() as db:
+        user = await db.get(User, user_id)
+        task = await create_from_prompt(db, user, "every day at 9am brief me on my inbox")
+        out = await edit_task(db, user, __import__("uuid").UUID(task["id"]), title="Morning brief", instruction="Brief me on unread mail only")
+    assert out["title"] == "Morning brief" and out["instruction"] == "Brief me on unread mail only"
+    assert out["schedule_label"] == task["schedule_label"]  # when it runs stays

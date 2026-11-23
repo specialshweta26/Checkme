@@ -21,6 +21,8 @@ class CreateTaskIn(BaseModel):
 
 class PatchTaskIn(BaseModel):
     status: str | None = None
+    title: str | None = None
+    instruction: str | None = None
 
 
 @router.get("")
@@ -71,10 +73,17 @@ async def create_scheduled(body: CreateTaskIn, user: User = Depends(current_user
 async def patch_scheduled(
     task_id: uuid.UUID, body: PatchTaskIn, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)
 ):
-    if not body.status:
+    if not body.status and body.title is None and body.instruction is None:
         raise HTTPException(400, "Nothing to update")
     try:
-        return await set_status(db, user, task_id, body.status)
+        out = None
+        if body.title is not None or body.instruction is not None:
+            from app.tasks.service import edit_task
+
+            out = await edit_task(db, user, task_id, title=body.title, instruction=body.instruction)
+        if body.status:
+            out = await set_status(db, user, task_id, body.status)
+        return out
     except KeyError:
         raise HTTPException(404, "Task not found")
     except ValueError as exc:

@@ -174,7 +174,9 @@ def block(rows: list[dict]) -> str:
     lines = [
         "Actions that answered questions like this before (from this user's earlier chats). If one fits, call it "
         "straight away with call_tool on its connector, with arguments for this question (dates, names, metrics); "
-        "search the catalog only when none fits or it fails. Several that are needed: call them in one step."
+        "search the catalog only when none fits or it fails. If it comes back empty, all zeros or not what was asked "
+        "(another brand, no breakdown), search for another action before answering; never answer from that. Several "
+        "that are needed: call them in one step."
     ]
     for e in rows:
         params = e.get("params") or {}
