@@ -2,7 +2,7 @@
 
 import { useEffect, useState, type ReactNode } from "react";
 import { AppShell } from "../components/AppShell";
-import { IconArrow, IconArtifact, IconData, IconGauge, IconKnow, IconPlugSm, IconQuality, IconRoutines, IconRuns, IconSkills, IconVault } from "../components/ProfileIcons";
+import { IconArrow, IconArtifact, IconData, IconGauge, IconKnow, IconModel, IconPlugSm, IconQuality, IconRoutines, IconRuns, IconSkills, IconVault } from "../components/ProfileIcons";
 import { getMe, initials, type Me } from "../lib";
 
 // Profile (docs/DESIGN.md "Profile"): who is signed in, and one place for everything the workspace keeps for them:
@@ -184,6 +184,7 @@ export default function ProfilePage() {
             body="Mail, calendar and the apps your agents can use."
             meta={connected === undefined ? "" : `${connected} connected`}
           />
+          <Card href="/models" tone="neutral" icon={<IconModel size={18} />} title="Models and keys" body="Bring your own model key and choose the model your agents use." />
           <Card href="/usage" tone="neutral" icon={<IconGauge size={18} />} title="Usage and cost" body="Model use, searches and computer time for the last 7 days." />
           <Card href="/account" tone="neutral" icon={<IconData size={18} />} title="Your data" body="Download everything, or delete your account." />
         </div>

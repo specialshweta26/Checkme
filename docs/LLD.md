@@ -1224,10 +1224,28 @@ skill writer's screenshots), `computer_use`, `image`, `transcribe` and `embed`.
 - `openai_client(spec)` returns Lumio's shared client for its own key, and one cached client per key and address for
   anything else.
 
+Saved keys and the user's model (phase 2, `app/model_keys`, Profile → Models and keys at `/models`):
+
+- `model_keys`: provider, label, Fernet-encrypted key, last four characters, optional address
+  (`openai_compatible` only, checked with `validate_public_url`), status, model list, last checked. A key is checked by
+  asking the provider for its model list (`providers.check`; OpenRouter's list is public, so its `/key` is asked
+  first); a key that fails isn't saved. The API never returns the key, and the data export leaves `key_enc` out.
+- `model_choices`: (user, scope, purpose) → key and model. Scope is `user` now, an agent id in phase 3. Purposes are
+  `agent` and `small`. Only providers marked `runs` (OpenAI today) can be chosen; other keys are saved for later.
+  Removing a key removes its choices.
+- API: `GET /api/models`, `POST /api/models/keys`, `POST /api/models/keys/{id}/check`, `DELETE /api/models/keys/{id}`,
+  `PUT /api/models/choices/{purpose}` (`key_id: null` goes back to Lumio's model).
+- A turn (`run_deep_agent`) loads the user's choices into `llm_gateway.CHOICES` once; nested runs keep the outer
+  turn's. `resolve` uses them for `agent`, and for `small` (the background choice, else the agent choice). Vision,
+  computer use, images, transcription and embeddings stay on Lumio's key. Work outside a turn (inbox, scheduler
+  bookkeeping) uses Lumio's models. Loading never fails a turn: on error the turn runs on Lumio's models.
+- Usage on the user's key is recorded as `model (your key)` (`usage_name`), so it shows in Usage and MODEL_PRICES
+  doesn't price it: it costs Lumio nothing and doesn't count toward the daily cap.
+
 Phases:
 
 1. Gateway (done): every call goes through `resolve`; behaviour unchanged.
-2. Saved keys: a table of the user's model keys (provider, label, encrypted key, optional address, status, last
+2. Saved keys (done, see below): a table of the user's model keys (provider, label, encrypted key, optional address, status, last
    checked, models it can use), an API and a Settings page to add, test and remove keys and pick a default model. A
    key is checked with a cheap model-list call when saved and never shown again.
 3. Per-agent model: `WorkspaceAgent.model` = `{key_id, model, small_model, vision_model}`; empty means the user's

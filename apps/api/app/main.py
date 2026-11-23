@@ -18,6 +18,7 @@ from app.chat.routes import router as chat_router
 from app.config import get_settings
 from app.connectors.routes import router as connectors_router
 from app.connectors.deploy_routes import router as deploy_router
+from app.model_keys.routes import router as model_keys_router
 from app.connectors.github_status import router as github_router
 from app.desktop.routes import router as desktop_router
 from app.files import router as files_router
@@ -227,6 +228,7 @@ app.include_router(agents_router, prefix="/api")
 app.include_router(memory_router, prefix="/api")
 app.include_router(github_router, prefix="/api")
 app.include_router(deploy_router, prefix="/api")
+app.include_router(model_keys_router, prefix="/api")
 app.include_router(connectors_router, prefix="/api")
 app.include_router(tasks_router, prefix="/api")
 app.include_router(quality_router, prefix="/api")

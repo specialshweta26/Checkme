@@ -460,6 +460,42 @@ class DeployCredential(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
 
+class ModelKey(Base):
+    """A user's own key for one model provider (app/model_keys, docs/LLD.md "Model gateway"), Fernet-encrypted.
+
+    Entered on the Models page only and never sent back: the page sees the provider, label and last four characters."""
+
+    __tablename__ = "model_keys"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    provider: Mapped[str] = mapped_column(String(30))  # openai | anthropic | google | xai | groq | openrouter | openai_compatible
+    label: Mapped[str] = mapped_column(String(80), default="")
+    key_enc: Mapped[str] = mapped_column(Text)
+    hint: Mapped[str] = mapped_column(String(12), default="")  # last four characters, for the page
+    base_url: Mapped[str] = mapped_column(String(300), default="")  # openai_compatible only
+    status: Mapped[str] = mapped_column(String(20), default="unchecked")  # ok | failed | unchecked
+    status_note: Mapped[str] = mapped_column(Text, default="")
+    models: Mapped[list] = mapped_column(JSONB, default=list)  # model ids the key can use, from its last check
+    checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class ModelChoice(Base):
+    """Which saved key and model a user picked for one purpose: scope "user" is their default, an agent id (phase 3)
+    is that agent's own choice. Removing the key removes the choice, so calls go back to Lumio's model."""
+
+    __tablename__ = "model_choices"
+    __table_args__ = (UniqueConstraint("user_id", "scope", "purpose"),)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    scope: Mapped[str] = mapped_column(String(64), default="user")
+    purpose: Mapped[str] = mapped_column(String(20))  # agent | small
+    key_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("model_keys.id", ondelete="CASCADE"))
+    model: Mapped[str] = mapped_column(String(160))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
 class AgentConnector(Base):
     """When rows exist for a connector, only those agents may use it. No rows = every agent."""
 

@@ -3,14 +3,15 @@
 Every model call in Lumio asks ``resolve(ctx, purpose)`` for a ``ModelSpec`` and builds its model or client from it:
 the agent's chat model (``chat_model``), the small background calls in ``app.llm.chat_complete``, and the OpenAI
 clients for images, transcription and computer use (``openai_client``). Today every spec is Lumio's own OpenAI key and
-the models configured in settings, so nothing behaves differently. Later phases let a user save their own keys
-(OpenAI, Anthropic, Google, xAI, Groq, OpenRouter or any OpenAI-compatible address) and pick a model for their
-profile or for one agent; ``resolve`` is the one place that choice is made, in this order: the agent's setting, the
-user's default, the team's default, then Lumio's.
+the models configured in settings, unless the user picked their own key and model on the Models page
+(app/model_keys): a turn loads those choices into ``CHOICES`` (``use_choices``) and ``resolve`` uses them for the
+agent and background purposes. Later phases add per-agent and team choices and other providers; ``resolve`` stays
+the one place the choice is made, in this order: the agent's setting, the user's default, the team's, then Lumio's.
 """
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -62,9 +63,39 @@ def _platform_model(purpose: str) -> str:
     return main
 
 
+# The user's choices for the running turn ({purpose: ModelSpec}), set by ``use_choices`` when a turn starts. Work the
+# turn starts (its tasks, nested teammates) sees them too; work outside a turn uses Lumio's models.
+CHOICES: ContextVar[dict | None] = ContextVar("model_choices", default=None)
+
+
 def _chosen(ctx: Any, purpose: str) -> ModelSpec | None:
-    """A model the agent, user or team picked for ``purpose``. None until saved keys exist (later phase)."""
+    """A model the user picked for ``purpose`` (Models page). Background work uses the user's background model, else
+    their agent model, so a user who brought a key isn't billed on Lumio's for half the turn. Agent and team choices
+    come in later phases."""
+    choices = CHOICES.get() or {}
+    if purpose == "agent":
+        return choices.get("agent")
+    if purpose == "small":
+        spec = choices.get("small") or choices.get("agent")
+        return replace(spec, purpose="small") if spec is not None else None
     return None
+
+
+async def use_choices(db: Any, user: Any) -> Any:
+    """Load ``user``'s model choices for this turn; returns a token for ``CHOICES.reset``. Never raises: a turn that
+    can't load them runs on Lumio's models."""
+    import logging
+
+    if db is None or getattr(user, "id", None) is None:
+        return CHOICES.set({})
+    try:
+        from app.model_keys.service import load_choices
+
+        found = await load_choices(db, user.id)
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger(__name__).warning("model choices not loaded: %s", type(exc).__name__)
+        found = {}
+    return CHOICES.set(found)
 
 
 def resolve(ctx: Any = None, purpose: str = "agent", model: str | None = None) -> ModelSpec:
@@ -142,6 +173,21 @@ def chat_model(spec: ModelSpec, *, cache_key: str = "", streaming: bool = False,
 def small_chat_model(ctx: Any = None, timeout: int = 60) -> Any:
     """A LangChain model for background work (memory extraction): the small model, no streaming, no cache key."""
     return chat_model(resolve(ctx, "small"), timeout=timeout)
+
+
+OWN_KEY = " (your key)"
+
+
+def usage_name(model: str) -> str:
+    """The name usage is recorded under: a model the user runs on their own key gets OWN_KEY, so Usage shows it apart
+    and MODEL_PRICES (Lumio's cost and the daily cap) doesn't price it."""
+    name = str(model or "")
+    if not name or name.endswith(OWN_KEY):
+        return name
+    own = {spec.model for spec in (CHOICES.get() or {}).values() if not spec.is_platform}
+    if not own:
+        return name
+    return name + OWN_KEY if name in own or any(name.startswith(m + "-20") for m in own) else name
 
 
 def record_usage(spec: ModelSpec, usage_obj: Any) -> None:
