@@ -1844,9 +1844,16 @@ async def _shorter_windows(ctx: RunContext, conn, tool_name: str, args: dict, re
         sent = {**args, inner_key: window_args} if inner_key else window_args
         return await invoke_named(ctx.db, ctx.user, conn, tool_name, sent, ctx.attachments)
 
-    if ctx.progress is not None and windows.window(base):
+    if not windows.window(base):
+        return windows.give_up(result)
+    if ctx.progress is not None:
         await ctx.progress.emit("The answer was too large: asking for it in shorter periods", kind="tool")
-    return await windows.split(call, base, result)
+    split = await windows.split(call, base, result)
+    from app.agent.jsonsize import fits
+
+    if isinstance(split, dict) and split.get("split_by_lumio") and not fits(tabulate(split), INLINE_RESULT_CHARS):
+        return windows.give_up(result)  # whole but too much together: digging through it cost more than it saved
+    return split
 
 
 async def _read_all_pages(ctx: RunContext, conn, tool_name: str, args: dict, result: Any) -> Any:

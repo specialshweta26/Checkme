@@ -4,7 +4,9 @@ A gateway can answer a long period with "Response was too large for MCP and has 
 start/end". The agent then called the same tool with the same two weeks again and again (9 calls, 23 reads of the
 reduced answer, 215 s) and still couldn't give every category. When an answer says it was reduced and the call has a
 start and end date, Lumio splits the period in halves (and those halves again, while they are still reduced), asks
-for every piece at once, and hands the agent each window's full answer to add up.
+for every piece at once, and hands the agent each window's full answer to add up, but only when every window came
+back whole and they fit the model together (deep._shorter_windows). Otherwise the agent gets the first answer with a
+note to use a more specific action instead of calling it again.
 """
 
 from __future__ import annotations
@@ -17,8 +19,8 @@ from typing import Any, Awaitable, Callable
 REDUCED = re.compile(r"too large|has been reduced|been truncated|was truncated|narrow the (window|range|period|dates?)", re.I)
 START_KEYS = ("start", "start_date", "since", "from", "from_date", "date_from", "begin", "startDate", "fromDate")
 END_KEYS = ("end", "end_date", "until", "to", "to_date", "date_to", "endDate", "toDate")
-MAX_WINDOWS = 16
-MAX_DEPTH = 4
+MAX_WINDOWS = 8
+MAX_DEPTH = 3
 _DAY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
@@ -44,6 +46,16 @@ def window(args: dict) -> tuple[str, str, date, date] | None:
     except ValueError:
         return None
     return (start_key, end_key, start, end) if start < end else None
+
+
+GIVE_UP = ("Lumio asked for this in shorter periods and the source still reduced each one, so its detail isn't "
+           "available this way. Don't call it again: use the most specific action for what was asked (a daily or "
+           "by-category report, or one filtered to the brand, channel or category), or answer from what is here and say "
+           "what it doesn't cover.")
+
+
+def give_up(result: Any) -> Any:
+    return {**result, "_lumio_note": GIVE_UP} if isinstance(result, dict) else result
 
 
 def halves(start: date, end: date) -> list[tuple[date, date]]:
@@ -77,8 +89,10 @@ async def split(call: Callable[[dict], Awaitable[Any]], args: dict, result: Any)
 
     parts = await asyncio.gather(*(fetch(a, b, 1) for a, b in halves(start, end)))
     windows = [w for part in parts for w in part]
-    if all("error" in w for w in windows):
-        return result
+    if any(w.get("still_reduced") or "error" in w for w in windows):
+        # Still too big in short periods: the detail itself is large, not the period. More windows only meant more
+        # data to dig through (9 windows, 61 reads, timed out), so the agent gets the first answer and a way out.
+        return give_up(result)
     return {
         "split_by_lumio": True,
         "period": {"start": start.isoformat(), "end": end.isoformat()},
