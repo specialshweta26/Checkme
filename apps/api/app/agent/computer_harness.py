@@ -823,10 +823,13 @@ async def write_bytes(ctx, path: str, data: bytes) -> Any:
     )
 
 
-async def write_file(ctx, path: str, content: str) -> Any:
+async def write_file(ctx, path: str, content: str, overwrite: bool = False) -> Any:
     if not (path or "").strip():
         return {"error": "path is required"}
-    result = await run_computer(ctx, "write_file", {"path": path, "content": content or ""})
+    args: dict[str, Any] = {"path": path, "content": content or ""}
+    if overwrite:
+        args["overwrite"] = True
+    result = await run_computer(ctx, "write_file", args)
     if isinstance(result, dict) and result.get("ok") and _DELIVERABLE.search(path):
         published = await attach_file(ctx, path)
         if isinstance(published, dict) and published.get("download_url"):
@@ -834,6 +837,49 @@ async def write_file(ctx, path: str, content: str) -> Any:
             result["preview_url"] = published.get("preview_url")
             result["filename"] = published.get("filename") or path.rsplit("/", 1)[-1]
             result["hint"] = "File is saved to durable storage. Give the user download_url; it stays valid. Never cite a sandbox path."
+    return result
+
+
+def _whole_text(result: Any) -> str | None:
+    """The file's full text from a read_file result, or None when the read was partial (clipped, a table summary,
+    an office document's extracted text) and writing it back would lose the rest."""
+    if not isinstance(result, dict) or not result.get("ok", True) or result.get("error"):
+        return None
+    text = result.get("content")
+    if not isinstance(text, str) or result.get("truncated") or result.get("table") or result.get("summary"):
+        return None
+    size = result.get("bytes")
+    if isinstance(size, int) and size != len(text.encode("utf-8")):
+        return None
+    return text
+
+
+async def edit_file(ctx, path: str, old_string: str, new_string: str, replace_all: bool = False) -> Any:
+    """Replace exact text in a text file on the computer (the user's Mac in the desktop app). The edit is the change
+    the user asked for, so the file is written back without a separate overwrite question; nothing is written unless
+    the old text is found (exactly once, unless replace_all) in a complete read of the file."""
+    if not (path or "").strip():
+        return {"error": "path is required"}
+    if not old_string:
+        return {"error": "old_string is required: copy the exact text to replace from read_file"}
+    if old_string == new_string:
+        return {"error": "old_string and new_string are the same"}
+    read = await run_computer(ctx, "read_file", {"path": path})
+    if isinstance(read, dict) and (read.get("need") or read.get("computer_unavailable")):
+        return read
+    text = _whole_text(read)
+    if text is None:
+        err = read.get("error") if isinstance(read, dict) else ""
+        return {"ok": False, "error": err or "This file can't be edited in place (it is too large, binary, a table or an office document). Rewrite it with write_file instead.", "path": path}
+    count = text.count(old_string)
+    if count == 0:
+        return {"ok": False, "error": "old_string was not found in the file. read_file it again and copy the text exactly, including spaces and line breaks.", "path": path}
+    if count > 1 and not replace_all:
+        return {"ok": False, "error": f"old_string appears {count} times. Add surrounding text so it is unique, or set replace_all=true.", "path": path}
+    updated = text.replace(old_string, new_string) if replace_all else text.replace(old_string, new_string, 1)
+    result = await run_computer(ctx, "write_file", {"path": path, "content": updated, "overwrite": True})
+    if isinstance(result, dict) and result.get("ok"):
+        result["replacements"] = count if replace_all else 1
     return result
 
 

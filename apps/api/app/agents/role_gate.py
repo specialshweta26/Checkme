@@ -27,7 +27,8 @@ PROMPT = (
     "The request is in role when the role or instructions plausibly cover it, when it is small talk or a question about "
     "the assistant itself, when it continues the conversation's current work, or when the user, told it was outside the "
     "role, insists or says to go ahead. Only a request clearly belonging to a different kind of work is out of role.\n\n"
-    "Assistant: {name}\nRole: {title}\nInstructions: {instructions}\n\nOther agents:\n{others}\n\n"
+    "Anything one of the assistant's own skills covers is in role.\n\n"
+    "Assistant: {name}\nRole: {title}\nInstructions: {instructions}\nIts skills: {skills}\n\nOther agents:\n{others}\n\n"
     "Recent conversation:\n{history}\n\nRequest: {query}"
 )
 
@@ -55,6 +56,24 @@ def _history(history: list[dict]) -> str:
     return "\n".join(lines) or "(none)"
 
 
+def _skills(skills: list[dict]) -> str:
+    rows = []
+    for sk in (skills or [])[:20]:
+        about = re.sub(r"\s+", " ", str(sk.get("description") or sk.get("instruction") or ""))[:160]
+        rows.append(f"{sk.get('name') or ''}" + (f" ({about})" if about else ""))
+    return "; ".join(r for r in rows if r) or "(none)"
+
+
+def covered_by_skill(skills: list[dict], query: str) -> bool:
+    """The agent has its own skill for this: that is its role, whatever its title says. Matched on the skill's name and
+    description (an imported skill's instructions are long and match almost anything)."""
+    from app.skills.service import match_skills
+
+    rows = [{"name": sk.get("name") or "", "instruction": sk.get("description") or (sk.get("instruction") or "")[:400]}
+            for sk in (skills or []) if sk.get("name")]  # fmt: skip
+    return bool(match_skills(rows, query, limit=1))
+
+
 def parse(text: str) -> dict | None:
     m = re.search(r"\{.*\}", text or "", re.S)
     if not m:
@@ -80,9 +99,12 @@ def reply(agent, fits: str, others: list) -> str:
     return f"That's outside my role as {who}. {where} say **go ahead** and I'll do it here anyway."
 
 
-async def check(agent, query: str, history: list[dict], others: list, complete=None) -> dict | None:
-    """``{"text", "fits"}`` when the request is clearly outside a specialist's role; None to go on."""
+async def check(agent, query: str, history: list[dict], others: list, complete=None, skills: list[dict] | None = None) -> dict | None:
+    """``{"text", "fits"}`` when the request is clearly outside a specialist's role; None to go on. ``skills`` are the
+    agent's own skills: a request one of them covers is never redirected."""
     if agent is None or is_general(agent) or not (query or "").strip() or _SMALL_TALK.match(query or ""):
+        return None
+    if covered_by_skill(skills or [], query):
         return None
     if complete is None:
         from app.config import get_settings
@@ -97,7 +119,7 @@ async def check(agent, query: str, history: list[dict], others: list, complete=N
     prompt = PROMPT.format(
         name=getattr(agent, "name", ""), title=_role_text(agent),
         instructions=re.sub(r"\s+", " ", str(getattr(agent, "instructions", "") or ""))[:800] or "(none)",
-        others=_others(others), history=_history(history), query=str(query)[:1500],
+        skills=_skills(skills or []), others=_others(others), history=_history(history), query=str(query)[:1500],
     )  # fmt: skip
     try:
         resp = await complete([{"role": "user", "content": prompt}], max_tokens=200)

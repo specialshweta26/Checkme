@@ -105,7 +105,10 @@ Every agent works by its own instructions, role and skills.
   the request with its role and instructions; a request clearly outside them is answered at once, without tools,
   naming the agent whose role fits (or the all-round agent), and "go ahead" makes the agent do it. Small talk,
   follow-ups, the all-round agent, background jobs, teammate hand-offs, group chats and replies to an approval are
-  never checked, and any failure lets the request through.
+  never checked, and any failure lets the request through. The agent's own skills count as its role: a request whose
+  words match one of its skills' names or descriptions (`role_gate.covered_by_skill`) goes straight through without
+  the model call, and the skills are listed in the check's prompt otherwise (live: Baba, titled "Llm wiki" with the
+  Karpathy wiki skill, called "ingest <url> into the wiki" outside its role).
 - **Own connectors only:** a run gets the connectors assigned to its agent (and the shared computer and marketplace,
   and anything not assigned to anyone). Before, an agent in a group also got every connector assigned to its
   teammates; now work that needs a teammate's connector goes to that teammate with `ask_teammate`, and it runs with its
