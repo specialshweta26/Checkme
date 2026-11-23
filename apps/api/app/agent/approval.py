@@ -162,6 +162,23 @@ def addressed_only_to(tool_name: str, args: dict | None, own: set[str]) -> bool:
     return bool(people) and all(p in own for p in people)
 
 
+_SEND_WORDS = re.compile(r"\b(send|sent|email|e-mail|mail|message|write|drop|shoot)\b", re.I)
+
+
+def asked_in_chat(tool_name: str, args: dict | None, query: str) -> bool:
+    """A new message the user asked for in this chat message, to addresses they typed in it ("send an email to
+    a@b.com saying hello"). Their own words are the approval: every recipient must appear in the message, so nothing a
+    mail or page said can add one."""
+    if tool_name not in SEND_TOOLS:
+        return False
+    people = recipients(args)
+    text = (query or "").lower()
+    if not people or not _SEND_WORDS.search(text):
+        return False
+    typed = {a.lower() for a in _ADDRESS.findall(text)}
+    return all(p in typed for p in people)
+
+
 # --- 4. a plain yes in a job's chat --------------------------------------------------------------------------------
 
 APPROVE_REPLIES = frozenset(

@@ -58,7 +58,7 @@ def summary(timing: dict, target_s: float) -> dict:
     from app.admin.latency import breakdown
 
     b = breakdown(timing)
-    return {**{k: b[k] for k in ("total_ms", "model_ms", "model_calls", "connector_ms", "tool_ms", "other_ms", "tools", "slowest_calls")},
+    return {**{k: b[k] for k in ("total_ms", "model_ms", "model_calls", "connector_ms", "tool_ms", "other_ms", "tools", "slowest_calls", "calls", "remembered")},
             "over_target": b["total_ms"] > target_s * 1000}  # fmt: skip
 
 

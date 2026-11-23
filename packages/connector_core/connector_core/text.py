@@ -53,3 +53,21 @@ def clean_body(raw: str, is_html: bool = False, limit: int = 2000, keep_quoted: 
     if not keep_quoted:
         text = strip_quoted(text)
     return clip(text, limit)
+
+
+_ADDRESS = __import__("re").compile(r"[A-Za-z0-9._%+'-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+
+
+def address_list(value) -> list[str]:
+    """Mail addresses from what a caller sent for to/cc/bcc: a list, one comma- or semicolon-separated string, "Name
+    <a@b.com>" forms, or {"email": ...} objects. A plain string used to be read a character at a time, so Outlook got
+    one-letter recipients ("couldn't resolve the recipient") and Gmail a broken To header."""
+    items = value if isinstance(value, (list, tuple)) else [value]
+    out: list[str] = []
+    for item in items:
+        if isinstance(item, dict):
+            item = item.get("email") or item.get("address") or (item.get("emailAddress") or {}).get("address") or ""
+        for found in _ADDRESS.findall(str(item or "")):
+            if found.lower() not in {a.lower() for a in out}:
+                out.append(found)
+    return out

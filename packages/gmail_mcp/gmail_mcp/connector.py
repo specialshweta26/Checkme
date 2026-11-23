@@ -376,12 +376,14 @@ class GmailConnector(BaseConnector):
 
     @staticmethod
     def _compose(to, subject, body, cc=None, bcc=None, headers: dict | None = None) -> EmailMessage:
+        from connector_core.text import address_list
+
         msg = EmailMessage()
-        msg["To"] = ", ".join(to)
-        if cc:
-            msg["Cc"] = ", ".join(cc)
-        if bcc:
-            msg["Bcc"] = ", ".join(bcc)
+        msg["To"] = ", ".join(address_list(to))
+        if address_list(cc):
+            msg["Cc"] = ", ".join(address_list(cc))
+        if address_list(bcc):
+            msg["Bcc"] = ", ".join(address_list(bcc))
         msg["Subject"] = subject
         for k, v in (headers or {}).items():
             msg[k] = v
@@ -437,10 +439,12 @@ class GmailConnector(BaseConnector):
         if reply_all:
             others = [a for _, a in getaddresses([h.get("to", ""), h.get("cc", "")]) if a and a.lower() != me]
             copied = [a for a in dict.fromkeys(others) if a not in to]
-        extra = [a.strip() for a in (cc or []) if a and a.strip()]
+        from connector_core.text import address_list
+
+        extra = address_list(cc)
         copied = list(dict.fromkeys(copied + extra))
         copied = [a for a in copied if a not in to]
-        blind = [a.strip() for a in (bcc or []) if a and a.strip() and a not in to and a not in copied]
+        blind = [a for a in address_list(bcc) if a not in to and a not in copied]
         subject = h.get("subject", "")
         if not subject.lower().startswith("re:"):
             subject = f"Re: {subject}"

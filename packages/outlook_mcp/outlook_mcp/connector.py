@@ -60,8 +60,10 @@ def _addr(r: dict | None) -> str:
     return f"{name} <{address}>" if name and name != address else address
 
 
-def _recips(addresses: list[str] | None) -> list[dict]:
-    return [{"emailAddress": {"address": a}} for a in addresses or []]
+def _recips(addresses) -> list[dict]:
+    from connector_core.text import address_list
+
+    return [{"emailAddress": {"address": a}} for a in address_list(addresses)]
 
 
 def _summary(m: dict, my_email: str = "") -> dict:
@@ -551,6 +553,10 @@ class OutlookConnector(BaseConnector):
         bcc: list[str] | None = None,
         files: list | None = None,
     ):
+        from connector_core.text import address_list
+
+        if not address_list(to):
+            raise ValueError("No valid recipient address in 'to'.")
         payload = self._message(to, subject, body, cc, bcc)
         atts = self._file_attachments(files)
         if atts:
@@ -567,8 +573,10 @@ class OutlookConnector(BaseConnector):
         cc: list[str] | None = None,
         bcc: list[str] | None = None,
     ):
-        extra_cc = [a.strip() for a in (cc or []) if a and a.strip()]
-        extra_bcc = [a.strip() for a in (bcc or []) if a and a.strip()]
+        from connector_core.text import address_list
+
+        extra_cc = address_list(cc)
+        extra_bcc = address_list(bcc)
         atts = self._file_attachments(files)
         if not atts and not extra_cc and not extra_bcc:
             action = "replyAll" if reply_all else "reply"

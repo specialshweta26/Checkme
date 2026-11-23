@@ -274,6 +274,35 @@ def _cap_lists(value: Any, n: int, depth: int = 0) -> tuple[Any, int]:
     return value, 0
 
 
+_CUT_FLAGS = ("truncated", "partial", "too_large", "hasMore", "has_more", "more", "limited", "capped", "is_truncated")
+
+
+def result_shape(value: Any) -> dict:
+    """A connector answer's outline for the reply timings: its top-level keys, its longest list, and any flag saying it
+    was cut off (by the connector, or by Lumio's paging). Cheap: two levels deep, no encoding."""
+    out: dict = {}
+    if isinstance(value, dict):
+        out["keys"] = [str(k)[:40] for k in list(value)[:10]]
+        flags = sorted(k for k in _CUT_FLAGS if value.get(k) not in (None, False, 0, "", [], {}))
+        nested = [v for v in value.values() if isinstance(v, dict)][:6]
+        flags += sorted({k for v in nested for k in _CUT_FLAGS if v.get(k) not in (None, False, 0, "", [], {})} - set(flags))
+        if flags:
+            out["flags"] = flags
+        for k in ("note", "message", "warning"):
+            if isinstance(value.get(k), str) and value[k].strip():
+                out[k] = value[k].strip()[:200]
+        lists = [len(v) for v in value.values() if isinstance(v, list)] + [len(x) for v in nested for x in v.values() if isinstance(x, list)]
+        if lists:
+            out["rows"] = max(lists)
+    elif isinstance(value, list):
+        out["rows"] = len(value)
+    elif isinstance(value, str):
+        out["text_chars"] = len(value)
+        if "truncat" in value[:4000].lower():
+            out["flags"] = ["truncated (text)"]
+    return out
+
+
 def fit_payload(value: Any, limit: int = CONNECTOR_RESULT_CHARS) -> Any:
     """A connector's answer for the model: whole when it fits inline (as is, or with its record lists as tables);
     otherwise the real data with long lists cut to their first rows (as many as fit), saying how much was left out,
@@ -2241,6 +2270,9 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
     needs_card = False
     if destructive or git_write or unvetted or injected:
         self_ok = (not git_write) and (not injected) and await may_self_approve(ctx, tool_name, args)
+        if not self_ok and not (git_write or injected or ctx.auto_confirm or ctx.job is not None):
+            # The user asked for this message in their own words, to addresses they typed: that is the approval.
+            self_ok = approval.asked_in_chat(tool_name, args, ctx.query)
         if not self_ok:
             used_approval = _approval_for(ctx, conn, connector_slug, tool_name, args)
             needs_card = used_approval is None
@@ -2292,6 +2324,10 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
                     if isinstance(result, dict) and result.get("pages_fetched"):
                         timing["pages"] = result["pages_fetched"]
                 timing["ms"] = int((_time.monotonic() - _t0) * 1000)
+                inner = [a for a in approval.nested_actions(tool_name, args) if a != tool_name]
+                if inner:
+                    timing["action"] = inner[0][:120]
+                timing["shape"] = result_shape(result)  # what came back: rows, cut-off flags (admin test scenarios)
                 ctx.call_timings.append(timing)  # admin "Reply times" (app/admin/latency.py)
                 from app.connectors.mcp_client import ignored_dates
 
@@ -2328,6 +2364,8 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
         payload = compact_payload(result, payload_limit) if tool_name in BROWSER_PAGE_TOOLS else fit_payload(result, payload_limit)
         if isinstance(payload, dict) and (payload.get("too_large") or payload.get("partial")):
             payload["result_id"] = rid
+            if ctx.call_timings and ctx.call_timings[-1].get("tool") == tool_name:
+                ctx.call_timings[-1]["cut_for_model"] = True
         if tool_name not in CATALOG_TOOLS:
             from app.agent import injection
 
@@ -2379,6 +2417,23 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
         return {"error": str(exc)[:300]}
 
 
+_DIRECT = re.compile(
+    r"\b(direct(ly)?|without (asking|approval|confirm\w*)|no (approval|confirmation)|(don'?t|do not|never) ask|"
+    r"(turn|switch) off (the )?(approval|confirmation|ask[- ]first)|auto[- ]?send|skip (the )?(approval|confirmation)|"
+    r"no need to (ask|approve|confirm))\b",
+    re.I,
+)
+
+
+def asks_to_send_directly(query: str) -> bool:
+    """The user's message asks for it to go out without asking ("send it to me directly", "no approval needed"), or
+    answers yes to the agent's question about it ("approved", "yes")."""
+    from app.agent import approval
+
+    text = (query or "").replace("’", "'")
+    return bool(_DIRECT.search(text)) or approval.normalize_reply(text) in approval.APPROVE_REPLIES
+
+
 def _approval_off_refused(ctx: RunContext, name: str, args: dict) -> dict | None:
     """Only the user, in their own chat, can turn off an automation's ask-first: not an unattended run (a schedule or
     an event job) and not a turn that has read other people's content (mail, pages, connector results), where the
@@ -2389,7 +2444,11 @@ def _approval_off_refused(ctx: RunContext, name: str, args: dict) -> dict | None
 
     if "requires_approval" not in args or _as_bool(args.get("requires_approval")) is not False:
         return None
-    if ctx.auto_confirm or ctx.job is not None or ctx.untrusted_seen or ctx.injections:
+    if ctx.auto_confirm or ctx.job is not None:
+        return {"error": "An unattended run can't turn off ask-first; only the user can, in chat."}
+    if asks_to_send_directly(getattr(ctx, "query", "")):
+        return None  # the user's own message says so: nothing read this turn can change those words
+    if ctx.untrusted_seen or ctx.injections:
         return {"error": "Turning off ask-first must come straight from the user: ask them to say it in a new message, "
                          "then call this again before reading anything else."}  # fmt: skip
     return None
@@ -3887,7 +3946,9 @@ def system_prompt(
         "outranks memory (Episodes, From earlier chats), which may describe an action before it finished. Don't run an action "
         "again because of it unless the user asks again, and don't say you can't verify something the record shows.\n"
         "If you cannot tell which connector fits, ask the user.\n"
-        "Destructive connector actions still need call_tool; the app asks the user to confirm.\n"
+        "Destructive connector actions still need call_tool; the app asks the user to confirm. "
+        "When the user's message itself asks you to send mail to an address they typed, call the send tool: it goes out "
+        "without a confirmation.\n"
         "If the user wants work done later (email a report in N minutes, tonight, every day), schedule_task and do not fetch now. "
         "For 'when mail from X arrives' or 'before each meeting', use run_staff_tool(name='create_automation', args={trigger_type:'mail' or 'meeting', name, trigger, condition, action}); "
         "when the user says to send it to them directly or not to ask, add requires_approval:false (it then sends to the user without asking; anything for someone else still asks). "
@@ -5113,7 +5174,7 @@ async def _run_deep_agent(
         "repo": ctx.repo,
         "thread": list(ctx.thread),
         "files_seen": list(ctx.files_seen),
-        "timing": {**timer.summary(), "calls": ctx.call_timings[:30]},
+        "timing": {**timer.summary(), "calls": ctx.call_timings[:30], "remembered": [e.get("action") for e in remembered]},
         "tool_digest": digest,
         "fact_check": ctx.fact_report or None,
     }

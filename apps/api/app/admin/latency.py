@@ -52,6 +52,11 @@ def breakdown(timing: dict) -> dict:
         "other_ms": max(0, total - llm - conn - tools),
         # Time in the chat route before and after the agent ran (checks, history, saving the reply).
         "route_ms": max(0, total - int(timing.get("total_ms") or total)),
+        # Each connector call in order: the action, its time, and what came back (rows, cut-off flags).
+        "calls": [{k: c.get(k) for k in ("connector", "tool", "action", "ms", "prep_ms", "pages", "cached", "shape", "cut_for_model")
+                   if c.get(k) is not None} for c in calls[:30]],  # fmt: skip
+        # Remembered actions offered at the start of the turn (agent/action_memory.py).
+        "remembered": [str(a) for a in timing.get("remembered") or []],
         "computer_used": bool(timing.get("computer_used")),
         "kind": timing.get("kind") or "",
         # A turn that didn't finish: stopped (by the person, or the reason the app stopped it) or failed.
