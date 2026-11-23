@@ -108,3 +108,24 @@ def test_only_the_user_in_chat_can_turn_ask_first_off():
     # Turning it back on, or other changes, are always fine.
     assert deep._approval_off_refused(_ctx(untrusted_seen=True), "update_automation", {"automation_id": 1, "requires_approval": True}) is None
     assert deep._approval_off_refused(_ctx(untrusted_seen=True), "update_automation", {"automation_id": 1, "enabled": False}) is None
+
+
+def test_the_users_own_words_turn_ask_first_off_even_after_reading_mail():
+    off = {"automation_id": 1, "requires_approval": False}
+    for said in ("Send me the pre-read directly", "no approval needed", "don't ask me, just send it", "Approved", "yes"):
+        assert deep._approval_off_refused(_ctx(untrusted_seen=True, injections=[{}], query=said), "update_automation", off) is None, said
+    assert "error" in deep._approval_off_refused(_ctx(untrusted_seen=True, query="check my calendar"), "update_automation", off)
+    assert "error" in deep._approval_off_refused(_ctx(auto_confirm=True, query="send directly"), "update_automation", off)
+
+
+def test_mail_the_user_asked_for_to_an_address_they_typed_needs_no_card():
+    from app.agent.approval import asked_in_chat
+
+    asked = "Send email to friend@example.com saying hello to him"
+    assert asked_in_chat("send_message", {"to": "friend@example.com", "subject": "Hello", "body": "Hello!"}, asked)
+    assert asked_in_chat("send_message", {"to": ["Friend@Example.com"]}, asked)
+    # Someone the user didn't type (from a mail the agent read) still asks, and so does a message they didn't ask to send.
+    assert not asked_in_chat("send_message", {"to": ["friend@example.com", "other@evil.test"]}, asked)
+    assert not asked_in_chat("send_message", {"to": ["friend@example.com"]}, "who is friend@example.com?")
+    assert not asked_in_chat("delete_message", {"to": ["friend@example.com"]}, asked)
+    assert not asked_in_chat("send_message", {"to": []}, asked)

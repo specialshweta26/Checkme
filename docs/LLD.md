@@ -1081,6 +1081,19 @@ ask. Only the user, in their own chat and before anything third-party is read th
 (`deep._approval_off_refused`). `update_automation` changes an automation by its number id (on/off, ask-first, action,
 condition, trigger, delete); `update_scheduled_task` given such an id passes it on, instead of failing on the UUID.
 
+The user's own words count even after something third-party was read: a message saying to send directly ("send it to
+me directly", "no approval needed") or a plain yes to the agent's question (`deep.asks_to_send_directly`) turns
+ask-first off; an unattended run never can.
+
+### Mail the user asked for
+
+"Send an email to a@b.com saying hello" goes out without a confirmation (`approval.asked_in_chat`): a send in an
+interactive chat, where every recipient is an address the user typed in that message and the message asks to send.
+Anyone else as a recipient (an address from a mail the agent read), any reply, forward or delete, and anything after
+injected instructions still ask. Both mail connectors read `to`, `cc` and `bcc` as a list, one comma- or
+semicolon-separated string, or "Name <a@b>" (`connector_core.text.address_list`): a plain string used to reach Outlook
+one character at a time ("couldn't resolve the recipient").
+
 ## 13. Error handling
 
 | Failure | Behavior |

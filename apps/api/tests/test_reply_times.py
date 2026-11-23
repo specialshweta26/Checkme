@@ -124,3 +124,15 @@ def test_tools_and_unaccounted_time_are_broken_down():
     assert b["tools"][0] == {"tool": "call_tool", "calls": 1, "ms": 10000}
     assert {"tool": "aggregate_result", "calls": 2, "ms": 5000} in b["tools"]
     assert b["tool_ms"] == 9000 and b["other_ms"] == 60000 - 20000 - 10000 - 9000 and b["route_ms"] == 300
+
+
+def test_each_call_says_what_came_back():
+    from app.agent.deep import result_shape
+
+    shape = result_shape({"rows": [1, 2, 3], "truncated": True, "note": "Showing first 3 of 40"})
+    assert shape["rows"] == 3 and shape["flags"] == ["truncated"] and shape["note"].startswith("Showing")
+    assert result_shape({"data": {"items": [1] * 7, "hasMore": True}}) == {"keys": ["data"], "flags": ["hasMore"], "rows": 7}
+    assert result_shape("Result truncated at 50 rows")["flags"] == ["truncated (text)"]
+    b = latency.breakdown({"total_ms": 1000, "calls": [{"connector": "gw", "tool": "gateway__execute", "action": "get_sales_split",
+                                                "ms": 500, "shape": {"rows": 3}, "cut_for_model": True}], "remembered": ["get_sales_split"]})  # fmt: skip
+    assert b["calls"][0]["action"] == "get_sales_split" and b["calls"][0]["cut_for_model"] and b["remembered"] == ["get_sales_split"]
