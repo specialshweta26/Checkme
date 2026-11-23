@@ -114,6 +114,12 @@ def event(job: AgentJob, kind: str, text: str, data: dict | None = None, agent_n
     )
 
 
+def _client_kind() -> str:
+    from app.desktop.client import client_kind
+
+    return client_kind()
+
+
 def new_job(
     user_id,
     *,
@@ -159,6 +165,9 @@ def new_job(
             "history": list(history or [])[-HISTORY_TURNS:],
             "confirmations": [],
             "pending": [],
+            # A job started from the Lumio desktop app keeps using that computer (docs/COMPUTER.md); without this it
+            # would run as a website turn on the cloud computer, where paths on the user's Mac don't exist.
+            "client": _client_kind(),
         },
         attempts=0,
         scheduled_task_id=scheduled_task_id,

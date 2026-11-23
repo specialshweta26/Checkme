@@ -3,17 +3,17 @@
 Every agent has a cloud computer: an E2B Desktop sandbox per user (or Daytona when configured, see LLD §7.2).
 The website always uses that cloud computer. The Lumio desktop app (Mac/Windows, `apps/desktop`) runs files, the
 browser, and teaching on this machine. File tools only work inside folders the user granted (native picker; review/revoke
-in **This computer**). Terminal and `run_code` ask the user to allow each run in a native prompt. `write_file`, `copy_file` and `move_file` create missing folders inside a granted folder. Shell/files fall back to E2B if
-the sidecar is offline; browser, live screen, boot, and teaching never open E2B from the desktop app.
+in **This computer**). Terminal and `run_code` ask the user to allow each run in a native prompt. `write_file`, `copy_file` and `move_file` create missing folders inside a granted folder. Shell, files,
+browser, live screen, boot, and teaching never open E2B from the desktop app, including background jobs it starts.
 
 ## Routing
 
 | Tool | Who has it | Website | Desktop app (sidecar online) |
 | --- | --- | --- | --- |
-| `shell` | every agent | cloud computer | this computer after the user allows the command in a native prompt (`Run` / `Don't run`, or `Allow until Lumio quits` on Mac); a no returns `need: shell_approval` and nothing runs. Older desktop apps: `need: terminal_grant`. E2B if sidecar offline |
+| `shell` | every agent | cloud computer | this computer after the user allows the command in a native prompt (`Run` / `Don't run`, or `Allow until Lumio quits` on Mac); a no returns `need: shell_approval` and nothing runs. Older desktop apps: `need: terminal_grant`. Sidecar offline: "desktop app is not connected", never E2B |
 | `sandbox_shell` | coding agents | cloud computer | cloud computer (toolchain wrapping) |
 | `ensure_toolchain(tools)` | every agent | cloud computer | cloud computer |
-| files | every agent | cloud computer | granted folders on this computer; E2B if sidecar offline |
+| files | every agent | cloud computer | granted folders on this computer; sidecar offline: "desktop app is not connected", never E2B |
 | `run_code` | every agent | cloud computer | same as shell (asks before each run) |
 | browser / live screen | every agent | cloud computer | Lumio Chrome profile on this computer (never the user's Chrome profile; never E2B from the desktop app) |
 | teach a skill | every agent | cloud computer (xinput in the sandbox) | this computer (OS clicks + Lumio browser) |
@@ -21,7 +21,7 @@ the sidecar is offline; browser, live screen, boot, and teaching never open E2B 
 
 - The website never uses the laptop, even if the desktop app is paired and online (`X-Lumio-Client` is `web` unless the
   Tauri app injects `desktop`).
-- When the sidecar is offline, desktop shell/files fall back to E2B (`ran_on: cloud_computer`).
+- When the sidecar is offline, desktop shell/files return `computer_unavailable` ("The Lumio desktop app is not connected") instead of running on E2B, where paths on the user's Mac don't exist. Background jobs started from the desktop app record `meta.client = "desktop"` and run as desktop turns, so the same holds for them and for the jobs they delegate.
 - When no local computer is connected, `user_computer_shell` is not offered. If an older prompt or skill still calls it, the
   command runs on the cloud computer (`LOCAL_SHELL_FALLBACK_TO_CLOUD=1`) and the result says `ran_on: cloud_computer`.
 - The system prompt (`deep.shell_routing_hint`) says: on the website, install CLIs on the cloud computer; in the desktop

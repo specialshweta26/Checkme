@@ -353,3 +353,42 @@ async def test_start_background_task_offered_to_every_agent_in_chat(monkeypatch)
     await found["start_background_task"].ainvoke({"task": "Compare prices on three sites", "title": "Compare", "steps": ["Open each site", "Compare"]})
     assert seen == {"task": "Compare prices on three sites", "role": "worker", "steps": ["Open each site", "Compare"]}
     assert "worker" in jobs_service.ROLES and "worker" in runner.ROLE_BRIEF
+
+
+def test_job_from_the_desktop_app_keeps_running_on_that_computer():
+    from app.desktop.client import reset_client_kind, set_client_kind
+    from app.jobs.runner import client_args
+
+    token = set_client_kind("desktop")
+    try:
+        job = _job(role="worker")
+    finally:
+        reset_client_kind(token)
+    assert job.meta["client"] == "desktop"
+    assert client_args(job.meta) == {"client_kind": "desktop"}
+
+
+def test_website_and_older_jobs_stay_website_turns():
+    from app.jobs.runner import client_args
+
+    assert _job().meta["client"] == "web"
+    assert client_args(_job().meta) == {}
+    assert client_args({"history": []}) == {}
+    assert client_args({}) == {}
+
+
+async def test_job_run_passes_the_desktop_client_to_the_agent(monkeypatch):
+    """Child jobs started inside a desktop job inherit it: the run sets the client, and new_job reads it."""
+    from app.agent import deep
+    from app.desktop.client import client_kind
+
+    seen = {}
+
+    async def inner(*a, **kw):
+        seen["client"] = client_kind()
+        seen["child"] = _job(kind="delegate", parent=_job()).meta["client"]
+        return {"text": "ok"}
+
+    monkeypatch.setattr(deep, "_run_deep_agent", inner)
+    await deep.run_deep_agent(None, SimpleNamespace(id=uuid.uuid4()), None, "r", [], "q", [], client_kind="desktop")
+    assert seen.get("client") == "desktop" and seen.get("child") == "desktop"

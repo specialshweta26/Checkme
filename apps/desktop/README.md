@@ -3,7 +3,7 @@
 Wraps the Lumio website in a Tauri 2 window and runs a sidecar on this machine.
 
 - **Website:** always the cloud computer (E2B).
-- **This app:** files inside user-granted folders, Lumio's own Chrome profile, live screen, and teaching on this computer. Terminal and Python ask you in a native prompt before each run. Shell/files fall back to E2B if the sidecar is offline. Browser, boot, and teaching never open E2B from this app.
+- **This app:** files inside user-granted folders, Lumio's own Chrome profile, live screen, and teaching on this computer. Terminal and Python ask you in a native prompt before each run. Shell and files never move to E2B from this app: if the sidecar is offline the agent is told the app isn't connected. Background jobs started here stay on this computer too. Browser, boot, and teaching never open E2B from this app.
 
 The sidecar polls `/api/desktop/jobs` (outbound), so it works behind NAT. Sign in inside the window; pairing is automatic.
 

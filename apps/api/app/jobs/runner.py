@@ -70,6 +70,12 @@ ROLE_BRIEF = {
 }
 
 
+def client_args(meta: dict) -> dict:
+    """A job started from the desktop app runs as a desktop turn, so files, shell and the browser stay on that computer
+    and never fall back to the cloud one. Older jobs and website jobs pass nothing (the website default)."""
+    return {"client_kind": "desktop"} if (meta or {}).get("client") == "desktop" else {}
+
+
 def job_query(job: AgentJob) -> str:
     query = service.next_query(job)
     if (job.meta or {}).get("history"):
@@ -218,6 +224,8 @@ async def run_job(job_id, session_factory: Callable | None = None, agent_impl: C
                 job=job,
                 # A webhook payload is third-party content: the run asks before destructive actions from the start.
                 **({"untrusted_input": True} if job.kind == "event" else {}),
+                # Started from the desktop app: files, shell and browser stay on that computer, never the cloud one.
+                **client_args(meta),
             )
         except asyncio.CancelledError:
             job_trace.CURRENT.reset(trace_token)
