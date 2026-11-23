@@ -1116,7 +1116,10 @@ async def search_user_tools(ctx: RunContext, query: str, connector_slug: str | N
     if connector_slug:
         conn = ctx.connectors.get(connector_slug)
         if conn is None:
-            return [{"error": f"connector '{connector_slug}' is not connected for this user"}]
+            real, _ = resolve_slug(ctx, connector_slug)
+            if not real:
+                return [_no_connector(ctx, connector_slug)]
+            conn = ctx.connectors[real]
         if keep_connector_scope(getattr(conn, "provider", None), query):
             conns = [conn]
     hits = await search_tools(ctx.db, conns, query, 40) if ctx.db is not None else []
@@ -1922,9 +1925,12 @@ def check_gateway_args(known: dict | None, tool_name: str, args: dict) -> dict |
 
 
 async def get_user_tool_schema(ctx: RunContext, connector_slug: str, tool_name: str) -> dict:
+    if connector_slug not in ctx.connectors:
+        real, glued = resolve_slug(ctx, connector_slug)
+        if not real:
+            return _no_connector(ctx, connector_slug)
+        connector_slug, tool_name = real, (f"{glued}__{tool_name}" if glued and not str(tool_name).startswith(glued + "__") else tool_name)
     conn = ctx.connectors.get(connector_slug)
-    if conn is None:
-        return {"error": f"connector '{connector_slug}' is not connected for this user"}
     hits = await load_named(ctx.db, [conn], {(connector_slug, tool_name)}) if ctx.db is not None else []
     if not hits:
         fallback = _builtin_mail_spec(conn, tool_name)
@@ -2178,6 +2184,33 @@ async def waiting_on(ctx: RunContext, conn, tool_name: str):
         mcp_client.PROGRESS.reset(token)
 
 
+def resolve_slug(ctx: RunContext, slug: str) -> tuple[str, str]:
+    """(the connector's real slug or "", any tool path the agent glued onto it). The agent wrote a connector name
+    loosely ("Agilitas", "mcp-gateway-agilitas-digital-2__funnel-analytics") and got "not connected", which it took for
+    an outage and gave up on a healthy connector."""
+    raw = str(slug or "").strip()
+    if raw in ctx.connectors:
+        return raw, ""
+    base, _, rest = raw.partition("__")
+    if base in ctx.connectors:
+        return base, rest
+    low = raw.lower()
+    for key, conn in ctx.connectors.items():
+        names = {key.lower(), str(getattr(conn, "name", "") or "").lower(), str(getattr(conn, "alias", "") or "").lower()}
+        if low in names:
+            return key, ""
+        if rest and base.lower() in names:
+            return key, rest
+    near = [k for k, c in ctx.connectors.items()
+            if low and (low in k.lower() or low in str(getattr(c, "name", "") or "").lower())]  # fmt: skip
+    return (near[0], "") if len(near) == 1 else ("", "")
+
+
+def _no_connector(ctx: RunContext, slug: str) -> dict:
+    return {"error": f"There is no connector named '{slug}'. It is not an outage: use one of these exact connector slugs.",
+            "connected": sorted(ctx.connectors)}  # fmt: skip
+
+
 async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, args: dict | None = None) -> Any:
     from app.agent import cancel as run_cancel
 
@@ -2190,9 +2223,14 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
     from app.agent.computer_harness import desktop_tool_slug
 
     connector_slug = desktop_tool_slug(ctx, connector_slug, tool_name)
+    if connector_slug not in ctx.connectors:
+        real, glued = resolve_slug(ctx, connector_slug)
+        if not real:
+            return _no_connector(ctx, connector_slug)
+        connector_slug = real
+        if glued and not str(tool_name).startswith(glued + "__"):
+            tool_name = f"{glued}__{tool_name}"  # "gateway__funnel-analytics" + "get_sales_split"
     conn = ctx.connectors.get(connector_slug)
-    if conn is None:
-        return {"error": f"connector '{connector_slug}' is not connected for this user"}
     qualified = f"{connector_slug}__{tool_name}"
     ctx.used_tools.append(qualified)
     hit = None
