@@ -794,9 +794,10 @@ async def generate_image(prompt: str, size: str = "1024x1024") -> dict:
         return {"error": "Image generation is not configured (missing OPENAI_API_KEY)."}
     dim = size if size in {"1024x1024", "1024x1792", "1792x1024"} else "1024x1024"
     try:
-        from app.llm import openai_client
+        from app import llm_gateway
 
-        resp = await openai_client().images.generate(model="dall-e-3", prompt=text[:4000], size=dim)
+        client = llm_gateway.openai_client(llm_gateway.resolve(None, "image"))
+        resp = await client.images.generate(model="dall-e-3", prompt=text[:4000], size=dim)
         row = (resp.data or [None])[0]
         url = getattr(row, "url", None) if row is not None else None
         if not url:

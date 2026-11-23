@@ -107,12 +107,23 @@ async def chat_complete(
     response_format: dict | None = None,
     max_tokens: int = 1200,
     model: str | None = None,
+    ctx: Any = None,
+    purpose: str = "agent",
 ) -> Any:
     """Call /v1/responses. gpt-6-luna cannot use function tools on chat completions with reasoning.
-    ``model`` overrides OPENAI_MODEL for this call (the fast browser loop's BROWSER_FAST_MODEL)."""
+    The model gateway picks the model and key (app/llm_gateway.py); ``model`` names one for this call (the fast
+    browser loop's BROWSER_FAST_MODEL, or small_model() for background work)."""
+    from app import llm_gateway
+
+    if purpose == "agent" and model and model.strip() == small_model():
+        # Background calls pass model=small_model(); they are the small purpose, so a user's small-model choice applies.
+        purpose, model = "small", None
+    spec = llm_gateway.resolve(ctx, purpose, model=model)
+    if not spec.is_openai:
+        raise llm_gateway.UnsupportedProvider(f"background calls can't run on {spec.provider} yet")
     instructions, items = _split_messages(messages)
     kwargs: dict[str, Any] = {
-        "model": (model or "").strip() or get_settings().openai_model,
+        "model": spec.model,
         "service_tier": "default",
         "input": items,
         "text": _text_format(response_format),
@@ -128,10 +139,9 @@ async def chat_complete(
             kwargs["tool_choice"] = tool_choice
     if temperature is not None:
         kwargs["temperature"] = temperature
-    resp = await openai_client().responses.create(**kwargs)
-    from app.agent import usage
-
-    usage.from_openai(kwargs["model"], getattr(resp, "usage", None))
+    client = openai_client() if spec.is_platform else llm_gateway.openai_client(spec)
+    resp = await client.responses.create(**kwargs)
+    llm_gateway.record_usage(spec, getattr(resp, "usage", None))
     return _as_chat_completion(_output_text(resp))
 
 
@@ -166,6 +176,7 @@ async def embed_texts(texts: list[str]) -> list[list[float]]:
             cached.append(None)
             missing.append((i, text))
     if missing:
+        # Embeddings always use Lumio's model: stored vectors only match vectors from the same model.
         resp = await openai_client().embeddings.create(
             model=get_settings().openai_embedding_model,
             input=[t for _, t in missing],

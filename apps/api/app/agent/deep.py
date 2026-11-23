@@ -13,7 +13,6 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from langchain_core.tools import StructuredTool
-from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import InMemorySaver
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -4089,32 +4088,13 @@ def cache_key(ctx: "RunContext | None") -> str:
 
 
 def _chat_model(ctx: "RunContext | None" = None):
-    """gpt-6-luna function tools + reasoning only work on /v1/responses, not chat completions."""
-    from app.llm import reasoning_payload
+    """The agent's chat model, from the model gateway (app/llm_gateway.py)."""
+    from app import llm_gateway
 
     s = get_settings()
-    effort = (s.openai_reasoning_effort or "").strip() or "none"
-    reasoning = reasoning_payload()
-    base = {"model": s.openai_model, "api_key": s.openai_api_key, "timeout": 120, "max_retries": 1}
     key = cache_key(ctx) if getattr(s, "prompt_cache_key", True) else ""
-    if key:
-        base["model_kwargs"] = {"prompt_cache_key": key}
-    if bool(getattr(s, "stream_tokens", True)):
-        # Tokens reach the callbacks as they are generated (the chat shows the reply as it streams).
-        base["streaming"] = True
-    attempts = [
-        {"use_responses_api": True, "reasoning": reasoning, "verbosity": "medium", "service_tier": "default"},
-        {"use_responses_api": True, "reasoning": reasoning, "verbosity": "medium"},
-        {"use_responses_api": True, "reasoning": reasoning},
-        {"use_responses_api": True, "reasoning_effort": effort},
-        {"use_responses_api": True},
-    ]
-    for extra in attempts:
-        try:
-            return ChatOpenAI(**base, **extra)
-        except TypeError:
-            continue
-    return ChatOpenAI(**base)
+    spec = llm_gateway.resolve(ctx, "agent")
+    return llm_gateway.chat_model(spec, cache_key=key, streaming=bool(getattr(s, "stream_tokens", True)))
 
 
 def _todo_middleware():

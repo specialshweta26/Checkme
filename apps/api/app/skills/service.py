@@ -871,7 +871,8 @@ def _parse_writer(raw: str) -> dict | None:
 
 async def _write_skill(timeline: list[dict], frames: list[dict], name_hint: str, transcript: list[dict] | None = None) -> dict:
     """LLM: timeline + narration + key frames -> {name, instruction}. Raises the last error when every attempt fails."""
-    from app.llm import chat_complete, openai_client, reasoning_payload
+    from app import llm_gateway
+    from app.llm import chat_complete, reasoning_payload
 
     if not (get_settings().openai_api_key or "").strip():
         raise RuntimeError("no OpenAI key is configured")
@@ -883,6 +884,7 @@ async def _write_skill(timeline: list[dict], frames: list[dict], name_hint: str,
     )
     picks = frames if len(frames) <= 6 else [frames[round(i * (len(frames) - 1) / 5)] for i in range(6)]
     last: Exception | None = None
+    vision = llm_gateway.resolve(None, "vision")
     for attempt in range(WRITER_ATTEMPTS):
         if picks:
             content: list[dict] = [{"type": "input_text", "text": text}]
@@ -891,8 +893,8 @@ async def _write_skill(timeline: list[dict], frames: list[dict], name_hint: str,
                 content.append({"type": "input_image", "image_url": "data:image/jpeg;base64," + frame["jpeg"]})
             try:
                 resp = await asyncio.wait_for(
-                    openai_client().responses.create(
-                        model=get_settings().openai_model,
+                    llm_gateway.openai_client(vision).responses.create(
+                        model=vision.model,
                         instructions=SKILL_WRITER,
                         input=[{"role": "user", "content": content}],
                         text={"format": {"type": "json_object"}},

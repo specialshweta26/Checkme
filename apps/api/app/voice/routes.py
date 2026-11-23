@@ -53,11 +53,11 @@ async def transcribe(audio: UploadFile = File(...), seconds: float = Form(0), la
         raise HTTPException(413, "That recording is too long. Keep it under two minutes.")
     if len(data) < 800:
         return {"text": ""}  # a click, not speech
-    from app.llm import openai_client
+    from app import llm_gateway
 
     lang = language.strip().lower()[:5] if language and language.strip().isascii() else ""
     try:
-        out = await openai_client().audio.transcriptions.create(
+        out = await llm_gateway.openai_client(llm_gateway.resolve(None, "transcribe")).audio.transcriptions.create(
             model=getattr(s, "transcribe_model", "") or "gpt-4o-mini-transcribe",
             file=(f"voice.{ext}", data, kind),
             **({"language": lang.split("-")[0]} if lang else {}),
