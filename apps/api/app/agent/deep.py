@@ -105,6 +105,8 @@ class RunContext:
     query: str = ""
     call_impl: Any = None
     results: list[dict] = field(default_factory=list)
+    # Figures Lumio worked out from stored results (aggregate_result): checked like the data itself (agent/fact_check.py).
+    derived: list[dict] = field(default_factory=list)
     gateway_surface: dict[str, dict] = field(default_factory=dict)
     # (connector slug, gateway action) -> {"fields": [...], "required": [...]}, from catalog search results.
     gateway_args: dict = field(default_factory=dict)
@@ -1828,6 +1830,25 @@ def _with_trace(ctx: RunContext, conn, schema: Any, args: dict) -> dict:
     return args
 
 
+async def _shorter_windows(ctx: RunContext, conn, tool_name: str, args: dict, result: Any) -> Any:
+    """A source that reduced its answer for size, asked again in shorter date windows (agent/windows.py)."""
+    from app.agent import windows
+    from app.routing.retrieve import is_execute_tool
+
+    if not windows.reduced(result):
+        return result
+    inner_key = next((k for k in _EXECUTE_ARG_KEYS if isinstance(args.get(k), dict)), None) if is_execute_tool(tool_name) else None
+    base = dict(args.get(inner_key) or {}) if inner_key else dict(args)
+
+    async def call(window_args: dict) -> Any:
+        sent = {**args, inner_key: window_args} if inner_key else window_args
+        return await invoke_named(ctx.db, ctx.user, conn, tool_name, sent, ctx.attachments)
+
+    if ctx.progress is not None and windows.window(base):
+        await ctx.progress.emit("The answer was too large: asking for it in shorter periods", kind="tool")
+    return await windows.split(call, base, result)
+
+
 async def _read_all_pages(ctx: RunContext, conn, tool_name: str, args: dict, result: Any) -> Any:
     """A table answered a page at a time: fetch the remaining pages and merge their rows (docs/LLD.md "Paged tables")."""
     from app.agent import tables
@@ -2350,6 +2371,9 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
                     result = await _read_all_pages(ctx, conn, tool_name, args, result)
                     if isinstance(result, dict) and result.get("pages_fetched"):
                         timing["pages"] = result["pages_fetched"]
+                    result = await _shorter_windows(ctx, conn, tool_name, args, result)
+                    if isinstance(result, dict) and result.get("split_by_lumio"):
+                        timing["windows"] = len(result.get("windows") or [])
                 timing["ms"] = int((_time.monotonic() - _t0) * 1000)
                 inner = [a for a in approval.nested_actions(tool_name, args) if a != tool_name]
                 if inner:
@@ -3042,7 +3066,12 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
         if row is None:
             return dumps({"error": "No stored result with that id. call_tool first."})
         ctx.used_tools.append("aggregate_result")
-        return dumps(tables.aggregate(row.get("data"), where, group_by, sums, top), 32000)
+        out = tables.aggregate(row.get("data"), where, group_by, sums, top)
+        if isinstance(out, dict) and not out.get("error"):
+            # Totals over every row, worked out by Lumio: the reply may quote them (the figure check accepts them).
+            ctx.derived.append({"source_tool": "aggregate_result", "args": {"result_id": row.get("result_id"), "where": where,
+                                "group_by": group_by, "sums": sums}, "data": out})  # fmt: skip
+        return dumps(out, 32000)
 
     async def inspect_result(
         result_id: str | None = None,
@@ -5143,9 +5172,9 @@ async def _run_deep_agent(
         from app.agent import fact_check
 
         try:
-            if progress is not None and fact_check.unverified(text, ctx.results):
+            if progress is not None and fact_check.unverified(text, ctx.derived + ctx.results):
                 await progress.emit("Checking the figures against the data", kind="check")
-            text, ctx.fact_report = await fact_check.verify_reply(text, ctx.results)
+            text, ctx.fact_report = await fact_check.verify_reply(text, ctx.derived + ctx.results)
         except Exception:  # noqa: BLE001 - the reply stands unchecked rather than not at all
             log.warning("fact check skipped", exc_info=True)
     timer.mark("fact_check", _c)

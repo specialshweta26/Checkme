@@ -1060,6 +1060,20 @@ ends. Each user's credentials get their own session, and a teammate's run inside
   computer task, a computer or deep turn, a background job, or six or more tool calls. A one-shot data question or
   web lookup ends with its answer. `AGENT_FINISH_CHECK=false` still turns it off entirely.
 
+### Shorter windows
+
+A gateway can answer a long period with "Response was too large for MCP and has been reduced. Narrow the window with
+start/end". When an answer says it was reduced and the call names a start and end date, Lumio splits the period in
+halves (and again while a half is still reduced, up to 16 windows), asks for every piece at once, and gives the agent
+each window's full answer to add up (`app/agent/windows.py`). Before, the agent repeated the same two-week call 9 times.
+
+### Figures Lumio worked out
+
+`aggregate_result` totals are kept in `ctx.derived` and checked like the data itself, and a report's own text counts
+with its scale ("₹6.51 crore"). When the turn's data is too big to show the rewriter whole, the reply's unmatched
+figures are marked, not rewritten: the rewriter saw only the first 60,000 characters and replaced a report's totals
+with "not in the supplied data excerpt".
+
 ### Action memory
 
 A data question on a gateway connector used to start the catalog hunt from zero every time: 3-6 searches at 4-7 s
