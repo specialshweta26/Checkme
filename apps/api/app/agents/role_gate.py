@@ -64,6 +64,20 @@ def _skills(skills: list[dict]) -> str:
     return "; ".join(r for r in rows if r) or "(none)"
 
 
+# Instructions that make every request this agent's work: "always use only skill to answer", "answer every question",
+# "handle all requests". The user wrote them for this agent, so they win over the model's reading of its title.
+_TAKES_EVERYTHING = re.compile(
+    r"\b(always|only)\b[^.\n]{0,40}\bskills?\b"
+    r"|\b(answer|handle|take|do)\b[^.\n]{0,25}\b(every|all|any)\b[^.\n]{0,15}\b(question|request|message|task)s?\b"
+    r"|\bnever\b[^.\n]{0,20}\b(redirect|refuse|send (me|them) (to|elsewhere))\b",
+    re.I,
+)
+
+
+def takes_everything(agent) -> bool:
+    return bool(_TAKES_EVERYTHING.search(str(getattr(agent, "instructions", "") or "")))
+
+
 def covered_by_skill(skills: list[dict], query: str) -> bool:
     """The agent has its own skill for this: that is its role, whatever its title says. Matched on the skill's name and
     description (an imported skill's instructions are long and match almost anything)."""
@@ -104,7 +118,7 @@ async def check(agent, query: str, history: list[dict], others: list, complete=N
     agent's own skills: a request one of them covers is never redirected."""
     if agent is None or is_general(agent) or not (query or "").strip() or _SMALL_TALK.match(query or ""):
         return None
-    if covered_by_skill(skills or [], query):
+    if takes_everything(agent) or covered_by_skill(skills or [], query):
         return None
     if complete is None:
         from app.config import get_settings
