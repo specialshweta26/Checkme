@@ -80,6 +80,9 @@ def _numbers(value: Any, out: list[float], sums: dict, depth: int = 0) -> None:
                 out.append(float(m.group(0).replace(",", "")))
             except ValueError:
                 pass
+        if any(w in value[:20000].lower() for w in ("crore", "lakh", "lac", "million", "billion", " cr", "mn", "bn")):
+            # A report's own text ("₹6.51 crore"): the figure as written, at its scale.
+            out.extend(v for _, v, _ in reply_figures(value[:20000]))
     elif isinstance(value, dict):
         for v in value.values():
             _numbers(v, out, sums, depth + 1)
@@ -214,10 +217,22 @@ REPAIR_PROMPT = (
 )
 
 
-def _data_for_prompt(results: list[dict], limit: int = 60_000) -> str:
+PROMPT_DATA_CHARS = 60_000
+
+
+def _data_for_prompt(results: list[dict], limit: int = PROMPT_DATA_CHARS) -> str:
     rows = [{"source": r.get("source_tool"), "args": r.get("args"), "data": r.get("data")} for r in results or [] if isinstance(r, dict)]
     text = json.dumps(rows, default=str, ensure_ascii=False)
     return text if len(text) <= limit else text[:limit] + "…"
+
+
+def _fits_prompt(results: list[dict]) -> bool:
+    """All of the data fits the rewrite prompt. When it doesn't, the rewriter sees only the start of it and took figures
+    it couldn't see for missing: a report's totals were replaced with "not in the supplied data excerpt"."""
+    from app.agent.jsonsize import fits
+
+    rows = [{"source": r.get("source_tool"), "args": r.get("args"), "data": r.get("data")} for r in results or [] if isinstance(r, dict)]
+    return fits(rows, PROMPT_DATA_CHARS)
 
 
 _BLANK_CELL = re.compile(r"\|[ \t]*(?:-|—|–|n/?a)?[ \t]*(?=\|)", re.I)
@@ -252,6 +267,11 @@ async def verify_reply(text: str, results: list[dict], complete=None) -> tuple[s
     wrong = unverified(text, results)
     if not wrong:
         return text, report
+    if not _fits_prompt(results):
+        # Too much data to show the rewriter whole: keep the reply's figures and mark the unmatched ones instead.
+        report["unverified"] = wrong
+        report["too_much_data"] = True
+        return flag(text, wrong), report
     if complete is None:
         from app.llm import chat_complete as complete
     try:
