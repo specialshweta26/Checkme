@@ -2400,6 +2400,13 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
         cached = await read_cache.get(ctx.user.id, connector_slug, tool_name, args) if cacheable else None
         if not cacheable:
             await read_cache.wrote(ctx.user.id, connector_slug)
+        from app.agent import source_limit
+
+        held = await source_limit.paused(ctx.user, connector_slug) if cached is None and _is_user_mcp(conn) else None
+        if held is not None:
+            # The source said its own usage limit is used up: answer for it instead of asking again (docs/LLD.md).
+            ctx.call_timings.append({"connector": connector_slug, "tool": tool_name, "ms": 0, "source_limit": True})
+            return held
         if cached is not None:
             result = cached
             log.info("read cache hit: %s.%s", connector_slug, tool_name)
@@ -2430,8 +2437,12 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
                 wrong_dates = ignored_dates(args, result) if _is_user_mcp(conn) else ""
                 if wrong_dates:
                     result = await _note_ignored_args(ctx, conn, tool_name, args, result, wrong_dates)
+            words = source_limit.said(result) if _is_user_mcp(conn) else None
+            if words:
+                return await source_limit.mark(ctx.user, connector_slug, words)
             if cacheable:
-                await read_cache.put(ctx.user.id, connector_slug, tool_name, args, result)
+                await read_cache.put(ctx.user.id, connector_slug, tool_name, args, result,
+                                     ttl=read_cache.ttl_for(args, getattr(ctx.user, "timezone", None)))  # fmt: skip
         # One approval, one action: running the same thing again needs a new card.
         approval.consume(ctx.confirmations, used_approval)
         note_untrusted(ctx, tool_name)
@@ -2492,6 +2503,11 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
     except ToolError as exc:
         if ctx.db is not None:
             await bump_usage(ctx.db, ctx.user.id, conn.id, tool_name, False)
+        from app.agent import source_limit
+
+        words = source_limit.said(exc) if _is_user_mcp(conn) else None
+        if words:
+            return await source_limit.mark(ctx.user, connector_slug, words)
         out = {"error": str(exc)}
         if orig_tool.startswith("browse") and orig_args.get("url"):
             out["url"] = str(orig_args.get("url") or "")
@@ -2510,6 +2526,11 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
         log.exception("tool failed")
         if ctx.db is not None:
             await bump_usage(ctx.db, ctx.user.id, conn.id, tool_name, False)
+        from app.agent import source_limit
+
+        words = source_limit.said(exc) if conn is not None and _is_user_mcp(conn) else None
+        if words:
+            return await source_limit.mark(ctx.user, connector_slug, words)
         return {"error": str(exc)[:300]}
 
 
