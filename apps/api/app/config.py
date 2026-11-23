@@ -320,6 +320,10 @@ class Settings(BaseSettings):
     chat_rate_limit_per_minute: int = 30
     history_messages: int = 8
     max_agent_steps: int = 20
+    # What each model can do (tools, images, PDF, context size), from public catalogs (app/model_keys/capabilities.py).
+    # Empty turns a source off; models it doesn't list are "unknown" and learned from their errors.
+    model_catalog_url: str = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
+    openrouter_catalog_url: str = "https://openrouter.ai/api/v1/models"
     agent_finish_check: bool = True  # compare a finished turn with the request (one small-model call, two if work is left)
 
     @model_validator(mode="after")

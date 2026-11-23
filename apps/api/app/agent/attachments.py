@@ -274,3 +274,44 @@ async def image_message(keys: list[str]) -> Any:
     if not parts:
         return None
     return HumanMessage(content=[{"type": "text", "text": "The images the user attached to their message:"}, *parts])
+
+
+DESCRIBE_PROMPT = ("Describe each image for someone who can't see it, so they can answer questions about it: every piece "
+                   "of text, number, table row, chart value and label exactly as shown, then what the image shows. Number "
+                   "the images. No opinions.")  # fmt: skip
+
+
+async def described_image_message(keys: list[str]) -> Any:
+    """The uploaded images described in words, for a chosen model that can't read images (docs/LLD.md "Model
+    gateway", phase 5). Lumio's own vision model does the reading. None if none could be loaded or read."""
+    from langchain_core.messages import HumanMessage
+
+    from app import llm_gateway
+
+    content: list[dict] = [{"type": "input_text", "text": DESCRIBE_PROMPT}]
+    for key in keys:
+        try:
+            data, _ = await asyncio.to_thread(get_bytes, key)
+            content.append({"type": "input_image", "image_url": await asyncio.to_thread(_as_data_url, data)})
+        except Exception as exc:  # noqa: BLE001
+            log.warning("uploaded image not loaded: %s", type(exc).__name__)
+    if len(content) == 1:
+        return None
+    vision = llm_gateway.ModelSpec(provider="openai", model=llm_gateway.resolve(None, "vision").model,
+                                   api_key=get_settings().openai_api_key or "", purpose="vision")  # fmt: skip
+    kwargs: dict[str, Any] = {"model": vision.model, "input": [{"role": "user", "content": content}], "max_output_tokens": 1500}
+    reasoning = llm_gateway.reasoning_for(vision.model)
+    if reasoning:
+        kwargs["reasoning"] = reasoning
+    try:
+        resp = await llm_gateway.openai_client(vision).responses.create(**kwargs)
+        llm_gateway.record_usage(vision, getattr(resp, "usage", None))
+        text = (getattr(resp, "output_text", "") or "").strip()
+    except Exception as exc:  # noqa: BLE001 - the turn still has the file names
+        log.warning("images not described: %s", type(exc).__name__)
+        return None
+    if not text:
+        return None
+    n = len(content) - 1
+    return HumanMessage(content=f"The user attached {n} image{'s' if n != 1 else ''}. The model you run on can't read images, "
+                                f"so Lumio described them:\n\n{text}")  # fmt: skip

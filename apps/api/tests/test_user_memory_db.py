@@ -53,6 +53,7 @@ async def factory(monkeypatch):
     async with engine.begin() as conn:
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         await conn.run_sync(Base.metadata.create_all)
+        await conn.execute(text("ALTER TABLE model_choices ADD COLUMN IF NOT EXISTS tier VARCHAR(20) DEFAULT ''"))
         await app_db._migrate_memory(conn)
         await app_db._migrate_user_memory(conn)
     yield async_sessionmaker(engine, expire_on_commit=False)

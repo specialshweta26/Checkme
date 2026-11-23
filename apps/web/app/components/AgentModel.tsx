@@ -2,17 +2,18 @@
 
 import { useEffect, useState } from "react";
 import { apiError, type WorkspaceAgent } from "../lib";
+import { CapsLine, TierSelect, capsText, type Caps, type Tier } from "./ModelCaps";
 
 // The agent's own model (docs/LLD.md "Model gateway", phase 3), in its About panel: one of the user's saved keys and a
 // model on it, or "Same as your default" (the Models page choice, else Lumio's). Keys are added on /models.
 
-type Key = { id: string; label: string; hint: string; runs: boolean; status: string; models: string[] };
-type Choice = { key_id: string; model: string };
-type Overview = { keys: Key[]; choices: { agent?: Choice }; agents: Record<string, { agent?: Choice }>; lumio: { agent: string } };
+type Key = { id: string; provider: string; label: string; hint: string; runs: boolean; status: string; models: string[]; caps: Record<string, Caps> };
+type Choice = { key_id: string; model: string; tier?: string };
+type Overview = { keys: Key[]; choices: { agent?: Choice }; agents: Record<string, { agent?: Choice }>; lumio: { agent: string }; tiers: Tier[] };
 
 export function AgentModel({ agent }: { agent: WorkspaceAgent }) {
   const [data, setData] = useState<Overview | null>(null);
-  const [draft, setDraft] = useState<Choice>({ key_id: "", model: "" });
+  const [draft, setDraft] = useState<Choice>({ key_id: "", model: "", tier: "" });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -20,7 +21,7 @@ export function AgentModel({ agent }: { agent: WorkspaceAgent }) {
   function fill(d: Overview) {
     setData(d);
     const own = d.agents?.[agent.id]?.agent;
-    setDraft({ key_id: own?.key_id || "", model: own?.model || "" });
+    setDraft({ key_id: own?.key_id || "", model: own?.model || "", tier: own?.tier || "" });
   }
 
   useEffect(() => {
@@ -41,7 +42,9 @@ export function AgentModel({ agent }: { agent: WorkspaceAgent }) {
   const own = data?.agents?.[agent.id]?.agent;
   const fallback = data?.choices?.agent;
   const fallbackName = fallback ? `${fallback.model} on ${data?.keys.find((k) => k.id === fallback.key_id)?.label || "your key"}` : `Lumio's ${data?.lumio.agent || "model"}`;
-  const dirty = (own?.key_id || "") !== draft.key_id || (own?.model || "") !== draft.model;
+  const dirty = (own?.key_id || "") !== draft.key_id || (own?.model || "") !== draft.model || (own?.tier || "") !== (draft.tier || "");
+  const caps = key && draft.model ? key.caps?.[draft.model] : undefined;
+  const blocked = caps?.tools === false;
 
   async function save() {
     setBusy(true);
@@ -52,7 +55,7 @@ export function AgentModel({ agent }: { agent: WorkspaceAgent }) {
         method: "PUT",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ key_id: draft.key_id || null, model: draft.model, agent_id: agent.id }),
+        body: JSON.stringify({ key_id: draft.key_id || null, model: draft.model, agent_id: agent.id, tier: key?.provider === "openai" ? draft.tier || "" : "" }),
       });
       const d = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(apiError(d, "Couldn't save the model."));
@@ -84,7 +87,7 @@ export function AgentModel({ agent }: { agent: WorkspaceAgent }) {
               disabled={busy || !data}
               onChange={(e) => {
                 const k = keys.find((x) => x.id === e.target.value);
-                setDraft({ key_id: e.target.value, model: k?.models.includes(draft.model) ? draft.model : "" });
+                setDraft({ key_id: e.target.value, model: k?.models.includes(draft.model) ? draft.model : "", tier: k?.provider === "openai" ? draft.tier : "" });
               }}
             >
               <option value="">Same as your default</option>
@@ -109,12 +112,21 @@ export function AgentModel({ agent }: { agent: WorkspaceAgent }) {
             />
             <datalist id={`agent-models-${agent.id}`}>
               {(key?.models || []).map((m) => (
-                <option key={m} value={m} />
+                <option key={m} value={m} label={capsText(key?.caps?.[m])} />
               ))}
             </datalist>
           </span>
+          {draft.key_id ? <CapsLine caps={caps} model={draft.model} /> : null}
         </label>
-        <button className="btn small" type="submit" disabled={busy || !dirty || (!!draft.key_id && !draft.model.trim())}>
+        {key?.provider === "openai" ? (
+          <label>
+            <span>Speed</span>
+            <span className="limits-input">
+              <TierSelect tiers={data?.tiers || []} value={draft.tier || ""} disabled={busy} onChange={(tier) => setDraft({ ...draft, tier })} />
+            </span>
+          </label>
+        ) : null}
+        <button className="btn small" type="submit" disabled={busy || !dirty || blocked || (!!draft.key_id && !draft.model.trim())}>
           {busy ? "Saving…" : "Save model"}
         </button>
       </form>

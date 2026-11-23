@@ -36,6 +36,7 @@ class ModelSpec:
     base_url: str = ""
     purpose: str = "agent"
     source: str = PLATFORM  # platform | user | team | agent: whose setting chose this
+    tier: str = ""  # OpenAI service tier the user picked ("" = standard); see tier_for
 
     @property
     def is_openai(self) -> bool:
@@ -99,6 +100,12 @@ async def enter(db: Any, user: Any, agent: Any = None) -> list:
     import logging
 
     tokens: list = []
+    try:
+        from app.model_keys import capabilities
+
+        capabilities.ensure_loading()  # what each model can do, refreshed in the background once a day
+    except Exception:  # noqa: BLE001
+        pass
     every = ALL_CHOICES.get()
     if every is None:
         every = {}
@@ -206,6 +213,40 @@ def learn_effort(model: str | None, exc: BaseException) -> bool:  # noqa: C901
     return True
 
 
+# OpenAI's processing tiers a user can pick for their own key: Standard ("default"), Flex (cheaper, slower, sometimes
+# busy), Fast ("priority") and Ultrafast. Lumio's own key always runs on Standard. Batch isn't offered: it answers
+# within hours, which no chat can wait for.
+TIERS = {"": "Standard", "flex": "Flex", "priority": "Fast", "ultrafast": "Ultrafast"}
+TIER_BACKOFF_SECONDS = 600
+_TIER_OFF: dict[tuple[str, str], float] = {}  # (model, tier) -> until when Standard is used instead
+_TIER_REFUSED = re.compile(r"service[_ ]tier|resource unavailable|flex|priority|ultrafast", re.I)
+
+
+def tier_for(spec: ModelSpec) -> str:
+    """The ``service_tier`` to send: the user's pick on their own OpenAI key, unless the model refused it lately."""
+    import time
+
+    tier = spec.tier if spec.is_openai and not spec.is_platform and spec.tier in TIERS else ""
+    if tier and _TIER_OFF.get((spec.model, tier), 0) > time.time():
+        tier = ""
+    return tier or "default"
+
+
+def learn_tier(spec: ModelSpec, exc: BaseException) -> bool:
+    """When ``exc`` is the model refusing the picked tier (not offered for it, or Flex busy), use Standard for a while
+    and say True (retry)."""
+    import time
+
+    sent = tier_for(spec)
+    text = str(exc or "")
+    if sent == "default" or not _TIER_REFUSED.search(text):
+        return False
+    if not ("400" in text or "429" in text or "unsupported" in text.lower() or "invalid" in text.lower()):
+        return False
+    _TIER_OFF[(spec.model, sent)] = time.time() + TIER_BACKOFF_SECONDS
+    return True
+
+
 # Providers reached through their OpenAI-compatible chat completions address (ChatOpenAI with base_url).
 COMPATIBLE = ("google", "xai", "groq", "openrouter", "openai_compatible")
 AGENT_MAX_TOKENS = 8192  # a reply's length cap where the provider needs one (Anthropic)
@@ -254,7 +295,7 @@ def chat_model(spec: ModelSpec, *, cache_key: str = "", streaming: bool = False,
     # gpt-6-luna function tools + reasoning only work on /v1/responses; older langchain-openai versions reject some of
     # these arguments, so each is dropped in turn.
     attempts = [
-        {"use_responses_api": True, "reasoning": reasoning, "verbosity": "medium", "service_tier": "default"},
+        {"use_responses_api": True, "reasoning": reasoning, "verbosity": "medium", "service_tier": tier_for(spec)},
         {"use_responses_api": True, "reasoning": reasoning, "verbosity": "medium"},
         {"use_responses_api": True, "reasoning": reasoning},
         {"use_responses_api": True, "reasoning_effort": effort},

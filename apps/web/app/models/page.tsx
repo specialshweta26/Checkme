@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { AppShell } from "../components/AppShell";
+import { CapsLine, TierSelect, capsText, type Caps, type Tier } from "../components/ModelCaps";
 import { IconLock, IconModel, IconPlus } from "../components/ProfileIcons";
 import { apiError, getMe, loadWorkspace, relativeTime, type Me, type WorkspaceAgent } from "../lib";
 
@@ -22,18 +23,20 @@ type SavedKey = {
   status: "ok" | "failed" | "unchecked";
   status_note: string;
   models: string[];
+  caps: Record<string, Caps>;
   checked_at: string | null;
 };
-type Choice = { key_id: string; model: string };
+type Choice = { key_id: string; model: string; tier?: string };
 type Overview = {
   providers: Provider[];
   keys: SavedKey[];
   choices: Partial<Record<"agent" | "small", Choice>>;
   agents: Record<string, Partial<Record<"agent" | "small", Choice>>>;
   lumio: { agent: string; small: string };
+  tiers: Tier[];
 };
 type Form = { provider: string; api_key: string; label: string; base_url: string };
-type Draft = { key_id: string; model: string };
+type Draft = { key_id: string; model: string; tier: string };
 
 const PURPOSES: { key: "agent" | "small"; title: string; body: string }[] = [
   { key: "agent", title: "Agent replies", body: "The model that reads your request, uses tools and writes the answer." },
@@ -64,7 +67,7 @@ export default function ModelsPage() {
   function show(next: Overview) {
     setData(next);
     const d: Record<string, Draft> = {};
-    for (const p of PURPOSES) d[p.key] = { key_id: next.choices[p.key]?.key_id || "", model: next.choices[p.key]?.model || "" };
+    for (const p of PURPOSES) d[p.key] = { key_id: next.choices[p.key]?.key_id || "", model: next.choices[p.key]?.model || "", tier: next.choices[p.key]?.tier || "" };
     setDrafts(d);
   }
 
@@ -132,7 +135,8 @@ export default function ModelsPage() {
   const choose = (purpose: "agent" | "small") =>
     run(async () => {
       const d = drafts[purpose];
-      show(await call(`/api/models/choices/${purpose}`, { method: "PUT", body: JSON.stringify({ key_id: d.key_id || null, model: d.model }) }));
+      const key = keys.find((k) => k.id === d.key_id);
+      show(await call(`/api/models/choices/${purpose}`, { method: "PUT", body: JSON.stringify({ key_id: d.key_id || null, model: d.model, tier: key?.provider === "openai" ? d.tier : "" }) }));
       setNotice(d.key_id ? `Your agents now use ${d.model} on ${keyName(d.key_id)} for ${purpose === "agent" ? "replies" : "background work"}.` : "Back on Lumio's model.");
     });
 
@@ -178,10 +182,12 @@ export default function ModelsPage() {
           </div>
           <div className="vault-list models-choices">
             {PURPOSES.map((p) => {
-              const d = drafts[p.key] || { key_id: "", model: "" };
+              const d = drafts[p.key] || { key_id: "", model: "", tier: "" };
               const key = keys.find((k) => k.id === d.key_id);
               const current = data?.choices[p.key];
-              const changed = (current?.key_id || "") !== d.key_id || (current?.model || "") !== d.model;
+              const changed = (current?.key_id || "") !== d.key_id || (current?.model || "") !== d.model || (current?.tier || "") !== d.tier;
+              const caps = key && d.model ? key.caps?.[d.model] : undefined;
+              const blocked = p.key === "agent" && caps?.tools === false;
               return (
                 <div key={p.key} className="models-choice">
                   <div className="vault-item-main">
@@ -195,7 +201,7 @@ export default function ModelsPage() {
                       disabled={busy}
                       onChange={(e) => {
                         const k = keys.find((x) => x.id === e.target.value);
-                        setDrafts({ ...drafts, [p.key]: { key_id: e.target.value, model: k?.models.includes(d.model) ? d.model : "" } });
+                        setDrafts({ ...drafts, [p.key]: { key_id: e.target.value, model: k?.models.includes(d.model) ? d.model : "", tier: k?.provider === "openai" ? d.tier : "" } });
                       }}
                     >
                       <option value="">Lumio's ({data?.lumio[p.key] || "default"})</option>
@@ -217,11 +223,20 @@ export default function ModelsPage() {
                     />
                     <datalist id={`models-${p.key}`}>
                       {(key?.models || []).map((m) => (
-                        <option key={m} value={m} />
+                        <option key={m} value={m} label={capsText(key?.caps?.[m])} />
                       ))}
                     </datalist>
+                    {d.key_id ? <CapsLine caps={caps} model={d.model} /> : null}
                   </label>
-                  <button className="btn small" type="button" disabled={busy || !changed || (!!d.key_id && !d.model.trim())} onClick={() => choose(p.key)}>
+                  <label className="vault-field">
+                    <span>Speed</span>
+                    {key?.provider === "openai" ? (
+                      <TierSelect tiers={data?.tiers || []} value={d.tier} disabled={busy} onChange={(tier) => setDrafts({ ...drafts, [p.key]: { ...d, tier } })} />
+                    ) : (
+                      <em className="models-caps">{d.key_id ? "Set by the provider." : "Standard."}</em>
+                    )}
+                  </label>
+                  <button className="btn small" type="button" disabled={busy || !changed || blocked || (!!d.key_id && !d.model.trim())} onClick={() => choose(p.key)}>
                     Save
                   </button>
                 </div>
