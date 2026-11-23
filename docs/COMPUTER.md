@@ -3,18 +3,18 @@
 Every agent has a cloud computer: an E2B Desktop sandbox per user (or Daytona when configured, see LLD §7.2).
 The website always uses that cloud computer. The Lumio desktop app (Mac/Windows, `apps/desktop`) runs files, the
 browser, and teaching on this machine. File tools only work inside folders the user granted (native picker; review/revoke
-in **This computer**). Terminal and `run_code` stay off unless the user enables them. Shell/files fall back to E2B if
+in **This computer**). Terminal and `run_code` ask the user to allow each run in a native prompt. `write_file`, `copy_file` and `move_file` create missing folders inside a granted folder. Shell/files fall back to E2B if
 the sidecar is offline; browser, live screen, boot, and teaching never open E2B from the desktop app.
 
 ## Routing
 
 | Tool | Who has it | Website | Desktop app (sidecar online) |
 | --- | --- | --- | --- |
-| `shell` | every agent | cloud computer | this computer only if Terminal is enabled; else `need: terminal_grant`. E2B if sidecar offline |
+| `shell` | every agent | cloud computer | this computer after the user allows the command in a native prompt (`Run` / `Don't run`, or `Allow until Lumio quits` on Mac); a no returns `need: shell_approval` and nothing runs. Older desktop apps: `need: terminal_grant`. E2B if sidecar offline |
 | `sandbox_shell` | coding agents | cloud computer | cloud computer (toolchain wrapping) |
 | `ensure_toolchain(tools)` | every agent | cloud computer | cloud computer |
 | files | every agent | cloud computer | granted folders on this computer; E2B if sidecar offline |
-| `run_code` | every agent | cloud computer | same as shell (Terminal grant) |
+| `run_code` | every agent | cloud computer | same as shell (asks before each run) |
 | browser / live screen | every agent | cloud computer | Lumio Chrome profile on this computer (never the user's Chrome profile; never E2B from the desktop app) |
 | teach a skill | every agent | cloud computer (xinput in the sandbox) | this computer (OS clicks + Lumio browser) |
 | `user_computer_shell` | only when a local computer is paired | the user's machine (approval required) | same machine with extra confirmation |

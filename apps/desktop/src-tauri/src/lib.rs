@@ -15,6 +15,7 @@ use tokio::process::Command;
 use tokio::sync::Mutex;
 
 mod agent_browsers;
+mod approval;
 mod browser;
 mod office;
 mod updates;
@@ -28,7 +29,8 @@ const FILE_TEXT_LIMIT: usize = 80_000;
 const TABLE_MAX: u64 = 64 * 1024 * 1024;
 const PUBLISH_LIMIT: usize = 8 * 1024 * 1024;
 /// What this app can do that older ones can't, sent when it asks for work. `browser-spaces`: agents' own browsers.
-const FEATURES: &str = "browser-spaces";
+/// `shell-approval`: shell and Python ask the user in a native prompt instead of needing Terminal switched on.
+const FEATURES: &str = "browser-spaces,shell-approval";
 
 struct Sidecar {
     token: Mutex<Option<String>>,
@@ -399,8 +401,8 @@ fn run_write_file(args: &Value) -> Value {
                     "ran_on": "local_computer",
                 });
             }
-            if let Some(parent) = file.parent() {
-                let _ = fs::create_dir_all(parent);
+            if let Err(err) = grants::make_parents(&file) {
+                return json!({ "ok": false, "error": format!("could not create the folder: {err}"), "ran_on": "local_computer" });
             }
             match fs::write(&file, &bytes) {
                 Ok(()) if file.exists() => json!({
@@ -494,6 +496,9 @@ fn run_copy_move(args: &Value, moving: bool) -> Value {
             "ran_on": "local_computer",
         });
     }
+    if let Err(err) = grants::make_parents(&to) {
+        return json!({ "ok": false, "error": format!("could not create the folder: {err}"), "ran_on": "local_computer" });
+    }
     let result = if moving { fs::rename(&from, &to) } else { fs::copy(&from, &to).map(|_| ()) };
     match result {
         Ok(()) if to.exists() => json!({
@@ -577,34 +582,36 @@ fn python_bin() -> &'static str {
     candidates[0]
 }
 
+fn shell_dir(cwd: Option<&str>) -> Result<PathBuf, Value> {
+    match cwd.filter(|raw| !raw.trim().is_empty()) {
+        Some(raw) => match grants::resolve_existing(raw) {
+            Ok(p) if p.is_dir() => Ok(p),
+            Ok(p) => Ok(p.parent().map(Path::to_path_buf).unwrap_or(p)),
+            Err(err) => Err(err.to_json()),
+        },
+        None => match grants::snapshot().folders.first() {
+            Some(folder) => Ok(PathBuf::from(&folder.path)),
+            None => Err(grants::AccessError::NeedGrant { path: String::new() }.to_json()),
+        },
+    }
+}
+
+/// A shell command, after the user allows it in the native prompt (`approval.rs`).
 async fn run_exec(command: &str, cwd: Option<&str>, timeout_s: u64) -> Value {
     if command.trim().is_empty() {
         return json!({ "ok": false, "error": "command is required", "ran_on": "local_computer" });
     }
-    if !grants::terminal_allowed() {
-        return json!({
-            "ok": false,
-            "need": "terminal_grant",
-            "error": "Terminal access is off. File work uses list_dir, search_files, read_file, and write_file inside granted folders — not shell. The user can enable Terminal in This computer settings.",
-            "ran_on": "local_computer",
-        });
-    }
-    let dir = match cwd {
-        Some(raw) => match grants::resolve_existing(raw) {
-            Ok(p) if p.is_dir() => p,
-            Ok(p) => p.parent().map(Path::to_path_buf).unwrap_or(p),
-            Err(err) => return err.to_json(),
-        },
-        None => {
-            let g = grants::snapshot();
-            match g.folders.first() {
-                Some(folder) => PathBuf::from(&folder.path),
-                None => {
-                    return grants::AccessError::NeedGrant { path: String::new() }.to_json();
-                }
-            }
-        }
+    let dir = match shell_dir(cwd) {
+        Ok(dir) => dir,
+        Err(refused) => return refused,
     };
+    if let Err(refused) = approval::approve("command", command, &dir.to_string_lossy()).await {
+        return refused;
+    }
+    spawn_shell(command, &dir, timeout_s).await
+}
+
+async fn spawn_shell(command: &str, dir: &Path, timeout_s: u64) -> Value {
     let timeout_s = timeout_s.clamp(10, 300);
     let mut cmd = if cfg!(windows) {
         let mut c = Command::new("cmd");
@@ -615,7 +622,7 @@ async fn run_exec(command: &str, cwd: Option<&str>, timeout_s: u64) -> Value {
         c.args(["-lc", command]);
         c
     };
-    cmd.current_dir(&dir)
+    cmd.current_dir(dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -675,13 +682,12 @@ async fn run_code(code: &str, timeout_s: u64) -> Value {
     if code.trim().is_empty() {
         return json!({ "ok": false, "error": "code is required" });
     }
-    if !grants::terminal_allowed() {
-        return json!({
-            "ok": false,
-            "need": "terminal_grant",
-            "error": "Full Python is off. Read a CSV or TSV with read_file: this computer summarizes row counts, status breakdowns, and numeric totals without Terminal.",
-            "ran_on": "local_computer",
-        });
+    let dir = match shell_dir(None) {
+        Ok(dir) => dir,
+        Err(refused) => return refused,
+    };
+    if let Err(refused) = approval::approve("Python code", code, &dir.to_string_lossy()).await {
+        return refused;
     }
     let file = grants::data_dir().join(".lumio_run.py");
     if fs::write(&file, code.as_bytes()).is_err() {
@@ -689,7 +695,7 @@ async fn run_code(code: &str, timeout_s: u64) -> Value {
     }
     let quoted = file.to_string_lossy().replace('\'', "'\\''");
     let command = format!("{} '{}'", python_bin(), quoted);
-    let out = run_exec(&command, None, timeout_s).await;
+    let out = spawn_shell(&command, &dir, timeout_s).await;
     let _ = fs::remove_file(&file);
     out
 }
@@ -964,6 +970,106 @@ mod download_tests {
     }
 }
 
+#[cfg(test)]
+mod local_tool_tests {
+    use super::*;
+    use crate::approval::{reset_session, Decision, TEST_ANSWER};
+    use crate::grants::tests::{isolate, lock_tests};
+
+    fn answer(d: Option<Decision>) {
+        *TEST_ANSWER.lock().unwrap() = d;
+        reset_session();
+    }
+
+    #[test]
+    fn write_file_makes_missing_folders_in_a_grant() {
+        let _lock = lock_tests();
+        let root = isolate();
+        let folder = root.join("work");
+        fs::create_dir_all(&folder).unwrap();
+        grants::add_folder(&folder).unwrap();
+        let target = folder.join("reports/2026/summary.md");
+        let out = run_write_file(&json!({ "path": target.to_string_lossy(), "content": "# hi" }));
+        assert_eq!(out["ok"], true, "{out}");
+        assert_eq!(fs::read_to_string(&target).unwrap(), "# hi");
+    }
+
+    #[test]
+    fn write_file_outside_grants_makes_no_folders() {
+        let _lock = lock_tests();
+        let root = isolate();
+        let folder = root.join("work");
+        fs::create_dir_all(&folder).unwrap();
+        grants::add_folder(&folder).unwrap();
+        let out = run_write_file(&json!({ "path": root.join("elsewhere/a.txt").to_string_lossy(), "content": "x" }));
+        assert_eq!(out["need"], "folder_grant", "{out}");
+        assert!(!root.join("elsewhere").exists());
+    }
+
+    #[test]
+    fn copy_into_a_new_folder_works() {
+        let _lock = lock_tests();
+        let root = isolate();
+        let folder = root.join("work");
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(folder.join("a.txt"), b"a").unwrap();
+        grants::add_folder(&folder).unwrap();
+        let out = run_copy_move(
+            &json!({ "src": folder.join("a.txt").to_string_lossy(), "dest": folder.join("backup/a.txt").to_string_lossy() }),
+            false,
+        );
+        assert_eq!(out["ok"], true, "{out}");
+        assert!(folder.join("backup/a.txt").exists());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shell_runs_after_the_user_allows_it() {
+        let _lock = lock_tests();
+        let root = isolate();
+        let folder = root.join("work");
+        fs::create_dir_all(&folder).unwrap();
+        grants::add_folder(&folder).unwrap();
+        answer(Some(Decision::Once));
+        let cmd = if cfg!(windows) { "echo approved> ran.txt" } else { "echo approved > ran.txt" };
+        let out = run_exec(cmd, None, 20).await;
+        assert_eq!(out["ok"], true, "{out}");
+        assert!(folder.join("ran.txt").exists());
+        answer(None);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shell_is_refused_and_nothing_runs_when_the_user_says_no() {
+        let _lock = lock_tests();
+        let root = isolate();
+        let folder = root.join("work");
+        fs::create_dir_all(&folder).unwrap();
+        grants::add_folder(&folder).unwrap();
+        answer(Some(Decision::Deny));
+        let out = run_exec("echo nope > ran.txt", None, 20).await;
+        assert_eq!(out["ok"], false);
+        assert_eq!(out["need"], "shell_approval");
+        assert!(!folder.join("ran.txt").exists());
+        let out = run_code("open('ran.txt','w').write('x')", 20).await;
+        assert_eq!(out["need"], "shell_approval");
+        assert!(!folder.join("ran.txt").exists());
+        answer(None);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn allow_until_quit_skips_later_prompts() {
+        let _lock = lock_tests();
+        let root = isolate();
+        let folder = root.join("work");
+        fs::create_dir_all(&folder).unwrap();
+        grants::add_folder(&folder).unwrap();
+        answer(Some(Decision::Session));
+        assert_eq!(run_exec("echo one", None, 20).await["ok"], true);
+        *TEST_ANSWER.lock().unwrap() = Some(Decision::Deny);
+        assert_eq!(run_exec("echo two", None, 20).await["ok"], true);
+        answer(None);
+    }
+}
+
 async fn run_job(tool: &str, args: &Value, state: &Sidecar) -> Value {
     match tool {
         "exec" => {
@@ -1128,13 +1234,7 @@ fn grant_folder_ui() -> Result<Value, String> {
 #[tauri::command]
 fn revoke_folder_grant(id: String) -> Result<Value, String> {
     let g = grants::revoke(&id)?;
-    Ok(json!({ "ok": true, "folders": g.folders, "terminal": g.terminal }))
-}
-
-#[tauri::command]
-fn set_terminal_grant(enabled: bool) -> Result<Value, String> {
-    let g = grants::set_terminal(enabled)?;
-    Ok(json!({ "ok": true, "terminal": g.terminal, "folders": g.folders }))
+    Ok(json!({ "ok": true, "folders": g.folders, "terminal": grants::terminal_allowed() }))
 }
 
 #[tauri::command]
@@ -1240,11 +1340,11 @@ pub fn run() {
             grant_folder_ui,
             open_external,
             revoke_folder_grant,
-            set_terminal_grant,
             reset_browser_profile
         ])
         .setup(|app| {
             updates::start(app.handle().clone());
+            approval::set_app(app.handle().clone());
             let _ = grants::data_dir();
             let url = lumio_url();
             WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url.parse()?))

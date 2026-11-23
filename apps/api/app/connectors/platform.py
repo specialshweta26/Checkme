@@ -76,7 +76,7 @@ LOCAL_COMPUTER_TOOLS = [
     ),
     ToolSpec(
         name="exec",
-        description="Run a shell command on this computer. Disabled unless the user enabled Terminal in This computer settings. Do not use this to read files.",
+        description="Run a shell command on this computer. The user approves each command in a prompt on this computer; need=shell_approval means it did not run. Do not use this to read files.",
         input_schema={
             "type": "object",
             "properties": {
@@ -92,7 +92,7 @@ LOCAL_COMPUTER_TOOLS = [
     ),
     ToolSpec(
         name="run_code",
-        description="Run a Python snippet on this computer. Disabled unless the user enabled Terminal.",
+        description="Run a Python snippet on this computer. The user approves each run in a prompt on this computer.",
         input_schema={
             "type": "object",
             "properties": {"code": {"type": "string"}, "timeout": {"type": "integer"}},
@@ -111,7 +111,7 @@ LOCAL_COMPUTER_TOOLS = [
     ),
     ToolSpec(
         name="write_file",
-        description="Write a UTF-8 file inside a granted folder. If the file exists, set overwrite=true only after the user confirms.",
+        description="Write a UTF-8 file inside a granted folder. Missing folders on the path are created. If the file exists, set overwrite=true only after the user confirms.",
         input_schema={
             "type": "object",
             "properties": {
