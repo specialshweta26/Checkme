@@ -51,3 +51,18 @@ async def test_still_reduced_windows_give_the_first_answer_back():
     out = await windows.split(call, {"start": "2026-01-01", "end": "2026-12-31"}, {"_note": NOTE})
     # Still reduced in short periods: the first answer comes back, with a way out instead of repeating the call.
     assert "windows" not in out and out["_note"] == NOTE and "Don't call it again" in out["_lumio_note"]
+
+
+async def test_a_split_that_the_model_would_get_cut_is_not_used(monkeypatch):
+    from types import SimpleNamespace
+
+    from app.agent import deep
+
+    async def invoke(db, user, conn, tool, args, attachments):
+        rows = {f"SKU-{i}-{args['start']}": {"units": i, "title": "x" * 200} for i in range(300)}
+        return {"summary": {"by_sku": rows}}
+
+    monkeypatch.setattr(deep, "invoke_named", invoke)
+    ctx = SimpleNamespace(db=None, user=None, attachments=[], progress=None)
+    out = await deep._shorter_windows(ctx, None, "get_sales_split", {"start": "2026-11-09", "end": "2026-11-22"}, {"_note": NOTE})
+    assert "windows" not in out and "_lumio_note" in out
