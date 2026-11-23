@@ -16,6 +16,9 @@ def _no_catalog_cache_across_tests(monkeypatch):
 
     monkeypatch.setattr(get_settings(), "catalog_cache_s", 0)
     monkeypatch.setattr(get_settings(), "action_memory_days", 0)
+    # Model abilities come from public catalogs online; tests never fetch them (a test that needs them fakes them).
+    monkeypatch.setattr(get_settings(), "model_catalog_url", "")
+    monkeypatch.setattr(get_settings(), "openrouter_catalog_url", "")
 
 
 @pytest.fixture(autouse=True)

@@ -312,7 +312,7 @@ async def test_keys_are_checked_encrypted_and_never_sent_back(factory, fake_chec
         refused = await c.put("/api/models/choices/agent", json={"key_id": row["id"], "model": "not-on-this-key"})
         assert refused.status_code == 400
         chose = await c.put("/api/models/choices/agent", json={"key_id": row["id"], "model": "gpt-mine"})
-        assert chose.json()["choices"]["agent"] == {"key_id": row["id"], "model": "gpt-mine"}
+        assert chose.json()["choices"]["agent"] == {"key_id": row["id"], "model": "gpt-mine", "tier": ""}
 
     async with factory() as db:
         stored = (await db.execute(select(ModelKey).where(ModelKey.user_id == user.id))).scalar_one()
@@ -365,7 +365,7 @@ async def test_one_agent_gets_its_own_model(factory, fake_check, platform):  # n
         assert res.status_code == 200, res.text
         body = res.json()
         assert body["choices"]["agent"]["model"] == "gpt-other"
-        assert body["agents"] == {str(coder.id): {"agent": {"key_id": key["id"], "model": "gpt-mine"}}}
+        assert body["agents"] == {str(coder.id): {"agent": {"key_id": key["id"], "model": "gpt-mine", "tier": ""}}}
         refused = await c.put("/api/models/choices/agent", json={"key_id": key["id"], "model": "gpt-mine", "agent_id": str(other_chief.id)})
         assert refused.status_code == 400 and "isn't yours" in refused.json()["detail"]
 

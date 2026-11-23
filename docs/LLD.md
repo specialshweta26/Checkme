@@ -1273,7 +1273,23 @@ Phases:
    packages, with each provider's own prompt caching, usage metering and harness profile. Custom addresses refuse
    private and internal network addresses. A key that fails says so in the chat; Lumio's key is used instead only if
    the user turned that on. Calls on the user's own key are metered but don't count toward Lumio's daily cap.
-5. Multimodal routing: a capability table per model (tools, images, audio, PDF, reasoning, context size, price).
+5. Abilities and tiers (done):
+   - `app/model_keys/capabilities.py` reads two public catalogs once a day in the background (MODEL_CATALOG_URL:
+     LiteLLM's model list; OPENROUTER_CATALOG_URL: OpenRouter's) into tools, images, PDF, audio, context and max
+     output per model, matched by provider prefix and with dates stripped. A model neither lists is unknown, and
+     `learn` remembers what a model's own error says it can't do (tools, images).
+   - An agent model known not to call tools can't be chosen (`choose`), and a run on one that refuses tools ends
+     with a plain message to pick another. Background work may use it.
+   - Images go to the chosen model unless it's known not to read them; then Lumio's vision model describes them in
+     words (`attachments.described_image_message`). A model that refuses images mid-turn is learned and the turn
+     retried with the description, when no tool ran yet.
+   - OpenAI processing tiers on the user's own OpenAI key (`model_choices.tier`): Standard, Flex, Fast
+     (`priority`), Ultrafast. Lumio's own key stays on Standard; Batch isn't offered (it answers within hours). A
+     tier the model or account refuses, or Flex being busy, falls back to Standard for that model for 10 minutes
+     (`learn_tier`) and the call is retried.
+   - The Models page and an agent's Model section show each model's abilities and the tier picker.
+   Original plan for phase 5:
+   Multimodal routing: a capability table per model (tools, images, audio, PDF, reasoning, context size, price).
    Agents can only pick models with tool calling; images, audio and PDFs go straight to a model that accepts them,
    otherwise a vision or transcription model describes them first; computer use where the provider supports it.
 6. Quality: the admin scenarios run per provider; only models that pass are marked recommended.

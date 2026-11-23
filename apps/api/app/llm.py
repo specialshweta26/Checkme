@@ -125,7 +125,7 @@ async def chat_complete(
     instructions, items = _split_messages(messages)
     kwargs: dict[str, Any] = {
         "model": spec.model,
-        "service_tier": "default",
+        "service_tier": llm_gateway.tier_for(spec),
         "input": items,
         "text": _text_format(response_format),
         "max_output_tokens": max_tokens,
@@ -150,8 +150,12 @@ async def chat_complete(
             resp = await client.responses.create(**kwargs)
             break
         except Exception as exc:
-            # A model that refuses the reasoning effort says what it takes: remember it and ask once more.
+            # A model that refuses the reasoning effort says what it takes, and one that refuses the picked tier falls
+            # back to Standard: remember it and ask once more.
             if attempt == 0 and llm_gateway.learn_effort(spec.model, exc):
+                continue
+            if attempt == 0 and llm_gateway.learn_tier(spec, exc):
+                kwargs["service_tier"] = llm_gateway.tier_for(spec)
                 continue
             raise
     llm_gateway.record_usage(spec, getattr(resp, "usage", None))

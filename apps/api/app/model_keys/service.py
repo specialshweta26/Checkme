@@ -8,6 +8,7 @@ for background work), either as the user's default (scope "user") or for one age
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -30,8 +31,11 @@ class ModelKeyError(ValueError):
 
 
 def public_key(row: ModelKey) -> dict[str, Any]:
+    from app.model_keys import capabilities
+
     p = providers.PROVIDERS.get(row.provider)
     return {
+        "caps": capabilities.summary(row.provider, list(row.models or [])),
         "id": str(row.id),
         "provider": row.provider,
         "provider_name": p.name if p else row.provider,
@@ -85,13 +89,21 @@ async def _scope(db: AsyncSession, user, agent_id: str | None) -> str:
 
 
 async def overview(db: AsyncSession, user) -> dict[str, Any]:
+    from app.model_keys import capabilities
+
+    try:  # the page shows what each model can do; wait a little for the catalogs on the first load
+        await asyncio.wait_for(capabilities.refresh(), timeout=8)
+    except Exception:  # noqa: BLE001 - shown as unknown
+        pass
     keys = await _keys(db, user.id)
     chosen: dict[str, dict] = {}
     agents: dict[str, dict] = {}
     for c in await _choices(db, user.id, None):
-        (chosen if c.scope == "user" else agents.setdefault(c.scope, {}))[c.purpose] = {"key_id": str(c.key_id), "model": c.model}
+        (chosen if c.scope == "user" else agents.setdefault(c.scope, {}))[c.purpose] = {
+            "key_id": str(c.key_id), "model": c.model, "tier": c.tier or ""}  # fmt: skip
     return {
         "providers": providers.public(),
+        "tiers": [{"key": k, "name": v} for k, v in llm_gateway.TIERS.items()],
         "keys": [public_key(k) for k in keys],
         "choices": chosen,
         "agents": agents,
@@ -163,7 +175,8 @@ async def remove_key(db: AsyncSession, user, key_id: str) -> None:
     await db.commit()
 
 
-async def choose(db: AsyncSession, user, purpose: str, key_id: str | None, model: str = "", agent_id: str | None = None) -> dict:
+async def choose(db: AsyncSession, user, purpose: str, key_id: str | None, model: str = "", agent_id: str | None = None,
+                 tier: str = "") -> dict:  # fmt: skip
     """Use ``key_id`` and ``model`` for ``purpose``, as the user's default or for one agent. No key_id removes the
     choice: the user's default goes back to Lumio's model, an agent goes back to the user's default."""
     if purpose not in PURPOSES:
@@ -186,10 +199,19 @@ async def choose(db: AsyncSession, user, purpose: str, key_id: str | None, model
         raise ModelKeyError("Pick a model.")
     if row.models and name not in row.models:
         raise ModelKeyError(f"This key can't use {name}. Pick one from its list, or check the key again.")
+    from app.model_keys import capabilities
+
+    if purpose == "agent" and capabilities.lookup(row.provider, name).tools is False:
+        raise ModelKeyError(f"{name} can't call tools, which agents need to look things up and act. Pick another model.")
+    tier = (tier or "").strip().lower()
+    if tier not in llm_gateway.TIERS:
+        raise ModelKeyError("Pick Standard, Flex, Fast or Ultrafast.")
+    if tier and row.provider != "openai":
+        raise ModelKeyError("Processing tiers are for OpenAI keys.")
     if existing is None:
-        db.add(ModelChoice(user_id=user.id, scope=scope, purpose=purpose, key_id=row.id, model=name[:160]))
+        db.add(ModelChoice(user_id=user.id, scope=scope, purpose=purpose, key_id=row.id, model=name[:160], tier=tier))
     else:
-        existing.key_id, existing.model = row.id, name[:160]
+        existing.key_id, existing.model, existing.tier = row.id, name[:160], tier
     await db.commit()
     return await overview(db, user)
 
@@ -212,7 +234,7 @@ async def load_all_choices(db: AsyncSession, user_id) -> dict[str, dict[str, llm
             provider=row.provider, model=c.model, api_key=secret, purpose=c.purpose,
             # OpenAI uses its SDK's own address; every other provider is reached at its compatible one.
             base_url=row.base_url or ("" if row.provider == "openai" else p.base_url),
-            source="user" if c.scope == "user" else "agent")  # fmt: skip
+            source="user" if c.scope == "user" else "agent", tier=c.tier or "")  # fmt: skip
     return out
 
 

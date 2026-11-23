@@ -4300,6 +4300,20 @@ def shorten_old(history: list[dict]) -> list[dict]:
     return out
 
 
+def _reads_images() -> bool:
+    """Whether the model this run is on can read images: Lumio's own does; a chosen one unless known not to."""
+    from app import llm_gateway
+    from app.model_keys import capabilities
+
+    spec = llm_gateway.resolve(None, "agent")
+    return spec.is_platform or capabilities.lookup(spec.provider, spec.model).images is not False
+
+
+def _shows_images(message: Any) -> bool:
+    content = getattr(message, "content", None)
+    return isinstance(content, list) and any(isinstance(p, dict) and p.get("type") == "image_url" for p in content)
+
+
 def _lc_messages(history: list[dict], query: str, extra: list | None = None, after: list | None = None):
     from langchain_core.messages import AIMessage, HumanMessage
 
@@ -5005,9 +5019,10 @@ async def _run_deep_agent(
             memory = ((memory or "").rstrip() + "\n\nYour coding memory (repos, conventions, past PRs):\n" + block).strip()
     extra = []
     if images:
-        from app.agent.attachments import image_message
+        from app.agent.attachments import described_image_message, image_message
 
-        shown = await image_message(images)
+        # A chosen model known not to read images gets them described in words (docs/LLD.md "Model gateway").
+        shown = await (described_image_message(images) if not _reads_images() else image_message(images))
         if shown is not None:
             extra.append(shown)
     matched_skills: list = []
@@ -5193,14 +5208,34 @@ async def _run_deep_agent(
                     await asyncio.sleep(NETWORK_RETRY_DELAYS[attempt])
                     continue
             from app import llm_gateway
+            from app.model_keys import capabilities
 
-            if attempt < 2 and len(ctx.used_tools) == tools_before and llm_gateway.learn_effort(llm_gateway.resolve(ctx, "agent").model, exc):
-                # The chosen model refused the reasoning effort: it now knows what that model takes, so build the
-                # agent again and carry on (no tool ran yet; a saved checkpoint continues instead of starting over).
-                log.warning("model refused the reasoning effort; retrying with %s", llm_gateway.effort_for(llm_gateway.resolve(ctx, "agent").model))
+            spec = llm_gateway.resolve(ctx, "agent")
+            nothing_ran = len(ctx.used_tools) == tools_before
+            if attempt < 2 and (llm_gateway.learn_effort(spec.model, exc) or llm_gateway.learn_tier(spec, exc)):
+                # The chosen model refused the reasoning effort or the picked tier: Lumio now knows what to send, so
+                # build the agent again and carry on (from the saved checkpoint, or from the start if nothing ran).
+                log.warning("model refused effort or tier; retrying with %s / %s", llm_gateway.effort_for(spec.model), llm_gateway.tier_for(spec))
                 graph = build_agent(ctx, prompt)
-                next_input = None if await _can_resume(graph, thread) else payload
+                resumed = await _can_resume(graph, thread)
+                if resumed or nothing_ran:
+                    next_input = None if resumed else payload
+                    continue
+            refused = None if spec.is_platform else capabilities.learn(spec.model, exc)
+            if refused == "images" and images and nothing_ran and attempt < 2:
+                from app.agent.attachments import described_image_message
+
+                described = await described_image_message(images)
+                extra = [m for m in extra if not _shows_images(m)] + ([described] if described is not None else [])
+                payload = {"messages": _lc_messages(history, query, extra, approved)}
+                graph = build_agent(ctx, prompt)  # a fresh checkpoint: the refused one holds the images
+                next_input = payload
+                log.warning("model can't read images; retrying with them described")
                 continue
+            if refused == "tools":
+                text = (f"{spec.model} can't call tools, which Lumio's agents need to look things up and act. Choose "
+                        "another model on Models and keys, or for this agent in its About panel.")  # fmt: skip
+                break
             log.exception("deep agent failed")
             text = f"I could not finish that request: {str(exc)[:240]}"
             break

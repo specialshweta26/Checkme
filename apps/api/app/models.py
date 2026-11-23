@@ -493,6 +493,7 @@ class ModelChoice(Base):
     purpose: Mapped[str] = mapped_column(String(20))  # agent | small
     key_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("model_keys.id", ondelete="CASCADE"))
     model: Mapped[str] = mapped_column(String(160))
+    tier: Mapped[str] = mapped_column(String(20), default="")  # OpenAI service tier: "" | flex | priority | ultrafast
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
 
