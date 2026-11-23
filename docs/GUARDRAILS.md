@@ -109,6 +109,12 @@ Every agent works by its own instructions, role and skills.
   words match one of its skills' names or descriptions (`role_gate.covered_by_skill`) goes straight through without
   the model call, and the skills are listed in the check's prompt otherwise (live: Baba, titled "Llm wiki" with the
   Karpathy wiki skill, called "ingest <url> into the wiki" outside its role). Skills shared with every agent count too. Instructions that give the agent every request ("always use only skill to answer", "answer every question", "handle all requests"; `role_gate.takes_everything`) turn the check off for that agent: the user's own words beat the small model's reading of the title (live: Baba sent "one8 products" to Teamily despite such instructions).
+- **Instructions that rule out tools take them away** (`agents/instruction_limits.py`): the prompt treats skills as
+  guidance, so an agent told "always use only skill to answer, don't use browser" still ran `web_search` (live: Baba,
+  One8's return policy). Now an agent's own instructions remove tools from its run: "don't use the browser" removes the
+  browser tools; "don't use the web / internet / Google" also removes web search and page fetching; "only use skills"
+  removes the browser and web search, and page fetching too unless the request itself carries a link (a skill's ingest
+  step reads the page the user gave). The prompt says which tools are off and to answer from skills and files.
 - **Own connectors only:** a run gets the connectors assigned to its agent (and the shared computer and marketplace,
   and anything not assigned to anyone). Before, an agent in a group also got every connector assigned to its
   teammates; now work that needs a teammate's connector goes to that teammate with `ask_teammate`, and it runs with its
