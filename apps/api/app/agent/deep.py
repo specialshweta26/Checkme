@@ -102,6 +102,8 @@ class RunContext:
     sources: list[dict] = field(default_factory=list)
     pending: list[dict] = field(default_factory=list)
     query: str = ""
+    # The request this turn works on: the query, or the earlier message a bare "go ahead" refers to (skill_query).
+    route_query: str = ""
     call_impl: Any = None
     results: list[dict] = field(default_factory=list)
     # Figures Lumio worked out from stored results (aggregate_result): checked like the data itself (agent/fact_check.py).
@@ -4158,9 +4160,19 @@ def build_agent(ctx: RunContext, prompt: str):
     from deepagents import create_deep_agent
 
     _exclude_shell()
+    tools = harness_tools(ctx)
+    agent = getattr(ctx, "agent", None) if ctx is not None else None
+    if agent is not None:
+        # Tools the agent's own instructions rule out are taken away, not just asked about (agents/instruction_limits.py).
+        from app.agents import instruction_limits
+
+        tools, note = instruction_limits.apply(
+            tools, str(getattr(agent, "instructions", "") or ""), getattr(ctx, "route_query", "") or getattr(ctx, "query", "")
+        )
+        prompt += note
     kwargs: dict[str, Any] = {
         "model": _chat_model(ctx),
-        "tools": harness_tools(ctx),
+        "tools": tools,
         "system_prompt": prompt,
         # A chat turn's checkpoint lives for that turn, so hitting the step limit continues instead of starting over.
         # A job's lives in Postgres, so a restart continues it too.
@@ -5044,6 +5056,7 @@ async def _run_deep_agent(
             log.info("skills: loading the skill index failed", exc_info=True)
             await db.rollback()
         route_query = skill_query(query, history)
+        ctx.route_query = route_query
         if all_skills and not file_turn and not simple_turn and not skip_skill_routing(plan, route_query):
             skills_task = asyncio.create_task(_route_and_confirm(all_skills, route_query))
         timer.mark("skills_index", _t)
