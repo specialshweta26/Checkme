@@ -150,18 +150,54 @@ async def test_chat_complete_uses_a_client_for_the_users_key(platform, monkeypat
     assert seen["key"] == "sk-mine" and seen["model"] == "my-model"
 
 
-async def test_use_choices_never_breaks_a_turn(platform, monkeypatch):
+async def test_loading_choices_never_breaks_a_run(platform, monkeypatch):
     from app.model_keys import service
 
     async def boom(db, user_id):
         raise RuntimeError("db down")
 
-    monkeypatch.setattr(service, "load_choices", boom)
-    token = await llm_gateway.use_choices(object(), SimpleNamespace(id="u"))
+    monkeypatch.setattr(service, "load_all_choices", boom)
+    tokens = await llm_gateway.enter(object(), SimpleNamespace(id="u"))
     try:
         assert llm_gateway.resolve(None, "agent").api_key == "sk-platform"
     finally:
-        llm_gateway.CHOICES.reset(token)
+        llm_gateway.leave(tokens)
+
+
+def test_an_agents_own_choice_wins_over_the_users_default():
+    every = {"user": {"agent": _mine("default-model"), "small": _mine("default-small", "small")},
+             "a1": {"agent": _mine("coder-model")}}  # fmt: skip
+    a1 = llm_gateway.for_agent(every, "a1")
+    assert a1["agent"].model == "coder-model" and a1["small"].model == "default-small"
+    assert llm_gateway.for_agent(every, "a2")["agent"].model == "default-model"
+    assert llm_gateway.for_agent(every, None)["agent"].model == "default-model"
+    assert llm_gateway.for_agent({"a1": {"agent": _mine("coder-model")}}, "a2") == {}
+
+
+async def test_a_teammate_runs_on_its_own_model_without_loading_again(platform, monkeypatch):
+    from app.model_keys import service
+
+    loads = []
+
+    async def load(db, user_id):
+        loads.append(user_id)
+        return {"user": {"agent": _mine("default-model")}, "coder": {"agent": _mine("coder-model")}}
+
+    monkeypatch.setattr(service, "load_all_choices", load)
+    user = SimpleNamespace(id="u")
+    outer = await llm_gateway.enter(object(), user, SimpleNamespace(id="chief"))
+    try:
+        assert llm_gateway.resolve(None, "agent").model == "default-model"
+        inner = await llm_gateway.enter(object(), user, SimpleNamespace(id="coder"))
+        try:
+            assert llm_gateway.resolve(None, "agent").model == "coder-model"
+        finally:
+            llm_gateway.leave(inner)
+        assert llm_gateway.resolve(None, "agent").model == "default-model"
+    finally:
+        llm_gateway.leave(outer)
+    assert loads == ["u"] and llm_gateway.resolve(None, "agent").model == "main-model"
+    assert llm_gateway.ALL_CHOICES.get() is None and llm_gateway.CHOICES.get() is None
 
 
 # --- saving keys and choices (Postgres) --------------------------------------------------------------------------
@@ -253,9 +289,104 @@ async def test_a_provider_agents_cant_run_on_yet_is_saved_but_not_chosen(factory
 
 
 @needs_db
+async def test_one_agent_gets_its_own_model(factory, fake_check, platform):  # noqa: F811
+    from app.agents.service import delete_agent
+    from app.model_keys.service import load_choices
+
+    user, (chief, coder) = await _user_with_agents(factory, "Coder")
+    other, (other_chief,) = await _user_with_agents(factory)
+    async with _client(factory, user) as c:
+        key = (await c.post("/api/models/keys", json={"provider": "openai", "api_key": "sk-agent-5555"})).json()
+        await c.put("/api/models/choices/agent", json={"key_id": key["id"], "model": "gpt-other"})
+        res = await c.put("/api/models/choices/agent", json={"key_id": key["id"], "model": "gpt-mine", "agent_id": str(coder.id)})
+        assert res.status_code == 200, res.text
+        body = res.json()
+        assert body["choices"]["agent"]["model"] == "gpt-other"
+        assert body["agents"] == {str(coder.id): {"agent": {"key_id": key["id"], "model": "gpt-mine"}}}
+        refused = await c.put("/api/models/choices/agent", json={"key_id": key["id"], "model": "gpt-mine", "agent_id": str(other_chief.id)})
+        assert refused.status_code == 400 and "isn't yours" in refused.json()["detail"]
+
+    async with factory() as db:
+        assert (await load_choices(db, user.id, coder.id))["agent"].model == "gpt-mine"
+        assert (await load_choices(db, user.id, chief.id))["agent"].model == "gpt-other"
+        assert (await load_choices(db, user.id, coder.id))["agent"].source == "agent"
+
+    async with _client(factory, user) as c:  # back to the user's default
+        back = await c.put("/api/models/choices/agent", json={"key_id": None, "agent_id": str(coder.id)})
+        assert back.json()["agents"] == {} and back.json()["choices"]["agent"]["model"] == "gpt-other"
+        await c.put("/api/models/choices/agent", json={"key_id": key["id"], "model": "gpt-mine", "agent_id": str(coder.id)})
+
+    async with factory() as db:  # deleting the agent removes its choice
+        from app.models import User
+
+        await delete_agent(db, await db.get(User, user.id), coder.id)
+    async with _client(factory, user) as c:
+        assert (await c.get("/api/models")).json()["agents"] == {}
+
+
+@needs_db
 async def test_custom_addresses_must_be_public(factory, fake_check, platform, monkeypatch):  # noqa: F811
     monkeypatch.setattr(get_settings(), "allow_private_mcp_urls", False)
     user, _ = await _user_with_agents(factory)
     async with _client(factory, user) as c:
         res = await c.post("/api/models/keys", json={"provider": "openai_compatible", "api_key": "k-1", "base_url": "https://127.0.0.1/v1"})
         assert res.status_code == 400 and "can't be used" in res.json()["detail"]
+
+
+# --- a model that refuses Lumio's reasoning effort teaches Lumio what it takes ----------------------------------
+
+REFUSED = ("Error code: 400 - {'error': {'message': \"Unsupported value: 'none' is not supported with the 'gpt-6.1-sol' "
+           "model. Supported values are: 'low', 'medium', 'high', 'xhigh', and 'max'.\", 'type': 'invalid_request_error', "
+           "'param': 'reasoning.effort', 'code': 'unsupported_value'}}")  # fmt: skip
+
+
+@pytest.fixture
+def fresh_efforts(monkeypatch):
+    monkeypatch.setattr(llm_gateway, "_EFFORT", {})
+    monkeypatch.setattr(get_settings(), "openai_reasoning_effort", "none")
+
+
+def test_a_refused_effort_is_learned_from_the_error(fresh_efforts):
+    assert llm_gateway.reasoning_for("gpt-6.1-sol") == {"effort": "none"}
+    assert llm_gateway.learn_effort("gpt-6.1-sol", RuntimeError(REFUSED))
+    assert llm_gateway.effort_for("gpt-6.1-sol") == "low"
+    assert llm_gateway.reasoning_for("gpt-6.1-sol")["effort"] == "low"
+    assert llm_gateway.effort_for("gpt-6-luna") == "none"  # other models keep the setting
+    assert not llm_gateway.learn_effort("gpt-6.1-sol", RuntimeError(REFUSED))  # already takes "low": nothing to learn
+
+
+def test_other_errors_are_not_mistaken_for_an_effort_refusal(fresh_efforts):
+    assert not llm_gateway.learn_effort("m", RuntimeError("Error code: 401 - invalid api key"))
+    assert not llm_gateway.learn_effort("m", RuntimeError("Error code: 400 - context_length_exceeded"))
+    assert not llm_gateway.learn_effort("", RuntimeError(REFUSED))
+
+
+def test_a_model_without_reasoning_gets_none_sent(fresh_efforts, platform):
+    assert llm_gateway.learn_effort("plain-model", RuntimeError("Error code: 400 - Unsupported parameter: 'reasoning.effort' is not supported with this model."))
+    assert llm_gateway.reasoning_for("plain-model") is None
+    model = llm_gateway.chat_model(llm_gateway.ModelSpec(provider="openai", model="plain-model", api_key="k"))
+    assert not getattr(model, "reasoning", None) and not getattr(model, "reasoning_effort", None)
+
+
+def test_the_agent_model_is_built_with_the_learned_effort(fresh_efforts, platform):
+    llm_gateway.learn_effort("gpt-6.1-sol", RuntimeError(REFUSED))
+    model = llm_gateway.chat_model(_mine("gpt-6.1-sol"))
+    assert model.reasoning["effort"] == "low"
+
+
+async def test_chat_complete_retries_once_with_the_effort_the_model_takes(fresh_efforts, platform, monkeypatch):
+    sent = []
+
+    class Responses:
+        async def create(self, **kwargs):
+            sent.append(kwargs.get("reasoning"))
+            if kwargs.get("reasoning", {}).get("effort") == "none":
+                raise RuntimeError(REFUSED)
+            return SimpleNamespace(output_text="ok", usage=None)
+
+    monkeypatch.setattr(llm, "openai_client", lambda: SimpleNamespace(responses=Responses()))
+    out = await llm.chat_complete([{"role": "user", "content": "x"}], model="gpt-6.1-sol")
+    assert out.choices[0].message.content == "ok"
+    assert [r["effort"] for r in sent] == ["none", "low"]
+    await llm.chat_complete([{"role": "user", "content": "x"}], model="gpt-6.1-sol")
+    assert sent[-1]["effort"] == "low" and len(sent) == 3  # learned: no second refusal

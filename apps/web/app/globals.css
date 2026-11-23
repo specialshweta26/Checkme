@@ -4929,6 +4929,7 @@ button.routine-tile:hover { border-color: var(--line-strong); }
 .limits-input:focus-within { border-color: var(--accent); }
 .limits-input input { width: 100%; min-width: 0; padding: var(--space-2) 0; border: 0; outline: 0; background: none; color: var(--text); font: inherit; font-size: var(--text-sm); }
 .limits-form .btn { grid-column: 1 / -1; justify-self: start; }
+.limits-input select { width: 100%; min-width: 0; padding: var(--space-2) 0; border: 0; outline: 0; background: none; color: var(--text); font: inherit; font-size: var(--text-sm); }
 .agent-browser { display: grid; gap: var(--space-2); }
 .agent-browser-own { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); padding: var(--space-2) var(--space-3); border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface); font-size: var(--text-xs); }
 .agent-browser-confirm { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); color: var(--text); }

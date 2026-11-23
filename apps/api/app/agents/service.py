@@ -465,6 +465,9 @@ async def delete_agent(db: AsyncSession, user: User, agent_id: uuid.UUID) -> Non
     await db.execute(sql_delete(MemoryPassage).where(MemoryPassage.agent_id == row.id))
     await db.execute(sql_delete(ScheduledTask).where(ScheduledTask.agent_id == row.id))
     await db.execute(sql_delete(Automation).where(Automation.agent_id == row.id))
+    from app.models import ModelChoice
+
+    await db.execute(sql_delete(ModelChoice).where(ModelChoice.user_id == user.id, ModelChoice.scope == str(row.id)))
     await db.delete(row)
     await db.commit()
 

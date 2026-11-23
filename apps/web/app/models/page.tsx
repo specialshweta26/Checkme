@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { AppShell } from "../components/AppShell";
 import { IconLock, IconModel, IconPlus } from "../components/ProfileIcons";
-import { apiError, getMe, relativeTime, type Me } from "../lib";
+import { apiError, getMe, loadWorkspace, relativeTime, type Me, type WorkspaceAgent } from "../lib";
 
 // Models and keys (apps/api/app/model_keys, docs/LLD.md "Model gateway"): the user's own model keys and the model
 // their agents use. A key is checked with the provider when it is saved and is never sent back to the page: only its
@@ -25,7 +25,13 @@ type SavedKey = {
   checked_at: string | null;
 };
 type Choice = { key_id: string; model: string };
-type Overview = { providers: Provider[]; keys: SavedKey[]; choices: Partial<Record<"agent" | "small", Choice>>; lumio: { agent: string; small: string } };
+type Overview = {
+  providers: Provider[];
+  keys: SavedKey[];
+  choices: Partial<Record<"agent" | "small", Choice>>;
+  agents: Record<string, Partial<Record<"agent" | "small", Choice>>>;
+  lumio: { agent: string; small: string };
+};
 type Form = { provider: string; api_key: string; label: string; base_url: string };
 type Draft = { key_id: string; model: string };
 
@@ -53,6 +59,7 @@ export default function ModelsPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [agents, setAgents] = useState<WorkspaceAgent[]>([]);
 
   function show(next: Overview) {
     setData(next);
@@ -77,6 +84,9 @@ export default function ModelsPage() {
       }
       setMe(u);
       refresh();
+      loadWorkspace()
+        .then((w) => setAgents((w.agents || []).filter((a) => !a.archived)))
+        .catch(() => undefined);
     });
   }, []);
 
@@ -222,6 +232,42 @@ export default function ModelsPage() {
             Calls on your key are billed by your provider. They show in Usage as "model (your key)" and don't count toward Lumio's daily limit.
             {usable.length === 0 ? " Add an OpenAI key to choose a model: agents run on OpenAI keys today, and other providers are coming." : ""}
           </p>
+
+          {agents.length ? (
+            <>
+              <div className="vault-list-head">
+                <h2>Each agent</h2>
+              </div>
+              <div className="vault-list">
+                {agents.map((a) => {
+                  const own = data?.agents?.[a.id]?.agent;
+                  return (
+                    <div key={a.id} className="vault-item models-agent">
+                      <span className="vault-monogram" aria-hidden>
+                        {a.name.slice(0, 1).toUpperCase()}
+                      </span>
+                      <div className="vault-item-main">
+                        <strong>{a.name}</strong>
+                        <span className="vault-item-meta">
+                          {own ? (
+                            <span>
+                              Its own model: {own.model} on {keyName(own.key_id) || "your key"}
+                            </span>
+                          ) : (
+                            <span>Same as your default</span>
+                          )}
+                        </span>
+                      </div>
+                      <a className="btn secondary small" href={`/models?about=${a.id}`}>
+                        Change
+                      </a>
+                    </div>
+                  );
+                })}
+              </div>
+              <p className="faint models-note">Change opens the agent's About panel: choose its key and model under Model. The list updates when you reload the page.</p>
+            </>
+          ) : null}
 
           <div className="vault-list-head">
             <h2>
