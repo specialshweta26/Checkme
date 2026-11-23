@@ -33,6 +33,9 @@ def end(token: Any | None) -> None:
 
 
 def add(model: str, input_tokens: int = 0, output_tokens: int = 0, cached_tokens: int = 0) -> None:
+    from app.llm_gateway import usage_name
+
+    model = usage_name(model)  # tokens on the user's own key are labelled, and cost Lumio nothing
     if input_tokens or output_tokens:
         from app.agent.meter import record_tokens
 

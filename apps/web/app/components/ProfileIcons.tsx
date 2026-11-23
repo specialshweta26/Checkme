@@ -151,3 +151,10 @@ export const IconQuality = (p: P) => (
     <path d="m7 15 4-4 3 3 5-6" />
   </Svg>
 );
+
+export const IconModel = (p: P) => (
+  <Svg {...p}>
+    <rect x="6" y="6" width="12" height="12" rx="2" />
+    <path d="M10 10h4v4h-4zM9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3" />
+  </Svg>
+);

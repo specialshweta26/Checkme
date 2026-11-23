@@ -4722,6 +4722,10 @@ async def run_deep_agent(
     from app.connectors.mcp_client import turn_sessions
 
     integrity_task = None
+    from app import llm_gateway
+
+    # The user's own model and key (Models page), for every model call in this turn. A nested run keeps the outer one's.
+    choices_token = None if llm_gateway.CHOICES.get() is not None else await llm_gateway.use_choices(db, user)
     try:
         # The integrity check needs no database, so it runs beside the budget and role checks (each may wait on a
         # small model): a turn waits for the slower one, not both. Its refusal still wins.
@@ -4765,6 +4769,8 @@ async def run_deep_agent(
             integrity_task.cancel()
         if agent_token is not None:
             AGENT.reset(agent_token)
+        if choices_token is not None:
+            llm_gateway.CHOICES.reset(choices_token)
         agent_browsers.BROWSER_SPACE.reset(browser_token)
         reset_client_kind(token)
 
