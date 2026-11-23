@@ -1851,7 +1851,8 @@ async def _shorter_windows(ctx: RunContext, conn, tool_name: str, args: dict, re
     split = await windows.split(call, base, result)
     from app.agent.jsonsize import fits
 
-    if isinstance(split, dict) and split.get("split_by_lumio") and not fits(tabulate(split), INLINE_RESULT_CHARS):
+    # The same limit fit_payload cuts a connector answer to for the model: a split that would be cut is not worth it.
+    if isinstance(split, dict) and split.get("split_by_lumio") and not fits(tabulate(split), min(CONNECTOR_RESULT_CHARS, INLINE_RESULT_CHARS)):
         return windows.give_up(result)  # whole but too much together: digging through it cost more than it saved
     return split
 
