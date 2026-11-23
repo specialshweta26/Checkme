@@ -121,7 +121,8 @@ def leave(tokens: list) -> None:
 
 def resolve(ctx: Any = None, purpose: str = "agent", model: str | None = None) -> ModelSpec:
     """The spec for one call. ``model`` names a specific model (a caller's own setting such as BROWSER_FAST_MODEL); it
-    keeps the provider and key that would have been used."""
+    keeps the provider and key that would have been used. Those names are OpenAI's, so on another provider's key the
+    chosen model is used instead."""
     if purpose not in PURPOSES:
         raise ValueError(f"unknown model purpose: {purpose}")
     spec = _chosen(ctx, purpose) or ModelSpec(
@@ -131,7 +132,7 @@ def resolve(ctx: Any = None, purpose: str = "agent", model: str | None = None) -
         purpose=purpose,
     )
     wanted = (model or "").strip()
-    return replace(spec, model=wanted) if wanted else spec
+    return replace(spec, model=wanted) if wanted and spec.is_openai else spec
 
 
 _CLIENTS: dict[tuple[str, str], Any] = {}
@@ -143,7 +144,7 @@ def openai_client(spec: ModelSpec | None = None) -> Any:
 
     if spec is None or spec.is_platform:
         return llm.openai_client()
-    if spec.provider not in ("openai", "openrouter", "openai_compatible", "groq", "xai"):
+    if spec.provider not in ("openai", *COMPATIBLE):
         raise UnsupportedProvider(f"{spec.provider} has no OpenAI-compatible client")
     from openai import AsyncOpenAI
 
@@ -183,7 +184,7 @@ def reasoning_for(model: str | None = None) -> dict[str, str] | None:
     return {"effort": effort, "mode": "standard", "summary": "auto"}
 
 
-def learn_effort(model: str | None, exc: BaseException) -> bool:
+def learn_effort(model: str | None, exc: BaseException) -> bool:  # noqa: C901
     """When ``exc`` is a model refusing the reasoning effort Lumio sent, remember what it takes and say True (retry)."""
     name = (model or "").strip()
     text = str(exc or "")
@@ -205,10 +206,37 @@ def learn_effort(model: str | None, exc: BaseException) -> bool:
     return True
 
 
-def chat_model(spec: ModelSpec, *, cache_key: str = "", streaming: bool = False, timeout: int = 120) -> Any:
-    """The LangChain chat model the agent runs on."""
+# Providers reached through their OpenAI-compatible chat completions address (ChatOpenAI with base_url).
+COMPATIBLE = ("google", "xai", "groq", "openrouter", "openai_compatible")
+AGENT_MAX_TOKENS = 8192  # a reply's length cap where the provider needs one (Anthropic)
+
+
+def chat_model(spec: ModelSpec, *, cache_key: str = "", streaming: bool = False, timeout: int = 120,
+               max_tokens: int | None = None) -> Any:  # fmt: skip
+    """The LangChain chat model the agent runs on: OpenAI on its Responses API, Anthropic natively, and every other
+    provider on its OpenAI-compatible chat completions address."""
+    if spec.provider == "anthropic":
+        from langchain_anthropic import ChatAnthropic
+
+        kwargs: dict[str, Any] = {"model": spec.model, "api_key": spec.api_key, "timeout": timeout, "max_retries": 1,
+                                  "max_tokens": max_tokens or AGENT_MAX_TOKENS}  # fmt: skip
+        if streaming:
+            kwargs["streaming"] = True
+        return ChatAnthropic(**kwargs)
+    if spec.provider in COMPATIBLE:
+        from langchain_openai import ChatOpenAI
+
+        if not spec.base_url:
+            raise UnsupportedProvider(f"{spec.provider} needs its API address")
+        kwargs = {"model": spec.model, "api_key": spec.api_key, "base_url": spec.base_url, "timeout": timeout,
+                  "max_retries": 1, "use_responses_api": False}  # fmt: skip
+        if max_tokens:
+            kwargs["max_tokens"] = max_tokens
+        if streaming:
+            kwargs["streaming"] = True
+        return ChatOpenAI(**kwargs)
     if not spec.is_openai:
-        raise UnsupportedProvider(f"agents can't run on {spec.provider} yet")
+        raise UnsupportedProvider(f"Lumio can't run {spec.provider} models")
     from langchain_openai import ChatOpenAI
 
     effort = effort_for(spec.model)
@@ -216,6 +244,8 @@ def chat_model(spec: ModelSpec, *, cache_key: str = "", streaming: bool = False,
     base: dict[str, Any] = {"model": spec.model, "api_key": spec.api_key, "timeout": timeout, "max_retries": 1}
     if spec.base_url:
         base["base_url"] = spec.base_url
+    if max_tokens:
+        base["max_tokens"] = max_tokens
     if cache_key:
         base["model_kwargs"] = {"prompt_cache_key": cache_key}
     if streaming:
@@ -264,5 +294,5 @@ def record_usage(spec: ModelSpec, usage_obj: Any) -> None:
     """Count the tokens one call used, under the model that served it."""
     from app.agent import usage
 
-    if spec.is_openai or spec.provider in ("openrouter", "openai_compatible", "groq", "xai"):
+    if spec.is_openai or spec.provider in COMPATIBLE:
         usage.from_openai(spec.model, usage_obj)

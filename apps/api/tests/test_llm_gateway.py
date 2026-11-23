@@ -58,12 +58,12 @@ def test_agent_model_is_unchanged(settings):
     assert model.model_kwargs.get("prompt_cache_key") == deep.cache_key(ctx)
 
 
-def test_other_providers_say_they_are_not_supported_yet(settings):
-    spec = llm_gateway.ModelSpec(provider="anthropic", model="claude", api_key="k", source="user")
+def test_unknown_providers_are_refused(settings):
+    spec = llm_gateway.ModelSpec(provider="mystery", model="m", api_key="k", source="user")
     with pytest.raises(llm_gateway.UnsupportedProvider):
         llm_gateway.chat_model(spec)
     with pytest.raises(llm_gateway.UnsupportedProvider):
-        llm_gateway.openai_client(spec)
+        llm_gateway.openai_client(llm_gateway.ModelSpec(provider="anthropic", model="claude", api_key="k", source="user"))
 
 
 def test_platform_specs_share_lumios_client_and_user_keys_get_their_own(settings, monkeypatch):

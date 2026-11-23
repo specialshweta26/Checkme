@@ -4116,7 +4116,10 @@ def _exclude_shell():
     try:
         from deepagents import HarnessProfile, register_harness_profile
 
-        register_harness_profile("openai", HarnessProfile(excluded_tools=frozenset({"execute"})))
+        # Every provider's models run behind the same harness: ChatOpenAI reports "openai" for any compatible address,
+        # Anthropic reports its own.
+        for provider in ("openai", "anthropic"):
+            register_harness_profile(provider, HarnessProfile(excluded_tools=frozenset({"execute"})))
         _SHELL_EXCLUDED = True
     except Exception:  # noqa: BLE001
         log.debug("could not exclude shell execute tool")

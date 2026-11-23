@@ -24,7 +24,7 @@ class Provider:
     key: str
     name: str
     base_url: str  # OpenAI-compatible address, "" when the user supplies it
-    runs: bool  # Lumio can run agents on it today
+    runs: bool  # Lumio can run agents on it
     hint: str  # where to get a key
     custom_url: bool = False
 
@@ -33,20 +33,20 @@ PROVIDERS: dict[str, Provider] = {
     p.key: p
     for p in (
         Provider("openai", "OpenAI", "https://api.openai.com/v1", True, "platform.openai.com → API keys"),
-        Provider("anthropic", "Anthropic", "https://api.anthropic.com/v1", False, "console.anthropic.com → API keys"),
-        Provider("google", "Google Gemini", "https://generativelanguage.googleapis.com/v1beta/openai", False,
+        Provider("anthropic", "Anthropic", "https://api.anthropic.com/v1", True, "console.anthropic.com → API keys"),
+        Provider("google", "Google Gemini", "https://generativelanguage.googleapis.com/v1beta/openai", True,
                  "aistudio.google.com → Get API key"),
-        Provider("xai", "xAI (Grok)", "https://api.x.ai/v1", False, "console.x.ai → API keys"),
-        Provider("groq", "Groq", "https://api.groq.com/openai/v1", False, "console.groq.com → API keys"),
-        Provider("openrouter", "OpenRouter", "https://openrouter.ai/api/v1", False, "openrouter.ai → Keys"),
-        Provider("openai_compatible", "OpenAI-compatible", "", False,
+        Provider("xai", "xAI (Grok)", "https://api.x.ai/v1", True, "console.x.ai → API keys"),
+        Provider("groq", "Groq", "https://api.groq.com/openai/v1", True, "console.groq.com → API keys"),
+        Provider("openrouter", "OpenRouter", "https://openrouter.ai/api/v1", True, "openrouter.ai → Keys"),
+        Provider("openai_compatible", "OpenAI-compatible", "", True,
                  "Any service with an OpenAI-style /models and chat API (Mistral, Together, DeepSeek, …)", custom_url=True),
     )
 }  # fmt: skip
 
-# OpenAI lists every model it has; these can't hold a conversation, so they aren't offered.
-_NOT_CHAT = ("embedding", "whisper", "tts", "dall-e", "moderation", "transcribe", "audio", "realtime", "image", "davinci",
-             "babbage", "search", "similarity", "sora")  # fmt: skip
+# Providers list every model they have; these can't hold a conversation, so they aren't offered.
+_NOT_CHAT = ("embedding", "embed-", "whisper", "tts", "dall-e", "moderation", "transcribe", "audio", "realtime", "image",
+             "davinci", "babbage", "search", "similarity", "sora", "guard", "imagen", "veo")  # fmt: skip
 
 
 def public() -> list[dict]:
@@ -73,7 +73,7 @@ def _ids(rows: Any, field: str = "id") -> list[str]:
 
 
 def chat_models(provider: str, ids: list[str]) -> list[str]:
-    keep = [m for m in ids if not any(word in m.lower() for word in _NOT_CHAT)] if provider == "openai" else ids
+    keep = [m for m in ids if not any(word in m.lower() for word in _NOT_CHAT)]
     return sorted(set(keep))[:MAX_MODELS]
 
 

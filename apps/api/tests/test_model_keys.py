@@ -76,8 +76,65 @@ async def test_unknown_provider_and_empty_key_are_refused():
         await providers.check("openai", " ")
 
 
-def test_only_openai_runs_agents_today():
-    assert [p["key"] for p in providers.public() if p["runs"]] == ["openai"]
+def test_every_provider_runs_agents():
+    assert all(p["runs"] for p in providers.public())
+
+
+def _spec(provider, model="m", base_url=""):
+    return llm_gateway.ModelSpec(provider=provider, model=model, api_key="sk-user", base_url=base_url, source="user")
+
+
+def test_each_provider_gets_its_own_chat_model():
+    from langchain_anthropic import ChatAnthropic
+    from langchain_openai import ChatOpenAI
+
+    claude = llm_gateway.chat_model(_spec("anthropic", "claude-x"), streaming=True)
+    assert isinstance(claude, ChatAnthropic) and claude.model == "claude-x" and claude.streaming
+    assert claude.max_tokens == llm_gateway.AGENT_MAX_TOKENS
+    for provider in llm_gateway.COMPATIBLE:
+        base = providers.PROVIDERS[provider].base_url or "https://api.example.com/v1"
+        model = llm_gateway.chat_model(_spec(provider, "grok-x", base), cache_key="lumio-k")
+        assert isinstance(model, ChatOpenAI) and model.openai_api_base == base and not model.use_responses_api
+        assert not (model.model_kwargs or {}).get("prompt_cache_key") and not getattr(model, "reasoning", None)
+    with pytest.raises(llm_gateway.UnsupportedProvider):
+        llm_gateway.chat_model(_spec("groq"))  # no address
+
+
+def test_lumios_model_names_dont_reach_another_provider(platform):
+    token = llm_gateway.CHOICES.set({"agent": _spec("anthropic", "claude-x")})
+    try:
+        assert llm_gateway.resolve(None, "agent", model="gpt-5.4-nano").model == "claude-x"
+    finally:
+        llm_gateway.CHOICES.reset(token)
+
+
+async def test_background_calls_run_on_another_providers_model(platform, monkeypatch):
+    from langchain_core.messages import AIMessage
+
+    asked = {}
+
+    class Fake:
+        def bind(self, **kw):
+            asked["bound"] = kw
+            return self
+
+        async def ainvoke(self, convo):
+            asked["convo"] = convo
+            return AIMessage(content=[{"type": "text", "text": 'Sure: ```json\n{"ok": true}\n```'}],
+                             usage_metadata={"input_tokens": 7, "output_tokens": 3, "total_tokens": 10})
+
+    monkeypatch.setattr(llm_gateway, "chat_model", lambda spec, **kw: asked.setdefault("kw", kw) and Fake())
+    counted = []
+    monkeypatch.setattr("app.agent.usage.add", lambda *a: counted.append(a))
+    token = llm_gateway.CHOICES.set({"agent": _spec("anthropic", "claude-x", "https://api.anthropic.com/v1")})
+    try:
+        out = await llm.chat_complete([{"role": "system", "content": "Rules"}, {"role": "user", "content": "Go"}],
+                                      model=llm.small_model(), response_format={"type": "json_object"}, max_tokens=300)
+    finally:
+        llm_gateway.CHOICES.reset(token)
+    assert out.choices[0].message.content == '{"ok": true}'
+    assert "JSON object only" in asked["convo"][0].content and asked["convo"][1].content == "Go"
+    assert asked["kw"]["max_tokens"] == 300 and counted == [("claude-x", 7, 3, 0)]
 
 
 # --- the gateway uses the user's choice for the turn -------------------------------------------------------------
@@ -277,13 +334,19 @@ async def test_keys_are_checked_encrypted_and_never_sent_back(factory, fake_chec
 
 
 @needs_db
-async def test_a_provider_agents_cant_run_on_yet_is_saved_but_not_chosen(factory, fake_check, platform):  # noqa: F811
+async def test_an_anthropic_key_runs_agents_at_its_address(factory, fake_check, platform):  # noqa: F811
+    from app.model_keys.service import load_choices
+
     user, _ = await _user_with_agents(factory)
     async with _client(factory, user) as c:
         row = (await c.post("/api/models/keys", json={"provider": "anthropic", "api_key": "sk-ant-1111"})).json()
-        assert row["runs"] is False and row["status"] == "ok"
-        refused = await c.put("/api/models/choices/agent", json={"key_id": row["id"], "model": "gpt-mine"})
-        assert refused.status_code == 400 and "can't run agents on Anthropic yet" in refused.json()["detail"]
+        assert row["runs"] is True and row["status"] == "ok"
+        chose = await c.put("/api/models/choices/agent", json={"key_id": row["id"], "model": "gpt-mine"})
+        assert chose.status_code == 200, chose.text
+    async with factory() as db:
+        spec = (await load_choices(db, user.id))["agent"]
+        assert spec.provider == "anthropic" and spec.base_url == "https://api.anthropic.com/v1"
+    async with _client(factory, user) as c:
         back = await c.put("/api/models/choices/agent", json={"key_id": None})
         assert back.status_code == 200 and back.json()["choices"] == {}
 
