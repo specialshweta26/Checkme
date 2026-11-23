@@ -121,7 +121,7 @@ async def chat_complete(
         purpose, model = "small", None
     spec = llm_gateway.resolve(ctx, purpose, model=model)
     if not spec.is_openai:
-        raise llm_gateway.UnsupportedProvider(f"background calls can't run on {spec.provider} yet")
+        return await _complete_elsewhere(spec, messages, response_format, max_tokens, temperature)
     instructions, items = _split_messages(messages)
     kwargs: dict[str, Any] = {
         "model": spec.model,
@@ -156,6 +156,48 @@ async def chat_complete(
             raise
     llm_gateway.record_usage(spec, getattr(resp, "usage", None))
     return _as_chat_completion(_output_text(resp))
+
+
+async def _complete_elsewhere(spec: Any, messages: list[dict[str, Any]], response_format: dict | None, max_tokens: int,
+                              temperature: float | None) -> Any:  # fmt: skip
+    """One background call on a provider other than OpenAI (the user's own key), through its LangChain model. Callers
+    only read the reply's text, so no tools are sent. A JSON reply is asked for in words too, since not every provider
+    has a JSON mode."""
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+
+    from app import llm_gateway
+    from app.agent import usage
+
+    instructions, items = _split_messages(messages)
+    wants_json = isinstance(response_format, dict) and response_format.get("type") == "json_object"
+    if wants_json:
+        instructions = ((instructions or "") + "\n\nReply with one JSON object only, no other text.").strip()
+    convo: list[Any] = [SystemMessage(content=instructions)] if instructions else []
+    for item in items:
+        convo.append(AIMessage(content=item["content"]) if item["role"] == "assistant" else HumanMessage(content=item["content"]))
+    model = llm_gateway.chat_model(spec, timeout=60, max_tokens=max_tokens)
+    if temperature is not None:
+        model = model.bind(temperature=temperature)
+    reply = await model.ainvoke(convo)
+    meta = getattr(reply, "usage_metadata", None) or {}
+    details = meta.get("input_token_details") or {}
+    usage.add(spec.model, int(meta.get("input_tokens") or 0), int(meta.get("output_tokens") or 0), int(details.get("cache_read") or 0))
+    content = reply.content
+    if isinstance(content, list):  # Anthropic and others answer in blocks
+        content = "".join(part.get("text", "") if isinstance(part, dict) else str(part) for part in content)
+    text = str(content or "")
+    if wants_json:
+        text = _json_only(text)
+    return _as_chat_completion(text)
+
+
+def _json_only(text: str) -> str:
+    """The JSON object in a reply that wrapped it in a code fence or a sentence."""
+    stripped = text.strip()
+    if stripped.startswith("{"):
+        return stripped
+    start, end = stripped.find("{"), stripped.rfind("}")
+    return stripped[start : end + 1] if 0 <= start < end else stripped
 
 
 def _emb_key(text: str) -> str:

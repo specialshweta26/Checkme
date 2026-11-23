@@ -209,7 +209,9 @@ async def load_all_choices(db: AsyncSession, user_id) -> dict[str, dict[str, llm
         if row is None or not (p and p.runs) or not secret:
             continue
         out.setdefault(c.scope, {})[c.purpose] = llm_gateway.ModelSpec(
-            provider=row.provider, model=c.model, api_key=secret, base_url=row.base_url or "", purpose=c.purpose,
+            provider=row.provider, model=c.model, api_key=secret, purpose=c.purpose,
+            # OpenAI uses its SDK's own address; every other provider is reached at its compatible one.
+            base_url=row.base_url or ("" if row.provider == "openai" else p.base_url),
             source="user" if c.scope == "user" else "agent")  # fmt: skip
     return out
 

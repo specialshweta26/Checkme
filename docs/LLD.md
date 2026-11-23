@@ -1233,7 +1233,7 @@ Saved keys and the user's model (phase 2, `app/model_keys`, Profile → Models a
 - `model_choices`: (user, scope, purpose) → key and model. Scope is `user` (the default) or an agent id (that agent's
   own model, phase 3: the Model section of its About panel, `PUT /api/models/choices/agent` with `agent_id`; the
   Models page lists which agents have one). Deleting an agent removes its choice. Purposes are
-  `agent` and `small`. Only providers marked `runs` (OpenAI today) can be chosen; other keys are saved for later.
+  `agent` and `small`. Every provider runs agents (phase 4, below).
   Removing a key removes its choices.
 - API: `GET /api/models`, `POST /api/models/keys`, `POST /api/models/keys/{id}/check`, `DELETE /api/models/keys/{id}`,
   `PUT /api/models/choices/{purpose}` (`key_id: null` goes back to Lumio's model).
@@ -1260,7 +1260,16 @@ Phases:
 3. Per-agent model (done, see above; stored as `model_choices` rows scoped to the agent rather than a column):
    `WorkspaceAgent.model` = `{key_id, model, small_model, vision_model}`; empty means the user's
    default, so existing agents don't change.
-4. Providers: Anthropic, Google, xAI, Groq, OpenRouter and OpenAI-compatible addresses through LangChain's provider
+4. Providers (done): `chat_model` builds OpenAI on its Responses API, Anthropic natively (`ChatAnthropic`, replies
+   capped at `AGENT_MAX_TOKENS`), and Google, xAI, Groq, OpenRouter and OpenAI-compatible services on their
+   OpenAI-compatible chat completions address (`ChatOpenAI` with `base_url`, `COMPATIBLE`). OpenAI-only settings
+   (reasoning effort, prompt cache key, service tier) go to OpenAI only. Background calls on another provider run
+   through its LangChain model (`llm._complete_elsewhere`); a JSON reply is asked for in words and taken out of any
+   code fence. A model name a caller passes (BROWSER_FAST_MODEL) is OpenAI's, so on another provider's key the chosen
+   model is used. The shell tool is excluded for the `openai` and `anthropic` harness profiles (compatible providers
+   report `openai`). Still open from the original plan: Anthropic prompt caching beyond what deepagents adds, and
+   per-model capability checks (phase 5). Original plan:
+   Anthropic, Google, xAI, Groq, OpenRouter and OpenAI-compatible addresses through LangChain's provider
    packages, with each provider's own prompt caching, usage metering and harness profile. Custom addresses refuse
    private and internal network addresses. A key that fails says so in the chat; Lumio's key is used instead only if
    the user turned that on. Calls on the user's own key are metered but don't count toward Lumio's daily cap.

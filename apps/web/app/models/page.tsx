@@ -7,8 +7,8 @@ import { apiError, getMe, loadWorkspace, relativeTime, type Me, type WorkspaceAg
 
 // Models and keys (apps/api/app/model_keys, docs/LLD.md "Model gateway"): the user's own model keys and the model
 // their agents use. A key is checked with the provider when it is saved and is never sent back to the page: only its
-// provider, name and last four characters. Agents run on OpenAI keys today; other providers' keys can be saved now and
-// are used once Lumio supports them.
+// provider, name and last four characters. Agents run on any provider: OpenAI natively, Anthropic natively, the others
+// on their OpenAI-compatible address.
 
 type Provider = { key: string; name: string; runs: boolean; hint: string; custom_url: boolean };
 type SavedKey = {
@@ -230,7 +230,7 @@ export default function ModelsPage() {
           </div>
           <p className="faint models-note">
             Calls on your key are billed by your provider. They show in Usage as "model (your key)" and don't count toward Lumio's daily limit.
-            {usable.length === 0 ? " Add an OpenAI key to choose a model: agents run on OpenAI keys today, and other providers are coming." : ""}
+            {usable.length === 0 ? " Add a key to choose a model." : ""} Your model needs tool calling to work as an agent; image attachments need a model that reads images.
           </p>
 
           {agents.length ? (
