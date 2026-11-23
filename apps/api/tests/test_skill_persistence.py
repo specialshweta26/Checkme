@@ -149,7 +149,7 @@ async def test_writer_puts_json_in_the_input(monkeypatch):
 
     monkeypatch.setattr(service, "get_settings", lambda: SimpleNamespace(openai_api_key="k", openai_model="m"))
     monkeypatch.setattr(llm, "openai_client", lambda: SimpleNamespace(responses=Responses()))
-    monkeypatch.setattr(llm, "reasoning_payload", lambda: None)
+    monkeypatch.setattr(llm, "reasoning_payload", lambda *a: None)
     out = await service._write_skill([{"t": 1, "kind": "click", "x": 1, "y": 1}], [{"t": 1, "jpeg": "AAAA"}], "", [])
     assert out == {"name": "N", "instruction": "1. Do it."}
     text = " ".join(part.get("text", "") for part in seen["input"][0]["content"])

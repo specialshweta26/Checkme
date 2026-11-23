@@ -4724,8 +4724,9 @@ async def run_deep_agent(
     integrity_task = None
     from app import llm_gateway
 
-    # The user's own model and key (Models page), for every model call in this turn. A nested run keeps the outer one's.
-    choices_token = None if llm_gateway.CHOICES.get() is not None else await llm_gateway.use_choices(db, user)
+    # This agent's model and key (its own choice, else the user's default), for every model call in this run. A
+    # teammate's nested run gets its own agent's choice.
+    choice_tokens = await llm_gateway.enter(db, user, workspace_agent)
     try:
         # The integrity check needs no database, so it runs beside the budget and role checks (each may wait on a
         # small model): a turn waits for the slower one, not both. Its refusal still wins.
@@ -4769,8 +4770,7 @@ async def run_deep_agent(
             integrity_task.cancel()
         if agent_token is not None:
             AGENT.reset(agent_token)
-        if choices_token is not None:
-            llm_gateway.CHOICES.reset(choices_token)
+        llm_gateway.leave(choice_tokens)
         agent_browsers.BROWSER_SPACE.reset(browser_token)
         reset_client_kind(token)
 
@@ -5189,6 +5189,15 @@ async def _run_deep_agent(
                     log.warning("network error (%s); retry %s/2 resumed=%s", type(exc).__name__, attempt + 1, resumed)
                     await asyncio.sleep(NETWORK_RETRY_DELAYS[attempt])
                     continue
+            from app import llm_gateway
+
+            if attempt < 2 and len(ctx.used_tools) == tools_before and llm_gateway.learn_effort(llm_gateway.resolve(ctx, "agent").model, exc):
+                # The chosen model refused the reasoning effort: it now knows what that model takes, so build the
+                # agent again and carry on (no tool ran yet; a saved checkpoint continues instead of starting over).
+                log.warning("model refused the reasoning effort; retrying with %s", llm_gateway.effort_for(llm_gateway.resolve(ctx, "agent").model))
+                graph = build_agent(ctx, prompt)
+                next_input = None if await _can_resume(graph, thread) else payload
+                continue
             log.exception("deep agent failed")
             text = f"I could not finish that request: {str(exc)[:240]}"
             break

@@ -1230,15 +1230,24 @@ Saved keys and the user's model (phase 2, `app/model_keys`, Profile → Models a
   (`openai_compatible` only, checked with `validate_public_url`), status, model list, last checked. A key is checked by
   asking the provider for its model list (`providers.check`; OpenRouter's list is public, so its `/key` is asked
   first); a key that fails isn't saved. The API never returns the key, and the data export leaves `key_enc` out.
-- `model_choices`: (user, scope, purpose) → key and model. Scope is `user` now, an agent id in phase 3. Purposes are
+- `model_choices`: (user, scope, purpose) → key and model. Scope is `user` (the default) or an agent id (that agent's
+  own model, phase 3: the Model section of its About panel, `PUT /api/models/choices/agent` with `agent_id`; the
+  Models page lists which agents have one). Deleting an agent removes its choice. Purposes are
   `agent` and `small`. Only providers marked `runs` (OpenAI today) can be chosen; other keys are saved for later.
   Removing a key removes its choices.
 - API: `GET /api/models`, `POST /api/models/keys`, `POST /api/models/keys/{id}/check`, `DELETE /api/models/keys/{id}`,
   `PUT /api/models/choices/{purpose}` (`key_id: null` goes back to Lumio's model).
-- A turn (`run_deep_agent`) loads the user's choices into `llm_gateway.CHOICES` once; nested runs keep the outer
-  turn's. `resolve` uses them for `agent`, and for `small` (the background choice, else the agent choice). Vision,
+- Each run (`run_deep_agent`) calls `llm_gateway.enter(db, user, agent)`: the outermost run loads every choice the
+  user made once (`ALL_CHOICES`), and every run, a teammate's nested one included, sets `CHOICES` to its agent's
+  own choice for each purpose, else the user's (`for_agent`); `leave` restores the outer run's. `resolve` uses them
+  for `agent`, and for `small` (the background choice, else the agent choice). Vision,
   computer use, images, transcription and embeddings stay on Lumio's key. Work outside a turn (inbox, scheduler
   bookkeeping) uses Lumio's models. Loading never fails a turn: on error the turn runs on Lumio's models.
+- Reasoning effort per model: Lumio sends REASONING_EFFORT (often `none`), which some models refuse ("'none' is not
+  supported with the 'gpt-6.1-sol' model. Supported values are: 'low', …"). `learn_effort` reads the allowed values
+  from that error, remembers the cheapest for that model (or to send no reasoning field when the model takes none),
+  and the call is retried: once in `chat_complete`, and in the agent loop by rebuilding the agent when no tool ran
+  yet. Nothing is listed by hand; what was learned is kept per process.
 - Usage on the user's key is recorded as `model (your key)` (`usage_name`), so it shows in Usage and MODEL_PRICES
   doesn't price it: it costs Lumio nothing and doesn't count toward the daily cap.
 
@@ -1248,7 +1257,8 @@ Phases:
 2. Saved keys (done, see below): a table of the user's model keys (provider, label, encrypted key, optional address, status, last
    checked, models it can use), an API and a Settings page to add, test and remove keys and pick a default model. A
    key is checked with a cheap model-list call when saved and never shown again.
-3. Per-agent model: `WorkspaceAgent.model` = `{key_id, model, small_model, vision_model}`; empty means the user's
+3. Per-agent model (done, see above; stored as `model_choices` rows scoped to the agent rather than a column):
+   `WorkspaceAgent.model` = `{key_id, model, small_model, vision_model}`; empty means the user's
    default, so existing agents don't change.
 4. Providers: Anthropic, Google, xAI, Groq, OpenRouter and OpenAI-compatible addresses through LangChain's provider
    packages, with each provider's own prompt caching, usage metering and harness profile. Custom addresses refuse

@@ -5,6 +5,7 @@ import { AgentAvatar } from "./AgentAvatar";
 import { AgentBrowser } from "./AgentBrowser";
 import { AgentHandoffs } from "./AgentHandoffs";
 import { AgentLimits } from "./AgentLimits";
+import { AgentModel } from "./AgentModel";
 import { Select } from "./Select";
 import { listRoutines, listSkills, type AgentGroup, type WorkspaceAgent } from "../lib";
 
@@ -95,6 +96,8 @@ export function AgentAboutPanel({ agent, agents = [], groups, onRoutines }: { ag
         </ul>
       ) : null}
       {signIns?.length ? <p className="faint about-note">Can sign in to {signIns.join(", ")}.</p> : null}
+
+      <AgentModel agent={agent} />
 
       <AgentLimits agent={agent} />
 

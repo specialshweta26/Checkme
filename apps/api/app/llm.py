@@ -32,11 +32,12 @@ def small_model() -> str:
     return (s.openai_small_model or "").strip() or s.openai_model
 
 
-def reasoning_payload() -> dict[str, str]:
-    effort = (get_settings().openai_reasoning_effort or "").strip() or "none"
-    if effort == "none":
-        return {"effort": "none"}
-    return {"effort": effort, "mode": "standard", "summary": "auto"}
+def reasoning_payload(model: str | None = None) -> dict[str, str]:
+    """REASONING_EFFORT as the Responses API's ``reasoning`` field, or what ``model`` accepted instead
+    (app/llm_gateway.py ``learn_effort``)."""
+    from app.llm_gateway import reasoning_for
+
+    return reasoning_for(model) or {}
 
 
 def _as_chat_completion(text: str) -> Any:
@@ -127,7 +128,6 @@ async def chat_complete(
         "service_tier": "default",
         "input": items,
         "text": _text_format(response_format),
-        "reasoning": reasoning_payload(),
         "max_output_tokens": max_tokens,
     }
     if instructions:
@@ -140,7 +140,20 @@ async def chat_complete(
     if temperature is not None:
         kwargs["temperature"] = temperature
     client = openai_client() if spec.is_platform else llm_gateway.openai_client(spec)
-    resp = await client.responses.create(**kwargs)
+    for attempt in range(2):
+        reasoning = llm_gateway.reasoning_for(spec.model)
+        if reasoning is None:
+            kwargs.pop("reasoning", None)
+        else:
+            kwargs["reasoning"] = reasoning
+        try:
+            resp = await client.responses.create(**kwargs)
+            break
+        except Exception as exc:
+            # A model that refuses the reasoning effort says what it takes: remember it and ask once more.
+            if attempt == 0 and llm_gateway.learn_effort(spec.model, exc):
+                continue
+            raise
     llm_gateway.record_usage(spec, getattr(resp, "usage", None))
     return _as_chat_completion(_output_text(resp))
 

@@ -4,13 +4,14 @@ Every model call in Lumio asks ``resolve(ctx, purpose)`` for a ``ModelSpec`` and
 the agent's chat model (``chat_model``), the small background calls in ``app.llm.chat_complete``, and the OpenAI
 clients for images, transcription and computer use (``openai_client``). Today every spec is Lumio's own OpenAI key and
 the models configured in settings, unless the user picked their own key and model on the Models page
-(app/model_keys): a turn loads those choices into ``CHOICES`` (``use_choices``) and ``resolve`` uses them for the
-agent and background purposes. Later phases add per-agent and team choices and other providers; ``resolve`` stays
+(app/model_keys), or one agent's own choice: a run loads those into ``CHOICES`` (``enter``) and ``resolve`` uses them
+for the agent and background purposes. Later phases add team choices and other providers; ``resolve`` stays
 the one place the choice is made, in this order: the agent's setting, the user's default, the team's, then Lumio's.
 """
 
 from __future__ import annotations
 
+import re
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -63,15 +64,18 @@ def _platform_model(purpose: str) -> str:
     return main
 
 
-# The user's choices for the running turn ({purpose: ModelSpec}), set by ``use_choices`` when a turn starts. Work the
-# turn starts (its tasks, nested teammates) sees them too; work outside a turn uses Lumio's models.
+# The choices for the running agent ({purpose: ModelSpec}), set by ``enter`` when a run starts: the agent's own
+# (its About panel), else the user's default (Models page). Work the run starts sees them too; work outside a run
+# uses Lumio's models.
 CHOICES: ContextVar[dict | None] = ContextVar("model_choices", default=None)
+# Every choice the user made ({scope: {purpose: ModelSpec}}, scope "user" or an agent id), loaded once by the outermost
+# run, so a teammate's nested run picks its own agent's model without asking the database again.
+ALL_CHOICES: ContextVar[dict | None] = ContextVar("all_model_choices", default=None)
 
 
 def _chosen(ctx: Any, purpose: str) -> ModelSpec | None:
-    """A model the user picked for ``purpose`` (Models page). Background work uses the user's background model, else
-    their agent model, so a user who brought a key isn't billed on Lumio's for half the turn. Agent and team choices
-    come in later phases."""
+    """The model picked for ``purpose``. Background work uses the background model, else the agent model, so a user
+    who brought a key isn't billed on Lumio's for half the turn. Team choices come in a later phase."""
     choices = CHOICES.get() or {}
     if purpose == "agent":
         return choices.get("agent")
@@ -81,21 +85,38 @@ def _chosen(ctx: Any, purpose: str) -> ModelSpec | None:
     return None
 
 
-async def use_choices(db: Any, user: Any) -> Any:
-    """Load ``user``'s model choices for this turn; returns a token for ``CHOICES.reset``. Never raises: a turn that
-    can't load them runs on Lumio's models."""
+def for_agent(all_choices: dict | None, agent_id: Any = None) -> dict:
+    """The choices one agent runs with: its own for each purpose, else the user's."""
+    every = all_choices or {}
+    own = every.get(str(agent_id), {}) if agent_id is not None else {}
+    mine = every.get("user", {})
+    return {p: own.get(p) or mine.get(p) for p in ("agent", "small") if own.get(p) or mine.get(p)}
+
+
+async def enter(db: Any, user: Any, agent: Any = None) -> list:
+    """Set the model choices for one run of ``agent``; give the result to ``leave`` when the run ends. Never raises:
+    a run that can't load them runs on Lumio's models."""
     import logging
 
-    if db is None or getattr(user, "id", None) is None:
-        return CHOICES.set({})
-    try:
-        from app.model_keys.service import load_choices
+    tokens: list = []
+    every = ALL_CHOICES.get()
+    if every is None:
+        every = {}
+        if db is not None and getattr(user, "id", None) is not None:
+            try:
+                from app.model_keys.service import load_all_choices
 
-        found = await load_choices(db, user.id)
-    except Exception as exc:  # noqa: BLE001
-        logging.getLogger(__name__).warning("model choices not loaded: %s", type(exc).__name__)
-        found = {}
-    return CHOICES.set(found)
+                every = await load_all_choices(db, user.id)
+            except Exception as exc:  # noqa: BLE001
+                logging.getLogger(__name__).warning("model choices not loaded: %s", type(exc).__name__)
+        tokens.append((ALL_CHOICES, ALL_CHOICES.set(every)))
+    tokens.append((CHOICES, CHOICES.set(for_agent(every, getattr(agent, "id", None)))))
+    return tokens
+
+
+def leave(tokens: list) -> None:
+    for var, token in reversed(tokens or []):
+        var.reset(token)
 
 
 def resolve(ctx: Any = None, purpose: str = "agent", model: str | None = None) -> ModelSpec:
@@ -134,17 +155,64 @@ def openai_client(spec: ModelSpec | None = None) -> Any:
     return client
 
 
+# Reasoning effort a model accepts, learned from its own error when it refused Lumio's setting (REASONING_EFFORT, often
+# "none"): {model: effort}, or OMIT_EFFORT for a model that takes no reasoning setting at all. Nothing is listed by
+# hand: a new model teaches Lumio on its first refused call, and that call is retried.
+_EFFORT: dict[str, str] = {}
+OMIT_EFFORT = "-"
+_EFFORT_REFUSED = re.compile(r"reasoning|effort|'none' is not supported", re.I)
+_SUPPORTED = re.compile(r"supported values are:?\s*(.+?)(?:\.|$)", re.I | re.S)
+_NO_REASONING = re.compile(r"unsupported parameter:?\s*'?reasoning", re.I)
+
+
+def effort_for(model: str | None = None) -> str:
+    """The reasoning effort to send ``model``: what it accepted before, else REASONING_EFFORT."""
+    learned = _EFFORT.get((model or "").strip())
+    if learned:
+        return learned
+    return (get_settings().openai_reasoning_effort or "").strip() or "none"
+
+
+def reasoning_for(model: str | None = None) -> dict[str, str] | None:
+    """The Responses API ``reasoning`` field for ``model``, or None to leave it out."""
+    effort = effort_for(model)
+    if effort == OMIT_EFFORT:
+        return None
+    if effort == "none":
+        return {"effort": "none"}
+    return {"effort": effort, "mode": "standard", "summary": "auto"}
+
+
+def learn_effort(model: str | None, exc: BaseException) -> bool:
+    """When ``exc`` is a model refusing the reasoning effort Lumio sent, remember what it takes and say True (retry)."""
+    name = (model or "").strip()
+    text = str(exc or "")
+    lowered = text.lower()
+    if not name or not ("400" in text or "invalid_request" in lowered or "unsupported" in lowered):
+        return False
+    if not _EFFORT_REFUSED.search(text):
+        return False
+    if _NO_REASONING.search(text):
+        _EFFORT[name] = OMIT_EFFORT
+        return True
+    found = _SUPPORTED.search(text)
+    allowed = re.findall(r"'([a-z]+)'", found.group(1)) if found else []
+    current = effort_for(name)
+    if not allowed or current in allowed:
+        return False
+    # The cheapest it allows when Lumio asked for none or a lower one; otherwise the closest it allows.
+    _EFFORT[name] = allowed[0]
+    return True
+
+
 def chat_model(spec: ModelSpec, *, cache_key: str = "", streaming: bool = False, timeout: int = 120) -> Any:
     """The LangChain chat model the agent runs on."""
     if not spec.is_openai:
         raise UnsupportedProvider(f"agents can't run on {spec.provider} yet")
     from langchain_openai import ChatOpenAI
 
-    from app.llm import reasoning_payload
-
-    s = get_settings()
-    effort = (s.openai_reasoning_effort or "").strip() or "none"
-    reasoning = reasoning_payload()
+    effort = effort_for(spec.model)
+    reasoning = reasoning_for(spec.model)
     base: dict[str, Any] = {"model": spec.model, "api_key": spec.api_key, "timeout": timeout, "max_retries": 1}
     if spec.base_url:
         base["base_url"] = spec.base_url
@@ -162,6 +230,8 @@ def chat_model(spec: ModelSpec, *, cache_key: str = "", streaming: bool = False,
         {"use_responses_api": True, "reasoning_effort": effort},
         {"use_responses_api": True},
     ]
+    if reasoning is None:  # the model takes no reasoning setting
+        attempts = [{k: v for k, v in a.items() if k not in ("reasoning", "reasoning_effort")} for a in attempts]
     for extra in attempts:
         try:
             return ChatOpenAI(**base, **extra)

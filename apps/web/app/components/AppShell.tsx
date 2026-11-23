@@ -315,6 +315,9 @@ export function AppShell({
   }
   useEffect(() => {
     loadWorkspace().then(setRoster).catch(() => undefined);
+    // ?about=<agent id> opens that agent's About panel (the Models page's "Change" links here).
+    const about = new URLSearchParams(window.location.search).get("about");
+    if (about) setPanel({ kind: "about", agentId: about });
   }, []);
   useEffect(() => {
     if (!panel) return;

@@ -2,8 +2,8 @@
 
 Keys are encrypted and never leave the server: the page gets the provider, label, last four characters, check status
 and model list. A choice names one saved key and one model for a purpose ("agent" for the agent's replies, "small"
-for background work). ``load_choices`` turns a user's choices into ModelSpecs for app.llm_gateway at the start of a
-turn.
+for background work), either as the user's default (scope "user") or for one agent (scope = its id, phase 3).
+``load_all_choices`` turns them into ModelSpecs for app.llm_gateway at the start of a run.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import llm_gateway
 from app.model_keys import providers
-from app.models import ModelChoice, ModelKey
+from app.models import ModelChoice, ModelKey, WorkspaceAgent
 from app.security import decrypt, encrypt
 
 PURPOSES = ("agent", "small")
@@ -62,18 +62,39 @@ async def _key(db: AsyncSession, user_id, key_id: str) -> ModelKey:
     return row
 
 
-async def _choices(db: AsyncSession, user_id, scope: str = "user") -> list[ModelChoice]:
-    q = select(ModelChoice).where(ModelChoice.user_id == user_id, ModelChoice.scope == scope)
+async def _choices(db: AsyncSession, user_id, scope: str | None = "user") -> list[ModelChoice]:
+    """One scope's choices, or every scope's with ``scope=None``."""
+    q = select(ModelChoice).where(ModelChoice.user_id == user_id)
+    if scope is not None:
+        q = q.where(ModelChoice.scope == scope)
     return list((await db.execute(q)).scalars().all())
+
+
+async def _scope(db: AsyncSession, user, agent_id: str | None) -> str:
+    """"user", or the id of one of this user's agents."""
+    if not agent_id:
+        return "user"
+    try:
+        aid = uuid.UUID(str(agent_id))
+    except ValueError as exc:
+        raise ModelKeyError("That agent isn't yours.") from exc
+    found = (await db.execute(select(WorkspaceAgent.id).where(WorkspaceAgent.id == aid, WorkspaceAgent.user_id == user.id))).scalar_one_or_none()
+    if found is None:
+        raise ModelKeyError("That agent isn't yours.")
+    return str(aid)
 
 
 async def overview(db: AsyncSession, user) -> dict[str, Any]:
     keys = await _keys(db, user.id)
-    chosen = {c.purpose: {"key_id": str(c.key_id), "model": c.model} for c in await _choices(db, user.id)}
+    chosen: dict[str, dict] = {}
+    agents: dict[str, dict] = {}
+    for c in await _choices(db, user.id, None):
+        (chosen if c.scope == "user" else agents.setdefault(c.scope, {}))[c.purpose] = {"key_id": str(c.key_id), "model": c.model}
     return {
         "providers": providers.public(),
         "keys": [public_key(k) for k in keys],
         "choices": chosen,
+        "agents": agents,
         "lumio": {"agent": llm_gateway.resolve(None, "agent").model, "small": llm_gateway.resolve(None, "small").model},
     }
 
@@ -142,11 +163,13 @@ async def remove_key(db: AsyncSession, user, key_id: str) -> None:
     await db.commit()
 
 
-async def choose(db: AsyncSession, user, purpose: str, key_id: str | None, model: str = "") -> dict:
-    """Use ``key_id`` and ``model`` for ``purpose``; no key_id goes back to Lumio's model."""
+async def choose(db: AsyncSession, user, purpose: str, key_id: str | None, model: str = "", agent_id: str | None = None) -> dict:
+    """Use ``key_id`` and ``model`` for ``purpose``, as the user's default or for one agent. No key_id removes the
+    choice: the user's default goes back to Lumio's model, an agent goes back to the user's default."""
     if purpose not in PURPOSES:
         raise ModelKeyError("Pick the agent model or the background model.")
-    existing = next((c for c in await _choices(db, user.id) if c.purpose == purpose), None)
+    scope = await _scope(db, user, agent_id)
+    existing = next((c for c in await _choices(db, user.id, scope) if c.purpose == purpose), None)
     if not key_id:
         if existing is not None:
             await db.delete(existing)
@@ -164,26 +187,33 @@ async def choose(db: AsyncSession, user, purpose: str, key_id: str | None, model
     if row.models and name not in row.models:
         raise ModelKeyError(f"This key can't use {name}. Pick one from its list, or check the key again.")
     if existing is None:
-        db.add(ModelChoice(user_id=user.id, scope="user", purpose=purpose, key_id=row.id, model=name[:160]))
+        db.add(ModelChoice(user_id=user.id, scope=scope, purpose=purpose, key_id=row.id, model=name[:160]))
     else:
         existing.key_id, existing.model = row.id, name[:160]
     await db.commit()
     return await overview(db, user)
 
 
-async def load_choices(db: AsyncSession, user_id) -> dict[str, llm_gateway.ModelSpec]:
-    """The user's choices as specs, for one turn. A key Lumio can't read or run is left out (Lumio's model is used)."""
-    choices = await _choices(db, user_id)
+async def load_all_choices(db: AsyncSession, user_id) -> dict[str, dict[str, llm_gateway.ModelSpec]]:
+    """Every choice the user made as specs, {scope: {purpose: spec}}, for one run. A key Lumio can't read or run is
+    left out (that purpose falls back to the next choice, then Lumio's model)."""
+    choices = await _choices(db, user_id, None)
     if not choices:
         return {}
     keys = {k.id: k for k in await _keys(db, user_id)}
-    out: dict[str, llm_gateway.ModelSpec] = {}
+    out: dict[str, dict[str, llm_gateway.ModelSpec]] = {}
     for c in choices:
         row = keys.get(c.key_id)
         p = providers.PROVIDERS.get(row.provider) if row else None
         secret = decrypt(row.key_enc) if row else None
         if row is None or not (p and p.runs) or not secret:
             continue
-        out[c.purpose] = llm_gateway.ModelSpec(provider=row.provider, model=c.model, api_key=secret,
-                                               base_url=row.base_url or "", purpose=c.purpose, source="user")  # fmt: skip
+        out.setdefault(c.scope, {})[c.purpose] = llm_gateway.ModelSpec(
+            provider=row.provider, model=c.model, api_key=secret, base_url=row.base_url or "", purpose=c.purpose,
+            source="user" if c.scope == "user" else "agent")  # fmt: skip
     return out
+
+
+async def load_choices(db: AsyncSession, user_id, agent_id=None) -> dict[str, llm_gateway.ModelSpec]:
+    """The choices one agent (or the user's default, with no agent) runs with."""
+    return llm_gateway.for_agent(await load_all_choices(db, user_id), agent_id)
