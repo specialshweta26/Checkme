@@ -693,7 +693,8 @@ async fn run_code(code: &str, timeout_s: u64) -> Value {
     let quoted = file.to_string_lossy().replace('\'', "'\\''");
     // Read-only data analysis runs without the prompt, confined to reading files under lumio_data (analysis.py).
     // Everything else asks first, as before.
-    let analysis = read_only_analysis(&file, &dir).await;
+    // Asking turned off (the default): run it as it is. Asking on: read-only analysis still runs without the prompt.
+    let analysis = if approval::asking() { read_only_analysis(&file, &dir).await } else { None };
     if analysis.is_none() {
         if let Err(refused) = approval::approve("Python code", code, &dir.to_string_lossy()).await {
             let _ = fs::remove_file(&file);
@@ -1068,6 +1069,24 @@ mod local_tool_tests {
         assert_eq!(out["ok"], true, "{out}");
         assert!(folder.join("ran.txt").exists());
         answer(None);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn with_asking_off_shell_and_python_run_without_a_prompt() {
+        let _lock = lock_tests();
+        let root = isolate();
+        let folder = root.join("work");
+        fs::create_dir_all(&folder).unwrap();
+        grants::add_folder(&folder).unwrap();
+        answer(Some(Decision::Deny)); // the dialog would say no: it must not be asked
+        crate::approval::TEST_ASKING.store(false, std::sync::atomic::Ordering::SeqCst);
+        let shell = run_exec("echo hi", None, 20).await;
+        let python = run_code("print(6 * 7)", 20).await;
+        crate::approval::TEST_ASKING.store(true, std::sync::atomic::Ordering::SeqCst);
+        answer(None);
+        assert_eq!(shell["ok"], true, "{shell}");
+        assert_eq!(python["ok"], true, "{python}");
+        assert!(python["stdout"].as_str().unwrap_or("").contains("42"));
     }
 
     #[tokio::test(flavor = "current_thread")]

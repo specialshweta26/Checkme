@@ -3,7 +3,7 @@
 Wraps the Lumio website in a Tauri 2 window and runs a sidecar on this machine.
 
 - **Website:** always the cloud computer (E2B).
-- **This app:** files inside user-granted folders, Lumio's own Chrome profile, live screen, and teaching on this computer. Terminal and Python ask you in a native prompt before each run, except read-only data analysis: a Python script that only uses plain data modules and reads files under `~/lumio_data` runs without asking, confined to reading those files (`src-tauri/src/analysis.py`). Shell and files never move to E2B from this app: if the sidecar is offline the agent is told the app isn't connected. Background jobs started here stay on this computer too. Browser, boot, and teaching never open E2B from this app.
+- **This app:** files inside user-granted folders, Lumio's own Chrome profile, live screen, and teaching on this computer. Terminal and Python run directly, with no prompt. To be asked first, set `LUMIO_ASK_BEFORE_RUN=1` or create an `ask-before-running` file in Lumio's data folder; then each run asks in a native prompt, except read-only data analysis (`src-tauri/src/analysis.py`). Shell and files never move to E2B from this app: if the sidecar is offline the agent is told the app isn't connected. Background jobs started here stay on this computer too. Browser, boot, and teaching never open E2B from this app.
 
 The sidecar polls `/api/desktop/jobs` (outbound), so it works behind NAT. Sign in inside the window; pairing is automatic.
 

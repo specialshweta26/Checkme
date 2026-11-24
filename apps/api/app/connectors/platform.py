@@ -76,7 +76,7 @@ LOCAL_COMPUTER_TOOLS = [
     ),
     ToolSpec(
         name="exec",
-        description="Run a shell command on this computer. The user approves each command in a prompt on this computer; need=shell_approval means it did not run. Do not use this to read files.",
+        description="Run a shell command on this computer. It runs directly (if the user turned on asking first, need=shell_approval means they said no and it did not run). Do not use this to read files.",
         input_schema={
             "type": "object",
             "properties": {
@@ -92,7 +92,7 @@ LOCAL_COMPUTER_TOOLS = [
     ),
     ToolSpec(
         name="run_code",
-        description="Run a Python snippet on this computer. The user approves each run in a prompt on this computer.",
+        description="Run a Python snippet on this computer. It runs directly (if the user turned on asking first, need=shell_approval means it did not run).",
         input_schema={
             "type": "object",
             "properties": {"code": {"type": "string"}, "timeout": {"type": "integer"}},

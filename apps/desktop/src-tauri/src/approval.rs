@@ -1,4 +1,6 @@
-//! Shell and Python run only after the user says yes in a native dialog on this computer.
+//! Shell and Python run directly by default: the user chose not to be asked. With asking turned on
+//! (`LUMIO_ASK_BEFORE_RUN=1`, or an `ask-before-running` file in Lumio's data folder) they run only after the user says
+//! yes in a native dialog on this computer.
 //! The dialog is native, not part of the web page, so the page (or anything injected into it) cannot answer it.
 //! "Allow until Lumio quits" (macOS) is kept in memory only; quitting the app asks again.
 
@@ -46,8 +48,27 @@ pub fn message(kind: &str, body: &str, dir: &str) -> String {
     )
 }
 
+#[cfg(test)]
+pub static TEST_ASKING: AtomicBool = AtomicBool::new(true);
+
+/// Whether shell and Python ask first. Off unless the user turned it on.
+pub fn asking() -> bool {
+    #[cfg(test)]
+    {
+        return TEST_ASKING.load(Ordering::SeqCst);
+    }
+    #[allow(unreachable_code)]
+    {
+        std::env::var("LUMIO_ASK_BEFORE_RUN").map(|v| v.trim() == "1").unwrap_or(false)
+            || crate::grants::data_dir().join("ask-before-running").exists()
+    }
+}
+
 /// Ok(()) to run. Err is the tool result to send back instead.
 pub async fn approve(kind: &str, body: &str, dir: &str) -> Result<(), Value> {
+    if !asking() {
+        return Ok(());
+    }
     if SESSION.load(Ordering::SeqCst) {
         return Ok(());
     }
