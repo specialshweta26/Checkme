@@ -252,6 +252,8 @@ class Settings(BaseSettings):
     browser_escalate_model: str = ""  # model after repeated failures; empty = OPENAI_MODEL
     browser_fast_max_steps: int = 12  # model rounds per browser_task
     browser_replay: bool = True  # save successful browser_task runs and replay them without model calls
+    big_table_rows: int = 20000  # a paged table bigger than this comes back as a sample first (docs/LLD.md "Big tables")
+    table_file_rows: int = 3000  # a fetched table with more rows than this goes to a file on the computer
     lean_context: bool = True  # scope tool schemas to the turn, shorten old long history (docs/LLD.md "Lean context")
     mcp_session_reuse: bool = True  # keep one MCP session per connector for a whole turn (docs/LLD.md "MCP sessions per turn")
     data_integrity: bool = True  # refuse scaled, hidden or invented figures (agent/integrity.py)

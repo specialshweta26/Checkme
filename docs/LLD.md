@@ -954,6 +954,23 @@ The gateway showed the data while Lumio answered without it, or spent extra mode
   `public_name` / `public_tool_name`. `approval.nested_actions` reads those too; before, a plain read such as
   `get_daily_sales` asked for approval because its name wasn't seen.
 
+### Big tables
+
+"Product-wise sales across two channels, November MTD" hit a 104,255-row table, and Lumio read every page through
+the turn before the model could start. Other agent harnesses (Claude, Cursor) work differently. A large tool result
+is saved to a file, the model sees a preview and the path, and it writes a script, runs it with its code tool, and
+answers from the output. Lumio now does the same:
+- **Sample first, narrowed at the source:** when a paged table's first page says it has more than `BIG_TABLE_ROWS`
+  rows (20,000 by default), nothing more is read. The agent gets the sample rows, the total, and the tool's
+  parameters, and is told to call again with the tool's own filters for what was asked (brand, channel, store,
+  dates...). Calling again with the same arguments reads the whole table. A sample is never cached as an answer.
+- **The rows go to a file on the computer:** a fetched table with more than `TABLE_FILE_ROWS` rows (3,000), or too
+  big to read inline (`INLINE_RESULT_CHARS`), is written as JSON to `lumio_data/…` on the user's computer. The model
+  gets the path, the row count, the columns (or "arrays: read each position from sample_rows"), eight sample rows,
+  and how to load it. It writes one Python script that computes exactly what was asked, runs it with `run_code`,
+  and answers from its output. `aggregate_result` still works on the stored result. Without a computer, the table
+  comes back as before.
+
 ### Paged tables
 
 A data tool answered "SIS sales, November MTD" as a table of 8,999 rows, 27 unnamed columns each, a page at a time

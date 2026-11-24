@@ -1861,6 +1861,85 @@ async def _shorter_windows(ctx: RunContext, conn, tool_name: str, args: dict, re
     return split
 
 
+def _big_table_sample(ctx: RunContext, slug: str, tool_name: str, args: dict, result: Any, hit) -> dict | None:
+    """The first page of a big paged table, as a sample, instead of reading every page at once (docs/LLD.md
+    "Big tables"). The agent learns the columns from it and narrows the call with the tool's own filters (brand,
+    channel, dates...) so far fewer rows come back. Calling again with the same arguments reads the whole table."""
+    from app.agent import tables
+    from app.agent.approval import canonical_args
+
+    if not tables.is_paged(result):
+        return None
+    total = next((result.get(k) for k in ("totalRows", "total_rows", "total", "totalCount", "total_count")
+                  if isinstance(result.get(k), int) and not isinstance(result.get(k), bool)), None)  # fmt: skip
+    limit = int(getattr(get_settings(), "big_table_rows", 20000) or 0)
+    if not total or not limit or total <= limit:
+        return None
+    key = ("__big__", slug, tool_name, canonical_args(args))
+    if ctx.gateway_args.get(key):
+        return None  # asked again with the same arguments: it can't be narrowed, so read it all
+    ctx.gateway_args[key] = True
+    rows_key = tables._rows_key(result) or "data"
+    params = brief_schema(getattr(hit, "schema", None)) if hit is not None else None
+    if params is None:
+        from app.agent import approval
+
+        action = next((a for a in approval.nested_actions(tool_name, args) if a != tool_name), None)
+        known = ctx.gateway_args.get((slug, action)) if action else None
+        params = brief_schema((known or {}).get("schema")) if known else None
+    return {
+        "big_table": True, "total_rows": total, "sample_rows": (result.get(rows_key) or [])[:8], "rows_key": rows_key,
+        **({"parameters": params} if params else {}),
+        **{k: v for k, v in result.items() if k not in {rows_key} and not isinstance(v, (list, dict))},
+        "next": (f"This table has {total} rows; only a sample is shown, nothing was read beyond it. Work out the columns from "
+                 "sample_rows and the tool's description. If the user's request names something the tool can filter on "
+                 "(a brand, channel, store, category, dates...), call it again with those filters so only those rows come "
+                 "back. If it can't be narrowed, call it again with exactly the same arguments: the whole table is then read "
+                 "into a file on the computer, and you compute the answer with a Python script (run_code)."),
+    }  # fmt: skip
+
+
+async def _table_to_computer(ctx: RunContext, slug: str, tool_name: str, rid: str, result: Any) -> dict | None:
+    """A fetched table too big for the model goes into a JSON file on the user's computer, and the model gets its path,
+    row count, columns and sample rows, to compute the answer with a script there (docs/LLD.md "Big tables")."""
+    from app.agent import computer_harness as computer, tables
+
+    rows = tables.find_rows(result)
+    limit = int(getattr(get_settings(), "table_file_rows", 3000) or 0)
+    # Like other agent harnesses: a result too big to read inline goes to a file, by rows or by size.
+    many_rows = bool(limit) and len(rows) > limit
+    too_big = _json_size(result) > INLINE_RESULT_CHARS
+    if not rows or not (many_rows or too_big) or not computer.computer_slug(ctx):
+        return None
+    safe = re.sub(r"[^a-zA-Z0-9_-]+", "_", tool_name)[-60:]
+    path = f"lumio_data/{safe}_{rid}_{int(_time.time())}.json"
+    try:
+        body = json.dumps(result, default=str).encode()
+        written = await computer.write_bytes(ctx, path, body)
+    except Exception:  # noqa: BLE001 - without the computer the model gets the table as before
+        log.info("writing %s to the computer failed", tool_name, exc_info=True)
+        return None
+    if not isinstance(written, dict) or written.get("error") or written.get("ok") is False:
+        log.info("writing %s to the computer failed: %s", tool_name, str(written)[:200])
+        return None
+    where = str(written.get("path") or path)
+    rows_key = tables._rows_key(result) if isinstance(result, dict) else None
+    columns = list(rows[0].keys()) if rows and isinstance(rows[0], dict) else None
+    load = f"json.load(open({where!r}))" + (f"[{rows_key!r}]" if rows_key else "")
+    if ctx.progress is not None:
+        await ctx.progress.emit(f"Saved {len(rows)} rows to the computer for analysis", kind="tool", tool=tool_name)
+    return {
+        "saved_to_computer": where, "rows": len(rows), "result_id": rid,
+        **({"columns": columns} if columns else {"columns": "rows are arrays: read each position's meaning from sample_rows"}),
+        "sample_rows": rows[:8],
+        **{k: v for k, v in (result.items() if isinstance(result, dict) else []) if not isinstance(v, (list, dict))},
+        "next": (f"All {len(rows)} rows are in {where} on the computer. Write one Python script that loads them "
+                 f"(rows = {load}), computes exactly what the user asked (filters, group-bys, totals, top items), and "
+                 "prints a compact result; run it with run_code and answer from its output. Don't read the rows "
+                 "yourself. aggregate_result with result_id also adds up simple totals."),
+    }  # fmt: skip
+
+
 async def _read_all_pages(ctx: RunContext, conn, tool_name: str, args: dict, result: Any) -> Any:
     """A table answered a page at a time: fetch the remaining pages and merge their rows (docs/LLD.md "Paged tables")."""
     from app.agent import tables
@@ -2421,7 +2500,10 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
                 result = await invoke_named(ctx.db, ctx.user, conn, tool_name, args, ctx.attachments)
                 timing = {"connector": connector_slug, "tool": tool_name, "first_ms": int((_time.monotonic() - _t0) * 1000),
                           "prep_ms": int((_t0 - _entered) * 1000)}
-                if _is_user_mcp(conn):
+                sample = _big_table_sample(ctx, connector_slug, tool_name, args, result, hit) if _is_user_mcp(conn) else None
+                if sample is not None:
+                    result = sample  # learn the columns and narrow at the source before reading every row
+                elif _is_user_mcp(conn):
                     result = await _read_all_pages(ctx, conn, tool_name, args, result)
                     if isinstance(result, dict) and result.get("pages_fetched"):
                         timing["pages"] = result["pages_fetched"]
@@ -2442,7 +2524,7 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
             words = source_limit.said(result) if _is_user_mcp(conn) else None
             if words:
                 return await source_limit.mark(ctx.user, connector_slug, words)
-            if cacheable:
+            if cacheable and not (isinstance(result, dict) and result.get("big_table")):  # a sample is not the answer
                 await read_cache.put(ctx.user.id, connector_slug, tool_name, args, result,
                                      ttl=read_cache.ttl_for(args, getattr(ctx.user, "timezone", None)))  # fmt: skip
         # One approval, one action: running the same thing again needs a new card.
@@ -2470,7 +2552,11 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
             payload_limit = BROWSER_PAGE_CHARS
         else:
             payload_limit = CONNECTOR_RESULT_CHARS
-        payload = compact_payload(result, payload_limit) if tool_name in BROWSER_PAGE_TOOLS else fit_payload(result, payload_limit)
+        on_computer = await _table_to_computer(ctx, connector_slug, tool_name, rid, result) if _is_user_mcp(conn) else None
+        if on_computer is not None:
+            payload = on_computer  # the rows are in a file on the computer: a script there computes the answer
+        else:
+            payload = compact_payload(result, payload_limit) if tool_name in BROWSER_PAGE_TOOLS else fit_payload(result, payload_limit)
         if isinstance(payload, dict) and (payload.get("too_large") or payload.get("partial")):
             payload["result_id"] = rid
             if ctx.call_timings and ctx.call_timings[-1].get("tool") == tool_name:
