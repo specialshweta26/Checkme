@@ -109,6 +109,9 @@ async def _migrate() -> None:
         conn = _GuardedConn(raw, columns, indexes)
         await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS suspended_at TIMESTAMPTZ"))
         await conn.execute(text("ALTER TABLE model_choices ADD COLUMN IF NOT EXISTS tier VARCHAR(20) DEFAULT ''"))
+        # Reasoning per choice, also for Lumio's own model (a choice without a key) (docs/LLD.md "Reasoning").
+        await conn.execute(text("ALTER TABLE model_choices ADD COLUMN IF NOT EXISTS reasoning VARCHAR(20) DEFAULT ''"))
+        await conn.execute(text("ALTER TABLE model_choices ALTER COLUMN key_id DROP NOT NULL"))
         await conn.execute(text("ALTER TABLE connectors ADD COLUMN IF NOT EXISTS description TEXT DEFAULT ''"))
         await conn.execute(text("ALTER TABLE inbox_items ADD COLUMN IF NOT EXISTS to_header VARCHAR(1000) DEFAULT ''"))
         await conn.execute(text("ALTER TABLE inbox_items ADD COLUMN IF NOT EXISTS cc_header VARCHAR(1000) DEFAULT ''"))

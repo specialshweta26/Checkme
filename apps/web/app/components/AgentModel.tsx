@@ -2,18 +2,18 @@
 
 import { useEffect, useState } from "react";
 import { apiError, type WorkspaceAgent } from "../lib";
-import { CapsLine, TierSelect, capsText, type Caps, type Tier } from "./ModelCaps";
+import { CapsLine, ReasoningSelect, TierSelect, capsText, type Caps, type Tier } from "./ModelCaps";
 
 // The agent's own model (docs/LLD.md "Model gateway", phase 3), in its About panel: one of the user's saved keys and a
 // model on it, or "Same as your default" (the Models page choice, else Lumio's). Keys are added on /models.
 
 type Key = { id: string; provider: string; label: string; hint: string; runs: boolean; status: string; models: string[]; caps: Record<string, Caps> };
-type Choice = { key_id: string; model: string; tier?: string };
-type Overview = { keys: Key[]; choices: { agent?: Choice }; agents: Record<string, { agent?: Choice }>; lumio: { agent: string }; tiers: Tier[] };
+type Choice = { key_id: string; model: string; tier?: string; reasoning?: string };
+type Overview = { keys: Key[]; choices: { agent?: Choice }; agents: Record<string, { agent?: Choice }>; lumio: { agent: string }; tiers: Tier[]; reasoning?: Tier[] };
 
 export function AgentModel({ agent }: { agent: WorkspaceAgent }) {
   const [data, setData] = useState<Overview | null>(null);
-  const [draft, setDraft] = useState<Choice>({ key_id: "", model: "", tier: "" });
+  const [draft, setDraft] = useState<Choice>({ key_id: "", model: "", tier: "", reasoning: "" });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -21,7 +21,7 @@ export function AgentModel({ agent }: { agent: WorkspaceAgent }) {
   function fill(d: Overview) {
     setData(d);
     const own = d.agents?.[agent.id]?.agent;
-    setDraft({ key_id: own?.key_id || "", model: own?.model || "", tier: own?.tier || "" });
+    setDraft({ key_id: own?.key_id || "", model: own?.model || "", tier: own?.tier || "", reasoning: own?.reasoning || "" });
   }
 
   useEffect(() => {
@@ -42,7 +42,11 @@ export function AgentModel({ agent }: { agent: WorkspaceAgent }) {
   const own = data?.agents?.[agent.id]?.agent;
   const fallback = data?.choices?.agent;
   const fallbackName = fallback ? `${fallback.model} on ${data?.keys.find((k) => k.id === fallback.key_id)?.label || "your key"}` : `Lumio's ${data?.lumio.agent || "model"}`;
-  const dirty = (own?.key_id || "") !== draft.key_id || (own?.model || "") !== draft.model || (own?.tier || "") !== (draft.tier || "");
+  const dirty =
+    (own?.key_id || "") !== draft.key_id ||
+    (own?.model || "") !== draft.model ||
+    (own?.tier || "") !== (draft.tier || "") ||
+    (own?.reasoning || "") !== (draft.reasoning || "");
   const caps = key && draft.model ? key.caps?.[draft.model] : undefined;
   const blocked = caps?.tools === false;
 
@@ -55,7 +59,13 @@ export function AgentModel({ agent }: { agent: WorkspaceAgent }) {
         method: "PUT",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ key_id: draft.key_id || null, model: draft.model, agent_id: agent.id, tier: key?.provider === "openai" ? draft.tier || "" : "" }),
+        body: JSON.stringify({
+          key_id: draft.key_id || null,
+          model: draft.model,
+          agent_id: agent.id,
+          tier: key?.provider === "openai" ? draft.tier || "" : "",
+          reasoning: draft.reasoning || "",
+        }),
       });
       const d = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(apiError(d, "Couldn't save the model."));
@@ -126,6 +136,12 @@ export function AgentModel({ agent }: { agent: WorkspaceAgent }) {
             </span>
           </label>
         ) : null}
+        <label>
+          <span>Reasoning</span>
+          <span className="limits-input">
+            <ReasoningSelect levels={data?.reasoning || []} value={draft.reasoning || ""} disabled={busy} onChange={(reasoning) => setDraft({ ...draft, reasoning })} />
+          </span>
+        </label>
         <button className="btn small" type="submit" disabled={busy || !dirty || blocked || (!!draft.key_id && !draft.model.trim())}>
           {busy ? "Saving…" : "Save model"}
         </button>

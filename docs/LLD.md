@@ -954,6 +954,34 @@ The gateway showed the data while Lumio answered without it, or spent extra mode
   `public_name` / `public_tool_name`. `approval.nested_actions` reads those too; before, a plain read such as
   `get_daily_sales` asked for approval because its name wasn't seen.
 
+### Reasoning
+
+Every model choice on the Models page, and each agent's own, now has a **Reasoning** level: Default, Off, Low, Medium or
+High (`ModelChoice.reasoning`, `ModelSpec.reasoning`, `llm_gateway.REASONING`). It applies to every provider:
+- **OpenAI:** the Responses API `reasoning.effort`. A model that refused an effort before keeps the one it accepts.
+- **Anthropic:** extended thinking with a token budget per level (`THINKING_BUDGET`: 2k / 8k / 24k), and the answer's
+  token limit raised above it.
+- **OpenAI-compatible providers:** `reasoning_effort`, which a model without reasoning ignores.
+
+Lumio's own model can carry a level too: such a choice has no key (`key_id` NULL) and keeps Lumio's model and billing.
+Default keeps Lumio's setting.
+
+### Data turns
+
+The agent runs with reasoning off (`REASONING_EFFORT`, usually "none") so quick answers stay quick. On data questions
+it took the first tool result as final: a tool that ignored the date filter gave "not verified". Now:
+- **More reasoning once data work starts:** after the turn's first data tool call (`search_tools`, `call_tool`,
+  `get_tool_schema`, `inspect_result`, `aggregate_result`, `table_to_computer`), its later model calls get
+  `DATA_REASONING_EFFORT` ("medium"; "" turns it off). This happens per call through the agent's model settings
+  (`app/agent/data_reasoning.py`). A user's own Reasoning choice is never overridden.
+- **`table_to_computer`:** one call reads a data tool's whole table, every page or window, into files on the computer
+  (`ctx.force_full_table`: no sample first, saved even when small). The agent then computes with one script via
+  `run_code`. The notes on samples and ignored dates point to it.
+- **A data playbook in the prompt:** find the tool with the user's own words, looking at the connector's other tools
+  and dataset listings when the matches don't fit; probe it with a small call to see its columns and whether it
+  honours the filters; narrow at the source; else `table_to_computer` plus a script. Try another tool or approach
+  before ever answering "not verified", and say what the data covers when it lags.
+
 ### Big tables
 
 "Product-wise sales across two channels, November MTD" hit a 104,255-row table, and Lumio read every page through

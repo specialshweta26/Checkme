@@ -37,6 +37,7 @@ class ModelSpec:
     purpose: str = "agent"
     source: str = PLATFORM  # platform | user | team | agent: whose setting chose this
     tier: str = ""  # OpenAI service tier the user picked ("" = standard); see tier_for
+    reasoning: str = ""  # reasoning level the user picked ("" = Lumio's default); see REASONING
 
     @property
     def is_openai(self) -> bool:
@@ -181,6 +182,11 @@ def effort_for(model: str | None = None) -> str:
     return (get_settings().openai_reasoning_effort or "").strip() or "none"
 
 
+def learned_effort(model: str | None = None) -> str:
+    """The effort ``model`` was found to accept after refusing Lumio's, or "" if it never refused one."""
+    return _EFFORT.get((model or "").strip(), "")
+
+
 def reasoning_for(model: str | None = None) -> dict[str, str] | None:
     """The Responses API ``reasoning`` field for ``model``, or None to leave it out."""
     effort = effort_for(model)
@@ -217,6 +223,16 @@ def learn_effort(model: str | None, exc: BaseException) -> bool:  # noqa: C901
 # busy), Fast ("priority") and Ultrafast. Lumio's own key always runs on Standard. Batch isn't offered: it answers
 # within hours, which no chat can wait for.
 TIERS = {"": "Standard", "flex": "Flex", "priority": "Fast", "ultrafast": "Ultrafast"}
+# Reasoning a user can pick for any model (docs/LLD.md "Reasoning"): OpenAI's effort, Anthropic's extended thinking
+# (a token budget), and reasoning_effort on OpenAI-compatible providers (ignored by a model without it).
+REASONING = {"": "Default", "none": "Off", "low": "Low", "medium": "Medium", "high": "High"}
+THINKING_BUDGET = {"low": 2048, "medium": 8192, "high": 24000}
+
+
+def picked_reasoning(spec: "ModelSpec | None") -> str:
+    """The reasoning level the user picked for this model, or "" for Lumio's default."""
+    level = (getattr(spec, "reasoning", "") or "").strip().lower()
+    return level if level in REASONING else ""
 TIER_BACKOFF_SECONDS = 600
 _TIER_OFF: dict[tuple[str, str], float] = {}  # (model, tier) -> until when Standard is used instead
 _TIER_REFUSED = re.compile(r"service[_ ]tier|resource unavailable|flex|priority|ultrafast", re.I)
@@ -261,6 +277,11 @@ def chat_model(spec: ModelSpec, *, cache_key: str = "", streaming: bool = False,
 
         kwargs: dict[str, Any] = {"model": spec.model, "api_key": spec.api_key, "timeout": timeout, "max_retries": 1,
                                   "max_tokens": max_tokens or AGENT_MAX_TOKENS}  # fmt: skip
+        budget = THINKING_BUDGET.get(picked_reasoning(spec))
+        if budget:
+            # Extended thinking: the answer's token limit must leave room above the thinking budget.
+            kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
+            kwargs["max_tokens"] = max(int(kwargs["max_tokens"]), budget + 4096)
         if streaming:
             kwargs["streaming"] = True
         return ChatAnthropic(**kwargs)
@@ -271,6 +292,8 @@ def chat_model(spec: ModelSpec, *, cache_key: str = "", streaming: bool = False,
             raise UnsupportedProvider(f"{spec.provider} needs its API address")
         kwargs = {"model": spec.model, "api_key": spec.api_key, "base_url": spec.base_url, "timeout": timeout,
                   "max_retries": 1, "use_responses_api": False}  # fmt: skip
+        if picked_reasoning(spec) and picked_reasoning(spec) != "none":
+            kwargs["reasoning_effort"] = picked_reasoning(spec)
         if max_tokens:
             kwargs["max_tokens"] = max_tokens
         if streaming:
@@ -282,6 +305,10 @@ def chat_model(spec: ModelSpec, *, cache_key: str = "", streaming: bool = False,
 
     effort = effort_for(spec.model)
     reasoning = reasoning_for(spec.model)
+    picked = picked_reasoning(spec)
+    if picked and reasoning is not None and not learned_effort(spec.model):
+        effort = picked
+        reasoning = {"effort": "none"} if picked == "none" else {"effort": picked, "summary": "auto"}
     base: dict[str, Any] = {"model": spec.model, "api_key": spec.api_key, "timeout": timeout, "max_retries": 1}
     if spec.base_url:
         base["base_url"] = spec.base_url

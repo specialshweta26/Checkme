@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { AppShell } from "../components/AppShell";
-import { CapsLine, TierSelect, capsText, type Caps, type Tier } from "../components/ModelCaps";
+import { CapsLine, ReasoningSelect, TierSelect, capsText, type Caps, type Tier } from "../components/ModelCaps";
 import { IconLock, IconModel, IconPlus } from "../components/ProfileIcons";
 import { apiError, getMe, loadWorkspace, relativeTime, type Me, type WorkspaceAgent } from "../lib";
 
@@ -26,7 +26,7 @@ type SavedKey = {
   caps: Record<string, Caps>;
   checked_at: string | null;
 };
-type Choice = { key_id: string; model: string; tier?: string };
+type Choice = { key_id: string; model: string; tier?: string; reasoning?: string };
 type Overview = {
   providers: Provider[];
   keys: SavedKey[];
@@ -34,9 +34,10 @@ type Overview = {
   agents: Record<string, Partial<Record<"agent" | "small", Choice>>>;
   lumio: { agent: string; small: string };
   tiers: Tier[];
+  reasoning?: Tier[];
 };
 type Form = { provider: string; api_key: string; label: string; base_url: string };
-type Draft = { key_id: string; model: string; tier: string };
+type Draft = { key_id: string; model: string; tier: string; reasoning: string };
 
 const PURPOSES: { key: "agent" | "small"; title: string; body: string }[] = [
   { key: "agent", title: "Agent replies", body: "The model that reads your request, uses tools and writes the answer." },
@@ -67,7 +68,13 @@ export default function ModelsPage() {
   function show(next: Overview) {
     setData(next);
     const d: Record<string, Draft> = {};
-    for (const p of PURPOSES) d[p.key] = { key_id: next.choices[p.key]?.key_id || "", model: next.choices[p.key]?.model || "", tier: next.choices[p.key]?.tier || "" };
+    for (const p of PURPOSES)
+      d[p.key] = {
+        key_id: next.choices[p.key]?.key_id || "",
+        model: next.choices[p.key]?.model || "",
+        tier: next.choices[p.key]?.tier || "",
+        reasoning: next.choices[p.key]?.reasoning || "",
+      };
     setDrafts(d);
   }
 
@@ -136,8 +143,18 @@ export default function ModelsPage() {
     run(async () => {
       const d = drafts[purpose];
       const key = keys.find((k) => k.id === d.key_id);
-      show(await call(`/api/models/choices/${purpose}`, { method: "PUT", body: JSON.stringify({ key_id: d.key_id || null, model: d.model, tier: key?.provider === "openai" ? d.tier : "" }) }));
-      setNotice(d.key_id ? `Your agents now use ${d.model} on ${keyName(d.key_id)} for ${purpose === "agent" ? "replies" : "background work"}.` : "Back on Lumio's model.");
+      show(
+        await call(`/api/models/choices/${purpose}`, {
+          method: "PUT",
+          body: JSON.stringify({ key_id: d.key_id || null, model: d.model, tier: key?.provider === "openai" ? d.tier : "", reasoning: d.reasoning }),
+        }),
+      );
+      const thinking = d.reasoning ? ` with ${d.reasoning === "none" ? "no extra" : d.reasoning} reasoning` : "";
+      setNotice(
+        d.key_id
+          ? `Your agents now use ${d.model} on ${keyName(d.key_id)}${thinking} for ${purpose === "agent" ? "replies" : "background work"}.`
+          : `On Lumio's model${thinking || " with its default reasoning"}.`,
+      );
     });
 
   const recheck = (k: SavedKey) =>
@@ -182,10 +199,11 @@ export default function ModelsPage() {
           </div>
           <div className="vault-list models-choices">
             {PURPOSES.map((p) => {
-              const d = drafts[p.key] || { key_id: "", model: "", tier: "" };
+              const d = drafts[p.key] || { key_id: "", model: "", tier: "", reasoning: "" };
               const key = keys.find((k) => k.id === d.key_id);
               const current = data?.choices[p.key];
-              const changed = (current?.key_id || "") !== d.key_id || (current?.model || "") !== d.model || (current?.tier || "") !== d.tier;
+              const changed =
+                (current?.key_id || "") !== d.key_id || (current?.model || "") !== d.model || (current?.tier || "") !== d.tier || (current?.reasoning || "") !== d.reasoning;
               const caps = key && d.model ? key.caps?.[d.model] : undefined;
               const blocked = p.key === "agent" && caps?.tools === false;
               return (
@@ -201,7 +219,7 @@ export default function ModelsPage() {
                       disabled={busy}
                       onChange={(e) => {
                         const k = keys.find((x) => x.id === e.target.value);
-                        setDrafts({ ...drafts, [p.key]: { key_id: e.target.value, model: k?.models.includes(d.model) ? d.model : "", tier: k?.provider === "openai" ? d.tier : "" } });
+                        setDrafts({ ...drafts, [p.key]: { key_id: e.target.value, model: k?.models.includes(d.model) ? d.model : "", tier: k?.provider === "openai" ? d.tier : "", reasoning: d.reasoning } });
                       }}
                     >
                       <option value="">Lumio's ({data?.lumio[p.key] || "default"})</option>
@@ -235,6 +253,10 @@ export default function ModelsPage() {
                     ) : (
                       <em className="models-caps">{d.key_id ? "Set by the provider." : "Standard."}</em>
                     )}
+                  </label>
+                  <label className="vault-field">
+                    <span>Reasoning</span>
+                    <ReasoningSelect levels={data?.reasoning || []} value={d.reasoning} disabled={busy} onChange={(reasoning) => setDrafts({ ...drafts, [p.key]: { ...d, reasoning } })} />
                   </label>
                   <button className="btn small" type="button" disabled={busy || !changed || blocked || (!!d.key_id && !d.model.trim())} onClick={() => choose(p.key)}>
                     Save

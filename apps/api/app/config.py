@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-6-luna"
     openai_embedding_model: str = "text-embedding-3-small"
     openai_reasoning_effort: str = "none"
+    data_reasoning_effort: str = "medium"  # once a turn works with connector data (docs/LLD.md "Data turns"); "" turns it off
     # Model for background and routing calls (memory, skill matching, browser planning). Empty = OPENAI_MODEL.
     openai_small_model: str = ""
     embedding_dims: int = 1536
