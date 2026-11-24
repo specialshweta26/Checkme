@@ -906,6 +906,22 @@ A schema without properties, or one that allows extra names, is never blocked. G
 way against their catalog's parameters (`check_gateway_args`). If an answer still covers a wider period than the
 dates sent (`mcp_client.ignored_dates`), the agent is told so, with the real parameter names when they're known.
 
+### Argument repair
+
+A gateway doesn't reject an argument name it doesn't know: it answers for its defaults. Live (24 Nov 2026), "One8
+sales today" sent `from_date`/`to_date` (another source's names) to an action that takes `start`/`end`. It got 30
+days back, the agent was told the dates were ignored, and it gave up, because this gateway's catalog lists no
+parameters and the note had none to offer. Now (`app/agent/arg_repair.py`, `deep._repair_args`):
+- **Caught for any argument:** a wider period than the dates sent, or a filter the answer echoes under another
+  name with another value (`brand_name: One8` sent, `brand: all` back). A count that shares a word with a filter
+  (`category_count`) is not taken for it.
+- **Renamed and asked once more:** each ignored argument gets the name the source uses: from the catalog's parameters,
+  else from what the answer reports about itself (`window.start`), else from names the action's description mentions.
+  One day sent as `date` becomes `start` and `end`. Only names change, never values, so approval is unaffected.
+- **Kept when it worked:** if the second answer matches what was asked, it is the one used, with a `_lumio_note`, and
+  the names are kept for that user and action for 30 days (`arg-names:` in Redis), so the next call goes out right.
+  A rename that didn't help is not kept, and the agent is told, with the names the answer itself uses.
+
 ### Gateway execution
 
 Other MCP clients call a gateway's listed tool directly (`tools/call` on `<server>__<tool>`). Lumio sent the call
