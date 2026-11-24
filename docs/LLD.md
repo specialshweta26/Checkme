@@ -995,6 +995,16 @@ read the first page only, and the model could not add up thousands of rows itsel
   search shows them first as `gateway_advice` and `recommended`, and the `trace_id` goes on the execute call when
   execute takes one.
 
+**Tables filtered inside windows.** Some tools apply a filter (a `search`, say) inside fixed windows: `offset` /
+`limit` step through the whole table and only each window's matches come back. A page can be short or empty while
+`hasMore` is still true, and its `totalRows` counts that window's matches, not the table. Asked for 3 rows from
+offset 0, one such tool returned none with `hasMore: true`. Lumio stopped at the first empty page and took
+`totalRows` as the total, so it missed most of the rows. `tables.windowed` now tells such a page apart by its own
+fields: it asked for `limit` rows, got fewer, and says more follow. For such a table the offset steps by the window,
+empty windows are passed over, reading stops at the first window that says nothing follows, and `totalRows` becomes
+the real count. Windows are read several at a time inside Lumio, with no model calls; only matching rows are kept. A
+tool that caps windows lower is followed at its size.
+
 ### Tool search speed
 
 Reply times on live data-analysis turns showed `search_tools` 4–9 times per reply at 4–7 s each, and
