@@ -77,12 +77,14 @@ def windowed(page: Any) -> bool:
     return bool(key and limit) and len(page.get(key) or []) < limit
 
 
-async def _windowed_pages(first: dict, args: dict, call, max_pages: int, max_rows: int, page_rows: int, concurrency: int) -> dict:
+async def _windowed_pages(first: dict, args: dict, call, max_pages: int, max_rows: int, page_rows: int, concurrency: int,
+                          spool: "SpoolRows | None" = None) -> dict:
     """Every window of a window-filtered table (see ``windowed``): the offset steps by the window, empty windows are
     passed over, and reading stops at the first window that says nothing follows. Windows are read several at a time
     and merged in order, so the rows are the same as reading one by one."""
     key = _rows_key(first) or "data"
-    rows = list(first.get(key) or [])
+    rows: Any = spool if spool is not None else []
+    rows.extend(first.get(key) or [])
     start = _num(first, ("offset",)) or 0
     window = max(_num(first, ("limit",)) or 1, page_rows)
     at = start + (_num(first, ("limit",)) or 0)
@@ -117,7 +119,7 @@ async def _windowed_pages(first: dict, args: dict, call, max_pages: int, max_row
                 more = False
                 break
     cut = more and (pages >= max_pages or len(rows) >= max_rows)
-    merged = {**first, key: rows[:max_rows], "returnedRows": min(len(rows), max_rows), "offset": start, "pages_fetched": pages,
+    merged = {**first, key: list(rows[:max_rows]), "returnedRows": min(len(rows), max_rows), "offset": start, "pages_fetched": pages,
               "windowed": True}  # fmt: skip
     for k in _TOTAL:
         if k in merged:
@@ -130,7 +132,58 @@ async def _windowed_pages(first: dict, args: dict, call, max_pages: int, max_row
     return merged
 
 
-async def all_pages(first: Any, args: dict, call: Callable[[dict], Awaitable[Any]]) -> Any:
+class SpoolRows:
+    """Rows of a table being read, kept in memory while small; past ``keep`` rows every page goes to ``write(part, rows)``
+    (a file on the computer) and is dropped, so a 100,000-row table never sits in the server's memory. Behaves like the
+    list ``all_pages`` builds: ``extend``, ``len`` and slicing (which then sees the sample rows)."""
+
+    SAMPLE = 8
+
+    def __init__(self, write: Callable[[int, list], Awaitable[Any]], keep: int):
+        self.write, self.keep = write, keep
+        self.buffer: list = []
+        self.sample: list = []
+        self.count = 0
+        self.parts = 0
+        self.tasks: list = []
+        self.spilled = False
+
+    def _spill(self, rows: list) -> None:
+        self.parts += 1
+        self.tasks.append(asyncio.ensure_future(self.write(self.parts, rows)))
+
+    def extend(self, rows: Any) -> None:
+        rows = list(rows or [])
+        if not rows:
+            return
+        if len(self.sample) < self.SAMPLE:
+            self.sample.extend(rows[: self.SAMPLE - len(self.sample)])
+        self.count += len(rows)
+        if self.spilled:
+            self._spill(rows)
+            return
+        self.buffer.extend(rows)
+        if len(self.buffer) > self.keep:
+            self.spilled = True
+            held, self.buffer = self.buffer, []
+            self._spill(held)
+
+    def __len__(self) -> int:
+        return self.count
+
+    def __getitem__(self, index: Any) -> Any:
+        return (self.buffer if not self.spilled else self.sample)[index]
+
+    def __iter__(self):
+        return iter(self.buffer if not self.spilled else self.sample)
+
+    async def flush(self) -> bool:
+        """Wait for every page to be written; False if any write failed."""
+        done = await asyncio.gather(*self.tasks, return_exceptions=True)
+        return not any(isinstance(r, BaseException) or (isinstance(r, dict) and (r.get("error") or r.get("ok") is False)) for r in done)
+
+
+async def all_pages(first: Any, args: dict, call: Callable[[dict], Awaitable[Any]], spool: "SpoolRows | None" = None) -> Any:
     """``first`` with every remaining page's rows added. ``args`` are the arguments of the first call (the paging
     parameters are set on them for each later page); ``call(args)`` runs the tool. Stops at the page and row limits.
 
@@ -143,9 +196,10 @@ async def all_pages(first: Any, args: dict, call: Callable[[dict], Awaitable[Any
         return first
     max_pages, max_rows, page_rows, concurrency = _limits()
     if windowed(first):
-        return await _windowed_pages(first, args, call, max_pages, max_rows, page_rows, concurrency)
+        return await _windowed_pages(first, args, call, max_pages, max_rows, page_rows, concurrency, spool)
     key = _rows_key(first)
-    rows = list(first.get(key) or [])
+    rows: Any = spool if spool is not None else []
+    rows.extend(first.get(key) or [])
     total = _num(first, _TOTAL)
     first_limit = _num(first, ("limit",))
     start = _num(first, ("offset",)) or 0
@@ -218,8 +272,9 @@ async def all_pages(first: Any, args: dict, call: Callable[[dict], Awaitable[Any
                 break
     # Stopped by the page or row limit while the table went on: say so, so the answer isn't taken as the whole table.
     cut = (more and step > 0 and (pages >= max_pages or len(rows) >= max_rows)) or (total is not None and len(rows) < total)
+    count = min(len(rows), max_rows)
     rows = rows[:max_rows]
-    merged = {**first, key: rows, "returnedRows": len(rows), "offset": start, "pages_fetched": pages}
+    merged = {**first, key: rows, "returnedRows": count, "offset": start, "pages_fetched": pages}
     for flag in _MORE:
         if flag in merged:
             merged[flag] = bool(cut)

@@ -70,8 +70,10 @@ async def test_a_narrowed_call_reads_every_page_into_a_file_on_the_computer(monk
     ctx, calls, files = _setup(monkeypatch, total=1200)
     out = await deep.call_user_tool(ctx, "gw", "srv__get_sku_daily", {"brand": "BrandA", "from_date": "2026-11-01"})
     assert out["rows"] == 1200 and out["saved_to_computer"].startswith("/home/user/lumio_data/")
-    saved = next(iter(files.values()))
-    assert len(saved["data"]) == 1200 and "run_code" in out["next"] and len(out["sample_rows"]) == 8
+    pages = [files[k] for k in sorted(files)]
+    assert sum(len(p) for p in pages) == 1200 and all(k.rsplit("/", 1)[1].startswith("part_") for k in files)
+    assert [r for p in pages for r in p] == [_row(i) for i in range(1200)]  # every row, in order
+    assert "run_code" in out["next"] and "glob" in out["next"] and len(out["sample_rows"]) == 8
     assert len(json.dumps(out)) < 5000  # the model gets the path and a sample, not the rows
 
 
@@ -105,3 +107,31 @@ async def test_a_few_very_wide_rows_go_to_a_file_too(monkeypatch):
     monkeypatch.setattr(deep, "invoke_named", invoke)
     out = await deep.call_user_tool(ctx, "gw", "srv__get_sku_daily", {"brand": "BrandA"})
     assert out["rows"] == 60 and out["saved_to_computer"] and out["columns"] == ["sku", "notes"]
+
+
+async def test_the_server_keeps_only_a_sample_once_a_table_spills_to_files():
+    from app.agent import tables
+
+    written = {}
+
+    async def write(part, rows):
+        written[part] = rows
+        return {"ok": True}
+
+    spool = tables.SpoolRows(write, keep=300)
+    for start in range(0, 5000, 500):
+        spool.extend([[i] for i in range(start, start + 500)])
+    assert await spool.flush() and spool.spilled and len(spool) == 5000
+    assert spool.buffer == [] and len(spool.sample) == 8 and len(list(spool)) == 8  # nothing else held in memory
+    assert [r for p in sorted(written) for r in written[p]] == [[i] for i in range(5000)]
+
+
+async def test_a_small_table_stays_in_memory_and_writes_nothing():
+    from app.agent import tables
+
+    async def write(part, rows):
+        raise AssertionError("must not write")
+
+    spool = tables.SpoolRows(write, keep=300)
+    spool.extend([[1], [2], [3]])
+    assert not spool.spilled and list(spool) == [[1], [2], [3]] and await spool.flush()

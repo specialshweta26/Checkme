@@ -971,6 +971,19 @@ answers from the output. Lumio now does the same:
   and answers from its output. `aggregate_result` still works on the stored result. Without a computer, the table
   comes back as before.
 
+**Page by page to files, not server memory.** Reading a 104,255-row table held every row in the API process (a 512 MB
+starter instance) along with its copies, and the chat that asked was cut off as if by an app update. Now
+`tables.SpoolRows` keeps a table in memory only while it is small (`TABLE_FILE_ROWS`). Past that, each page is
+written to `lumio_data/<tool>_<time>/part_NNNN.json` on the user's computer as it arrives and dropped from memory; the
+server keeps eight sample rows and a count. This applies to ordinary and windowed paging alike. The model gets the
+folder, the row count, the columns and how to load every part (`glob` + `json`), and computes the answer with one
+script via `run_code`. If a page fails to write, the reply says the files may be incomplete.
+
+**Ignored filters are not a dead end.** A tool can have no date or channel filter, or ignore one, and answer from its
+whole history. The agent used to stop at "can't verify". The notes on a sample and on ignored dates now say to read
+the whole table into files and filter in a script instead. That works whatever a tool documents, which is how
+another client answered the same question.
+
 ### Paged tables
 
 A data tool answered "SIS sales, November MTD" as a table of 8,999 rows, 27 unnamed columns each, a page at a time

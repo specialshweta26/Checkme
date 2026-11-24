@@ -1894,9 +1894,35 @@ def _big_table_sample(ctx: RunContext, slug: str, tool_name: str, args: dict, re
         "next": (f"This table has {total} rows; only a sample is shown, nothing was read beyond it. Work out the columns from "
                  "sample_rows and the tool's description. If the user's request names something the tool can filter on "
                  "(a brand, channel, store, category, dates...), call it again with those filters so only those rows come "
-                 "back. If it can't be narrowed, call it again with exactly the same arguments: the whole table is then read "
-                 "into a file on the computer, and you compute the answer with a Python script (run_code)."),
+                 "back. If it can't be narrowed (no such parameter, or the tool ignores it), call it again with exactly the "
+                 "same arguments: the whole table is then read into files on the computer, and you filter and compute the "
+                 "answer with a Python script (run_code). Never stop at 'can't verify' while that is possible."),
     }  # fmt: skip
+
+
+def _spooled_payload(ctx: RunContext, rid: str, result: dict) -> dict:
+    """What the model gets for a table written page by page to the computer: the folder, row count, columns, sample
+    rows and how to load every page in a script."""
+    from app.agent import tables
+
+    folder = str(result["saved_to_computer_dir"])
+    key = tables._rows_key(result)
+    sample = list(result.get(key) or [])[:8] if key else []
+    columns = list(sample[0].keys()) if sample and isinstance(sample[0], dict) else None
+    load = f"rows = [r for f in sorted(glob.glob({(folder + '/part_*.json')!r})) for r in json.load(open(f))]"
+    out = {
+        "saved_to_computer": folder, "rows": result.get("rows_saved"), "parts": result.get("parts"), "result_id": rid,
+        **({"columns": columns} if columns else {"columns": "rows are arrays: read each position's meaning from sample_rows"}),
+        "sample_rows": sample,
+        **{k: v for k, v in result.items() if not isinstance(v, (list, dict)) and k not in {"saved_to_computer_dir", "rows_saved", "parts"}},
+        "next": (f"All {result.get('rows_saved')} rows are in {result.get('parts')} JSON files in {folder} on the computer. Write one "
+                 f"Python script that loads them ({load}; import glob, json), filters and computes exactly what the user "
+                 "asked (dates, channel, store, top items, totals), and prints a compact result; run it with run_code and "
+                 "answer from its output. Don't read the rows yourself."),
+    }  # fmt: skip
+    if result.get("write_failed"):
+        out["warning"] = "Some pages could not be written to the computer, so the files may be incomplete: say so if it matters."
+    return out
 
 
 async def _table_to_computer(ctx: RunContext, slug: str, tool_name: str, rid: str, result: Any) -> dict | None:
@@ -1904,6 +1930,8 @@ async def _table_to_computer(ctx: RunContext, slug: str, tool_name: str, rid: st
     row count, columns and sample rows, to compute the answer with a script there (docs/LLD.md "Big tables")."""
     from app.agent import computer_harness as computer, tables
 
+    if isinstance(result, dict) and result.get("saved_to_computer_dir"):
+        return _spooled_payload(ctx, rid, result)
     rows = tables.find_rows(result)
     limit = int(getattr(get_settings(), "table_file_rows", 3000) or 0)
     # Like other agent harnesses: a result too big to read inline goes to a file, by rows or by size.
@@ -1957,7 +1985,37 @@ async def _read_all_pages(ctx: RunContext, conn, tool_name: str, args: dict, res
     if ctx.progress is not None:
         total = next((result.get(k) for k in ("totalRows", "total_rows", "total") if isinstance(result.get(k), int)), None)
         await ctx.progress.emit(f"Reading all {total} rows, page by page" if total else "Reading every page of the table", kind="tool", tool=tool_name)
-    return await tables.all_pages(result, base, call)
+    spool, folder = _computer_spool(ctx, tool_name)
+    merged = await tables.all_pages(result, base, call, spool)
+    if spool is not None and spool.spilled and isinstance(merged, dict):
+        ok = await spool.flush()
+        merged = {**merged, "saved_to_computer_dir": spool.where.get("folder") or folder, "parts": spool.parts, "rows_saved": len(spool),
+                  **({} if ok else {"write_failed": True})}  # fmt: skip
+    return merged
+
+
+def _computer_spool(ctx: RunContext, tool_name: str):
+    """(row store that writes a big table's pages to files on the computer, their folder), or (None, "") without a
+    computer. The server then holds a few thousand rows at most, whatever the table's size (docs/LLD.md "Big tables")."""
+    from app.agent import computer_harness as computer, tables
+
+    keep = int(getattr(get_settings(), "table_file_rows", 3000) or 0)
+    if not keep or not computer.computer_slug(ctx):
+        return None, ""
+    safe = re.sub(r"[^a-zA-Z0-9_-]+", "_", tool_name)[-60:]
+    folder = f"lumio_data/{safe}_{int(_time.time() * 1000)}"
+
+    where = {"folder": folder}
+
+    async def write(part: int, rows: list):
+        written = await computer.write_bytes(ctx, f"{folder}/part_{part:04d}.json", json.dumps(rows, default=str).encode())
+        if part == 1 and isinstance(written, dict) and written.get("path"):
+            where["folder"] = str(written["path"]).rsplit("/", 1)[0]  # the computer's own absolute path
+        return written
+
+    spool = tables.SpoolRows(write, keep)
+    spool.where = where
+    return spool, folder
 
 
 def execute_args(schema: Any, args: dict, request: str = "") -> dict:
@@ -2221,7 +2279,10 @@ async def _note_ignored_args(ctx: RunContext, conn, tool_name: str, args: dict, 
             "its defaults. Values can be exact-match too (an id's spelling or case, as the connector lists it). Do not report this "
             "as the requested period: "
             + (f"call it again with exactly these parameters: {', '.join(known['fields'])}." if known and known.get("fields")
-               else "call get_tool_schema for it and call it again with its own parameter names."))  # fmt: skip
+               else "call get_tool_schema for it and call it again with its own parameter names.")
+            + " If the tool has no working filter for this (no such parameter, or it ignores it), don't give up: read its "
+              "whole table (call it again with the same arguments) and filter by date, channel or store in a Python "
+              "script on the computer.")  # fmt: skip
     body = result if isinstance(result, dict) else {"data": result}
     return {**body, "args_ignored": True, "note": note, **({"arguments_expected": known["fields"]} if known and known.get("fields") else {})}
 
