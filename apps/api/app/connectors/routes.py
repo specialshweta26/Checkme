@@ -26,7 +26,7 @@ from app.connectors.mcp_oauth import (
 )
 from app.connectors.registry import server_key_for
 from app.connectors.platform import ensure_platform_connectors
-from app.connectors.service import next_slug, sync_in_background
+from app.connectors.service import next_slug, sync_connector, sync_in_background
 from app.connectors.urlsafety import UnsafeUrl, validate_public_url
 from app.db import get_db
 from app.deps import current_user
@@ -48,6 +48,11 @@ class AddMcpBody(BaseModel):
     client_secret: str | None = None
     alias: str | None = None
     description: str | None = None
+
+
+class CredentialsBody(BaseModel):
+    token: str = Field(min_length=1, max_length=8000)
+    header: str = Field(default="Authorization", max_length=100)
 
 
 class PatchConnector(BaseModel):
@@ -667,6 +672,33 @@ async def mcp_oauth_callback(
     await db.commit()
     background.add_task(sync_in_background, row.id, True)
     return RedirectResponse(f"{web}/chat?mcp=connected")
+
+
+@router.post("/{connector_id}/credentials")
+async def save_credentials(
+    connector_id: uuid.UUID,
+    body: CredentialsBody,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Store an API key for an MCP connector (the key field on a chat connect card) and load its tools now, so the
+    card can say whether the key worked. The key never passes through the chat."""
+    row = await db.get(Connector, connector_id)
+    if row is None or row.user_id != user.id or row.kind != "mcp":
+        raise HTTPException(404, "Not found")
+    header = (body.header or "Authorization").strip() or "Authorization"
+    custom = header.lower() != "authorization"
+    row.auth_type = "header" if custom else "bearer"
+    row.credentials_enc = encrypt(pack_bearer(body.token.strip(), header, "" if custom else "Bearer "))
+    row.health = "pending"
+    await db.commit()
+    await invalidate(row.id)
+    try:
+        await sync_connector(db, row)
+    except Exception as exc:  # noqa: BLE001 - sync_connector already marked it down
+        raise HTTPException(400, f"The server did not accept that key: {str(exc)[:200]}")
+    card = await db.get(ServerCard, row.server_key) if row.server_key else None
+    return {"connector": _public(row, card), "connected": True}
 
 
 @router.patch("/{connector_id}")
