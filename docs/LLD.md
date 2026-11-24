@@ -994,6 +994,12 @@ it took the first tool result as final: a tool that ignored the date filter gave
   honours the filters; narrow at the source; else `table_to_computer` plus a script. Try another tool or approach
   before ever answering "not verified", and say what the data covers when it lags.
 
+**No prompt before running code (the default).** At the user's request, the desktop app runs shell commands and
+Python directly, with no native dialog (`approval::asking()` is false). Asking can be turned back on with
+`LUMIO_ASK_BEFORE_RUN=1`, or an `ask-before-running` file in Lumio's data folder; then the behaviour below applies.
+The web app never prompted: code there runs on the cloud computer. The trade-off: text the agent reads from other
+people (mail, pages, documents) could steer it into running commands with the user's access, with nobody asked.
+
 **Analysis scripts on the desktop run without the prompt.** On the desktop app, `run_code` asks in a native dialog
 before running Python. Read-only data analysis no longer does (`apps/desktop/src-tauri/src/analysis.py`):
 1. **The check.** `--check` parses the script, without running it, and allows only:
