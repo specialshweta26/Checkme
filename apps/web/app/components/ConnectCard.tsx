@@ -1,10 +1,12 @@
 "use client";
 
 import { useState } from "react";
-import { connectMarketplace, grantToolkitAgent, isLumioDesktop } from "../lib";
+import { connectMarketplace, grantToolkitAgent, isLumioDesktop, saveConnectorKey } from "../lib";
 
 export type ConnectCardView = {
   toolkit?: string;
+  /** Set for a user-added MCP connector (chat's connect_mcp_server); Composio cards use toolkit instead. */
+  connector_id?: string;
   name?: string;
   logo?: string;
   description?: string;
@@ -38,6 +40,7 @@ export function cardsFromMeta(meta: any): ConnectCardView[] {
     seen.add(key);
     out.push({
       toolkit: row.toolkit || "",
+      connector_id: row.connector_id || "",
       name: row.name || row.toolkit || "Connect app",
       logo: row.logo || "",
       description: row.description || "",
@@ -74,6 +77,7 @@ function ConnectPanel({
   const [sessionUrl, setSessionUrl] = useState("");
   const needsKey = Boolean(card.needs_credentials) && !stored;
   const desktop = isLumioDesktop();
+  const connectorId = card.connector_id || "";
 
   async function freshSession() {
     if (!card.toolkit || needsKey) return stored;
@@ -91,6 +95,17 @@ function ConnectPanel({
     setBusy(true);
     setError("");
     try {
+      if (connectorId) {
+        if (needsKey) {
+          await saveConnectorKey(connectorId, apiKey.trim());
+          setApiKey("");
+          setEnabled(true);
+          return;
+        }
+        if (desktop) window.location.href = stored;
+        else window.open(stored, "_blank", "noreferrer");
+        return;
+      }
       if (needsKey && card.toolkit) {
         const field = (card.fields && card.fields[0]?.name) || "generic_api_key";
         const data = await connectMarketplace(card.toolkit, forId || undefined, { [field]: apiKey.trim() });
@@ -123,7 +138,7 @@ function ConnectPanel({
           <p>
             {needsKey
               ? card.description || "This app uses an API key, not OAuth. Paste the key to enable it."
-              : card.description || "Authorize this app in Composio to use it from chat."}
+              : card.description || (connectorId ? "Sign in to authorize this server." : "Authorize this app in Composio to use it from chat.")}
             {forName ? ` Enable it for ${forName}.` : ""}
           </p>
           {needsKey ? (
@@ -138,12 +153,12 @@ function ConnectPanel({
               />
             </label>
           ) : null}
-          {enabled ? <p className="ok">Enabled{forName ? ` for ${forName}` : ""}.</p> : null}
+          {enabled ? <p className="ok">{connectorId ? "Connected." : `Enabled${forName ? ` for ${forName}` : ""}.`}</p> : null}
           {error ? <p className="err">{error}</p> : null}
         </div>
-        {stored || needsKey || card.toolkit ? (
+        {stored || needsKey || card.toolkit || connectorId ? (
           <button className="btn" type="button" disabled={busy || (needsKey && !apiKey.trim())} onClick={() => void enable()}>
-            {busy ? "Enabling…" : enabled ? "Reconnect" : needsKey ? "Save key" : forName ? `Enable for ${forName}` : "Connect"}
+            {busy ? "Enabling…" : enabled ? "Reconnect" : needsKey ? "Save key" : forName && !connectorId ? `Enable for ${forName}` : "Connect"}
           </button>
         ) : null}
       </header>

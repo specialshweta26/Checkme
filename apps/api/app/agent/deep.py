@@ -19,6 +19,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents import chat_tools as workspace_tools
+from app.connectors import chat_connect
 from app.agents.service import (
     GROUP_MEMBER_MAX,
     GROUP_MEMBER_MIN,
@@ -878,7 +879,8 @@ _ACTIVE_CONNECTION = frozenset({"ACTIVE", "SUCCESS", "ENABLED", "CONNECTED"})
 
 def _is_connect_query(query: str) -> bool:
     q = (query or "").lower().replace("connected", " ")
-    return any(k in q for k in _CONNECT_HINTS)
+    # A message with a server URL asks for that server (connect_mcp_server), not a marketplace app named like it.
+    return any(k in q for k in _CONNECT_HINTS) and not re.search(r"https?://", q)
 
 
 def _active_toolkit(row: dict) -> str:
@@ -5322,6 +5324,10 @@ async def _run_deep_agent(
             result = await workspace_tools.run_confirmed(ctx, tool, payload.get("args") or {})
             ctx.used_tools.append(tool)
             limit_chars, note = 2000, "Tell the user what happened."
+        elif slug == chat_connect.CONNECTORS_SLUG:
+            result = await chat_connect.run_confirmed(ctx, tool, payload.get("args") or {})
+            ctx.used_tools.append(tool)
+            limit_chars, note = 2000, "Tell the user what happened: the connector's name and tool count, or the card to finish sign-in."
         elif slug == CODING_SLUG:
             from app.agent import git_tools
 

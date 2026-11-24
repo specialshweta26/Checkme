@@ -314,6 +314,19 @@ export async function grantToolkitAgent(toolkit: string, agentId: string) {
   return agentAction(`/api/agents/toolkit-assignments/${encodeURIComponent(toolkit)}/grant`, "POST", { agent_id: agentId });
 }
 
+/** Save an API key for an MCP connector from a chat card; the key goes straight to the API, never into chat. */
+export async function saveConnectorKey(connectorId: string, token: string, header = "Authorization") {
+  const res = await fetch(`/api/connectors/${encodeURIComponent(connectorId)}/credentials`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token, header }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(apiError(data, "Could not save that key"));
+  return data as { connected?: boolean; connector?: { name?: string; tool_count?: number | null } };
+}
+
 export async function connectMarketplace(
   toolkit: string,
   agentId?: string,
