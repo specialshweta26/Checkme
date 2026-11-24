@@ -26,6 +26,7 @@ class ChoiceIn(BaseModel):
     model: str = ""
     agent_id: str | None = None  # one agent's own model; none = the user's default
     tier: str = ""  # OpenAI processing tier: "" (Standard) | flex | priority (Fast) | ultrafast
+    reasoning: str = ""  # "" (Default) | none | low | medium | high: for any model, Lumio's own included
 
 
 def _refused(exc: service.ModelKeyError) -> HTTPException:
@@ -65,6 +66,6 @@ async def remove_key(key_id: str, user: User = Depends(current_user), db: AsyncS
 @router.put("/choices/{purpose}")
 async def choose(purpose: str, body: ChoiceIn, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     try:
-        return await service.choose(db, user, purpose, body.key_id, body.model, body.agent_id, body.tier)
+        return await service.choose(db, user, purpose, body.key_id, body.model, body.agent_id, body.tier, body.reasoning)
     except service.ModelKeyError as exc:
         raise _refused(exc) from exc

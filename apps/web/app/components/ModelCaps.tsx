@@ -38,6 +38,31 @@ export function CapsLine({ caps, model }: { caps?: Caps; model: string }) {
   );
 }
 
+// Reasoning for any model (docs/LLD.md "Reasoning"): OpenAI's effort, Anthropic's extended thinking, reasoning_effort on
+// other providers. "Default" keeps Lumio's setting, which reasons more on its own once a turn works with connector data.
+export const REASONING_HINT: Record<string, string> = {
+  "": "Lumio decides: quick answers fast, more thinking when it works through your data.",
+  none: "No extra thinking: fastest and cheapest.",
+  low: "A little thinking before acting.",
+  medium: "Thinks things through: better at multi-step data questions, a few seconds slower.",
+  high: "Thinks longest: hardest questions, slowest and most tokens.",
+};
+
+export function ReasoningSelect({ levels, value, onChange, disabled }: { levels: Tier[]; value: string; onChange: (v: string) => void; disabled?: boolean }) {
+  return (
+    <>
+      <select value={value} disabled={disabled} onChange={(e) => onChange(e.target.value)} aria-label="Reasoning">
+        {levels.map((t) => (
+          <option key={t.key} value={t.key}>
+            {t.name}
+          </option>
+        ))}
+      </select>
+      <em className="models-caps">{REASONING_HINT[value] || ""}</em>
+    </>
+  );
+}
+
 export function TierSelect({ tiers, value, onChange, disabled }: { tiers: Tier[]; value: string; onChange: (v: string) => void; disabled?: boolean }) {
   return (
     <>

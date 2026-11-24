@@ -113,6 +113,8 @@ class RunContext:
     gateway_args: dict = field(default_factory=dict)
     # Tool groups this turn starts without (app/agent/tool_scope.py); use_tools loads one.
     hidden_tools: list = field(default_factory=list)
+    # table_to_computer is running: read the whole table into files on the computer, whatever its size.
+    force_full_table: bool = False
     # One entry per connector call this turn: connector, tool, how long the first answer and its other pages took.
     call_timings: list = field(default_factory=list)
     agent: Any = None
@@ -1868,7 +1870,7 @@ def _big_table_sample(ctx: RunContext, slug: str, tool_name: str, args: dict, re
     from app.agent import tables
     from app.agent.approval import canonical_args
 
-    if not tables.is_paged(result):
+    if not tables.is_paged(result) or getattr(ctx, "force_full_table", False):
         return None
     total = next((result.get(k) for k in ("totalRows", "total_rows", "total", "totalCount", "total_count")
                   if isinstance(result.get(k), int) and not isinstance(result.get(k), bool)), None)  # fmt: skip
@@ -1894,9 +1896,9 @@ def _big_table_sample(ctx: RunContext, slug: str, tool_name: str, args: dict, re
         "next": (f"This table has {total} rows; only a sample is shown, nothing was read beyond it. Work out the columns from "
                  "sample_rows and the tool's description. If the user's request names something the tool can filter on "
                  "(a brand, channel, store, category, dates...), call it again with those filters so only those rows come "
-                 "back. If it can't be narrowed (no such parameter, or the tool ignores it), call it again with exactly the "
-                 "same arguments: the whole table is then read into files on the computer, and you filter and compute the "
-                 "answer with a Python script (run_code). Never stop at 'can't verify' while that is possible."),
+                 "back. If it can't be narrowed (no such parameter, or the tool ignores it), call table_to_computer with the "
+                 "same arguments: the whole table is read into files on the computer, and you filter and compute the answer "
+                 "with a Python script (run_code). Never stop at 'can't verify' while that is possible."),
     }  # fmt: skip
 
 
@@ -1937,7 +1939,8 @@ async def _table_to_computer(ctx: RunContext, slug: str, tool_name: str, rid: st
     # Like other agent harnesses: a result too big to read inline goes to a file, by rows or by size.
     many_rows = bool(limit) and len(rows) > limit
     too_big = _json_size(result) > INLINE_RESULT_CHARS
-    if not rows or not (many_rows or too_big) or not computer.computer_slug(ctx):
+    forced = getattr(ctx, "force_full_table", False)
+    if not rows or not (many_rows or too_big or forced) or not computer.computer_slug(ctx):
         return None
     safe = re.sub(r"[^a-zA-Z0-9_-]+", "_", tool_name)[-60:]
     path = f"lumio_data/{safe}_{rid}_{int(_time.time())}.json"
@@ -1999,8 +2002,8 @@ def _computer_spool(ctx: RunContext, tool_name: str):
     computer. The server then holds a few thousand rows at most, whatever the table's size (docs/LLD.md "Big tables")."""
     from app.agent import computer_harness as computer, tables
 
-    keep = int(getattr(get_settings(), "table_file_rows", 3000) or 0)
-    if not keep or not computer.computer_slug(ctx):
+    keep = 0 if getattr(ctx, "force_full_table", False) else int(getattr(get_settings(), "table_file_rows", 3000) or 0)
+    if (not keep and not getattr(ctx, "force_full_table", False)) or not computer.computer_slug(ctx):
         return None, ""
     safe = re.sub(r"[^a-zA-Z0-9_-]+", "_", tool_name)[-60:]
     folder = f"lumio_data/{safe}_{int(_time.time() * 1000)}"
@@ -2281,8 +2284,8 @@ async def _note_ignored_args(ctx: RunContext, conn, tool_name: str, args: dict, 
             + (f"call it again with exactly these parameters: {', '.join(known['fields'])}." if known and known.get("fields")
                else "call get_tool_schema for it and call it again with its own parameter names.")
             + " If the tool has no working filter for this (no such parameter, or it ignores it), don't give up: read its "
-              "whole table (call it again with the same arguments) and filter by date, channel or store in a Python "
-              "script on the computer.")  # fmt: skip
+              "whole table with table_to_computer and filter by date, channel or store in a Python script on the "
+              "computer (run_code).")  # fmt: skip
     body = result if isinstance(result, dict) else {"data": result}
     return {**body, "args_ignored": True, "note": note, **({"arguments_expected": known["fields"]} if known and known.get("fields") else {})}
 
@@ -3256,6 +3259,19 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
         """Return the description and JSON schema for one tool so you can fill arguments correctly."""
         return dumps_full(await get_user_tool_schema(ctx, connector_slug, tool_name))
 
+    async def table_to_computer(connector_slug: str, tool_name: str, args: dict[str, Any] | None = None) -> str:
+        """Read a data tool's WHOLE table (every page) into files on the computer, for a Python script to filter and compute
+        from. Use it when a tool can't filter what the user asked (no such parameter, or it ignored the filter), or the
+        answer needs every row (a ranking, totals, a breakdown). Returns the folder, row count, columns and sample rows;
+        then write one script that loads the files, filters (dates, channel, store...) and computes, and run it with
+        run_code. Pass the narrowest arguments the tool does honour."""
+        ctx.force_full_table = True
+        try:
+            out = await call_user_tool(ctx, connector_slug, tool_name, args)
+        finally:
+            ctx.force_full_table = False
+        return dumps_full(out)
+
     async def call_tool(connector_slug: str, tool_name: str, args: dict[str, Any] | None = None) -> str:
         """Run a tool on one of this user's connectors now. Do not use this to send or fetch if the user named a future time — call schedule_task instead. Catalog/search/resolve/list tools are not answers. Results come back whole; only one too big for the model shows the first rows of each list, and inspect_result reads the rest."""
         return dumps_full(await call_user_tool(ctx, connector_slug, tool_name, args))  # already fitted to the model
@@ -3490,6 +3506,12 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
             coroutine=call_tool,
             name="call_tool",
             description=call_tool.__doc__,
+            args_schema=CallToolInput,
+        ),
+        StructuredTool.from_function(
+            coroutine=table_to_computer,
+            name="table_to_computer",
+            description=table_to_computer.__doc__,
             args_schema=CallToolInput,
         ),
         StructuredTool.from_function(
@@ -4082,6 +4104,13 @@ def system_prompt(
         "Discover first when the user wants a connected app (mail, calendar, a marketplace app): list_connectors, then search_tools with the user's request in their own words (names, metrics, dates kept). "
         "A file, folder, or this-computer request is not a connector or skill lookup. Use search_files, list_files, list_dir, read_file, or write_file. Every agent has them. "
         "Keep the names, metrics and dates in the search query too. "
+        "For a question about the user's data (sales, products, channels, stock...): 1) find the tool: search with the user's "
+        "own words; if the matches don't fit, look at the connector's other tools and its catalog or dataset listings; "
+        "2) probe it with a small call (a low limit) to see its columns and whether it honours your filters (check the "
+        "dates and values in the rows); 3) narrow at the source with the filters it honours; 4) when it can't filter or "
+        "the answer needs every row, use table_to_computer and compute with one Python script via run_code. Try another "
+        "tool or approach before ever answering 'not verified'; say what the data covers (its latest date) when it "
+        "lags. "
         "Build every call from the chosen tool's parameters (shown in search results, or get_tool_schema): break the request into "
         "them, one by one, by each parameter's description, with its exact name, format (ISO dates YYYY-MM-DD) and allowed values; "
         "leave out what the request doesn't give; never invent a parameter name. When a parameter's description says its values come "
@@ -4337,6 +4366,15 @@ def build_agent(ctx: RunContext, prompt: str):
 
         kwargs["tools"] = [*kwargs["tools"], tool_scope.load_tool(hidden)]
         middleware = [*middleware, tool_scope.middleware(hidden)]
+    try:
+        from app import llm_gateway
+        from app.agent import data_reasoning
+
+        spec = llm_gateway.resolve(ctx, "agent")
+        middleware = [*middleware, data_reasoning.middleware(spec.model, bool(getattr(spec, "is_openai", False)),
+                                                             llm_gateway.picked_reasoning(spec))]
+    except Exception:  # noqa: BLE001 - the turn runs at its usual effort
+        log.info("data reasoning middleware not added", exc_info=True)
     turn = getattr(ctx, "turn_context", "") if ctx is not None else ""
     if turn:
         # The per-turn part of the prompt rides in a context message, so the system prompt stays cacheable.

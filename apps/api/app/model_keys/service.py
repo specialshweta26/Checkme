@@ -100,10 +100,12 @@ async def overview(db: AsyncSession, user) -> dict[str, Any]:
     agents: dict[str, dict] = {}
     for c in await _choices(db, user.id, None):
         (chosen if c.scope == "user" else agents.setdefault(c.scope, {}))[c.purpose] = {
-            "key_id": str(c.key_id), "model": c.model, "tier": c.tier or ""}  # fmt: skip
+            "key_id": str(c.key_id) if c.key_id else "", "model": c.model, "tier": c.tier or "",
+            "reasoning": getattr(c, "reasoning", "") or ""}  # fmt: skip
     return {
         "providers": providers.public(),
         "tiers": [{"key": k, "name": v} for k, v in llm_gateway.TIERS.items()],
+        "reasoning": [{"key": k, "name": v} for k, v in llm_gateway.REASONING.items()],
         "keys": [public_key(k) for k in keys],
         "choices": chosen,
         "agents": agents,
@@ -176,17 +178,28 @@ async def remove_key(db: AsyncSession, user, key_id: str) -> None:
 
 
 async def choose(db: AsyncSession, user, purpose: str, key_id: str | None, model: str = "", agent_id: str | None = None,
-                 tier: str = "") -> dict:  # fmt: skip
+                 tier: str = "", reasoning: str = "") -> dict:  # fmt: skip
     """Use ``key_id`` and ``model`` for ``purpose``, as the user's default or for one agent. No key_id removes the
     choice: the user's default goes back to Lumio's model, an agent goes back to the user's default."""
     if purpose not in PURPOSES:
         raise ModelKeyError("Pick the agent model or the background model.")
     scope = await _scope(db, user, agent_id)
     existing = next((c for c in await _choices(db, user.id, scope) if c.purpose == purpose), None)
+    reasoning = (reasoning or "").strip().lower()
+    if reasoning not in llm_gateway.REASONING:
+        raise ModelKeyError("Pick Default, Off, Low, Medium or High reasoning.")
     if not key_id:
-        if existing is not None:
-            await db.delete(existing)
-            await db.commit()
+        # Lumio's own model: kept only to carry a reasoning level; Default removes the choice.
+        if not reasoning:
+            if existing is not None:
+                await db.delete(existing)
+                await db.commit()
+            return await overview(db, user)
+        if existing is None:
+            db.add(ModelChoice(user_id=user.id, scope=scope, purpose=purpose, key_id=None, model="", tier="", reasoning=reasoning))
+        else:
+            existing.key_id, existing.model, existing.tier, existing.reasoning = None, "", "", reasoning
+        await db.commit()
         return await overview(db, user)
     row = await _key(db, user.id, key_id)
     p = providers.PROVIDERS.get(row.provider)
@@ -209,9 +222,9 @@ async def choose(db: AsyncSession, user, purpose: str, key_id: str | None, model
     if tier and row.provider != "openai":
         raise ModelKeyError("Processing tiers are for OpenAI keys.")
     if existing is None:
-        db.add(ModelChoice(user_id=user.id, scope=scope, purpose=purpose, key_id=row.id, model=name[:160], tier=tier))
+        db.add(ModelChoice(user_id=user.id, scope=scope, purpose=purpose, key_id=row.id, model=name[:160], tier=tier, reasoning=reasoning))
     else:
-        existing.key_id, existing.model, existing.tier = row.id, name[:160], tier
+        existing.key_id, existing.model, existing.tier, existing.reasoning = row.id, name[:160], tier, reasoning
     await db.commit()
     return await overview(db, user)
 
@@ -225,6 +238,14 @@ async def load_all_choices(db: AsyncSession, user_id) -> dict[str, dict[str, llm
     keys = {k.id: k for k in await _keys(db, user_id)}
     out: dict[str, dict[str, llm_gateway.ModelSpec]] = {}
     for c in choices:
+        if c.key_id is None:
+            # Lumio's own model with the user's reasoning level.
+            if getattr(c, "reasoning", ""):
+                base = llm_gateway.resolve(None, c.purpose)
+                out.setdefault(c.scope, {})[c.purpose] = llm_gateway.ModelSpec(
+                    provider=base.provider, model=base.model, api_key=base.api_key, base_url=base.base_url, purpose=c.purpose,
+                    reasoning=c.reasoning)  # fmt: skip
+            continue
         row = keys.get(c.key_id)
         p = providers.PROVIDERS.get(row.provider) if row else None
         secret = decrypt(row.key_enc) if row else None
@@ -234,7 +255,7 @@ async def load_all_choices(db: AsyncSession, user_id) -> dict[str, dict[str, llm
             provider=row.provider, model=c.model, api_key=secret, purpose=c.purpose,
             # OpenAI uses its SDK's own address; every other provider is reached at its compatible one.
             base_url=row.base_url or ("" if row.provider == "openai" else p.base_url),
-            source="user" if c.scope == "user" else "agent", tier=c.tier or "")  # fmt: skip
+            source="user" if c.scope == "user" else "agent", tier=c.tier or "", reasoning=getattr(c, "reasoning", "") or "")  # fmt: skip
     return out
 
 

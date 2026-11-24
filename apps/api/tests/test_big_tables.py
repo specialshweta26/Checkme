@@ -135,3 +135,23 @@ async def test_a_small_table_stays_in_memory_and_writes_nothing():
     spool = tables.SpoolRows(write, keep=300)
     spool.extend([[1], [2], [3]])
     assert not spool.spilled and list(spool) == [[1], [2], [3]] and await spool.flush()
+
+
+async def test_table_to_computer_reads_a_big_table_whole_without_a_sample_first(monkeypatch):
+    ctx, calls, files = _setup(monkeypatch, total=2600)
+    ctx.force_full_table = True
+    try:
+        out = await deep.call_user_tool(ctx, "gw", "srv__get_sku_daily", {"from_date": "2026-11-01"})
+    finally:
+        ctx.force_full_table = False
+    assert out["rows"] == 2600 and out["saved_to_computer"] and sum(len(v) for v in files.values()) == 2600
+
+
+async def test_table_to_computer_saves_even_a_small_table(monkeypatch):
+    ctx, calls, files = _setup(monkeypatch, total=40)
+    ctx.force_full_table = True
+    try:
+        out = await deep.call_user_tool(ctx, "gw", "srv__get_sku_daily", {"brand": "BrandA"})
+    finally:
+        ctx.force_full_table = False
+    assert out["rows"] == 40 and out["saved_to_computer"]
