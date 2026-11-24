@@ -686,18 +686,51 @@ async fn run_code(code: &str, timeout_s: u64) -> Value {
         Ok(dir) => dir,
         Err(refused) => return refused,
     };
-    if let Err(refused) = approval::approve("Python code", code, &dir.to_string_lossy()).await {
-        return refused;
-    }
     let file = grants::data_dir().join(".lumio_run.py");
     if fs::write(&file, code.as_bytes()).is_err() {
         return json!({ "ok": false, "error": "could not write temp script" });
     }
     let quoted = file.to_string_lossy().replace('\'', "'\\''");
-    let command = format!("{} '{}'", python_bin(), quoted);
-    let out = spawn_shell(&command, &dir, timeout_s).await;
+    // Read-only data analysis runs without the prompt, confined to reading files under lumio_data (analysis.py).
+    // Everything else asks first, as before.
+    let analysis = read_only_analysis(&file, &dir).await;
+    if analysis.is_none() {
+        if let Err(refused) = approval::approve("Python code", code, &dir.to_string_lossy()).await {
+            let _ = fs::remove_file(&file);
+            return refused;
+        }
+    }
+    let command = match &analysis {
+        Some(runner) => format!("{} '{}' '{}'", python_bin(), runner.to_string_lossy().replace('\'', "'\\''"), quoted),
+        None => format!("{} '{}'", python_bin(), quoted),
+    };
+    let mut out = spawn_shell(&command, &dir, timeout_s).await;
     let _ = fs::remove_file(&file);
+    if analysis.is_some() {
+        if let Some(obj) = out.as_object_mut() {
+            obj.insert("ran_as".into(), json!("read-only analysis (no prompt): reads files under lumio_data only"));
+        }
+    }
     out
+}
+
+const ANALYSIS_RUNNER: &str = include_str!("analysis.py");
+
+/// The runner's path when `script` is read-only data analysis (analysis.py --check says so), else None.
+async fn read_only_analysis(script: &Path, dir: &Path) -> Option<PathBuf> {
+    let runner = grants::data_dir().join(".lumio_analysis.py");
+    if fs::write(&runner, ANALYSIS_RUNNER.as_bytes()).is_err() {
+        return None;
+    }
+    let checked = Command::new(python_bin())
+        .arg(&runner)
+        .arg("--check")
+        .arg(script)
+        .current_dir(dir)
+        .output()
+        .await
+        .ok()?;
+    checked.status.success().then_some(runner)
 }
 
 fn web_url(raw: &str) -> Option<&str> {

@@ -994,6 +994,22 @@ it took the first tool result as final: a tool that ignored the date filter gave
   honours the filters; narrow at the source; else `table_to_computer` plus a script. Try another tool or approach
   before ever answering "not verified", and say what the data covers when it lags.
 
+**Analysis scripts on the desktop run without the prompt.** On the desktop app, `run_code` asks in a native dialog
+before running Python. Read-only data analysis no longer does (`apps/desktop/src-tauri/src/analysis.py`):
+1. **The check.** `--check` parses the script, without running it, and allows only:
+   - imports of plain data modules (json, glob, csv, collections, decimal, math, statistics, datetime, re,
+     itertools, functools, heapq, bisect, fractions, calendar, time, zoneinfo, copy, textwrap, pprint);
+   - no exec / eval / compile / getattr / setattr / vars / globals / type / `__import__`;
+   - no name, attribute, argument or function starting with `_`, and no class definitions;
+   - no attribute that reaches a dangerous module or function through an allowed one (`glob.os`, `json.codecs`,
+     `.system`, `.open`, `.environ`…).
+2. **The run.** A script that passes runs confined: `open()` reads only, and only real paths inside a `lumio_data`
+   folder under the home folder; `glob` lists only those. Anything else, and every shell command, still gets the
+   dialog.
+
+The agent's data playbook says how to write such a script. `tests/test_desktop_analysis_runner.py` covers the escape
+routes (`glob.os.system`, `json.codecs.open`, `operator.methodcaller`, `typing`, dunders, classes) and the confinement.
+
 ### Big tables
 
 "Product-wise sales across two channels, November MTD" hit a 104,255-row table, and Lumio read every page through
