@@ -542,17 +542,17 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
     async def run_code(code: str, timeout: int = 120) -> str:
         """Run a Python snippet on this user's cloud computer. Use for deep-dive analysis of a downloaded CSV/Excel/JSON/PDF extract: pandas groupby, joins, correlations, outliers. Open the saved path from browser_act downloads. Print real figures (do not invent). Write charts or cleaned tables under /tmp then attach_file. Install pandas/openpyxl with pip --user if missing. Returns stdout."""
         ctx.used_tools.append("run_code")
-        return _dumps(await computer.run_code(ctx, code, timeout), 40000)
+        return _dumps(computer.fit_output(ctx, await computer.run_code(ctx, code, timeout)), 40000)
 
     async def shell(command: str, cwd: str | None = None, timeout: int = 60) -> str:
         """Run a bash command. In the desktop app this runs on this computer and does not move to the cloud machine. Use search_files to find the user's files. On the website this is the cloud computer (home ~, work in ~/work): installs and builds go here, and a missing known tool is installed and retried once. Never put secrets in a command."""
         ctx.used_tools.append("shell")
-        return _dumps(await computer.shell(ctx, command, cwd, timeout), 40000)
+        return _dumps(computer.fit_output(ctx, await computer.shell(ctx, command, cwd, timeout), tool="shell"), 40000)
 
     async def user_computer_shell(command: str, cwd: str | None = None, timeout: int = 60) -> str:
         """Run a bash command on the user's own connected computer (their laptop, through the Checkme local agent), after their confirmation. Only when the user explicitly asks for their own machine; everything else uses shell (the cloud computer)."""
         ctx.used_tools.append("user_computer_shell")
-        return _dumps(await computer.user_computer_shell(ctx, command, cwd, timeout), 40000)
+        return _dumps(computer.fit_output(ctx, await computer.user_computer_shell(ctx, command, cwd, timeout), tool="shell"), 40000)
 
     async def ensure_toolchain(tools: list[str] | None = None, force: bool = False) -> str:
         """Make sure runtimes and CLIs are installed on the cloud computer before using them (idempotent; quick when already there): node+npm, pnpm, yarn, python3, pip, uv, git, gh, vercel, render, netlify... or groups web, python, deploy, dev. Installs non-interactively in user space. Returns present, installed and failed."""

@@ -539,6 +539,9 @@ async def _cache_shot(proc, fs) -> None:
         pass
 
 
+SCRIPT_STDOUT_CHARS = 200_000
+
+
 def _clip(text: str, limit: int = 24000) -> str:
     text = text or ""
     if len(text) <= limit:
@@ -1776,7 +1779,9 @@ async def _invoke_daytona(row, name: str, args: dict[str, Any]) -> Any:
                 response = await proc.exec(f"python3 - <<'PY'\n{code}\nPY", timeout=int(args.get("timeout") or 120))
             return {
                 "exit_code": getattr(response, "exit_code", None),
-                "stdout": _clip(getattr(response, "result", None) or getattr(response, "stdout", "") or ""),
+                # As long as the desktop app's limit: the agent fits a long output for the model itself, first and last
+                # lines (computer_harness.fit_output); a cut here lost the end, where a script prints its totals.
+                "stdout": _clip(getattr(response, "result", None) or getattr(response, "stdout", "") or "", SCRIPT_STDOUT_CHARS),
             }
         path = args.get("path") or "."
         if name == "read_bytes":

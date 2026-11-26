@@ -410,6 +410,7 @@ async def _vault_gate(ctx, url: str) -> dict | None:
 
 
 async def run_computer(ctx, tool_name: str, args: dict | None = None, *, force_cloud: bool = False) -> Any:
+    _changed_computer(ctx, tool_name)
     if tool_name in browser_guard.ACT_TOOLS:
         args = browser_guard.normalize(args)
     refused = browser_guard.before(ctx, tool_name, args)
@@ -781,10 +782,103 @@ async def ensure_toolchain(ctx, tools: list[str] | None = None, force: bool = Fa
     return await toolchain.ensure_tools(ctx, list(tools or ["dev"]), force=force)
 
 
+# Computer tools that only look: anything else may change files a script reads, so the same script may print
+# something else afterwards (docs/LLD.md "Script runs").
+_LOOK_ONLY = frozenset({"read_file", "list_dir", "search_files", "run_code"})
+
+
+def _changed_computer(ctx, tool_name: str) -> None:
+    if ctx is not None and tool_name not in _LOOK_ONLY:
+        try:
+            ctx._computer_changes = getattr(ctx, "_computer_changes", 0) + 1
+        except AttributeError:
+            pass
+
+
+def _script_lock(ctx) -> asyncio.Lock:
+    lock = getattr(ctx, "_script_lock", None)
+    if lock is None:
+        lock = asyncio.Lock()
+        ctx._script_lock = lock
+    return lock
+
+
 async def run_code(ctx, code: str, timeout: int = 120) -> Any:
+    """One script at a time per turn (the desktop app runs every script from the same file, so two at once could run
+    each other's code). A script that already ran cleanly this turn, with nothing on the computer changed since, isn't
+    run again: it gets the same output back (docs/LLD.md "Script runs")."""
+    import hashlib
+
     if not (code or "").strip():
         return {"error": "code is required"}
-    return await run_computer(ctx, "run_code", {"code": code, "timeout": max(10, min(int(timeout or 120), 300))})
+    async with _script_lock(ctx):
+        key = (hashlib.sha256(code.strip().encode()).hexdigest(), getattr(ctx, "_computer_changes", 0))
+        runs = getattr(ctx, "_script_runs", None)
+        if runs is None:
+            runs = {}
+            ctx._script_runs = runs
+        if key in runs:
+            return {**runs[key], "not_run_again": True,
+                    "note": ("This exact script already ran this turn and nothing on the computer changed since, so this "
+                             "is its output from then. Answer from it, or change the script if it needs to print "
+                             "something else.")}  # fmt: skip
+        if runs:
+            _changed_computer(ctx, "another script")  # a different script may have written files the next one reads
+            key = (key[0], getattr(ctx, "_computer_changes", 0))
+        out = await run_computer(ctx, "run_code", {"code": code, "timeout": max(10, min(int(timeout or 120), 300))})
+        if isinstance(out, dict) and out.get("ok", True) is not False and out.get("exit_code") in (0, None) and not out.get("error") \
+                and isinstance(out.get("stdout"), str) and not out.get("status"):
+            runs[key] = out
+        return out
+
+
+SCRIPT_OUTPUT_CHARS = 36000
+
+
+def fit_output(ctx, result: Any, limit: int = SCRIPT_OUTPUT_CHARS, tool: str = "run_code") -> Any:
+    """A script's or command's output too long for the model, as its first and last lines plus where the rest is
+    (docs/LLD.md "Script runs"). It used to be replaced whole by an outline without the text (and without the
+    result_id its hint named), so the agent saw nothing it printed and ran the script again, once per cut-off."""
+    if not isinstance(result, dict):
+        return result
+    text = result.get("stdout")
+    if not isinstance(text, str) or len(text) <= limit:
+        return result
+    import json
+
+    lines = text.splitlines()
+    size = [len(json.dumps(line)) for line in lines]  # as the model gets it: quotes and non-ASCII text are escaped
+    head, used = 0, 0
+    while head < len(lines) and used + size[head] <= limit * 2 // 3:
+        used += size[head]
+        head += 1
+    tail, used = 0, 0
+    while tail < len(lines) - head and used + size[-1 - tail] <= limit // 3:
+        used += size[-1 - tail]
+        tail += 1
+    if head == 0:  # one huge line: plain characters
+        shown = text[: limit // 3] + "\n…\n" + text[-(limit // 6):]  # escaped, a character can take up to six
+        head_lines, tail_lines = [], []
+    else:
+        head_lines, tail_lines = lines[:head], (lines[len(lines) - tail:] if tail else [])
+        shown = "\n".join(head_lines) + f"\n… {len(lines) - head - tail} lines not shown …\n" + "\n".join(tail_lines)
+    rid = ""
+    results = getattr(ctx, "results", None)
+    if isinstance(results, list):
+        rid = f"r{len(results) + 1}"
+        results.append({"result_id": rid, "source_tool": f"computer.{tool}", "connector_slug": "computer", "tool_name": tool,
+                        "args": {}, "data": {"stdout_lines": lines, "exit_code": result.get("exit_code")}})  # fmt: skip
+    where = (f"inspect_result(result_id={rid!r}, path='stdout_lines', offset={head}) reads the lines in between, 200 at a "
+             "time. " if rid else "")
+    return {
+        **{k: v for k, v in result.items() if k != "stdout"},
+        "stdout": shown,
+        "stdout_cut": {"chars": len(text), "lines": len(lines), "first_lines": head, "last_lines": tail, **({"result_id": rid} if rid else {})},
+        "note": (f"It ran; it printed {len(text)} characters ({len(lines)} lines), more than fits, so only the first and last "
+                 f"lines are shown. Don't run it again to see the rest: {where}Next time print only what the answer "
+                 "needs (totals and the top rows of each breakdown), or write the full table to a CSV under lumio_data and "
+                 "attach_file it."),
+    }  # fmt: skip
 
 
 async def search_files(ctx, query: str, path: str = "") -> Any:

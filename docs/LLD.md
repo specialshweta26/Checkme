@@ -1026,6 +1026,8 @@ answers from the output. Lumio now does the same:
   rows (20,000 by default), nothing more is read. The agent gets the sample rows, the total, and the tool's
   parameters, and is told to call again with the tool's own filters for what was asked (brand, channel, store,
   dates...). Calling again with the same arguments reads the whole table. A sample is never cached as an answer.
+  That whole read (the same call again, or `table_to_computer` with the same arguments) starts from the first page
+  the sample was made from, so the source is asked for it once, not twice (`first_page_reused` in Reply times).
 - **The rows go to a file on the computer:** a fetched table with more than `TABLE_FILE_ROWS` rows (3,000), or too
   big to read inline (`INLINE_RESULT_CHARS`), is written as JSON to `lumio_data/…` on the user's computer. The model
   gets the path, the row count, the columns (or "arrays: read each position from sample_rows"), eight sample rows,
@@ -1119,6 +1121,50 @@ Two things stopped it from helping:
 
 The computer and browser still take one action at a time (`computer_lock`), and actions that need approval still wait
 for it.
+
+`table_to_computer` marks its call "read the whole table" per task (a `ContextVar`), not on the turn's context. With
+the flag on the context, two tables asked for in one step broke: the faster call cleared it while the slower one still
+ran, so that one came back as a sample and the agent had to ask for it again. An ordinary call running beside it could
+also read a whole table nobody asked for.
+
+### Script runs
+
+"A brand's sales in October and product-wise sales details" ran scripts on the computer several times in a row, and
+the last such turn ran long enough to be cut off by an app update. Each run is a model step (writing the script,
+5–15 s) plus the run, one after another. The causes and fixes:
+
+- **A long output was thrown away.** A product-wise table for a brand with hundreds of products prints more than
+  40,000 characters (900 products: about 60,000). `run_code`'s result was fitted with the generic `compact_payload`,
+  which swaps anything that size for an outline: `{"stdout": {"type": "string", "chars": 60000}}`, with a hint to call
+  `inspect_result` with "this result_id", which it didn't give. The agent saw nothing it printed, so it ran the script
+  again with less output, once per cut-off. Now `computer_harness.fit_output` keeps the first and last lines that fit
+  (`SCRIPT_OUTPUT_CHARS`, 36,000: the month's total at the top and the overall total at the end both show) and says
+  how many lines it skipped. The full output is stored as `stdout_lines` under a `result_id`, and
+  `inspect_result(path="stdout_lines", offset=…)` reads the rest. The note tells the agent not to run the script
+  again. `shell` gets the same treatment. The cloud computer used to cut a script's output at 24,000 characters,
+  which lost the end; it now keeps 200,000, like the desktop app.
+- **The same script ran again.** A script that ran cleanly this turn, with nothing on the computer changed since,
+  isn't run again; the agent gets the same output, marked `not_run_again`. A change on the computer (a file
+  written, a command run, a new table saved, a different script) starts afresh, and a failed run can always be
+  repeated.
+- **A script per table or per breakdown.** The note on a table saved to the computer now lists every table saved
+  this turn (`saved_this_turn`) and asks for one script that loads them all and prints every breakdown asked
+  (totals, by month, by product). The prompt says the same, and lists "a total and its per-product or per-month
+  breakdown" among the calls that go together in one step.
+- **Scripts take turns.** The desktop app runs every script from the same file, so two scripts asked for in one step
+  could run each other's code. `run_code` holds a per-turn lock; with one script per question, nothing waits on it.
+
+Reply times show `script_runs` per reply.
+
+Expected effect on the question above, on the code path (each model step 5–15 s, a desktop script 1–3 s, a gateway
+page 2–6 s):
+
+| | Before | After |
+|---|---|---|
+| Tables (October and product-wise) | read one after another, or the second came back as a sample and was read again | together, each whole the first time |
+| First page of a big table | asked twice (sample, then whole read) | once |
+| Scripts | 3–5 (look at the data, compute, re-run after each cut-off, a script per breakdown) | 1–2 |
+| Turn | about 90–180 s | about 40–70 s |
 
 ### Lean context
 

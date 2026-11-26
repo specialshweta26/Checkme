@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import json
 import logging
 import re
@@ -89,6 +90,17 @@ CATALOG_TOOLS = {
 
 
 JOB_CONFIRM_TTL = 3 * 24 * 3600
+
+
+# table_to_computer is running in this task: read the whole table into files on the computer, whatever its size. Per
+# task, not on the turn's context, because the model's tool calls run at the same time (docs/LLD.md "Parallel tool
+# calls"): a flag on the context was reset by the first call to finish, so a second table_to_computer running beside it
+# came back as a sample and the agent asked for it again, and an ordinary call beside it read a whole table.
+_FULL_TABLE: contextvars.ContextVar[bool] = contextvars.ContextVar("lumio_full_table", default=False)
+
+
+def _full_table(ctx: Any) -> bool:
+    return _FULL_TABLE.get() or bool(getattr(ctx, "force_full_table", False))
 
 
 @dataclass
@@ -1872,7 +1884,7 @@ def _big_table_sample(ctx: RunContext, slug: str, tool_name: str, args: dict, re
     from app.agent import tables
     from app.agent.approval import canonical_args
 
-    if not tables.is_paged(result) or getattr(ctx, "force_full_table", False):
+    if not tables.is_paged(result) or _full_table(ctx):
         return None
     total = next((result.get(k) for k in ("totalRows", "total_rows", "total", "totalCount", "total_count")
                   if isinstance(result.get(k), int) and not isinstance(result.get(k), bool)), None)  # fmt: skip
@@ -1883,6 +1895,9 @@ def _big_table_sample(ctx: RunContext, slug: str, tool_name: str, args: dict, re
     if ctx.gateway_args.get(key):
         return None  # asked again with the same arguments: it can't be narrowed, so read it all
     ctx.gateway_args[key] = True
+    # Kept for the whole read that usually follows (table_to_computer, or the same call again): it starts from this
+    # page instead of asking the source for it a second time.
+    ctx.gateway_args[("__first__",) + key[1:]] = result
     rows_key = tables._rows_key(result) or "data"
     params = brief_schema(getattr(hit, "schema", None)) if hit is not None else None
     if params is None:
@@ -1902,6 +1917,14 @@ def _big_table_sample(ctx: RunContext, slug: str, tool_name: str, args: dict, re
                  "same arguments: the whole table is read into files on the computer, and you filter and compute the answer "
                  "with a Python script (run_code). Never stop at 'can't verify' while that is possible."),
     }  # fmt: skip
+
+
+def _sampled_first_page(ctx: RunContext, slug: str, tool_name: str, args: dict) -> Any:
+    """The first page a big-table sample was made from this turn, for the same call with the same arguments: the whole
+    read starts from it, one call to the source fewer (that first answer is often the slowest)."""
+    from app.agent.approval import canonical_args
+
+    return ctx.gateway_args.pop(("__first__", slug, tool_name, canonical_args(args)), None)
 
 
 def _spooled_payload(ctx: RunContext, rid: str, result: dict) -> dict:
@@ -1926,6 +1949,24 @@ def _spooled_payload(ctx: RunContext, rid: str, result: dict) -> dict:
     }  # fmt: skip
     if result.get("write_failed"):
         out["warning"] = "Some pages could not be written to the computer, so the files may be incomplete: say so if it matters."
+    return _with_saved_tables(ctx, out, {"folder": folder, "load": load, "rows": result.get("rows_saved"), "result_id": rid})
+
+
+def _with_saved_tables(ctx: RunContext, out: dict, saved: dict) -> dict:
+    """Every table saved on the computer this turn, on the newest one: one script loads them all and prints every
+    breakdown asked (the month's totals and the per-product table), instead of a script per table or per breakdown
+    run one after another (docs/LLD.md "Script runs")."""
+    tables_saved = ctx.__dict__.setdefault("_saved_tables", [])
+    earlier = [t for t in tables_saved if t.get("result_id") != saved.get("result_id")]
+    tables_saved.append(saved)
+    if earlier:
+        out["saved_this_turn"] = [*earlier, saved]
+        out["next"] = (f"{len(earlier) + 1} tables are saved on the computer this turn (saved_this_turn, each with how to "
+                       "load it). Write ONE Python script that loads all of them and prints every figure and breakdown the "
+                       "user asked for (totals, by month, by product...), each as a short table; run it once with run_code "
+                       "and answer from its output. Don't run a script per table or per breakdown.")  # fmt: skip
+    else:
+        out["next"] += " Compute every breakdown the user asked for (totals, by month, by product...) in that one script."
     return out
 
 
@@ -1941,7 +1982,7 @@ async def _table_to_computer(ctx: RunContext, slug: str, tool_name: str, rid: st
     # Like other agent harnesses: a result too big to read inline goes to a file, by rows or by size.
     many_rows = bool(limit) and len(rows) > limit
     too_big = _json_size(result) > INLINE_RESULT_CHARS
-    forced = getattr(ctx, "force_full_table", False)
+    forced = _full_table(ctx)
     if not rows or not (many_rows or too_big or forced) or not computer.computer_slug(ctx):
         return None
     safe = re.sub(r"[^a-zA-Z0-9_-]+", "_", tool_name)[-60:]
@@ -1961,7 +2002,7 @@ async def _table_to_computer(ctx: RunContext, slug: str, tool_name: str, rid: st
     load = f"json.load(open({where!r}))" + (f"[{rows_key!r}]" if rows_key else "")
     if ctx.progress is not None:
         await ctx.progress.emit(f"Saved {len(rows)} rows to the computer for analysis", kind="tool", tool=tool_name)
-    return {
+    out = {
         "saved_to_computer": where, "rows": len(rows), "result_id": rid,
         **({"columns": columns} if columns else {"columns": "rows are arrays: read each position's meaning from sample_rows"}),
         "sample_rows": rows[:8],
@@ -1971,6 +2012,7 @@ async def _table_to_computer(ctx: RunContext, slug: str, tool_name: str, rid: st
                  "prints a compact result; run it with run_code and answer from its output. Don't read the rows "
                  "yourself. aggregate_result with result_id also adds up simple totals."),
     }  # fmt: skip
+    return _with_saved_tables(ctx, out, {"file": where, "load": f"rows = {load}", "rows": len(rows), "result_id": rid})
 
 
 async def _read_all_pages(ctx: RunContext, conn, tool_name: str, args: dict, result: Any) -> Any:
@@ -2004,8 +2046,9 @@ def _computer_spool(ctx: RunContext, tool_name: str):
     computer. The server then holds a few thousand rows at most, whatever the table's size (docs/LLD.md "Big tables")."""
     from app.agent import computer_harness as computer, tables
 
-    keep = 0 if getattr(ctx, "force_full_table", False) else int(getattr(get_settings(), "table_file_rows", 3000) or 0)
-    if (not keep and not getattr(ctx, "force_full_table", False)) or not computer.computer_slug(ctx):
+    forced = _full_table(ctx)
+    keep = 0 if forced else int(getattr(get_settings(), "table_file_rows", 3000) or 0)
+    if (not keep and not forced) or not computer.computer_slug(ctx):
         return None, ""
     safe = re.sub(r"[^a-zA-Z0-9_-]+", "_", tool_name)[-60:]
     folder = f"lumio_data/{safe}_{int(_time.time() * 1000)}"
@@ -2563,9 +2606,12 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
         else:
             async with waiting_on(ctx, conn, tool_name):
                 _t0 = _time.monotonic()
-                result = await invoke_named(ctx.db, ctx.user, conn, tool_name, args, ctx.attachments)
+                reused = _sampled_first_page(ctx, connector_slug, tool_name, args) if _is_user_mcp(conn) else None
+                result = reused if reused is not None else await invoke_named(ctx.db, ctx.user, conn, tool_name, args, ctx.attachments)
                 timing = {"connector": connector_slug, "tool": tool_name, "first_ms": int((_time.monotonic() - _t0) * 1000),
                           "prep_ms": int((_t0 - _entered) * 1000)}
+                if reused is not None:
+                    timing["first_page_reused"] = True
                 sample = _big_table_sample(ctx, connector_slug, tool_name, args, result, hit) if _is_user_mcp(conn) else None
                 if sample is not None:
                     result = sample  # learn the columns and narrow at the source before reading every row
@@ -3267,11 +3313,11 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
         answer needs every row (a ranking, totals, a breakdown). Returns the folder, row count, columns and sample rows;
         then write one script that loads the files, filters (dates, channel, store...) and computes, and run it with
         run_code. Pass the narrowest arguments the tool does honour."""
-        ctx.force_full_table = True
+        token = _FULL_TABLE.set(True)
         try:
             out = await call_user_tool(ctx, connector_slug, tool_name, args)
         finally:
-            ctx.force_full_table = False
+            _FULL_TABLE.reset(token)
         return dumps_full(out)
 
     async def call_tool(connector_slug: str, tool_name: str, args: dict[str, Any] | None = None) -> str:
@@ -4111,7 +4157,9 @@ def system_prompt(
         "2) probe it with a small call (a low limit) to see its columns and whether it honours your filters (check the "
         "dates and values in the rows); 3) narrow at the source with the filters it honours; 4) when it can't filter or "
         "the answer needs every row, use table_to_computer and compute with one Python script via run_code that reads the "
-        "lumio_data files and prints a compact result. Try another "
+        "lumio_data files and prints a compact result: every breakdown asked (the period's totals and the per-product "
+        "table, say) in that one run, loading every table saved this turn, never a script per month, product or "
+        "breakdown. Fetch the tables a question needs together in one step. Try another "
         "tool or approach before ever answering 'not verified'; say what the data covers (its latest date) when it "
         "lags. "
         "Build every call from the chosen tool's parameters (shown in search results, or get_tool_schema): break the request into "
@@ -4221,7 +4269,8 @@ def system_prompt(
         "If a data tool returns a snapshot or as-of date, report those figures and the as-of date — that is still the answer. "
         "If the first search is weak, search once more with the request worded differently, then call_tool. Do not stop on a catalog search.\n"
         "Call tools as many times as the task needs — different connectors, different argument sets, different windows. Combine results yourself. "
-        "Calls that don't depend on each other's results (different connectors, metrics, date ranges or periods to compare) go together in one step: "
+        "Calls that don't depend on each other's results (different connectors, metrics, date ranges, periods to compare, a total and its per-product or per-month "
+        "breakdown) go together in one step: "
         "they run at the same time, so the answer comes back sooner. Only a call whose input comes from an earlier result waits for it.\n"
         "Gmail and Outlook are mail AND calendar. Never say there is no calendar connector when gmail or outlook is listed. "
         "Send mail with send_message. Create a calendar invite with create_event (attendees, start in IST). "
