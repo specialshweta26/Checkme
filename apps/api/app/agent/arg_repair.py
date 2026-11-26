@@ -54,6 +54,20 @@ def _tokens(key: str) -> set[str]:
     return {t for t in re.split(r"[_\-\s.]+", spaced) if t and t not in _GENERIC}
 
 
+def _raw_tokens(key: str) -> set[str]:
+    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", str(key)).lower()
+    return {t for t in re.split(r"[_\-\s.]+", spaced) if t}
+
+
+_DEFAULTS = {"all", "any", "*", "none", "null", "default", "", "total", "overall"}
+
+
+def defaulted(wrong: list[tuple[str, str]], result: Any) -> bool:
+    """The answer plainly fell back to its default for an ignored filter ("brand": "all")."""
+    echo = echoes(result)
+    return any(str(echo.get(other, "")).strip().casefold() in _DEFAULTS for _, other in wrong)
+
+
 def inner(tool_name: str, args: dict) -> tuple[str | None, dict, bool]:
     """(key the action's arguments sit under, those arguments, whether they were JSON text) for a gateway execute call;
     (None, args, False) for a direct call."""
@@ -144,7 +158,9 @@ def ignored_filters(sent: dict, result: Any) -> list[tuple[str, str]]:
         if not mine:
             continue
         for other, got in echo.items():
-            if other in sent or family(other) or not (mine & _tokens(other)):
+            # The answer's name must be part of the one sent ("brand" in "brand_name", "channel" in "sales_channel"),
+            # never more ("query_id" is a different thing from "query").
+            if other in sent or family(other) or not (_tokens(other) and _raw_tokens(other) <= _raw_tokens(key)):
                 continue
             if _numeric(got) != _numeric(value):
                 continue  # a count or total that shares a word with the filter ("category_count"), not the filter itself
@@ -242,3 +258,12 @@ async def apply_learned(user_id, slug: str, tool_name: str, args: dict, action: 
     if not use:
         return args, {}
     return wrap(args, key, renamed(sent, use), as_text), use
+
+
+async def forget(user_id, slug: str, action: str) -> None:
+    try:
+        from app.cache import get_redis
+
+        await get_redis().delete(_key(user_id, slug, action))
+    except Exception:  # noqa: BLE001
+        return

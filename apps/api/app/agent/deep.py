@@ -39,6 +39,7 @@ from app.connectors.runtime import RuntimeConnector
 from app.models import Connector, ServerCard
 from app.routing.describe import catalog_lines
 from app.connectors.shape import slim_search
+from app.agent import arg_repair
 from app.routing.retrieve import (
     GATEWAY_EXECUTE_NAMES,
     GATEWAY_RESOLVE_NAMES,
@@ -2157,6 +2158,8 @@ async def _repair_args(ctx: RunContext, conn, tool_name: str, args: dict, result
     new_args = arg_repair.wrap(args, key, arg_repair.renamed(sent, mapping), as_text)
     try:
         again = await invoke_named(ctx.db, ctx.user, conn, tool_name, new_args, ctx.attachments)
+        again = await _read_all_pages(ctx, conn, tool_name, new_args, again)  # the same treatment as the first answer
+        again = await _shorter_windows(ctx, conn, tool_name, new_args, again)
     except Exception:  # noqa: BLE001 - the first answer and the note stand
         log.info("asking %s again with its own argument names failed", action, exc_info=True)
         return None
@@ -2451,9 +2454,8 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
 
         cacheable = (not (destructive or git_write or unvetted or injected) and used_approval is None
                      and not is_catalog_tool(tool_name) and _plain_read(tool_name, args, hit))  # fmt: skip
-        if _is_user_mcp(conn) and not is_catalog_tool(tool_name):
-            from app.agent import arg_repair
-
+        _pre: dict = {}
+        if cacheable and _is_user_mcp(conn):  # reads only: a call that changes data is sent exactly as approved
             # Names this source answered to before for this action (it ignored the agent's own): renamed, same values.
             args, _pre = await arg_repair.apply_learned(ctx.user.id, connector_slug, tool_name, args, _action_of(tool_name, args))
         cached = await read_cache.get(ctx.user.id, connector_slug, tool_name, args) if cacheable else None
@@ -2495,18 +2497,21 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
 
                 wrong_dates, wrong_filters = "", []
                 if _is_user_mcp(conn):
-                    from app.agent import arg_repair
-
                     wrong_dates = ignored_dates(args, result)
                     wrong_filters = arg_repair.ignored_filters(arg_repair.inner(tool_name, args)[1], result)
-                if wrong_dates or wrong_filters:
-                    fixed = await _repair_args(ctx, conn, tool_name, args, result, bool(wrong_dates))
-                    if fixed is not None:
-                        args, result = fixed
-                    else:
-                        why = wrong_dates or "it answered " + ", ".join(
-                            f"{other} = {arg_repair.echoes(result).get(other)} instead of the {key} sent" for key, other in wrong_filters)
-                        result = await _note_ignored_args(ctx, conn, tool_name, args, result, why)
+                if (wrong_dates or wrong_filters) and _pre:
+                    # Names kept from before no longer work for this source: drop them, so the next call isn't renamed.
+                    await arg_repair.forget(ctx.user.id, connector_slug, _action_of(tool_name, args))
+                # Asked again only for a read: a call that may change data is never sent twice.
+                fixed = await _repair_args(ctx, conn, tool_name, args, result, bool(wrong_dates)) if (wrong_dates or wrong_filters) and cacheable else None
+                if fixed is not None:
+                    args, result = fixed
+                elif wrong_dates or arg_repair.defaulted(wrong_filters, result):
+                    # A filter is reported to the agent only when the answer plainly fell back to a default ("all"),
+                    # so an answer that only looks different is never marked wrong.
+                    why = wrong_dates or "it answered " + ", ".join(
+                        f"{other} = {arg_repair.echoes(result).get(other)} instead of the {key} sent" for key, other in wrong_filters)
+                    result = await _note_ignored_args(ctx, conn, tool_name, args, result, why)
             words = source_limit.said(result) if _is_user_mcp(conn) else None
             if words:
                 return await source_limit.mark(ctx.user, connector_slug, words)

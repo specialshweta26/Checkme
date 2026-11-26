@@ -151,3 +151,38 @@ def test_a_filter_the_answer_agrees_with_is_not_flagged():
     assert arg_repair.ignored_filters({"limit": 5}, {"rows": []}) == []
     assert arg_repair.ignored_filters({"category": "Shoes"}, {"category_count": 9}) == []  # a count, not the filter
     assert arg_repair.ignored_filters({"brand_name": "One8"}, {"brand": "all"}) == [("brand_name", "brand")]
+    assert arg_repair.ignored_filters({"query": "shoes"}, {"query_id": "abc"}) == []  # a different thing, not the filter
+
+
+async def test_a_call_that_may_change_data_is_never_sent_twice(monkeypatch):
+    ctx, calls, store = _gateway(monkeypatch, _daily)
+    monkeypatch.setattr(deep, "_plain_read", lambda tool_name, args, hit: False)  # e.g. create_report: not a plain read
+    from app.agent import approval
+
+    monkeypatch.setattr(approval, "gateway_needs_approval", lambda *a, **k: False)  # let it run without a card
+    store[("u1", "gw", "funnel-analytics__create_daily_report")] = {"from_date": "start"}
+    await deep.call_user_tool(ctx, "gw", "funnel-analytics__create_daily_report", {"brand": "one8", "from_date": "2026-11-24", "to_date": "2026-11-24"})
+    runs = [c["arguments"] for c in calls if "tool_name" in c]
+    assert runs == [{"brand": "one8", "from_date": "2026-11-24", "to_date": "2026-11-24"}]  # once, exactly as approved
+
+
+async def test_a_filter_that_only_looks_different_is_not_marked_wrong(monkeypatch):
+    def answer(inner):
+        return {"brand": "One 8 Commune", "rows": [{"sales": 5}]}  # the source's display name for what was asked
+
+    ctx, calls, store = _gateway(monkeypatch, answer)
+    out = await deep.call_user_tool(ctx, "gw", "funnel-analytics__get_brand_sales", {"brand_name": "one8"})
+    assert not out.get("args_ignored") and "note" not in out and not store
+
+
+async def test_names_kept_from_before_that_stop_working_are_dropped(monkeypatch):
+    ctx, calls, store = _gateway(monkeypatch, _daily)
+    from app.agent import arg_repair
+
+    async def forget(user_id, slug, action):
+        store.pop((user_id, slug, action), None)
+
+    monkeypatch.setattr(arg_repair, "forget", forget)
+    store[("u1", "gw", "funnel-analytics__get_daily_sales")] = {"start": "since"}  # stale: the source takes start now
+    await deep.call_user_tool(ctx, "gw", "funnel-analytics__get_daily_sales", {"brand": "one8", "start": "2026-11-24", "end": "2026-11-24"})
+    assert ("u1", "gw", "funnel-analytics__get_daily_sales") not in store or store[("u1", "gw", "funnel-analytics__get_daily_sales")] != {"start": "since"}

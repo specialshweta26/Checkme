@@ -920,7 +920,12 @@ parameters and the note had none to offer. Now (`app/agent/arg_repair.py`, `deep
   One day sent as `date` becomes `start` and `end`. Only names change, never values, so approval is unaffected.
 - **Kept when it worked:** if the second answer matches what was asked, it is the one used, with a `_lumio_note`, and
   the names are kept for that user and action for 30 days (`arg-names:` in Redis), so the next call goes out right.
-  A rename that didn't help is not kept, and the agent is told, with the names the answer itself uses.
+  A rename that didn't help is not kept, and the agent is told, with the names the answer itself uses. Kept names
+  that stop working are dropped.
+- **Safe by default:** only reads are renamed or asked again; a call that may change data is sent once, exactly as
+  approved. A filter counts as ignored only when the answer's name is part of the one sent (`brand` in `brand_name`,
+  never `query_id` for `query`), and the agent is warned about it only when the answer plainly fell back to a
+  default (`all`), so an answer that merely spells a value differently is never marked wrong.
 
 ### Gateway execution
 
