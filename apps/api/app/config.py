@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-6-luna"
     openai_embedding_model: str = "text-embedding-3-small"
     openai_reasoning_effort: str = "none"
+    data_reasoning_effort: str = "medium"  # once a turn works with connector data (docs/LLD.md "Data turns"); "" turns it off
     # Model for background and routing calls (memory, skill matching, browser planning). Empty = OPENAI_MODEL.
     openai_small_model: str = ""
     embedding_dims: int = 1536
@@ -252,6 +253,8 @@ class Settings(BaseSettings):
     browser_escalate_model: str = ""  # model after repeated failures; empty = OPENAI_MODEL
     browser_fast_max_steps: int = 12  # model rounds per browser_task
     browser_replay: bool = True  # save successful browser_task runs and replay them without model calls
+    big_table_rows: int = 20000  # a paged table bigger than this comes back as a sample first (docs/LLD.md "Big tables")
+    table_file_rows: int = 3000  # a fetched table with more rows than this goes to a file on the computer
     lean_context: bool = True  # scope tool schemas to the turn, shorten old long history (docs/LLD.md "Lean context")
     mcp_session_reuse: bool = True  # keep one MCP session per connector for a whole turn (docs/LLD.md "MCP sessions per turn")
     data_integrity: bool = True  # refuse scaled, hidden or invented figures (agent/integrity.py)

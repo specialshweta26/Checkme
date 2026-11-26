@@ -29,7 +29,7 @@ KEEP_KEYS = ("popups", "dialogs", "ok", "url", "title", "error", "warnings", "re
              "via", "completed", "deep_link_failed", "fallback_url", "bot_wall", "status", "took_ms")  # fmt: skip
 OLD_RESULT_CHARS = 4000
 # A connector's data stays whole for the whole turn: an answer comparing two calls needs both (docs/LLD.md).
-KEEP_WHOLE = {"call_tool", "inspect_result", "aggregate_result"}
+KEEP_WHOLE = {"call_tool", "inspect_result", "aggregate_result", "table_to_computer"}
 LEAN_OLD_RESULT_CHARS = 2500  # with LEAN_CONTEXT on (docs/LLD.md "Lean context")
 RECENT_MESSAGES = 4
 OLD_PAGE_TEXT_CHARS = 1500

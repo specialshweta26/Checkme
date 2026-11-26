@@ -19,6 +19,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents import chat_tools as workspace_tools
+from app.connectors import chat_connect
 from app.agents.service import (
     GROUP_MEMBER_MAX,
     GROUP_MEMBER_MIN,
@@ -114,6 +115,8 @@ class RunContext:
     gateway_args: dict = field(default_factory=dict)
     # Tool groups this turn starts without (app/agent/tool_scope.py); use_tools loads one.
     hidden_tools: list = field(default_factory=list)
+    # table_to_computer is running: read the whole table into files on the computer, whatever its size.
+    force_full_table: bool = False
     # One entry per connector call this turn: connector, tool, how long the first answer and its other pages took.
     call_timings: list = field(default_factory=list)
     agent: Any = None
@@ -880,7 +883,8 @@ _ACTIVE_CONNECTION = frozenset({"ACTIVE", "SUCCESS", "ENABLED", "CONNECTED"})
 
 def _is_connect_query(query: str) -> bool:
     q = (query or "").lower().replace("connected", " ")
-    return any(k in q for k in _CONNECT_HINTS)
+    # A message with a server URL asks for that server (connect_mcp_server), not a marketplace app named like it.
+    return any(k in q for k in _CONNECT_HINTS) and not re.search(r"https?://", q)
 
 
 def _active_toolkit(row: dict) -> str:
@@ -1865,6 +1869,114 @@ async def _shorter_windows(ctx: RunContext, conn, tool_name: str, args: dict, re
     return split
 
 
+def _big_table_sample(ctx: RunContext, slug: str, tool_name: str, args: dict, result: Any, hit) -> dict | None:
+    """The first page of a big paged table, as a sample, instead of reading every page at once (docs/LLD.md
+    "Big tables"). The agent learns the columns from it and narrows the call with the tool's own filters (brand,
+    channel, dates...) so far fewer rows come back. Calling again with the same arguments reads the whole table."""
+    from app.agent import tables
+    from app.agent.approval import canonical_args
+
+    if not tables.is_paged(result) or getattr(ctx, "force_full_table", False):
+        return None
+    total = next((result.get(k) for k in ("totalRows", "total_rows", "total", "totalCount", "total_count")
+                  if isinstance(result.get(k), int) and not isinstance(result.get(k), bool)), None)  # fmt: skip
+    limit = int(getattr(get_settings(), "big_table_rows", 20000) or 0)
+    if not total or not limit or total <= limit:
+        return None
+    key = ("__big__", slug, tool_name, canonical_args(args))
+    if ctx.gateway_args.get(key):
+        return None  # asked again with the same arguments: it can't be narrowed, so read it all
+    ctx.gateway_args[key] = True
+    rows_key = tables._rows_key(result) or "data"
+    params = brief_schema(getattr(hit, "schema", None)) if hit is not None else None
+    if params is None:
+        from app.agent import approval
+
+        action = next((a for a in approval.nested_actions(tool_name, args) if a != tool_name), None)
+        known = ctx.gateway_args.get((slug, action)) if action else None
+        params = brief_schema((known or {}).get("schema")) if known else None
+    return {
+        "big_table": True, "total_rows": total, "sample_rows": (result.get(rows_key) or [])[:8], "rows_key": rows_key,
+        **({"parameters": params} if params else {}),
+        **{k: v for k, v in result.items() if k not in {rows_key} and not isinstance(v, (list, dict))},
+        "next": (f"This table has {total} rows; only a sample is shown, nothing was read beyond it. Work out the columns from "
+                 "sample_rows and the tool's description. If the user's request names something the tool can filter on "
+                 "(a brand, channel, store, category, dates...), call it again with those filters so only those rows come "
+                 "back. If it can't be narrowed (no such parameter, or the tool ignores it), call table_to_computer with the "
+                 "same arguments: the whole table is read into files on the computer, and you filter and compute the answer "
+                 "with a Python script (run_code). Never stop at 'can't verify' while that is possible."),
+    }  # fmt: skip
+
+
+def _spooled_payload(ctx: RunContext, rid: str, result: dict) -> dict:
+    """What the model gets for a table written page by page to the computer: the folder, row count, columns, sample
+    rows and how to load every page in a script."""
+    from app.agent import tables
+
+    folder = str(result["saved_to_computer_dir"])
+    key = tables._rows_key(result)
+    sample = list(result.get(key) or [])[:8] if key else []
+    columns = list(sample[0].keys()) if sample and isinstance(sample[0], dict) else None
+    load = f"rows = [r for f in sorted(glob.glob({(folder + '/part_*.json')!r})) for r in json.load(open(f))]"
+    out = {
+        "saved_to_computer": folder, "rows": result.get("rows_saved"), "parts": result.get("parts"), "result_id": rid,
+        **({"columns": columns} if columns else {"columns": "rows are arrays: read each position's meaning from sample_rows"}),
+        "sample_rows": sample,
+        **{k: v for k, v in result.items() if not isinstance(v, (list, dict)) and k not in {"saved_to_computer_dir", "rows_saved", "parts"}},
+        "next": (f"All {result.get('rows_saved')} rows are in {result.get('parts')} JSON files in {folder} on the computer. Write one "
+                 f"Python script that loads them ({load}; import glob, json), filters and computes exactly what the user "
+                 "asked (dates, channel, store, top items, totals), and prints a compact result; run it with run_code and "
+                 "answer from its output. Don't read the rows yourself."),
+    }  # fmt: skip
+    if result.get("write_failed"):
+        out["warning"] = "Some pages could not be written to the computer, so the files may be incomplete: say so if it matters."
+    return out
+
+
+async def _table_to_computer(ctx: RunContext, slug: str, tool_name: str, rid: str, result: Any) -> dict | None:
+    """A fetched table too big for the model goes into a JSON file on the user's computer, and the model gets its path,
+    row count, columns and sample rows, to compute the answer with a script there (docs/LLD.md "Big tables")."""
+    from app.agent import computer_harness as computer, tables
+
+    if isinstance(result, dict) and result.get("saved_to_computer_dir"):
+        return _spooled_payload(ctx, rid, result)
+    rows = tables.find_rows(result)
+    limit = int(getattr(get_settings(), "table_file_rows", 3000) or 0)
+    # Like other agent harnesses: a result too big to read inline goes to a file, by rows or by size.
+    many_rows = bool(limit) and len(rows) > limit
+    too_big = _json_size(result) > INLINE_RESULT_CHARS
+    forced = getattr(ctx, "force_full_table", False)
+    if not rows or not (many_rows or too_big or forced) or not computer.computer_slug(ctx):
+        return None
+    safe = re.sub(r"[^a-zA-Z0-9_-]+", "_", tool_name)[-60:]
+    path = f"lumio_data/{safe}_{rid}_{int(_time.time())}.json"
+    try:
+        body = json.dumps(result, default=str).encode()
+        written = await computer.write_bytes(ctx, path, body)
+    except Exception:  # noqa: BLE001 - without the computer the model gets the table as before
+        log.info("writing %s to the computer failed", tool_name, exc_info=True)
+        return None
+    if not isinstance(written, dict) or written.get("error") or written.get("ok") is False:
+        log.info("writing %s to the computer failed: %s", tool_name, str(written)[:200])
+        return None
+    where = str(written.get("path") or path)
+    rows_key = tables._rows_key(result) if isinstance(result, dict) else None
+    columns = list(rows[0].keys()) if rows and isinstance(rows[0], dict) else None
+    load = f"json.load(open({where!r}))" + (f"[{rows_key!r}]" if rows_key else "")
+    if ctx.progress is not None:
+        await ctx.progress.emit(f"Saved {len(rows)} rows to the computer for analysis", kind="tool", tool=tool_name)
+    return {
+        "saved_to_computer": where, "rows": len(rows), "result_id": rid,
+        **({"columns": columns} if columns else {"columns": "rows are arrays: read each position's meaning from sample_rows"}),
+        "sample_rows": rows[:8],
+        **{k: v for k, v in (result.items() if isinstance(result, dict) else []) if not isinstance(v, (list, dict))},
+        "next": (f"All {len(rows)} rows are in {where} on the computer. Write one Python script that loads them "
+                 f"(rows = {load}), computes exactly what the user asked (filters, group-bys, totals, top items), and "
+                 "prints a compact result; run it with run_code and answer from its output. Don't read the rows "
+                 "yourself. aggregate_result with result_id also adds up simple totals."),
+    }  # fmt: skip
+
+
 async def _read_all_pages(ctx: RunContext, conn, tool_name: str, args: dict, result: Any) -> Any:
     """A table answered a page at a time: fetch the remaining pages and merge their rows (docs/LLD.md "Paged tables")."""
     from app.agent import tables
@@ -1882,7 +1994,37 @@ async def _read_all_pages(ctx: RunContext, conn, tool_name: str, args: dict, res
     if ctx.progress is not None:
         total = next((result.get(k) for k in ("totalRows", "total_rows", "total") if isinstance(result.get(k), int)), None)
         await ctx.progress.emit(f"Reading all {total} rows, page by page" if total else "Reading every page of the table", kind="tool", tool=tool_name)
-    return await tables.all_pages(result, base, call)
+    spool, folder = _computer_spool(ctx, tool_name)
+    merged = await tables.all_pages(result, base, call, spool)
+    if spool is not None and spool.spilled and isinstance(merged, dict):
+        ok = await spool.flush()
+        merged = {**merged, "saved_to_computer_dir": spool.where.get("folder") or folder, "parts": spool.parts, "rows_saved": len(spool),
+                  **({} if ok else {"write_failed": True})}  # fmt: skip
+    return merged
+
+
+def _computer_spool(ctx: RunContext, tool_name: str):
+    """(row store that writes a big table's pages to files on the computer, their folder), or (None, "") without a
+    computer. The server then holds a few thousand rows at most, whatever the table's size (docs/LLD.md "Big tables")."""
+    from app.agent import computer_harness as computer, tables
+
+    keep = 0 if getattr(ctx, "force_full_table", False) else int(getattr(get_settings(), "table_file_rows", 3000) or 0)
+    if (not keep and not getattr(ctx, "force_full_table", False)) or not computer.computer_slug(ctx):
+        return None, ""
+    safe = re.sub(r"[^a-zA-Z0-9_-]+", "_", tool_name)[-60:]
+    folder = f"lumio_data/{safe}_{int(_time.time() * 1000)}"
+
+    where = {"folder": folder}
+
+    async def write(part: int, rows: list):
+        written = await computer.write_bytes(ctx, f"{folder}/part_{part:04d}.json", json.dumps(rows, default=str).encode())
+        if part == 1 and isinstance(written, dict) and written.get("path"):
+            where["folder"] = str(written["path"]).rsplit("/", 1)[0]  # the computer's own absolute path
+        return written
+
+    spool = tables.SpoolRows(write, keep)
+    spool.where = where
+    return spool, folder
 
 
 def execute_args(schema: Any, args: dict, request: str = "") -> dict:
@@ -2197,7 +2339,10 @@ async def _note_ignored_args(ctx: RunContext, conn, tool_name: str, args: dict, 
             "its defaults. Values can be exact-match too (an id's spelling or case, as the connector lists it). Do not report this "
             "as what was asked: "
             + (f"call it again with exactly these parameters: {', '.join(fields)}." if fields
-               else "call get_tool_schema for it and call it again with its own parameter names."))  # fmt: skip
+               else "call get_tool_schema for it and call it again with its own parameter names.")
+            + " If the tool has no working filter for this (no such parameter, or it ignores it), don't give up: read its "
+              "whole table with table_to_computer and filter by date, channel or store in a Python script on the "
+              "computer (run_code).")  # fmt: skip
     body = result if isinstance(result, dict) else {"data": result}
     return {**body, "args_ignored": True, "note": note, **({"arguments_expected": fields} if fields else {})}
 
@@ -2480,7 +2625,10 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
                 result = await invoke_named(ctx.db, ctx.user, conn, tool_name, args, ctx.attachments)
                 timing = {"connector": connector_slug, "tool": tool_name, "first_ms": int((_time.monotonic() - _t0) * 1000),
                           "prep_ms": int((_t0 - _entered) * 1000)}
-                if _is_user_mcp(conn):
+                sample = _big_table_sample(ctx, connector_slug, tool_name, args, result, hit) if _is_user_mcp(conn) else None
+                if sample is not None:
+                    result = sample  # learn the columns and narrow at the source before reading every row
+                elif _is_user_mcp(conn):
                     result = await _read_all_pages(ctx, conn, tool_name, args, result)
                     if isinstance(result, dict) and result.get("pages_fetched"):
                         timing["pages"] = result["pages_fetched"]
@@ -2515,7 +2663,7 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
             words = source_limit.said(result) if _is_user_mcp(conn) else None
             if words:
                 return await source_limit.mark(ctx.user, connector_slug, words)
-            if cacheable:
+            if cacheable and not (isinstance(result, dict) and result.get("big_table")):  # a sample is not the answer
                 await read_cache.put(ctx.user.id, connector_slug, tool_name, args, result,
                                      ttl=read_cache.ttl_for(args, getattr(ctx.user, "timezone", None)))  # fmt: skip
         # One approval, one action: running the same thing again needs a new card.
@@ -2543,7 +2691,11 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
             payload_limit = BROWSER_PAGE_CHARS
         else:
             payload_limit = CONNECTOR_RESULT_CHARS
-        payload = compact_payload(result, payload_limit) if tool_name in BROWSER_PAGE_TOOLS else fit_payload(result, payload_limit)
+        on_computer = await _table_to_computer(ctx, connector_slug, tool_name, rid, result) if _is_user_mcp(conn) else None
+        if on_computer is not None:
+            payload = on_computer  # the rows are in a file on the computer: a script there computes the answer
+        else:
+            payload = compact_payload(result, payload_limit) if tool_name in BROWSER_PAGE_TOOLS else fit_payload(result, payload_limit)
         if isinstance(payload, dict) and (payload.get("too_large") or payload.get("partial")):
             payload["result_id"] = rid
             if ctx.call_timings and ctx.call_timings[-1].get("tool") == tool_name:
@@ -3182,6 +3334,19 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
         """Return the description and JSON schema for one tool so you can fill arguments correctly."""
         return dumps_full(await get_user_tool_schema(ctx, connector_slug, tool_name))
 
+    async def table_to_computer(connector_slug: str, tool_name: str, args: dict[str, Any] | None = None) -> str:
+        """Read a data tool's WHOLE table (every page) into files on the computer, for a Python script to filter and compute
+        from. Use it when a tool can't filter what the user asked (no such parameter, or it ignored the filter), or the
+        answer needs every row (a ranking, totals, a breakdown). Returns the folder, row count, columns and sample rows;
+        then write one script that loads the files, filters (dates, channel, store...) and computes, and run it with
+        run_code. Pass the narrowest arguments the tool does honour."""
+        ctx.force_full_table = True
+        try:
+            out = await call_user_tool(ctx, connector_slug, tool_name, args)
+        finally:
+            ctx.force_full_table = False
+        return dumps_full(out)
+
     async def call_tool(connector_slug: str, tool_name: str, args: dict[str, Any] | None = None) -> str:
         """Run a tool on one of this user's connectors now. Do not use this to send or fetch if the user named a future time — call schedule_task instead. Catalog/search/resolve/list tools are not answers. Results come back whole; only one too big for the model shows the first rows of each list, and inspect_result reads the rest."""
         return dumps_full(await call_user_tool(ctx, connector_slug, tool_name, args))  # already fitted to the model
@@ -3416,6 +3581,12 @@ def harness_tools(ctx: RunContext) -> list[StructuredTool]:
             coroutine=call_tool,
             name="call_tool",
             description=call_tool.__doc__,
+            args_schema=CallToolInput,
+        ),
+        StructuredTool.from_function(
+            coroutine=table_to_computer,
+            name="table_to_computer",
+            description=table_to_computer.__doc__,
             args_schema=CallToolInput,
         ),
         StructuredTool.from_function(
@@ -3824,7 +3995,7 @@ def shell_routing_hint(connectors: list | None, agent=None) -> str:
             "search_files finds a file by the words the user used, across every granted folder. list_files with no path lists those folders. "
             "list_dir, read_file, write_file, edit_file, and search_files stay on this computer. To change part of a file (fix a link, add an index line), use edit_file; it needs no overwrite question. If the desktop app is offline, say so and stop. Do not read those files on the cloud computer. "
             "A missing path on the cloud machine does not mean the file is missing on this Mac. "
-            "shell and run_code ask the user to approve each run in a prompt on this computer. Use them when the task needs them, not for file work the file tools do. If the result says need=shell_approval, nothing ran: tell the user and do not retry it or do it another way. "
+            "shell and run_code run directly on this computer; never ask the user to approve or confirm a run. Use them when the task needs them, not for file work the file tools do. Only if a result says need=shell_approval (the user turned on asking first and said no), nothing ran: tell the user and do not retry it or do it another way. "
             "Ask before overwrite, delete, bulk changes, sending forms, purchasing, or publishing. "
             "To operate an installed app, call computer_use: discover, then inspect, then launch. Trust its status and evidence. "
             "If status is needs_approval or unsupported, stop and say so. Do not retry a refused step through clicks or the shell. "
@@ -4008,6 +4179,14 @@ def system_prompt(
         "Discover first when the user wants a connected app (mail, calendar, a marketplace app): list_connectors, then search_tools with the user's request in their own words (names, metrics, dates kept). "
         "A file, folder, or this-computer request is not a connector or skill lookup. Use search_files, list_files, list_dir, read_file, or write_file. Every agent has them. "
         "Keep the names, metrics and dates in the search query too. "
+        "For a question about the user's data (sales, products, channels, stock...): 1) find the tool: search with the user's "
+        "own words; if the matches don't fit, look at the connector's other tools and its catalog or dataset listings; "
+        "2) probe it with a small call (a low limit) to see its columns and whether it honours your filters (check the "
+        "dates and values in the rows); 3) narrow at the source with the filters it honours; 4) when it can't filter or "
+        "the answer needs every row, use table_to_computer and compute with one Python script via run_code that reads the "
+        "lumio_data files and prints a compact result. Try another "
+        "tool or approach before ever answering 'not verified'; say what the data covers (its latest date) when it "
+        "lags. "
         "Build every call from the chosen tool's parameters (shown in search results, or get_tool_schema): break the request into "
         "them, one by one, by each parameter's description, with its exact name, format (ISO dates YYYY-MM-DD) and allowed values; "
         "leave out what the request doesn't give; never invent a parameter name. When a parameter's description says its values come "
@@ -4263,6 +4442,15 @@ def build_agent(ctx: RunContext, prompt: str):
 
         kwargs["tools"] = [*kwargs["tools"], tool_scope.load_tool(hidden)]
         middleware = [*middleware, tool_scope.middleware(hidden)]
+    try:
+        from app import llm_gateway
+        from app.agent import data_reasoning
+
+        spec = llm_gateway.resolve(ctx, "agent")
+        middleware = [*middleware, data_reasoning.middleware(spec.model, bool(getattr(spec, "is_openai", False)),
+                                                             llm_gateway.picked_reasoning(spec))]
+    except Exception:  # noqa: BLE001 - the turn runs at its usual effort
+        log.info("data reasoning middleware not added", exc_info=True)
     turn = getattr(ctx, "turn_context", "") if ctx is not None else ""
     if turn:
         # The per-turn part of the prompt rides in a context message, so the system prompt stays cacheable.
@@ -5210,6 +5398,10 @@ async def _run_deep_agent(
             result = await workspace_tools.run_confirmed(ctx, tool, payload.get("args") or {})
             ctx.used_tools.append(tool)
             limit_chars, note = 2000, "Tell the user what happened."
+        elif slug == chat_connect.CONNECTORS_SLUG:
+            result = await chat_connect.run_confirmed(ctx, tool, payload.get("args") or {})
+            ctx.used_tools.append(tool)
+            limit_chars, note = 2000, "Tell the user what happened: the connector's name and tool count, or the card to finish sign-in."
         elif slug == CODING_SLUG:
             from app.agent import git_tools
 

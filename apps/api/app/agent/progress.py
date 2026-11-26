@@ -338,6 +338,8 @@ def describe_tool(name: str, args: dict | None, connector_names: dict[str, str] 
         return f"Checking off {a.get('item_id')}"
     if n == "scratchpad_remove":
         return f"Removing checklist item {a.get('item_id')}"
+    if n == "connect_mcp_server":
+        return f"Connecting the MCP server {_clip(a.get('url'), 60)}"
     if n == "task_catalog":
         verb = str(a.get("action") or "search")
         if verb == "execute":

@@ -142,6 +142,11 @@ class ToolchainInput(BaseModel):
     force: bool = Field(default=False, description="Reinstall even when present.")
 
 
+class ConnectMcpInput(BaseModel):
+    url: str = Field(description="The MCP server's URL exactly as the user gave it, e.g. https://example.com/mcp.")
+    name: str = Field(default="", description="Optional display name the user asked for. Empty = named after the host.")
+
+
 class PathInput(BaseModel):
     path: str = Field(default="", description="Folder or file. In the desktop app, ~/Desktop, ~/Documents, and ~/Downloads are already granted. Empty lists those folders.")
 
@@ -591,6 +596,13 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         ctx.used_tools.append("edit_file")
         return _dumps(_seen(ctx, await computer.edit_file(ctx, path, old_string, new_string, replace_all)))
 
+    async def connect_mcp_server(url: str, name: str = "") -> str:
+        """Add a remote MCP server as one of the user's connectors, from its URL, when they ask to connect, add or install an MCP server or MCP URL. Connects and lists its tools; returns the connector name and tool count, or a card for the user to sign in or paste an API key (never ask for keys or passwords in chat). Asks for approval unless the user's message names the URL."""
+        from app.connectors import chat_connect
+
+        ctx.used_tools.append("connect_mcp_server")
+        return _dumps(await chat_connect.connect_mcp_server(ctx, url, name), 8000)
+
     async def save_mail_attachments(query: str, path: str, account: str = "", page_token: str = "") -> str:
         """Save attachments from the user's mail into a folder on this computer. Searches every connected Gmail and Outlook account unless account is set. Pages past the first 50 messages, downloads the files, and writes them into path. Do not stop at a chat download link."""
         from app.agent.mail_files import save_mail_attachments as _save
@@ -1033,6 +1045,7 @@ def extra_harness_tools(ctx) -> list[StructuredTool]:
         StructuredTool.from_function(coroutine=scratchpad_update, name="scratchpad_update", description=scratchpad_update.__doc__, args_schema=ScratchItemInput),
         StructuredTool.from_function(coroutine=scratchpad_complete, name="scratchpad_complete", description=scratchpad_complete.__doc__, args_schema=ScratchIdInput),
         StructuredTool.from_function(coroutine=scratchpad_remove, name="scratchpad_remove", description=scratchpad_remove.__doc__, args_schema=ScratchIdInput),
+        StructuredTool.from_function(coroutine=connect_mcp_server, name="connect_mcp_server", description=connect_mcp_server.__doc__, args_schema=ConnectMcpInput),
         StructuredTool.from_function(coroutine=task_catalog, name="task_catalog", description=task_catalog.__doc__, args_schema=TaskCatalogInput),
     ]
     if computer.local_slug(ctx):

@@ -686,18 +686,52 @@ async fn run_code(code: &str, timeout_s: u64) -> Value {
         Ok(dir) => dir,
         Err(refused) => return refused,
     };
-    if let Err(refused) = approval::approve("Python code", code, &dir.to_string_lossy()).await {
-        return refused;
-    }
     let file = grants::data_dir().join(".lumio_run.py");
     if fs::write(&file, code.as_bytes()).is_err() {
         return json!({ "ok": false, "error": "could not write temp script" });
     }
     let quoted = file.to_string_lossy().replace('\'', "'\\''");
-    let command = format!("{} '{}'", python_bin(), quoted);
-    let out = spawn_shell(&command, &dir, timeout_s).await;
+    // Read-only data analysis runs without the prompt, confined to reading files under lumio_data (analysis.py).
+    // Everything else asks first, as before.
+    // Asking turned off (the default): run it as it is. Asking on: read-only analysis still runs without the prompt.
+    let analysis = if approval::asking() { read_only_analysis(&file, &dir).await } else { None };
+    if analysis.is_none() {
+        if let Err(refused) = approval::approve("Python code", code, &dir.to_string_lossy()).await {
+            let _ = fs::remove_file(&file);
+            return refused;
+        }
+    }
+    let command = match &analysis {
+        Some(runner) => format!("{} '{}' '{}'", python_bin(), runner.to_string_lossy().replace('\'', "'\\''"), quoted),
+        None => format!("{} '{}'", python_bin(), quoted),
+    };
+    let mut out = spawn_shell(&command, &dir, timeout_s).await;
     let _ = fs::remove_file(&file);
+    if analysis.is_some() {
+        if let Some(obj) = out.as_object_mut() {
+            obj.insert("ran_as".into(), json!("read-only analysis (no prompt): reads files under lumio_data only"));
+        }
+    }
     out
+}
+
+const ANALYSIS_RUNNER: &str = include_str!("analysis.py");
+
+/// The runner's path when `script` is read-only data analysis (analysis.py --check says so), else None.
+async fn read_only_analysis(script: &Path, dir: &Path) -> Option<PathBuf> {
+    let runner = grants::data_dir().join(".lumio_analysis.py");
+    if fs::write(&runner, ANALYSIS_RUNNER.as_bytes()).is_err() {
+        return None;
+    }
+    let checked = Command::new(python_bin())
+        .arg(&runner)
+        .arg("--check")
+        .arg(script)
+        .current_dir(dir)
+        .output()
+        .await
+        .ok()?;
+    checked.status.success().then_some(runner)
 }
 
 fn web_url(raw: &str) -> Option<&str> {
@@ -1035,6 +1069,24 @@ mod local_tool_tests {
         assert_eq!(out["ok"], true, "{out}");
         assert!(folder.join("ran.txt").exists());
         answer(None);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn with_asking_off_shell_and_python_run_without_a_prompt() {
+        let _lock = lock_tests();
+        let root = isolate();
+        let folder = root.join("work");
+        fs::create_dir_all(&folder).unwrap();
+        grants::add_folder(&folder).unwrap();
+        answer(Some(Decision::Deny)); // the dialog would say no: it must not be asked
+        crate::approval::TEST_ASKING.store(false, std::sync::atomic::Ordering::SeqCst);
+        let shell = run_exec("echo hi", None, 20).await;
+        let python = run_code("print(6 * 7)", 20).await;
+        crate::approval::TEST_ASKING.store(true, std::sync::atomic::Ordering::SeqCst);
+        answer(None);
+        assert_eq!(shell["ok"], true, "{shell}");
+        assert_eq!(python["ok"], true, "{python}");
+        assert!(python["stdout"].as_str().unwrap_or("").contains("42"));
     }
 
     #[tokio::test(flavor = "current_thread")]

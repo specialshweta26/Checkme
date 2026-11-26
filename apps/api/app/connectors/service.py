@@ -76,6 +76,11 @@ async def sync_mcp(db: AsyncSession, connector: Connector) -> None:
     if connector.auth_type == "oauth":
         creds["access_token"] = await mcp_access_token(connector.id)
     tools = await list_mcp_tools(connector.server_url, creds)
+    await index_mcp_tools(db, connector, tools)
+
+
+async def index_mcp_tools(db: AsyncSession, connector: Connector, tools: list) -> None:
+    """Store the tools an MCP server listed as this connector's tool index and mark it synced."""
     specs = [spec_from_mcp(t) for t in tools]
     key = connector.server_key or server_key_for("mcp", "mcp", connector.server_url)
     await upsert_tool_index(db, key, connector.name, specs)

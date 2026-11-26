@@ -159,6 +159,7 @@ Startup backfill (`app/agents/scope.py`, applied from `db.py`): promote an exist
 ### Connectors / tasks / files
 
 - `GET/POST /connectors`, `PATCH/DELETE /connectors/{id}`, `POST .../sync`, MCP OAuth start/callback
+- `POST /connectors/{id}/credentials` `{token, header?}` — stores an API key for a user MCP connector (bearer, or a custom header with no prefix) and syncs its tools at once; 400 when the server refuses the key. Used by the key field on a chat connect card (§7 "Connect an MCP server from chat")
 - `GET /connectors/marketplace`, `POST /connectors/marketplace/connect` — Composio app catalog + OAuth link
 - Builtin platform connectors (when keys are set): `@computer` (E2B Desktop or Daytona sandbox, §7.2) and `@composio` (marketplace `find_tools` / `execute`)
 - `GET /connectors/computer/status` → `{state, screenAvailable, url, title, screen_agent, provider, stream_url?, control_url?}` (never resumes a paused sandbox); `POST /connectors/computer/boot` wakes it and returns the same stream fields; `GET /connectors/computer/screen` is a PNG (E2B: real desktop screenshot; Daytona: the Chromium frame); `POST /connectors/computer/control` is the click/type takeover used by Daytona and by teaching
@@ -441,6 +442,17 @@ Gmail and Outlook share `MAIL_CALENDAR_TOOLS` in `connector_core/mail_tools.py` 
 
 - **builtin** `composio_github` (`connectors/github.py`, slug `composio-github`): GitHub through the user's Composio connected account. `account_for(user)` lists `GET /api/v3.1/connected_accounts?toolkit_slugs=github&statuses=ACTIVE` (newest first, or the one on `COMPOSIO_GITHUB_AUTH_CONFIG_ID`; cached 60s). Every GitHub call is `POST /api/v3.1/tools/execute/proxy` with that account (GitHub `Accept` / API-version headers as header parameters); inner status ≥400 raises `GitHubError(status)`. Reads: `list_repos` (`/user/repos`), `list_branches`, `get_tree`, `get_file`, `search_code`, `list_commits`, `get_commit`, `compare_refs`, `blame_file`, `list_prs`, `get_pull_request` (files with patches), `get_pr_comments`, `list_issues`, `get_issue`, `check_merge` (mergeable state, conflicts, checks, statuses, `head_sha`). Writes: `comment_pull_request`, `create_review`, `request_reviewers`, plus the destructive `create_pull_request`, `update_pull_request`, `push_files` (`agent/*` only, git data API, text or base64 content, modes, never forced) and `merge_pull_request(repo, number, head_sha, method=merge|squash|rebase, delete_branch?, allow_failing_checks?)`. A merge requires the reviewed `head_sha`, refuses if the branch moved, re-checks mergeability (conflicts refused with the state spelled out, failing checks refused unless `allow_failing_checks`) and sends `sha=head_sha` to GitHub. The merge card shows a live preview (`preview_live`: ready / conflicts / checks / moved head). An approval covers only the exact repo, number, method, `delete_branch` and `head_sha` (`deep._approved`). `create_pull_request` / `merge_pull_request` results are tracked on the run (`ctx.prs`, `ctx.merged`). Routes `/api/connectors/github/{status,connect}`. The row is created by `ensure_platform_connectors` when `COMPOSIO_API_KEY` is set; legacy `github_app` rows route here and the built-in `github-app` row is disabled (the `github_installations` table is kept, unused). Setup: `docs/GITHUB.md`.
 - **Git-write gate** (`deep.git_write_gate` → `github.is_git_write`): Composio GitHub write tools, generic Composio `GITHUB_*` write slugs, and any GitHub/GitLab connector tool named like merge/push/create PR/commit/update file, need a confirm card even when `auto_confirm` is true.
+
+### Connect an MCP server from chat
+
+`connect_mcp_server(url, name?)` (harness tool, `connectors/chat_connect.py`) adds a remote MCP server as the user's connector from chat ("connect to https://host/mcp"), on the same rows, tool index and OAuth routes as the Connectors page. Nothing in it knows any particular server.
+
+1. The URL (`https://` added when missing) must pass `validate_public_url`. A server the user already has with `health=ok` returns `already_connected` with its tool count.
+2. Adding a connector is an account change: it needs an approval card (slug `__checkme_connectors__`, args `{url, name}`, run by `chat_connect.run_confirmed` from `run_deep_agent`'s confirmed-actions loop) unless the user's own message this turn names the same URL (host, port and path compared, scheme and trailing slash ignored) and nothing read this turn tried to give instructions (`ctx.injections`). Unattended runs (`auto_confirm`, jobs) never add one.
+3. Lumio connects and lists tools (`mcp_session`, 45 s cap). On success the row is saved with `auth_type=none`, the tools are indexed (`service.index_mcp_tools`, shared with `sync_mcp`), the row joins `ctx.connectors` for the rest of the turn, and the result names the connector and its tool count. An existing row that already holds a key or finished OAuth is re-synced with it first (`sync_connector`); only a refusal asks again.
+4. When the server refuses (or advertises OAuth): with OAuth metadata and a client from dynamic registration, the row is saved pending (`{pending, client_id, client_secret, meta}`, as `POST /connectors` does) and a connect card links to `/api/connectors/{id}/oauth/start`; the callback stores tokens and syncs. Otherwise a 401/403-style refusal gives a pending `bearer` row and a card with a key field that posts to `POST /connectors/{id}/credentials`. Cards are `ctx.results` rows with `connector_id` (read by `deep._connect_cards`; the web `ConnectCard` uses `connector_id` instead of a Composio toolkit). Keys go into the card, never into chat. Any other failure saves nothing and reports the error.
+
+A message with an `http(s)://` URL is not treated as a marketplace connect request (`deep._is_connect_query`), so no Composio app named like the host is started.
 
 ### 7.1 Outlook `get_thread`
 
@@ -975,6 +987,86 @@ The gateway showed the data while Lumio answered without it, or spent extra mode
   `public_name` / `public_tool_name`. `approval.nested_actions` reads those too; before, a plain read such as
   `get_daily_sales` asked for approval because its name wasn't seen.
 
+### Reasoning
+
+Every model choice on the Models page, and each agent's own, now has a **Reasoning** level: Default, Off, Low, Medium or
+High (`ModelChoice.reasoning`, `ModelSpec.reasoning`, `llm_gateway.REASONING`). It applies to every provider:
+- **OpenAI:** the Responses API `reasoning.effort`. A model that refused an effort before keeps the one it accepts.
+- **Anthropic:** extended thinking with a token budget per level (`THINKING_BUDGET`: 2k / 8k / 24k), and the answer's
+  token limit raised above it.
+- **OpenAI-compatible providers:** `reasoning_effort`, which a model without reasoning ignores.
+
+Lumio's own model can carry a level too: such a choice has no key (`key_id` NULL) and keeps Lumio's model and billing.
+Default keeps Lumio's setting.
+
+### Data turns
+
+The agent runs with reasoning off (`REASONING_EFFORT`, usually "none") so quick answers stay quick. On data questions
+it took the first tool result as final: a tool that ignored the date filter gave "not verified". Now:
+- **More reasoning once data work starts:** after the turn's first data tool call (`search_tools`, `call_tool`,
+  `get_tool_schema`, `inspect_result`, `aggregate_result`, `table_to_computer`), its later model calls get
+  `DATA_REASONING_EFFORT` ("medium"; "" turns it off). This happens per call through the agent's model settings
+  (`app/agent/data_reasoning.py`). A user's own Reasoning choice is never overridden.
+- **`table_to_computer`:** one call reads a data tool's whole table, every page or window, into files on the computer
+  (`ctx.force_full_table`: no sample first, saved even when small). The agent then computes with one script via
+  `run_code`. The notes on samples and ignored dates point to it.
+- **A data playbook in the prompt:** find the tool with the user's own words, looking at the connector's other tools
+  and dataset listings when the matches don't fit; probe it with a small call to see its columns and whether it
+  honours the filters; narrow at the source; else `table_to_computer` plus a script. Try another tool or approach
+  before ever answering "not verified", and say what the data covers when it lags.
+
+**No prompt before running code (the default).** At the user's request, the desktop app runs shell commands and
+Python directly, with no native dialog (`approval::asking()` is false). Asking can be turned back on with
+`LUMIO_ASK_BEFORE_RUN=1`, or an `ask-before-running` file in Lumio's data folder; then the behaviour below applies.
+The web app never prompted: code there runs on the cloud computer. The trade-off: text the agent reads from other
+people (mail, pages, documents) could steer it into running commands with the user's access, with nobody asked.
+
+**Analysis scripts on the desktop run without the prompt.** On the desktop app, `run_code` asks in a native dialog
+before running Python. Read-only data analysis no longer does (`apps/desktop/src-tauri/src/analysis.py`):
+1. **The check.** `--check` parses the script, without running it, and allows only:
+   - imports of plain data modules (json, glob, csv, collections, decimal, math, statistics, datetime, re,
+     itertools, functools, heapq, bisect, fractions, calendar, time, zoneinfo, copy, textwrap, pprint);
+   - no exec / eval / compile / getattr / setattr / vars / globals / type / `__import__`;
+   - no name, attribute, argument or function starting with `_`, and no class definitions;
+   - no attribute that reaches a dangerous module or function through an allowed one (`glob.os`, `json.codecs`,
+     `.system`, `.open`, `.environ`…).
+2. **The run.** A script that passes runs confined: `open()` reads only, and only real paths inside a `lumio_data`
+   folder under the home folder; `glob` lists only those. Anything else, and every shell command, still gets the
+   dialog.
+
+The agent's data playbook says how to write such a script. `tests/test_desktop_analysis_runner.py` covers the escape
+routes (`glob.os.system`, `json.codecs.open`, `operator.methodcaller`, `typing`, dunders, classes) and the confinement.
+
+### Big tables
+
+"Product-wise sales across two channels, November MTD" hit a 104,255-row table, and Lumio read every page through
+the turn before the model could start. Other agent harnesses (Claude, Cursor) work differently. A large tool result
+is saved to a file, the model sees a preview and the path, and it writes a script, runs it with its code tool, and
+answers from the output. Lumio now does the same:
+- **Sample first, narrowed at the source:** when a paged table's first page says it has more than `BIG_TABLE_ROWS`
+  rows (20,000 by default), nothing more is read. The agent gets the sample rows, the total, and the tool's
+  parameters, and is told to call again with the tool's own filters for what was asked (brand, channel, store,
+  dates...). Calling again with the same arguments reads the whole table. A sample is never cached as an answer.
+- **The rows go to a file on the computer:** a fetched table with more than `TABLE_FILE_ROWS` rows (3,000), or too
+  big to read inline (`INLINE_RESULT_CHARS`), is written as JSON to `lumio_data/…` on the user's computer. The model
+  gets the path, the row count, the columns (or "arrays: read each position from sample_rows"), eight sample rows,
+  and how to load it. It writes one Python script that computes exactly what was asked, runs it with `run_code`,
+  and answers from its output. `aggregate_result` still works on the stored result. Without a computer, the table
+  comes back as before.
+
+**Page by page to files, not server memory.** Reading a 104,255-row table held every row in the API process (a 512 MB
+starter instance) along with its copies, and the chat that asked was cut off as if by an app update. Now
+`tables.SpoolRows` keeps a table in memory only while it is small (`TABLE_FILE_ROWS`). Past that, each page is
+written to `lumio_data/<tool>_<time>/part_NNNN.json` on the user's computer as it arrives and dropped from memory; the
+server keeps eight sample rows and a count. This applies to ordinary and windowed paging alike. The model gets the
+folder, the row count, the columns and how to load every part (`glob` + `json`), and computes the answer with one
+script via `run_code`. If a page fails to write, the reply says the files may be incomplete.
+
+**Ignored filters are not a dead end.** A tool can have no date or channel filter, or ignore one, and answer from its
+whole history. The agent used to stop at "can't verify". The notes on a sample and on ignored dates now say to read
+the whole table into files and filter in a script instead. That works whatever a tool documents, which is how
+another client answered the same question.
+
 ### Paged tables
 
 A data tool answered "SIS sales, November MTD" as a table of 8,999 rows, 27 unnamed columns each, a page at a time
@@ -998,6 +1090,16 @@ read the first page only, and the model could not add up thousands of rows itsel
   steps), ranked `matches` with confidence and reason, and a `trace_id`. These were dropped. They are now kept: tool
   search shows them first as `gateway_advice` and `recommended`, and the `trace_id` goes on the execute call when
   execute takes one.
+
+**Tables filtered inside windows.** Some tools apply a filter (a `search`, say) inside fixed windows: `offset` /
+`limit` step through the whole table and only each window's matches come back. A page can be short or empty while
+`hasMore` is still true, and its `totalRows` counts that window's matches, not the table. Asked for 3 rows from
+offset 0, one such tool returned none with `hasMore: true`. Lumio stopped at the first empty page and took
+`totalRows` as the total, so it missed most of the rows. `tables.windowed` now tells such a page apart by its own
+fields: it asked for `limit` rows, got fewer, and says more follow. For such a table the offset steps by the window,
+empty windows are passed over, reading stops at the first window that says nothing follows, and `totalRows` becomes
+the real count. Windows are read several at a time inside Lumio, with no model calls; only matching rows are kept. A
+tool that caps windows lower is followed at its size.
 
 ### Tool search speed
 
@@ -1159,6 +1261,7 @@ one character at a time ("couldn't resolve the recipient").
 | `test_attachments.py` | Previewable types |
 | `test_routing*.py` | Tool search / describe |
 | `test_agent_scope.py` | Memory isolation, task `agent_id`, `execute_task` agent, Chief backfill |
+| `test_chat_connect.py` | `connect_mcp_server`: URL typed by the user connects without a card (name + tool count), other URLs and injected turns need a card that `run_confirmed` runs, unattended and unsafe URLs refused, OAuth server → sign-in card, key server → key card with no secret in chat, unreachable server saves nothing, already connected / existing key re-synced, `/connectors/{id}/credentials` stores bearer or custom-header keys and syncs |
 | `test_agent_chat_tools.py` | Workspace tools registered and in prompt; create/rename agent; group from all/named agents, 2–10 errors, add/remove/rename; deletes only via confirmation, Chief and unattended refused; confirmed delete runs in `run_deep_agent` |
 
 | `test_e2b_box.py` | E2B adapter with a fake SDK: create when none (metadata, timeout, pause-on-timeout, id persisted), reconnect by id and reuse the running stream, recreate when expired, metadata lookup, keepalive + resume via connect, Daytona-shaped exec/fs, `setsid` for `nohup`, status never resumes, `call_daytona` routing, backend selection, daemon version check |
