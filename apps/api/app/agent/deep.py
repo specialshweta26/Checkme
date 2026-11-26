@@ -40,6 +40,7 @@ from app.connectors.runtime import RuntimeConnector
 from app.models import Connector, ServerCard
 from app.routing.describe import catalog_lines
 from app.connectors.shape import slim_search
+from app.agent import arg_repair
 from app.routing.retrieve import (
     GATEWAY_EXECUTE_NAMES,
     GATEWAY_RESOLVE_NAMES,
@@ -681,6 +682,9 @@ async def _expand_gateway_catalog(ctx: RunContext, conn, query: str) -> list[dic
             _keep_gateway_guide(ctx, conn, raw)
         seen = ctx.gateway_args.setdefault(("__seen__", conn.slug), set())
         seen.update(str(item.get("public_name") or "") for item in parsed if item.get("public_name"))
+        for item in parsed:  # what an action says about itself: names its parameters when the catalog lists none
+            if item.get("public_name") and item.get("description"):
+                ctx.gateway_args[("__desc__", conn.slug, str(item["public_name"]))] = str(item["description"])[:1500]
         for item in parsed:
             name = str(item.get("public_name") or "")
             if name and (item.get("arguments") or item.get("read_only")):
@@ -2268,6 +2272,50 @@ def _is_user_mcp(conn) -> bool:
     return getattr(conn, "kind", "") != "builtin" and bool(getattr(conn, "server_url", "") or "")
 
 
+def _action_of(tool_name: str, args: dict) -> str:
+    from app.agent import approval
+    from app.routing.retrieve import is_execute_tool
+
+    return next((a for a in approval.nested_actions(tool_name, args) if not is_execute_tool(a)), tool_name)
+
+
+async def _repair_args(ctx: RunContext, conn, tool_name: str, args: dict, result: Any, dates_ignored: bool) -> tuple[dict, Any] | None:
+    """(args, answer) asked again under the source's own argument names, when its answer shows some were not applied
+    and the second answer matches what was asked (app/agent/arg_repair.py); None to tell the agent instead."""
+    from app.agent import arg_repair
+    from app.connectors.mcp_client import ignored_dates
+
+    action = _action_of(tool_name, args)
+    key, sent, as_text = arg_repair.inner(tool_name, args)
+    known = None
+    if action != tool_name:
+        try:
+            known = await gateway_action_args(ctx, conn, action)
+        except Exception:  # noqa: BLE001
+            known = None
+    description = ctx.gateway_args.get(("__desc__", conn.slug, action)) or ""
+    mapping = arg_repair.renames(sent, result, (known or {}).get("fields"), description, dates_ignored)
+    if not mapping:
+        return None
+    new_args = arg_repair.wrap(args, key, arg_repair.renamed(sent, mapping), as_text)
+    try:
+        again = await invoke_named(ctx.db, ctx.user, conn, tool_name, new_args, ctx.attachments)
+        again = await _read_all_pages(ctx, conn, tool_name, new_args, again)  # the same treatment as the first answer
+        again = await _shorter_windows(ctx, conn, tool_name, new_args, again)
+    except Exception:  # noqa: BLE001 - the first answer and the note stand
+        log.info("asking %s again with its own argument names failed", action, exc_info=True)
+        return None
+    new_inner = arg_repair.inner(tool_name, new_args)[1]
+    if ((isinstance(again, dict) and again.get("error")) or ignored_dates(new_args, again)
+            or arg_repair.ignored_filters(new_inner, again) or not arg_repair.applied(mapping, sent, again)):
+        return None
+    await arg_repair.remember(ctx.user.id, conn.slug, action, mapping)
+    ctx.call_timings.append({"connector": conn.slug, "tool": tool_name, "ms": 0, "args_renamed": arg_repair.describe(mapping)})
+    note = (f"Lumio sent {arg_repair.describe(mapping)}: the names {action} uses (it ignored the first ones and answered for its "
+            "defaults). This answer is for what was asked; use these names when calling it.")
+    return new_args, ({**again, "_lumio_note": note} if isinstance(again, dict) else {"data": again, "_lumio_note": note})
+
+
 async def _note_ignored_args(ctx: RunContext, conn, tool_name: str, args: dict, result: Any, why: str) -> Any:
     """The tool answered for other dates than it was sent: tell the agent, with the action's real parameter names when
     the catalog has them, so it calls again correctly instead of reporting the wrong period (docs/LLD.md)."""
@@ -2280,16 +2328,23 @@ async def _note_ignored_args(ctx: RunContext, conn, tool_name: str, args: dict, 
         known = await gateway_action_args(ctx, conn, action) if action != tool_name else None  # a gateway action
     except Exception:  # noqa: BLE001
         log.info("parameter lookup for %s failed", action, exc_info=True)
-    note = (f"{action} ignored the dates it was sent: {why}. It likely did not recognise the argument names and answered for "
+    from app.agent import arg_repair
+
+    sent = arg_repair.inner(tool_name, args)[1]
+    # No catalog parameters: the names the answer reports about itself are the source's own (window.start, brand).
+    own = [k for k in arg_repair.echoes(result) if k not in sent and (arg_repair.family(k) or any(
+        arg_repair._tokens(k) & arg_repair._tokens(s) for s in sent))][:8]  # fmt: skip
+    fields = list(known["fields"]) if known and known.get("fields") else own
+    note = (f"{action} ignored arguments it was sent: {why}. It likely did not recognise the argument names and answered for "
             "its defaults. Values can be exact-match too (an id's spelling or case, as the connector lists it). Do not report this "
-            "as the requested period: "
-            + (f"call it again with exactly these parameters: {', '.join(known['fields'])}." if known and known.get("fields")
+            "as what was asked: "
+            + (f"call it again with exactly these parameters: {', '.join(fields)}." if fields
                else "call get_tool_schema for it and call it again with its own parameter names.")
             + " If the tool has no working filter for this (no such parameter, or it ignores it), don't give up: read its "
               "whole table with table_to_computer and filter by date, channel or store in a Python script on the "
               "computer (run_code).")  # fmt: skip
     body = result if isinstance(result, dict) else {"data": result}
-    return {**body, "args_ignored": True, "note": note, **({"arguments_expected": known["fields"]} if known and known.get("fields") else {})}
+    return {**body, "args_ignored": True, "note": note, **({"arguments_expected": fields} if fields else {})}
 
 
 @contextlib.asynccontextmanager
@@ -2544,6 +2599,10 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
 
         cacheable = (not (destructive or git_write or unvetted or injected) and used_approval is None
                      and not is_catalog_tool(tool_name) and _plain_read(tool_name, args, hit))  # fmt: skip
+        _pre: dict = {}
+        if cacheable and _is_user_mcp(conn):  # reads only: a call that changes data is sent exactly as approved
+            # Names this source answered to before for this action (it ignored the agent's own): renamed, same values.
+            args, _pre = await arg_repair.apply_learned(ctx.user.id, connector_slug, tool_name, args, _action_of(tool_name, args))
         cached = await read_cache.get(ctx.user.id, connector_slug, tool_name, args) if cacheable else None
         if not cacheable:
             await read_cache.wrote(ctx.user.id, connector_slug)
@@ -2584,9 +2643,23 @@ async def call_user_tool(ctx: RunContext, connector_slug: str, tool_name: str, a
                 ctx.call_timings.append(timing)  # admin "Reply times" (app/admin/latency.py)
                 from app.connectors.mcp_client import ignored_dates
 
-                wrong_dates = ignored_dates(args, result) if _is_user_mcp(conn) else ""
-                if wrong_dates:
-                    result = await _note_ignored_args(ctx, conn, tool_name, args, result, wrong_dates)
+                wrong_dates, wrong_filters = "", []
+                if _is_user_mcp(conn):
+                    wrong_dates = ignored_dates(args, result)
+                    wrong_filters = arg_repair.ignored_filters(arg_repair.inner(tool_name, args)[1], result)
+                if (wrong_dates or wrong_filters) and _pre:
+                    # Names kept from before no longer work for this source: drop them, so the next call isn't renamed.
+                    await arg_repair.forget(ctx.user.id, connector_slug, _action_of(tool_name, args))
+                # Asked again only for a read: a call that may change data is never sent twice.
+                fixed = await _repair_args(ctx, conn, tool_name, args, result, bool(wrong_dates)) if (wrong_dates or wrong_filters) and cacheable else None
+                if fixed is not None:
+                    args, result = fixed
+                elif wrong_dates or arg_repair.defaulted(wrong_filters, result):
+                    # A filter is reported to the agent only when the answer plainly fell back to a default ("all"),
+                    # so an answer that only looks different is never marked wrong.
+                    why = wrong_dates or "it answered " + ", ".join(
+                        f"{other} = {arg_repair.echoes(result).get(other)} instead of the {key} sent" for key, other in wrong_filters)
+                    result = await _note_ignored_args(ctx, conn, tool_name, args, result, why)
             words = source_limit.said(result) if _is_user_mcp(conn) else None
             if words:
                 return await source_limit.mark(ctx.user, connector_slug, words)
